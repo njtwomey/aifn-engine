@@ -2,50 +2,81 @@
  * Numerically stable elementary forms: softplus, sigmoid, logit, logAddExp and the log1p/expm1 family. (log-sum-exp
  * and softmax are compositions of `aifn-compute/foundation/tensor` primitives; see index.ts.)
  *
- * The forms follow Mächler (2012), "Accurately computing log(1 − exp(−|a|))", CRAN Rmpfr vignette, for `log1mexp`.
+ * The forms follow Mächler (2012), "Accurately computing $\log(1 - \exp(-|a|))$", CRAN Rmpfr vignette, for `log1mexp`.
  */
 
-/** log(1 + e^x) without overflow or loss of the small-x tail. */
+/**
+ * $\log(1 + e^x)$ without overflow or loss of the small-$x$ tail.
+ *
+ * @param x - Real evaluation point.
+ * @returns Value of $\operatorname{softplus}(x) = \log(1 + e^x)$.
+ */
 export function softplus(x: number): number {
   return Math.max(x, 0) + Math.log1p(Math.exp(-Math.abs(x)))
 }
 
-/** The logistic function 1 / (1 + e^{−x}), evaluated without overflow for either sign of x. */
+/**
+ * The logistic function $1 / (1 + e^{-x})$, evaluated without overflow for either sign of $x$.
+ *
+ * @param x - Real evaluation point.
+ * @returns Logistic sigmoid value $\sigma(x) \in (0, 1)$.
+ */
 export function sigmoid(x: number): number {
   if (x >= 0) return 1 / (1 + Math.exp(-x))
   const e = Math.exp(x)
   return e / (1 + e)
 }
 
-/** log σ(x) = −softplus(−x), accurate for large negative x where σ(x) underflows. */
+/**
+ * $\log \sigma(x) = -\operatorname{softplus}(-x)$, accurate for large negative $x$ where $\sigma(x)$ underflows.
+ *
+ * @param x - Real evaluation point.
+ * @returns Value of $\log \sigma(x)$.
+ */
 export function logSigmoid(x: number): number {
   return -softplus(-x)
 }
 
-/** The log-odds log(p / (1 − p)) for p in [0, 1]; ±∞ at the ends. Uses log1p near p = 1/2 for accuracy. */
+/**
+ * The log-odds $\log(p / (1 - p))$ for $p \in [0, 1]$; $\pm\infty$ at the ends. Uses $\operatorname{log1p}$ near $p = 1/2$ for accuracy.
+ *
+ * @param p - Probability $p \in [0, 1]$.
+ * @returns Log-odds value $\operatorname{logit}(p)$.
+ */
 export function logit(p: number): number {
   // log(p) − log1p(−p) keeps relative accuracy for small p; near 1/2 the ratio form is exact enough either way.
   return p < 0.5 ? Math.log(p) - Math.log1p(-p) : Math.log(p / (1 - p))
 }
 
 /**
- * log(1 − e^x) for x ≤ 0 (Mächler 2012): `log(−expm1(x))` near 0, `log1p(−exp(x))` further out, switching at −ln 2.
- * Returns −∞ at x = 0 and NaN for x > 0.
+ * $\log(1 - e^x)$ for $x \le 0$ (Mächler 2012): `log(-expm1(x))` near 0, `log1p(-exp(x))` further out, switching at $-\ln 2$.
+ * Returns $-\infty$ at $x = 0$ and `NaN` for $x > 0$.
+ *
+ * @param x - Non-positive evaluation point $x \le 0$.
+ * @returns Value of $\log(1 - e^x)$.
  */
 export function log1mexp(x: number): number {
   if (x > 0) return NaN
   return x > -Math.LN2 ? Math.log(-Math.expm1(x)) : Math.log1p(-Math.exp(x))
 }
 
-/** log(e^x − 1) for x > 0, without overflow for large x or loss for small x. NaN for x < 0. */
+/**
+ * $\log(e^x - 1)$ for $x > 0$, without overflow for large $x$ or loss for small $x$. `NaN` for $x < 0$.
+ *
+ * @param x - Positive evaluation point $x > 0$.
+ * @returns Value of $\log(e^x - 1)$.
+ */
 export function logExpm1(x: number): number {
   if (x < 0) return NaN
   return x > 36 ? x + Math.log1p(-Math.exp(-x)) : Math.log(Math.expm1(x))
 }
 
 /**
- * log(1 + x) − x for x > −1, accurate near 0 where the two terms cancel (a power series for |x| < 0.1). Used in the
+ * $\log(1 + x) - x$ for $x > -1$, accurate near 0 where the two terms cancel (a power series for $|x| < 0.1$). Used in the
  * incomplete-gamma prefactor for large shape.
+ *
+ * @param x - Evaluation point $x > -1$.
+ * @returns Value of $\log(1 + x) - x$.
  */
 export function log1pmx(x: number): number {
   if (Math.abs(x) >= 0.1) return Math.log1p(x) - x
@@ -61,7 +92,13 @@ export function log1pmx(x: number): number {
   return sum
 }
 
-/** log(e^a + e^b), handling −∞ in either argument (and both). */
+/**
+ * $\log(e^a + e^b)$, handling $-\infty$ in either argument (and both).
+ *
+ * @param a - First log-space argument.
+ * @param b - Second log-space argument.
+ * @returns Value of $\log(e^a + e^b)$.
+ */
 export function logAddExp(a: number, b: number): number {
   if (a === -Infinity) return b
   if (b === -Infinity) return a
@@ -70,7 +107,13 @@ export function logAddExp(a: number, b: number): number {
   return m + Math.log1p(Math.exp(-Math.abs(a - b)))
 }
 
-/** log(e^a − e^b) for a ≥ b; −∞ when a = b, NaN when a < b. */
+/**
+ * $\log(e^a - e^b)$ for $a \ge b$; $-\infty$ when $a = b$, `NaN` when $a < b$.
+ *
+ * @param a - First log-space argument.
+ * @param b - Second log-space argument with $b \le a$.
+ * @returns Value of $\log(e^a - e^b)$.
+ */
 export function logDiffExp(a: number, b: number): number {
   if (b === -Infinity) return a
   if (a < b) return NaN
@@ -79,8 +122,12 @@ export function logDiffExp(a: number, b: number): number {
 }
 
 /**
- * Binary entropy H(p) = −p log p − (1 − p) log(1 − p), in nats by default or in the given `base` (2 for bits), with
- * 0 log 0 = 0. NaN outside [0, 1].
+ * Binary entropy $H(p) = -p \log p - (1 - p) \log(1 - p)$, in nats by default or in the given `base` (2 for bits), with
+ * $0 \log 0 = 0$. `NaN` outside $[0, 1]$.
+ *
+ * @param p - Success probability $p \in [0, 1]$.
+ * @param base - Logarithm base (defaults to $e$ for nats).
+ * @returns Binary entropy value.
  */
 export function binaryEntropy(p: number, base = Math.E): number {
   if (!(p >= 0 && p <= 1)) return NaN

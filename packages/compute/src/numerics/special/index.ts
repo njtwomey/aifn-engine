@@ -6,7 +6,7 @@
  * `elementwise` from `aifn-compute/foundation/tensor` together with **one** derivative per argument, written with primitives.
  * So every function accepts numbers, tensors of any rank and traced values alike (`erf(0.5)` is a number,
  * `erf(matrix)` a matrix of the same shape; two- and three-argument functions broadcast, NumPy rules), and it is
- * differentiable to any order wherever its derivative is: logΓ → ψ → ψ₁ → ψ₂ …, Φ → φ, softplus → σ. Integer tensors
+ * differentiable to any order wherever its derivative is: $\log\Gamma \to \psi \to \psi_1 \to \psi_2 \dots$, $\Phi \to \phi$, $\operatorname{softplus} \to \sigma$. Integer tensors
  * give float64 results.
  *
  * A partial derivative marked `null` (a shape parameter, an order, degrees of freedom) is an error when
@@ -60,6 +60,14 @@ const SQRT_2PI = Math.sqrt(2 * Math.PI)
 
 // ── Test domains ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Create a domain specification for input validation/testing.
+ *
+ * @param lo - Lower bound.
+ * @param hi - Upper bound.
+ * @param integer - Whether the domain is restricted to integers.
+ * @returns Domain object.
+ */
 const d = (lo: number, hi: number, integer = false): Domain => ({ lo, hi, integer })
 const positive = d(0.5, 4)
 const probability = d(0.05, 0.95)
@@ -149,9 +157,23 @@ const NOTES: Readonly<Record<string, string>> = {
   truncatedNormalV: 'expectation-propagation-truncated-gaussian',
   truncatedNormalW: 'expectation-propagation-truncated-gaussian',
 }
+
+/**
+ * Lookup documentation note metadata for a function.
+ *
+ * @param name - Function name.
+ * @returns Object with optional note metadata.
+ */
 const doc = (name: string) => (NOTES[name] ? { doc: { note: NOTES[name] } } : {})
 
-/** Register a one-argument function under `numerics/special/<name>` with its derivative dy/dx(x, y). */
+/**
+ * Register a one-argument function under `numerics/special/<name>` with its derivative dy/dx(x, y).
+ *
+ * @param name - Function identifier name.
+ * @param f - Scalar evaluation rule.
+ * @param derivative - Primitive derivative rule.
+ * @returns Elementwise unary function.
+ */
 function unary(name: string, f: (x: number) => number, derivative: Derivative): Unary {
   return elementwise({
     id: `numerics/special/${name}`,
@@ -162,7 +184,15 @@ function unary(name: string, f: (x: number) => number, derivative: Derivative): 
   })
 }
 
-/** Register a two-argument function with its partials ∂y/∂a(a, b, y) and ∂y/∂b(a, b, y). */
+/**
+ * Register a two-argument function with its partials $\partial y/\partial a(a, b, y)$ and $\partial y/\partial b(a, b, y)$.
+ *
+ * @param name - Function identifier name.
+ * @param f - Scalar evaluation rule.
+ * @param da - Partial derivative with respect to first argument.
+ * @param db - Partial derivative with respect to second argument.
+ * @returns Elementwise binary function.
+ */
 function binary(name: string, f: (a: number, b: number) => number, da: Derivative, db: Derivative): Binary {
   return elementwise({
     id: `numerics/special/${name}`,
@@ -173,7 +203,14 @@ function binary(name: string, f: (a: number, b: number) => number, da: Derivativ
   })
 }
 
-/** Register a three-argument function with its three partials. */
+/**
+ * Register a three-argument function with its three partials.
+ *
+ * @param name - Function identifier name.
+ * @param f - Scalar evaluation rule.
+ * @param derivative - Partial derivatives tuple.
+ * @returns Elementwise ternary function.
+ */
 function ternary(
   name: string,
   f: (a: number, b: number, c: number) => number,
@@ -183,43 +220,86 @@ function ternary(
 }
 
 /**
- * `x` where `ok` holds and `safe` elsewhere, so that the unused branch of a `where` stays finite (a NaN or ∞ there
- * would turn a zero cotangent into NaN).
+ * `x` where `ok` holds and `safe` elsewhere, so that the unused branch of a `where` stays finite (a `NaN` or $\infty$ there
+ * would turn a zero cotangent into `NaN`).
+ *
+ * @param ok - Boolean predicate condition tensor.
+ * @param x - Value to select when `ok` is true.
+ * @param safe - Safe numerical replacement when `ok` is false.
+ * @returns Guarded value.
  */
 const guarded = (ok: Value, x: Value, safe: number): Value => where(ok, x, safe)
 
 // ── Densities used as derivatives (compositions of the primitives below) ─────────────────────────────────────────
 
-/** log of the Gamma(a, 1) density, (a − 1) log x − x − log Γ(a), at x ≥ 0 (−∞ below). */
+/**
+ * $\log$ of the $\operatorname{Gamma}(a, 1)$ density, $(a - 1) \log x - x - \log \Gamma(a)$, at $x \ge 0$ ($-\infty$ below).
+ *
+ * @param a - Shape parameter $a$.
+ * @param x - Non-negative evaluation point $x$.
+ * @returns Log-density value.
+ */
 function logGammaDensity(a: Value, x: Value): Value {
   const ok = greaterEqual(x, 0)
   const xs = guarded(ok, x, 1)
   return where(ok, sub(sub(xlogy(sub(a, 1), xs), xs), logGamma(a)), -Infinity)
 }
 
-/** The Gamma(a, 1) density x^{a−1} e^{−x} / Γ(a) at x ≥ 0 (0 below): ∂P(a, x)/∂x. */
+/**
+ * The $\operatorname{Gamma}(a, 1)$ density $x^{a-1} e^{-x} / \Gamma(a)$ at $x \ge 0$ (0 below): $\partial P(a, x)/\partial x$.
+ *
+ * @param a - Shape parameter $a$.
+ * @param x - Non-negative evaluation point $x$.
+ * @returns Density value.
+ */
 function gammaDensity(a: Value, x: Value): Value {
   return exp(logGammaDensity(a, x))
 }
 
-/** The χ²ₖ density at x: half the Gamma(k/2, 1) density at x/2. */
+/**
+ * The $\chi^2_k$ density at $x$: half the $\operatorname{Gamma}(k/2, 1)$ density at $x/2$.
+ *
+ * @param x - Non-negative evaluation point $x$.
+ * @param k - Degrees of freedom $k$.
+ * @returns Chi-squared probability density.
+ */
 function chiSquareDensity(x: Value, k: Value): Value {
   return mul(0.5, gammaDensity(mul(0.5, k), mul(0.5, x)))
 }
 
-/** log of the Beta(a, b) density on [0, 1] (−∞ outside). */
+/**
+ * $\log$ of the $\operatorname{Beta}(a, b)$ density on $[0, 1]$ ($-\infty$ outside).
+ *
+ * @param a - Shape parameter $a$.
+ * @param b - Shape parameter $b$.
+ * @param x - Evaluation point $x$.
+ * @returns Log-density value.
+ */
 function logBetaDensity(a: Value, b: Value, x: Value): Value {
   const ok = where(greaterEqual(x, 0), lessEqual(x, 1), 0)
   const xs = guarded(ok, x, 0.5)
   return where(ok, sub(add(xlogy(sub(a, 1), xs), xlog1py(sub(b, 1), neg(xs))), logBeta(a, b)), -Infinity)
 }
 
-/** The Beta(a, b) density on [0, 1] (0 outside): ∂I_x(a, b)/∂x. */
+/**
+ * The $\operatorname{Beta}(a, b)$ density on $[0, 1]$ (0 outside): $\partial I_x(a, b)/\partial x$.
+ *
+ * @param a - Shape parameter $a$.
+ * @param b - Shape parameter $b$.
+ * @param x - Evaluation point $x$.
+ * @returns Density value.
+ */
 function betaDensity(a: Value, b: Value, x: Value): Value {
   return exp(logBetaDensity(a, b, x))
 }
 
-/** log of the Student t density with ν degrees of freedom at t (the standard normal's for ν = ∞). */
+/**
+ * $\log$ of the Student $t$ density with $\nu$ degrees of freedom at $t$ (the standard normal's for $\nu = \infty$).
+ *
+ * @param t - Real evaluation point $t$.
+ * @param df - Degrees of freedom $\nu$.
+ * @returns Log-density value.
+ */
 function logStudentTDensity(t: Value, df: Value): Value {
   const finite = less(df, Infinity)
   const nu = guarded(finite, df, 1)
@@ -232,54 +312,60 @@ function logStudentTDensity(t: Value, df: Value): Value {
   return where(finite, logDensity, normalLogPdf(t))
 }
 
-/** The Student t density with ν degrees of freedom at t (the standard normal density for ν = ∞). */
+/**
+ * The Student $t$ density with $\nu$ degrees of freedom at $t$ (the standard normal density for $\nu = \infty$).
+ *
+ * @param t - Real evaluation point $t$.
+ * @param df - Degrees of freedom $\nu$.
+ * @returns Density value.
+ */
 function studentTDensity(t: Value, df: Value): Value {
   return exp(logStudentTDensity(t, df))
 }
 
 // ── Error function family (erf.ts) ───────────────────────────────────────────────────────────────────────────────────
 
-/** erf(x) = (2/√π) ∫₀ˣ e^{−t²} dt, elementwise; relative error about 1e-15. */
+/** $\operatorname{erf}(x) = (2/\sqrt{\pi}) \int_0^x e^{-t^2}\,\mathrm{d}t$, elementwise; relative error about $10^{-15}$. */
 export const erf: Unary = unary('erf', E.erf, (x) => mul(TWO_OVER_SQRT_PI, exp(neg(square(x)))))
-/** erfc(x) = 1 − erf(x), elementwise, with full relative accuracy in the upper tail (to underflow near x = 27). */
+/** $\operatorname{erfc}(x) = 1 - \operatorname{erf}(x)$, elementwise, with full relative accuracy in the upper tail (to underflow near $x = 27$). */
 export const erfc: Unary = unary('erfc', E.erfc, (x) => mul(-TWO_OVER_SQRT_PI, exp(neg(square(x)))))
-/** erfcx(x) = e^{x²} erfc(x), the scaled complement, elementwise; no underflow for large x. */
+/** $\operatorname{erfcx}(x) = e^{x^2} \operatorname{erfc}(x)$, the scaled complement, elementwise; no underflow for large $x$. */
 export const erfcx: Unary = unary('erfcx', E.erfcx, (x, y) => sub(mul(mul(2, x), y), TWO_OVER_SQRT_PI))
-/** log erfc(x), elementwise, accurate far beyond the underflow of erfc. */
+/** $\log \operatorname{erfc}(x)$, elementwise, accurate far beyond the underflow of $\operatorname{erfc}$. */
 export const logErfc: Unary = unary('logErfc', E.logErfc, (x) => div(-TWO_OVER_SQRT_PI, erfcx(x)))
-/** The inverse error function on [−1, 1], elementwise. */
+/** The inverse error function on $[-1, 1]$, elementwise. */
 export const erfinv: Unary = unary('erfinv', N.erfinv, (_x, y) => mul(HALF_SQRT_PI, exp(square(y))))
-/** The inverse complementary error function on [0, 2], elementwise. */
+/** The inverse complementary error function on $[0, 2]$, elementwise. */
 export const erfcinv: Unary = unary('erfcinv', N.erfcinv, (_x, y) => mul(-HALF_SQRT_PI, exp(square(y))))
 
 // ── Standard normal (normal.ts) ──────────────────────────────────────────────────────────────────────────────────────
 
-/** The standard normal density φ(z), elementwise. */
+/** The standard normal density $\phi(z)$, elementwise. */
 export const normalPdf: Unary = unary('normalPdf', N.normalPdf, (x, y) => neg(mul(x, y)))
-/** log φ(z), elementwise. */
+/** $\log \phi(z)$, elementwise. */
 export const normalLogPdf: Unary = unary('normalLogPdf', N.normalLogPdf, (x) => neg(x))
 /**
- * The standard normal cdf Φ(z), elementwise, relatively accurate in the lower tail to underflow; use Φ(−z) for upper
+ * The standard normal cdf $\Phi(z)$, elementwise, relatively accurate in the lower tail to underflow; use $\Phi(-z)$ for upper
  * tails.
  */
 export const normalCdf: Unary = unary('normalCdf', N.normalCdf, (x) => normalPdf(x))
-/** log Φ(z), elementwise, accurate in both tails (no underflow in the lower tail). */
+/** $\log \Phi(z)$, elementwise, accurate in both tails (no underflow in the lower tail). */
 export const normalLogCdf: Unary = unary('normalLogCdf', N.normalLogCdf, (x) => truncatedNormalV(x))
-/** The standard normal quantile Φ⁻¹(p), elementwise (Wichura 1988, AS 241). */
+/** The standard normal quantile $\Phi^{-1}(p)$, elementwise (Wichura 1988, AS 241). */
 export const normalQuantile: Unary = unary('normalQuantile', N.normalQuantile, (_p, y) =>
   mul(SQRT_2PI, exp(mul(0.5, square(y)))),
 )
-/** log(Φ(u) − Φ(l)) for l ≤ u, elementwise over broadcast (l, u), without cancellation in either tail. */
+/** $\log(\Phi(u) - \Phi(l))$ for $l \le u$, elementwise over broadcast $(l, u)$, without cancellation in either tail. */
 export const normalLogIntervalProbability: Binary = binary(
   'normalLogIntervalProbability',
   N.normalLogIntervalProbability,
   (l, _u, y) => neg(exp(sub(normalLogPdf(l), y))),
   (_l, u, y) => exp(sub(normalLogPdf(u), y)),
 )
-/** v(t) = φ(t)/Φ(t), elementwise: the mean of a standard normal truncated to (−t, ∞); accurate in both tails. */
+/** $v(t) = \phi(t)/\Phi(t)$, elementwise: the mean of a standard normal truncated to $(-t, \infty)$; accurate in both tails. */
 export const truncatedNormalV: Unary = unary('truncatedNormalV', N.truncatedNormalV, (t) => neg(truncatedNormalW(t)))
 /**
- * w(t) = v(t)(v(t) + t) in (0, 1), elementwise: one minus the variance of the same truncation; accurate in both
+ * $w(t) = v(t)(v(t) + t)$ in $(0, 1)$, elementwise: one minus the variance of the same truncation; accurate in both
  * tails.
  */
 export const truncatedNormalW: Unary = unary('truncatedNormalW', N.truncatedNormalW, (t, w) => {
@@ -288,8 +374,8 @@ export const truncatedNormalW: Unary = unary('truncatedNormalW', N.truncatedNorm
   return sub(v, mul(w, add(mul(2, v), t)))
 })
 /**
- * The mean of a standard normal truncated to [−ε − t, ε − t] (the TrueSkill draw factor), elementwise over broadcast
- * (t, ε). Differentiable in t only.
+ * The mean of a standard normal truncated to $[-\varepsilon - t, \varepsilon - t]$ (the TrueSkill draw factor), elementwise over broadcast
+ * $(t, \varepsilon)$. Differentiable in $t$ only.
  */
 export const truncatedNormalVDraw: Binary = binary(
   'truncatedNormalVDraw',
@@ -298,8 +384,8 @@ export const truncatedNormalVDraw: Binary = binary(
   null,
 )
 /**
- * One minus the variance of a standard normal truncated to [−ε − t, ε − t], elementwise over broadcast (t, ε).
- * Differentiable in t only.
+ * One minus the variance of a standard normal truncated to $[-\varepsilon - t, \varepsilon - t]$, elementwise over broadcast $(t, \varepsilon)$.
+ * Differentiable in $t$ only.
  */
 export const truncatedNormalWDraw: Binary = binary(
   'truncatedNormalWDraw',
@@ -319,15 +405,15 @@ export const truncatedNormalWDraw: Binary = binary(
 
 // ── Gamma family (gamma.ts) ──────────────────────────────────────────────────────────────────────────────────────────
 
-/** log |Γ(x)|, elementwise; +∞ at the poles. */
+/** $\log |\Gamma(x)|$, elementwise; $+\infty$ at the poles. */
 export const logGamma: Unary = unary('logGamma', G.logGamma, (x) => digamma(x))
-/** Γ(x), elementwise; NaN at the poles, +∞ above 171.62. */
+/** $\Gamma(x)$, elementwise; `NaN` at the poles, $+\infty$ above 171.62. */
 export const gamma: Unary = unary('gamma', G.gamma, (x, y) => mul(y, digamma(x)))
-/** ψ(x) = d/dx log Γ(x), elementwise. */
+/** $\psi(x) = \frac{\mathrm{d}}{\mathrm{d}x} \log \Gamma(x)$, elementwise. */
 export const digamma: Unary = unary('digamma', G.digamma, (x) => trigamma(x))
 /**
- * ψ₁(x) = d²/dx² log Γ(x), elementwise, for all real x except the poles. Its derivative is ψ₂(x) for x > 0 and,
- * below, the reflection ψ₁(x) = π²/sin²(πx) − ψ₁(1 − x) differentiated.
+ * $\psi_1(x) = \frac{\mathrm{d}^2}{\mathrm{d}x^2} \log \Gamma(x)$, elementwise, for all real $x$ except the poles. Its derivative is $\psi_2(x)$ for $x > 0$ and,
+ * below, the reflection $\psi_1(x) = \pi^2/\sin^2(\pi x) - \psi_1(1 - x)$ differentiated.
  */
 export const trigamma: Unary = unary('trigamma', G.trigamma, (x) => {
   const right = greater(x, 0)
@@ -339,19 +425,19 @@ export const trigamma: Unary = unary('trigamma', G.trigamma, (x) => {
   return where(right, polygamma(2, xr), reflected)
 })
 /**
- * ψ⁽ⁿ⁾(x) for integer n ≥ 1 and x > 0, elementwise over broadcast (n, x). Differentiable in x (∂x = ψ⁽ⁿ⁺¹⁾), not n.
+ * $\psi^{(n)}(x)$ for integer $n \ge 1$ and $x > 0$, elementwise over broadcast $(n, x)$. Differentiable in $x$ ($\partial_x = \psi^{(n+1)}$), not $n$.
  */
 export const polygamma: Binary = binary('polygamma', G.polygamma, null, (n, x) => polygamma(add(n, 1), x))
-/** log B(a, b) for a, b > 0, elementwise over broadcast (a, b), accurate when either argument is large. */
+/** $\log B(a, b)$ for $a, b > 0$, elementwise over broadcast $(a, b)$, accurate when either argument is large. */
 export const logBeta: Binary = binary(
   'logBeta',
   G.logBeta,
   (a, b) => sub(digamma(a), digamma(add(a, b))),
   (a, b) => sub(digamma(b), digamma(add(a, b))),
 )
-/** log n! = log Γ(n + 1), elementwise. */
+/** $\log n! = \log \Gamma(n + 1)$, elementwise. */
 export const logFactorial: Unary = unary('logFactorial', G.logFactorial, (n) => digamma(add(n, 1)))
-/** log (n choose k), elementwise over broadcast (n, k), accurate for large n and small k; −∞ outside 0 ≤ k ≤ n. */
+/** $\log \binom{n}{k}$, elementwise over broadcast $(n, k)$, accurate for large $n$ and small $k$; $-\infty$ outside $0 \le k \le n$. */
 export const logChoose: Binary = binary(
   'logChoose',
   G.logChoose,
@@ -359,32 +445,32 @@ export const logChoose: Binary = binary(
   (n, k) => sub(digamma(add(sub(n, k), 1)), digamma(add(k, 1))),
 )
 /**
- * The regularised lower incomplete gamma function P(a, x), elementwise over broadcast (a, x), like
- * scipy.special.gammainc. Differentiable in x only (∂P/∂x is the Gamma(a, 1) density).
+ * The regularised lower incomplete gamma function $P(a, x)$, elementwise over broadcast $(a, x)$, like
+ * `scipy.special.gammainc`. Differentiable in $x$ only ($\partial P/\partial x$ is the $\operatorname{Gamma}(a, 1)$ density).
  */
 export const regularisedGammaP: Binary = binary('regularisedGammaP', G.regularisedGammaP, null, (a, x) =>
   gammaDensity(a, x),
 )
-/** The regularised upper incomplete gamma Q(a, x) = 1 − P(a, x), accurate in the upper tail. Differentiable in x. */
+/** The regularised upper incomplete gamma $Q(a, x) = 1 - P(a, x)$, accurate in the upper tail. Differentiable in $x$. */
 export const regularisedGammaQ: Binary = binary('regularisedGammaQ', G.regularisedGammaQ, null, (a, x) =>
   neg(gammaDensity(a, x)),
 )
 
 /**
- * log P(a, x), elementwise over broadcast (a, x): accurate where P underflows (the lower tail, summed in log space) and
- * where P ≈ 1 (log1p of −Q). Differentiable in x (∂ log P/∂x is the Gamma(a, 1) density over P).
+ * $\log P(a, x)$, elementwise over broadcast $(a, x)$: accurate where $P$ underflows (the lower tail, summed in log space) and
+ * where $P \approx 1$ ($\operatorname{log1p}$ of $-Q$). Differentiable in $x$ ($\partial \log P/\partial x$ is the $\operatorname{Gamma}(a, 1)$ density over $P$).
  */
 export const logRegularisedGammaP: Binary = binary('logRegularisedGammaP', G.logRegularisedGammaP, null, (a, x, y) =>
   exp(sub(logGammaDensity(a, x), y)),
 )
-/** log Q(a, x), elementwise over broadcast (a, x): accurate in the upper tail and where Q ≈ 1. Differentiable in x. */
+/** $\log Q(a, x)$, elementwise over broadcast $(a, x)$: accurate in the upper tail and where $Q \approx 1$. Differentiable in $x$. */
 export const logRegularisedGammaQ: Binary = binary('logRegularisedGammaQ', G.logRegularisedGammaQ, null, (a, x, y) =>
   neg(exp(sub(logGammaDensity(a, x), y))),
 )
 /**
- * The inverse of P(a, x) in x, elementwise over broadcast (a, p), like scipy.special.gammaincinv: the p-quantile of
- * Gamma(a, 1), inverting Q above p = ½ so that upper quantiles keep their accuracy. Differentiable in p
- * (dx/dp = 1 / the Gamma(a, 1) density at x).
+ * The inverse of $P(a, x)$ in $x$, elementwise over broadcast $(a, p)$, like `scipy.special.gammaincinv`: the $p$-quantile of
+ * $\operatorname{Gamma}(a, 1)$, inverting $Q$ above $p = 1/2$ so that upper quantiles keep their accuracy. Differentiable in $p$
+ * ($\mathrm{d}x/\mathrm{d}p = 1 / \text{the density at } x$).
  */
 export const regularisedGammaPInverse: Binary = binary(
   'regularisedGammaPInverse',
@@ -393,8 +479,8 @@ export const regularisedGammaPInverse: Binary = binary(
   (a, _p, y) => exp(neg(logGammaDensity(a, y))),
 )
 /**
- * The inverse of Q(a, x) in x, elementwise over broadcast (a, q), like scipy.special.gammainccinv: the inverse survival
- * function of Gamma(a, 1), accurate for q down to 1e-300. Differentiable in q (dx/dq = −1 / the density at x).
+ * The inverse of $Q(a, x)$ in $x$, elementwise over broadcast $(a, q)$, like `scipy.special.gammainccinv`: the inverse survival
+ * function of $\operatorname{Gamma}(a, 1)$, accurate for $q$ down to $10^{-300}$. Differentiable in $q$ ($\mathrm{d}x/\mathrm{d}q = -1 / \text{the density at } x$).
  */
 export const regularisedGammaQInverse: Binary = binary(
   'regularisedGammaQInverse',
@@ -406,8 +492,8 @@ export const regularisedGammaQInverse: Binary = binary(
 // ── Beta family and derived distribution functions (beta.ts) ─────────────────────────────────────────────────────────
 
 /**
- * The regularised incomplete beta function I_x(a, b), elementwise over broadcast (a, b, x), like
- * scipy.special.betainc. Differentiable in x only (∂I/∂x is the Beta(a, b) density).
+ * The regularised incomplete beta function $I_x(a, b)$, elementwise over broadcast $(a, b, x)$, like
+ * `scipy.special.betainc`. Differentiable in $x$ only ($\partial I/\partial x$ is the $\operatorname{Beta}(a, b)$ density).
  */
 export const regularisedBeta: Ternary = ternary('regularisedBeta', B.regularisedBeta, [
   null,
@@ -415,8 +501,8 @@ export const regularisedBeta: Ternary = ternary('regularisedBeta', B.regularised
   (a, b, x) => betaDensity(a, b, x),
 ])
 /**
- * The inverse of I_x(a, b) in x, elementwise over broadcast (a, b, p), like scipy.special.betaincinv. Differentiable in
- * p only (dx/dp = 1 / the Beta(a, b) density at x).
+ * The inverse of $I_x(a, b)$ in $x$, elementwise over broadcast $(a, b, p)$, like `scipy.special.betaincinv`. Differentiable in
+ * $p$ only ($\mathrm{d}x/\mathrm{d}p = 1 / \text{the density at } x$).
  */
 export const regularisedBetaInverse: Ternary = ternary('regularisedBetaInverse', B.regularisedBetaInverse, [
   null,
@@ -424,19 +510,19 @@ export const regularisedBetaInverse: Ternary = ternary('regularisedBetaInverse',
   (a, b, _p, y) => div(1, betaDensity(a, b, y)),
 ])
 /**
- * log I_x(a, b), elementwise over broadcast (a, b, x): accurate where I underflows and where I ≈ 1. Differentiable in x
- * only (the Beta(a, b) density over I).
+ * $\log I_x(a, b)$, elementwise over broadcast $(a, b, x)$: accurate where $I$ underflows and where $I \approx 1$. Differentiable in $x$
+ * only (the density over $I$).
  */
 export const logRegularisedBeta: Ternary = ternary('logRegularisedBeta', B.logRegularisedBeta, [
   null,
   null,
   (a, b, x, y) => exp(sub(logBetaDensity(a, b, x), y)),
 ])
-/** The Student t cdf, elementwise over broadcast (t, ν); ν = ∞ gives Φ. Accurate in both tails. Differentiable in t. */
+/** The Student $t$ cdf, elementwise over broadcast $(t, \nu)$; $\nu = \infty$ gives $\Phi$. Accurate in both tails. Differentiable in $t$. */
 export const studentTCdf: Binary = binary('studentTCdf', B.studentTCdf, (t, df) => studentTDensity(t, df), null)
 /**
- * log of the Student t cdf, elementwise over broadcast (t, ν): the lower tail in log space (no underflow) and log1p of
- * the complement in the upper tail. Differentiable in t (the density over the cdf).
+ * $\log$ of the Student $t$ cdf, elementwise over broadcast $(t, \nu)$: the lower tail in log space (no underflow) and $\operatorname{log1p}$ of
+ * the complement in the upper tail. Differentiable in $t$ (the density over the cdf).
  */
 export const studentTLogCdf: Binary = binary(
   'studentTLogCdf',
@@ -444,47 +530,47 @@ export const studentTLogCdf: Binary = binary(
   (t, df, y) => exp(sub(logStudentTDensity(t, df), y)),
   null,
 )
-/** The Student t quantile, elementwise over broadcast (p, ν). Differentiable in p. */
+/** The Student $t$ quantile, elementwise over broadcast $(p, \nu)$. Differentiable in $p$. */
 export const studentTQuantile: Binary = binary(
   'studentTQuantile',
   B.studentTQuantile,
   (_p, df, y) => div(1, studentTDensity(y, df)),
   null,
 )
-/** The chi-square cdf P(k/2, x/2), elementwise over broadcast (x, k). Differentiable in x. */
+/** The chi-square cdf $P(k/2, x/2)$, elementwise over broadcast $(x, k)$. Differentiable in $x$. */
 export const chiSquareCdf: Binary = binary('chiSquareCdf', B.chiSquareCdf, (x, k) => chiSquareDensity(x, k), null)
 /**
- * The chi-square survival function Q(k/2, x/2), elementwise over broadcast (x, k); use it for p-values.
- * Differentiable in x.
+ * The chi-square survival function $Q(k/2, x/2)$, elementwise over broadcast $(x, k)$; use it for p-values.
+ * Differentiable in $x$.
  */
 export const chiSquareSf: Binary = binary('chiSquareSf', B.chiSquareSf, (x, k) => neg(chiSquareDensity(x, k)), null)
 
 // ── Stable elementary forms (stable.ts) ──────────────────────────────────────────────────────────────────────────────
 
-/** softplus(x) = log(1 + eˣ), elementwise, without overflow; also known as log1pexp. */
+/** $\operatorname{softplus}(x) = \log(1 + e^x)$, elementwise, without overflow; also known as `log1pexp`. */
 export const softplus: Unary = unary('softplus', S.softplus, (x) => sigmoid(x))
-/** log(1 + eˣ); the same primitive as {@link softplus}. */
+/** $\log(1 + e^x)$; the same primitive as {@link softplus}. */
 export const log1pexp: Unary = softplus
-/** The logistic sigmoid 1/(1 + e^{−x}), elementwise, stable for either sign. */
+/** The logistic sigmoid $1/(1 + e^{-x})$, elementwise, stable for either sign. */
 export const sigmoid: Unary = unary('sigmoid', S.sigmoid, (_x, y) => mul(y, sub(1, y)))
-/** log σ(x) = −softplus(−x), elementwise. */
+/** $\log \sigma(x) = -\operatorname{softplus}(-x)$, elementwise. */
 export const logSigmoid: Unary = unary('logSigmoid', S.logSigmoid, (x) => sigmoid(neg(x)))
-/** log(p/(1 − p)), elementwise. */
+/** $\log(p/(1 - p))$, elementwise. */
 export const logit: Unary = unary('logit', S.logit, (p) => div(1, mul(p, sub(1, p))))
-/** log(1 − eˣ) for x ≤ 0, elementwise (Mächler 2012). */
+/** $\log(1 - e^x)$ for $x \le 0$, elementwise (Mächler 2012). */
 export const log1mexp: Unary = unary('log1mexp', S.log1mexp, (x) => div(-1, expm1(neg(x))))
-/** log(eˣ − 1) for x ≥ 0, elementwise. Both it and `log1mexp` have derivative −1/expm1(−x). */
+/** $\log(e^x - 1)$ for $x \ge 0$, elementwise. Both it and `log1mexp` have derivative $-1/\operatorname{expm1}(-x)$. */
 export const logExpm1: Unary = unary('logExpm1', S.logExpm1, (x) => div(-1, expm1(neg(x))))
-/** log(1 + x) − x, elementwise, accurate near 0. */
+/** $\log(1 + x) - x$, elementwise, accurate near 0. */
 export const log1pmx: Unary = unary('log1pmx', S.log1pmx, (x) => neg(div(x, add(1, x))))
-/** log(eᵃ + eᵇ), elementwise over broadcast (a, b), handling −∞. */
+/** $\log(e^a + e^b)$, elementwise over broadcast $(a, b)$, handling $-\infty$. */
 export const logAddExp: Binary = binary(
   'logAddExp',
   S.logAddExp,
   (a, _b, y) => exp(sub(a, y)),
   (_a, b, y) => exp(sub(b, y)),
 )
-/** log(eᵃ − eᵇ) for a ≥ b, elementwise over broadcast (a, b). */
+/** $\log(e^a - e^b)$ for $a \ge b$, elementwise over broadcast $(a, b)$. */
 export const logDiffExp: Binary = binary(
   'logDiffExp',
   S.logDiffExp,
@@ -496,48 +582,52 @@ export const logDiffExp: Binary = binary(
 
 /**
  * 0 where `x` is 0, else `f(nonzero)`, where `nonzero` masks the entries of `x` that are not 0: the derivative of
- * x·log(·) in its second argument, which is 0 wherever x is (the scipy convention 0 · log 0 = 0).
+ * $x \cdot \log(\cdot)$ in its second argument, which is 0 wherever $x$ is (the scipy convention $0 \log 0 = 0$).
+ *
+ * @param x - Input value to test for zero.
+ * @param f - Callback producing value for non-zero entries.
+ * @returns Evaluated result with exact zero preserved.
  */
 const zeroWhereZero = (x: Value, f: (nonzero: Value) => Value): Value => {
   const nonzero = notEqualTo(x, 0)
   return where(nonzero, f(nonzero), 0)
 }
 
-/** x · log y with 0 · log y = 0 (so 0 · log 0 = 0), elementwise over broadcast (x, y); as `scipy.special.xlogy`. */
+/** $x \log y$ with $0 \log y = 0$ (so $0 \log 0 = 0$), elementwise over broadcast $(x, y)$; as `scipy.special.xlogy`. */
 export const xlogy: Binary = binary(
   'xlogy',
   (x, y) => (x === 0 && y === y ? 0 : x * Math.log(y)),
   (_x, y) => log(y),
   (x, y) => zeroWhereZero(x, (nonzero) => div(x, guarded(nonzero, y, 1))),
 )
-/** x · log(1 + y) with 0 · log(1 + y) = 0, elementwise over broadcast (x, y); as `scipy.special.xlog1py`. */
+/** $x \log(1 + y)$ with $0 \log(1 + y) = 0$, elementwise over broadcast $(x, y)$; as `scipy.special.xlog1py`. */
 export const xlog1py: Binary = binary(
   'xlog1py',
   (x, y) => (x === 0 && y === y ? 0 : x * Math.log1p(y)),
   (_x, y) => log1p(y),
   (x, y) => zeroWhereZero(x, (nonzero) => div(x, add(1, guarded(nonzero, y, 0)))),
 )
-/** The modified Bessel function of the first kind I₀(x), elementwise (even in x). Its derivative is I₁. */
+/** The modified Bessel function of the first kind $I_0(x)$, elementwise (even in $x$). Its derivative is $I_1$. */
 export const besselI0: Unary = unary('besselI0', I.besselI0, (x) => besselI1(x))
-/** The modified Bessel function of the first kind I₁(x), elementwise (odd in x); I₁′(x) = I₀(x) − I₁(x)/x (½ at 0). */
+/** The modified Bessel function of the first kind $I_1(x)$, elementwise (odd in $x$); $I_1'(x) = I_0(x) - I_1(x)/x$ ($1/2$ at 0). */
 export const besselI1: Unary = unary('besselI1', I.besselI1, (x, y) => {
   const nonzero = notEqualTo(x, 0)
   return where(nonzero, sub(besselI0(x), div(y, guarded(nonzero, x, 1))), 0.5)
 })
 /**
- * A(κ) = I₁(κ)/I₀(κ) for κ ≥ 0 (NaN below), elementwise: the mean resultant length of a von Mises distribution.
- * A′(κ) = 1 − A/κ − A² (½ at 0).
+ * $A(\kappa) = I_1(\kappa)/I_0(\kappa)$ for $\kappa \ge 0$ (`NaN` below), elementwise: the mean resultant length of a von Mises distribution.
+ * $A'(\kappa) = 1 - A/\kappa - A^2$ ($1/2$ at 0).
  */
 export const besselRatio: Unary = unary('besselRatio', I.besselRatio, (x, a) => {
   const nonzero = notEqualTo(x, 0)
   return where(nonzero, sub(sub(1, div(a, guarded(nonzero, x, 1))), square(a)), 0.5)
 })
-/** log I₀(κ) for κ ≥ 0 (NaN below), without overflow; its derivative is `besselRatio`. */
+/** $\log I_0(\kappa)$ for $\kappa \ge 0$ (`NaN` below), without overflow; its derivative is `besselRatio`. */
 export const logBesselI0: Unary = unary('logBesselI0', I.logBesselI0, (x) => besselRatio(x))
 
 /**
- * The complete elliptic integral of the first kind K(m) = ∫₀^{π/2} (1 − m sin²θ)^{−½} dθ, elementwise in the parameter
- * m < 1 (as `scipy.special.ellipk`); K′(m) = (E − (1 − m)K) / (2m(1 − m)) (π/8 at 0).
+ * The complete elliptic integral of the first kind $K(m) = \int_0^{\pi/2} (1 - m \sin^2\theta)^{-1/2}\,\mathrm{d}\theta$, elementwise in the parameter
+ * $m < 1$ (as `scipy.special.ellipk`); $K'(m) = (E - (1 - m)K) / (2m(1 - m))$ ($\pi/8$ at 0).
  */
 export const ellipk: Unary = unary('ellipk', L.ellipk, (m, k) => {
   const nonzero = notEqualTo(m, 0)
@@ -545,29 +635,40 @@ export const ellipk: Unary = unary('ellipk', L.ellipk, (m, k) => {
   return where(nonzero, div(sub(ellipe(ms), mul(sub(1, ms), k)), mul(mul(2, ms), sub(1, ms))), Math.PI / 8)
 })
 /**
- * The complete elliptic integral of the second kind E(m) = ∫₀^{π/2} (1 − m sin²θ)^{½} dθ, elementwise in m ≤ 1 (as
- * `scipy.special.ellipe`); E′(m) = (E − K) / (2m) (−π/8 at 0).
+ * The complete elliptic integral of the second kind $E(m) = \int_0^{\pi/2} (1 - m \sin^2\theta)^{1/2}\,\mathrm{d}\theta$, elementwise in $m \le 1$ (as
+ * `scipy.special.ellipe`); $E'(m) = (E - K) / (2m)$ ($-\pi/8$ at 0).
  */
 export const ellipe: Unary = unary('ellipe', L.ellipe, (m, e) => {
   const nonzero = notEqualTo(m, 0)
   const ms = guarded(nonzero, m, 0.5)
   return where(nonzero, div(sub(e, ellipk(ms)), mul(2, ms)), -Math.PI / 8)
 })
-/** Scalar elliptic functions (numbers in and out): K(1 − p), F(φ | m), the Jacobi functions and Carlson's forms. */
+/** Scalar elliptic functions (numbers in and out): $K(1 - p)$, $F(\phi \mid m)$, the Jacobi functions and Carlson's forms. */
 export { carlsonRD, carlsonRF, ellipf, ellipj, ellipkm1, type Jacobi } from './elliptic'
 
 /** Options of `softmax` and `logSoftmax`. */
 export type SoftmaxOptions = {
-  /** The axis normalised over (default −1, the last). */
+  /** The axis normalised over (default $-1$, the last). */
   axis?: number
-  /** Temperature T > 0 (default 1): the result is softmax(x/T). */
+  /** Temperature $T > 0$ (default $1$): the result is $\operatorname{softmax}(x/T)$. */
   temperature?: number
 }
 
 /**
- * log softmax(x/T) along `axis` (default the last): xᵢ/T − log Σⱼ e^{xⱼ/T}, same shape as x (rank ≥ 1). Entries equal
- * to −∞ give −∞; a lane that is all −∞ gives NaN (there is no distribution). A composition of primitives, so it is
+ * $\log \operatorname{softmax}(x/T)$ along `axis` (default the last): $x_i/T - \log \sum_j e^{x_j/T}$, same shape as $x$ (rank $\ge 1$). Entries equal
+ * to $-\infty$ give $-\infty$; a lane that is all $-\infty$ gives `NaN` (there is no distribution). A composition of primitives, so it is
  * differentiable to any order.
+ *
+ * @param x - Input tensor of logits (rank $\ge 1$).
+ * @param options - Normalisation options.
+ * @param options.axis - The axis normalised over (default $-1$).
+ * @param options.temperature - Temperature parameter $T > 0$ (default $1$).
+ * @returns Tensor of log-probabilities of same shape as $x$.
+ *
+ * @example Compute log-softmax over logits
+ * const logits = tensor([1.0, 2.0, 3.0])
+ * const logp = logSoftmax(logits)
+ * print('Log-probabilities:\n' + logp)
  */
 export function logSoftmax(x: Tensor, options?: SoftmaxOptions): Tensor
 export function logSoftmax(x: Traced, options?: SoftmaxOptions): Traced
@@ -579,9 +680,20 @@ export function logSoftmax(x: Value, { axis = -1, temperature = 1 }: SoftmaxOpti
 }
 
 /**
- * softmax(x/T) along `axis` (default the last): e^{xᵢ/T} / Σⱼ e^{xⱼ/T}, same shape as x (rank ≥ 1), each lane summing
- * to 1; stable (computed as exp of `logSoftmax`). Entries equal to −∞ get probability 0; a lane that is all −∞ gives
- * NaN.
+ * $\operatorname{softmax}(x/T)$ along `axis` (default the last): $e^{x_i/T} / \sum_j e^{x_j/T}$, same shape as $x$ (rank $\ge 1$), each lane summing
+ * to 1; stable (computed as $\exp$ of `logSoftmax`). Entries equal to $-\infty$ get probability 0; a lane that is all $-\infty$ gives
+ * `NaN`.
+ *
+ * @param x - Input tensor of logits (rank $\ge 1$).
+ * @param options - Normalisation options.
+ * @param options.axis - The axis normalised over (default $-1$).
+ * @param options.temperature - Temperature parameter $T > 0$ (default $1$).
+ * @returns Tensor of normalized probabilities summing to 1 along `axis`.
+ *
+ * @example Compute softmax distribution
+ * const logits = tensor([1.0, 2.0, 3.0])
+ * const p = softmax(logits)
+ * print('Probabilities:\n' + p)
  */
 export function softmax(x: Tensor, options?: SoftmaxOptions): Tensor
 export function softmax(x: Traced, options?: SoftmaxOptions): Traced
@@ -597,8 +709,16 @@ const binaryEntropyNats: Unary = unary(
 )
 
 /**
- * Binary entropy H(p) = −p log p − (1 − p) log(1 − p) elementwise, with 0 log 0 = 0 and NaN outside [0, 1], in nats,
+ * Binary entropy $H(p) = -p \log p - (1 - p) \log(1 - p)$ elementwise, with $0 \log 0 = 0$ and `NaN` outside $[0, 1]$, in nats,
  * or in the given `base` (2 for bits).
+ *
+ * @param p - Probability value or tensor with elements in $[0, 1]$.
+ * @param base - Base of logarithm (defaults to $e$ for nats; pass 2 for bits).
+ * @returns Binary entropy value or tensor.
+ *
+ * @example Compute binary entropy in bits
+ * const p = 0.5
+ * print('Entropy at p=0.5 (bits):', binaryEntropy(p, 2))
  */
 export function binaryEntropy(p: number, base?: number): number
 export function binaryEntropy(p: Tensor, base?: number): Tensor

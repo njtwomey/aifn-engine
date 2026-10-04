@@ -1,6 +1,6 @@
 /**
- * The standard normal distribution's special functions: density, cdf Φ and log Φ (accurate far into both tails), the
- * quantile Φ⁻¹, erfinv and erfcinv, and the truncated-normal moment functions v and w used by expectation propagation,
+ * The standard normal distribution's special functions: density, cdf $\Phi$ and $\log \Phi$ (accurate far into both tails), the
+ * quantile $\Phi^{-1}$, $\operatorname{erfinv}$ and $\operatorname{erfcinv}$, and the truncated-normal moment functions $v$ and $w$ used by expectation propagation,
  * TrueSkill, the Bayes point machine and probit models.
  */
 
@@ -12,34 +12,55 @@ const INV_SQRT_2PI = 1 / Math.sqrt(2 * Math.PI)
 const SQRT_2_OVER_PI = Math.sqrt(2 / Math.PI)
 const TWO_OVER_SQRT_PI = 2 / Math.sqrt(Math.PI)
 
-/** e^{−z²/2}, with z² split so that its rounding error is not magnified for large |z| (see erf.ts). */
+/**
+ * $e^{-z^2/2}$, with $z^2$ split so that its rounding error is not magnified for large $|z|$ (see `erf.ts`).
+ *
+ * @param z - Real argument.
+ * @returns $e^{-z^2/2}$.
+ */
 function expHalfSquare(z: number): number {
   const hi = Math.trunc(z * 16) / 16
   const lo = z - hi
   return Math.exp(-0.5 * hi * hi) * Math.exp(-0.5 * lo * (z + hi))
 }
 
-/** The standard normal density φ(z) = e^{−z²/2} / √(2π). */
+/**
+ * The standard normal density $\phi(z) = e^{-z^2/2} / \sqrt{2\pi}$.
+ *
+ * @param z - Real standard score.
+ * @returns Probability density $\phi(z)$.
+ */
 export function normalPdf(z: number): number {
   return INV_SQRT_2PI * expHalfSquare(z)
 }
 
-/** log φ(z) = −z²/2 − log √(2π). */
+/**
+ * $\log \phi(z) = -z^2/2 - \log \sqrt{2\pi}$.
+ *
+ * @param z - Real standard score.
+ * @returns Log-density $\log \phi(z)$.
+ */
 export function normalLogPdf(z: number): number {
   return -0.5 * z * z - LOG_SQRT_2PI
 }
 
 /**
- * The standard normal cdf Φ(z) = erfc(−z/√2)/2, with full relative accuracy in the lower tail down to underflow
- * (about z = −37.5). For an upper-tail probability use Φ(−z), never 1 − Φ(z).
+ * The standard normal cdf $\Phi(z) = \frac{1}{2} \operatorname{erfc}(-z/\sqrt{2})$, with full relative accuracy in the lower tail down to underflow
+ * (about $z = -37.5$). For an upper-tail probability use $\Phi(-z)$, never $1 - \Phi(z)$.
+ *
+ * @param z - Real standard score.
+ * @returns Cumulative probability $\Phi(z) \in [0, 1]$.
  */
 export function normalCdf(z: number): number {
   return 0.5 * erfc(-z * Math.SQRT1_2)
 }
 
 /**
- * log Φ(z), accurate in both tails: in the lower tail through log erfc (no underflow even at z = −10⁵), in the upper
- * tail as log1p(−Φ(−z)).
+ * $\log \Phi(z)$, accurate in both tails: in the lower tail through $\log \operatorname{erfc}$ (no underflow even at $z = -10^5$), in the upper
+ * tail as $\operatorname{log1p}(-\Phi(-z))$.
+ *
+ * @param z - Real standard score.
+ * @returns Natural logarithm $\log \Phi(z)$.
  */
 export function normalLogCdf(z: number): number {
   if (Number.isNaN(z)) return NaN
@@ -76,6 +97,13 @@ const F = [
   1.421511758316446e-7, 2.0442631033899397e-15,
 ]
 
+/**
+ * Evaluate a polynomial using Horner's method.
+ *
+ * @param c - Coefficient array in increasing order of power.
+ * @param x - Evaluation point.
+ * @returns Polynomial value.
+ */
 function poly(c: number[], x: number): number {
   let s = c[c.length - 1]
   for (let i = c.length - 2; i >= 0; i--) s = s * x + c[i]
@@ -83,8 +111,11 @@ function poly(c: number[], x: number): number {
 }
 
 /**
- * The standard normal quantile Φ⁻¹(p) for p in [0, 1] (Wichura 1988, AS 241), relative accuracy about 1e-16;
- * Φ⁻¹(0) = −∞, Φ⁻¹(1) = +∞, NaN outside [0, 1].
+ * The standard normal quantile $\Phi^{-1}(p)$ for $p \in [0, 1]$ (Wichura 1988, AS 241), relative accuracy about $10^{-16}$;
+ * $\Phi^{-1}(0) = -\infty$, $\Phi^{-1}(1) = +\infty$, `NaN` outside $[0, 1]$.
+ *
+ * @param p - Probability $p \in [0, 1]$.
+ * @returns Quantile value $z = \Phi^{-1}(p)$.
  */
 export function normalQuantile(p: number): number {
   if (!(p >= 0 && p <= 1)) return NaN
@@ -108,8 +139,11 @@ export function normalQuantile(p: number): number {
 }
 
 /**
- * The inverse error function: erf(erfinv(y)) = y for y in [−1, 1]. Uses Φ⁻¹ for a first guess and two Newton steps on
- * erf (or on erfc for |y| > 1/2, where erf − y would cancel).
+ * The inverse error function: $\operatorname{erf}(\operatorname{erfinv}(y)) = y$ for $y \in [-1, 1]$. Uses $\Phi^{-1}$ for a first guess and two Newton steps on
+ * $\operatorname{erf}$ (or on $\operatorname{erfc}$ for $|y| > 1/2$, where $\operatorname{erf} - y$ would cancel).
+ *
+ * @param y - Argument $y \in [-1, 1]$.
+ * @returns Inverse error function value.
  */
 export function erfinv(y: number): number {
   if (!(y >= -1 && y <= 1)) return NaN
@@ -125,7 +159,12 @@ export function erfinv(y: number): number {
   return x
 }
 
-/** The inverse complementary error function: erfc(erfcinv(z)) = z for z in [0, 2]; erfcinv(z) = −Φ⁻¹(z/2)/√2. */
+/**
+ * The inverse complementary error function: $\operatorname{erfc}(\operatorname{erfcinv}(z)) = z$ for $z \in [0, 2]$; $\operatorname{erfcinv}(z) = -\Phi^{-1}(z/2)/\sqrt{2}$.
+ *
+ * @param z - Argument $z \in [0, 2]$.
+ * @returns Inverse complementary error function value.
+ */
 export function erfcinv(z: number): number {
   if (!(z >= 0 && z <= 2)) return NaN
   // erfc(−x) = 2 − erfc(x), and 2 − z is exact for z in [1, 2].
@@ -138,9 +177,12 @@ export function erfcinv(z: number): number {
 }
 
 /**
- * The truncated-normal mean function v(t) = φ(t)/Φ(t): the mean of a standard normal truncated to (−t, ∞), and the
- * derivative of log Φ(t). Computed as √(2/π)/erfcx(−t/√2), or for t < −3 by the continued fraction for the Mills
- * ratio (A&S 26.2.14), so it is accurate in both tails (v(t) → −t as t → −∞, v(t) → 0 as t → +∞).
+ * The truncated-normal mean function $v(t) = \phi(t)/\Phi(t)$: the mean of a standard normal truncated to $(-t, \infty)$, and the
+ * derivative of $\log \Phi(t)$. Computed as $\sqrt{2/\pi}/\operatorname{erfcx}(-t/\sqrt{2})$, or for $t < -3$ by the continued fraction for the Mills
+ * ratio (A&S 26.2.14), so it is accurate in both tails ($v(t) \to -t$ as $t \to -\infty$, $v(t) \to 0$ as $t \to +\infty$).
+ *
+ * @param t - Truncation threshold.
+ * @returns Mean of the truncated standard normal.
  */
 export function truncatedNormalV(t: number): number {
   if (t < -3) return -t + millsRemainder(-t)
@@ -148,9 +190,12 @@ export function truncatedNormalV(t: number): number {
 }
 
 /**
- * The truncated-normal variance function w(t) = v(t)(v(t) + t), in (0, 1): one minus the variance of a standard normal
- * truncated to (−t, ∞). For t < −3, v(t) + t is taken from the Mills-ratio continued fraction, avoiding the
- * cancellation of v(t) + t, so w → 1 accurately as t → −∞.
+ * The truncated-normal variance function $w(t) = v(t)(v(t) + t)$, in $(0, 1)$: one minus the variance of a standard normal
+ * truncated to $(-t, \infty)$. For $t < -3$, $v(t) + t$ is taken from the Mills-ratio continued fraction, avoiding the
+ * cancellation of $v(t) + t$, so $w \to 1$ accurately as $t \to -\infty$.
+ *
+ * @param t - Truncation threshold.
+ * @returns Variance factor $w(t) \in (0, 1)$.
  */
 export function truncatedNormalW(t: number): number {
   if (t < -3) {
@@ -162,8 +207,11 @@ export function truncatedNormalW(t: number): number {
 }
 
 /**
- * For x > 0, 1/R(x) − x where R(x) = (1 − Φ(x))/φ(x) is the Mills ratio. From R(x) = 1/(x + 1/(x + 2/(x + 3/(x + …))))
- * (A&S 26.2.14), 1/R(x) − x = 1/(x + 2/(x + 3/(x + …))); evaluated by the modified Lentz method.
+ * For $x > 0$, $1/R(x) - x$ where $R(x) = (1 - \Phi(x))/\phi(x)$ is the Mills ratio. From $R(x) = 1/(x + 1/(x + 2/(x + 3/(x + \dots))))$
+ * (A&S 26.2.14), $1/R(x) - x = 1/(x + 2/(x + 3/(x + \dots)))$; evaluated by the modified Lentz method.
+ *
+ * @param x - Evaluation point $x > 0$.
+ * @returns Mills ratio remainder value.
  */
 function millsRemainder(x: number): number {
   let f = x
@@ -181,7 +229,13 @@ function millsRemainder(x: number): number {
   return 1 / f
 }
 
-/** log(Φ(u) − Φ(l)) for l ≤ u, choosing the tail in which the difference does not cancel. */
+/**
+ * $\log(\Phi(u) - \Phi(l))$ for $l \le u$, choosing the tail in which the difference does not cancel.
+ *
+ * @param l - Lower boundary $l$.
+ * @param u - Upper boundary $u \ge l$.
+ * @returns Natural logarithm of the interval probability.
+ */
 export function normalLogIntervalProbability(l: number, u: number): number {
   if (u <= 0) return logDiffExp(normalLogCdf(u), normalLogCdf(l))
   if (l >= 0) return logDiffExp(normalLogCdf(-l), normalLogCdf(-u))
@@ -194,9 +248,13 @@ export function normalLogIntervalProbability(l: number, u: number): number {
 }
 
 /**
- * The draw version of v (Herbrich, Minka and Graepel 2007, "TrueSkill", NIPS): the mean of a standard normal
- * truncated to [−ε − t, ε − t], i.e. (φ(−ε − t) − φ(ε − t)) / (Φ(ε − t) − Φ(−ε − t)). Odd in t; computed in log space
- * so it stays finite when both Φ values underflow.
+ * The draw version of $v$ (Herbrich, Minka and Graepel 2007, "TrueSkill", NIPS): the mean of a standard normal
+ * truncated to $[-\varepsilon - t, \varepsilon - t]$, i.e. $(\phi(-\varepsilon - t) - \phi(\varepsilon - t)) / (\Phi(\varepsilon - t) - \Phi(-\varepsilon - t))$. Odd in $t$; computed in log space
+ * so it stays finite when both $\Phi$ values underflow.
+ *
+ * @param t - Performance difference parameter.
+ * @param eps - Draw margin $\varepsilon > 0$.
+ * @returns Truncated normal mean factor.
  */
 export function truncatedNormalVDraw(t: number, eps: number): number {
   if (t < 0) return -truncatedNormalVDraw(-t, eps)
@@ -207,8 +265,12 @@ export function truncatedNormalVDraw(t: number, eps: number): number {
 }
 
 /**
- * The draw version of w: one minus the variance of a standard normal truncated to [−ε − t, ε − t], i.e.
- * v² + ((ε − t)φ(ε − t) + (ε + t)φ(ε + t)) / (Φ(ε − t) − Φ(−ε − t)). Even in t; in (0, 1).
+ * The draw version of $w$: one minus the variance of a standard normal truncated to $[-\varepsilon - t, \varepsilon - t]$, i.e.
+ * $v^2 + ((\varepsilon - t)\phi(\varepsilon - t) + (\varepsilon + t)\phi(\varepsilon + t)) / (\Phi(\varepsilon - t) - \Phi(-\varepsilon - t))$. Even in $t$; in $(0, 1)$.
+ *
+ * @param t - Performance difference parameter.
+ * @param eps - Draw margin $\varepsilon > 0$.
+ * @returns Variance factor in $(0, 1)$.
  */
 export function truncatedNormalWDraw(t: number, eps: number): number {
   const a = Math.abs(t)

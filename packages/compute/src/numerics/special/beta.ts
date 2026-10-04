@@ -1,10 +1,10 @@
 /**
  * The regularised incomplete beta function and its inverse, and the distribution functions built on it and on the
- * incomplete gamma function: Student t (cdf, quantile) and chi-square (cdf, survival).
+ * incomplete gamma function: Student $t$ (cdf, quantile) and chi-square (cdf, survival).
  *
- * Method. I_x(a, b) by the continued fraction of Press et al., Numerical Recipes, 3rd ed., §6.4 (eq. 6.4.5), with the
- * symmetry I_x(a, b) = 1 − I_{1−x}(b, a) chosen so the fraction converges quickly. The inverse uses Newton's method on
- * log I in log x (and on the mirrored upper tail), inside a bracket.
+ * Method. $I_x(a, b)$ by the continued fraction of Press et al., Numerical Recipes, 3rd ed., §6.4 (eq. 6.4.5), with the
+ * symmetry $I_x(a, b) = 1 - I_{1-x}(b, a)$ chosen so the fraction converges quickly. The inverse uses Newton's method on
+ * $\log I$ in $\log x$ (and on the mirrored upper tail), inside a bracket.
  */
 
 import { logBeta, regularisedGammaP, regularisedGammaQ, logGamma } from './gamma'
@@ -13,7 +13,14 @@ import { normalCdf, normalLogCdf, normalQuantile } from './normal'
 const TINY = 1e-300
 const MAX_ITER = 100_000
 
-/** Continued fraction for I_x(a, b) · a B(a, b) / (xᵃ (1 − x)ᵇ), modified Lentz (NR3 eq. 6.4.5). */
+/**
+ * Continued fraction for $I_x(a, b) \cdot a B(a, b) / (x^a (1 - x)^b)$, modified Lentz (NR3 eq. 6.4.5).
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param x - Evaluation point $x \in (0, 1)$.
+ * @returns Value of the continued fraction.
+ */
 function betaFraction(a: number, b: number, x: number): number {
   const qab = a + b
   const qap = a + 1
@@ -45,15 +52,27 @@ function betaFraction(a: number, b: number, x: number): number {
   return NaN
 }
 
-/** log of xᵃ (1 − x)ᵇ / B(a, b). */
+/**
+ * $\log$ of $x^a (1 - x)^b / B(a, b)$.
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param x - Evaluation point $x \in (0, 1)$.
+ * @returns Logarithmic prefactor.
+ */
 function logBetaPrefactor(a: number, b: number, x: number): number {
   return a * Math.log(x) + b * Math.log1p(-x) - logBeta(a, b)
 }
 
 /**
- * The regularised incomplete beta function I_x(a, b) = ∫₀ˣ t^{a−1}(1 − t)^{b−1} dt / B(a, b), for a, b > 0 and
- * x in [0, 1]: the cdf of a Beta(a, b) variable. Argument order follows scipy.special.betainc. NaN if the continued
+ * The regularised incomplete beta function $I_x(a, b) = \int_0^x t^{a-1}(1 - t)^{b-1}\,\mathrm{d}t / B(a, b)$, for $a, b > 0$ and
+ * $x \in [0, 1]$: the cdf of a $\operatorname{Beta}(a, b)$ variable. Argument order follows `scipy.special.betainc`. `NaN` if the continued
  * fraction fails to converge.
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param x - Upper limit $x \in [0, 1]$.
+ * @returns Value of $I_x(a, b) \in [0, 1]$.
  */
 export function regularisedBeta(a: number, b: number, x: number): number {
   if (!(a > 0 && b > 0 && x >= 0 && x <= 1)) return NaN
@@ -64,15 +83,27 @@ export function regularisedBeta(a: number, b: number, x: number): number {
   return 1 - (Math.exp(logBetaPrefactor(b, a, 1 - x)) * betaFraction(b, a, 1 - x)) / b
 }
 
-/** The Beta(a, b) density x^{a−1}(1 − x)^{b−1} / B(a, b), the x-derivative of I_x(a, b). */
+/**
+ * The $\operatorname{Beta}(a, b)$ density $x^{a-1}(1 - x)^{b-1} / B(a, b)$, the $x$-derivative of $I_x(a, b)$.
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param x - Evaluation point $x$.
+ * @returns Probability density at $x$.
+ */
 export function betaDensity(a: number, b: number, x: number): number {
   if (x < 0 || x > 1) return 0
   return Math.exp((a - 1) * Math.log(x) + (b - 1) * Math.log1p(-x) - logBeta(a, b))
 }
 
 /**
- * log I_x(a, b): in log space in the directly summed branch, so that it does not underflow for tiny x, and log1p of the
- * complement in the mirrored branch, so that it keeps its relative accuracy where I_x ≈ 1. NaN for invalid arguments.
+ * $\log I_x(a, b)$: in log space in the directly summed branch, so that it does not underflow for tiny $x$, and $\operatorname{log1p}$ of the
+ * complement in the mirrored branch, so that it keeps its relative accuracy where $I_x \approx 1$. `NaN` for invalid arguments.
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param x - Upper limit $x \in [0, 1]$.
+ * @returns Natural logarithm $\log I_x(a, b)$.
  */
 export function logRegularisedBeta(a: number, b: number, x: number): number {
   if (!(a > 0 && b > 0 && x >= 0 && x <= 1)) return NaN
@@ -83,13 +114,18 @@ export function logRegularisedBeta(a: number, b: number, x: number): number {
 }
 
 /**
- * The inverse of the regularised incomplete beta function in x: I_x(a, b) = p for p in [0, 1], as (a, b, p) like
- * scipy.special.betaincinv. Relative accuracy about 1e-14 in x (and in 1 − x above the mean), including roots many
- * orders of magnitude below 1. NaN for invalid arguments.
+ * The inverse of the regularised incomplete beta function in $x$: $I_x(a, b) = p$ for $p \in [0, 1]$, as $(a, b, p)$ like
+ * `scipy.special.betaincinv`. Relative accuracy about $10^{-14}$ in $x$ (and in $1 - x$ above the mean), including roots many
+ * orders of magnitude below 1. `NaN` for invalid arguments.
  *
- * Method: below the mean m = a/(a + b), Newton's method on log I_x in s = log x, where the lower tail is nearly linear
- * (I_x ≈ xᵃ / (a B(a, b)) as x → 0, which also gives the first guess); above it, the same on the mirrored problem
- * I_y(b, a) = 1 − p with y = 1 − x. Every step is kept inside a bracket of the root.
+ * Method: below the mean $m = a/(a + b)$, Newton's method on $\log I_x$ in $s = \log x$, where the lower tail is nearly linear
+ * ($I_x \approx x^a / (a B(a, b))$ as $x \to 0$, which also gives the first guess); above it, the same on the mirrored problem
+ * $I_y(b, a) = 1 - p$ with $y = 1 - x$. Every step is kept inside a bracket of the root.
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param p - Cumulative probability $p \in [0, 1]$.
+ * @returns Quantile $x$ such that $I_x(a, b) = p$.
  */
 export function regularisedBetaInverse(a: number, b: number, p: number): number {
   if (!(a > 0 && b > 0 && p >= 0 && p <= 1)) return NaN
@@ -100,7 +136,15 @@ export function regularisedBetaInverse(a: number, b: number, p: number): number 
   return 1 - lowerTailInverse(b, a, Math.log1p(-p), 1 - m)
 }
 
-/** Solve log I_x(a, b) = logP for x in (0, xMax], by safeguarded Newton steps in s = log x. */
+/**
+ * Solve $\log I_x(a, b) = \log p$ for $x \in (0, x_{\max}]$, by safeguarded Newton steps in $s = \log x$.
+ *
+ * @param a - Shape parameter $a > 0$.
+ * @param b - Shape parameter $b > 0$.
+ * @param logP - Target log-probability $\log p$.
+ * @param xMax - Upper bracket bound for $x$.
+ * @returns Solution $x \in (0, x_{\max}]$.
+ */
 function lowerTailInverse(a: number, b: number, logP: number, xMax: number): number {
   const lbeta = logBeta(a, b)
   let lo = -Infinity
@@ -131,7 +175,13 @@ function lowerTailInverse(a: number, b: number, logP: number, xMax: number): num
   return Math.exp(s)
 }
 
-/** The Student t density with ν degrees of freedom, the t-derivative of {@link studentTCdf}. */
+/**
+ * The Student $t$ density with $\nu$ degrees of freedom, the $t$-derivative of {@link studentTCdf}.
+ *
+ * @param t - Real evaluation point.
+ * @param df - Degrees of freedom $\nu > 0$.
+ * @returns Probability density at $t$.
+ */
 export function studentTDensity(t: number, df: number): number {
   if (df === Infinity) return Math.exp(-0.5 * t * t) / Math.sqrt(2 * Math.PI)
   return Math.exp(
@@ -143,7 +193,11 @@ export function studentTDensity(t: number, df: number): number {
 }
 
 /**
- * The Student t cdf with ν > 0 degrees of freedom (ν = ∞ gives Φ), accurate in both tails.
+ * The Student $t$ cdf with $\nu > 0$ degrees of freedom ($\nu = \infty$ gives $\Phi$), accurate in both tails.
+ *
+ * @param t - Real evaluation point.
+ * @param df - Degrees of freedom $\nu > 0$.
+ * @returns Cumulative probability $P(T \le t)$.
  */
 export function studentTCdf(t: number, df: number): number {
   if (Number.isNaN(t) || !(df > 0)) return NaN
@@ -169,8 +223,12 @@ export function studentTCdf(t: number, df: number): number {
 }
 
 /**
- * log of the Student t cdf with ν > 0 degrees of freedom. The lower tail is log ½ + log I_x(ν/2, ½) with
- * x = ν/(ν + t²), in log space so that it does not underflow; the upper tail is log1p of minus the lower tail at −t.
+ * $\log$ of the Student $t$ cdf with $\nu > 0$ degrees of freedom. The lower tail is $\log(1/2) + \log I_x(\nu/2, 1/2)$ with
+ * $x = \nu/(\nu + t^2)$, in log space so that it does not underflow; the upper tail is $\operatorname{log1p}$ of minus the lower tail at $-t$.
+ *
+ * @param t - Real evaluation point.
+ * @param df - Degrees of freedom $\nu > 0$.
+ * @returns Natural logarithm of the cumulative distribution function.
  */
 export function studentTLogCdf(t: number, df: number): number {
   if (Number.isNaN(t) || !(df > 0)) return NaN
@@ -187,8 +245,12 @@ export function studentTLogCdf(t: number, df: number): number {
 }
 
 /**
- * The Student t quantile with ν > 0 degrees of freedom: studentTCdf(q, ν) = p. For p < ¼ (and symmetrically p > ¾)
+ * The Student $t$ quantile with $\nu > 0$ degrees of freedom: $\operatorname{studentTCdf}(q, \nu) = p$. For $p < 1/4$ (and symmetrically $p > 3/4$)
  * it inverts the tail form, so small tail probabilities keep their relative accuracy.
+ *
+ * @param p - Probability $p \in [0, 1]$.
+ * @param df - Degrees of freedom $\nu > 0$.
+ * @returns Quantile value $t$.
  */
 export function studentTQuantile(p: number, df: number): number {
   if (!(p >= 0 && p <= 1 && df > 0)) return NaN
@@ -217,19 +279,37 @@ export function studentTQuantile(p: number, df: number): number {
   return lower ? -t : t
 }
 
-/** The chi-square cdf with k > 0 degrees of freedom: P(k/2, x/2). */
+/**
+ * The chi-square cdf with $k > 0$ degrees of freedom: $P(k/2, x/2)$.
+ *
+ * @param x - Real evaluation point.
+ * @param k - Degrees of freedom $k > 0$.
+ * @returns Cumulative probability $P(X \le x)$.
+ */
 export function chiSquareCdf(x: number, k: number): number {
   if (x <= 0) return k > 0 ? 0 : NaN
   return regularisedGammaP(k / 2, x / 2)
 }
 
-/** The chi-square survival function 1 − F(x) = Q(k/2, x/2), accurate for small p-values. */
+/**
+ * The chi-square survival function $1 - F(x) = Q(k/2, x/2)$, accurate for small p-values.
+ *
+ * @param x - Real evaluation point.
+ * @param k - Degrees of freedom $k > 0$.
+ * @returns Survival probability $P(X > x)$.
+ */
 export function chiSquareSf(x: number, k: number): number {
   if (x <= 0) return k > 0 ? 1 : NaN
   return regularisedGammaQ(k / 2, x / 2)
 }
 
-/** The chi-square density with k degrees of freedom, the x-derivative of {@link chiSquareCdf}. */
+/**
+ * The chi-square density with $k$ degrees of freedom, the $x$-derivative of {@link chiSquareCdf}.
+ *
+ * @param x - Real evaluation point.
+ * @param k - Degrees of freedom $k > 0$.
+ * @returns Probability density at $x$.
+ */
 export function chiSquareDensity(x: number, k: number): number {
   if (x < 0) return 0
   if (x === 0) return k === 2 ? 0.5 : k < 2 ? Infinity : 0
