@@ -1,11 +1,11 @@
 /**
- * Approximate k-nearest neighbours by nearest-neighbour descent (Dong, Charikar and Li, 2011, "Efficient k-nearest
+ * Approximate $k$-nearest neighbours by nearest-neighbour descent (Dong, Charikar and Li, 2011, "Efficient k-nearest
  * neighbor graph construction for generic similarity measures", WWW '11), the method umap-learn uses through
- * pynndescent. The principle: a neighbour of a neighbour is likely a neighbour. Each point starts with k random
+ * pynndescent. The principle: a neighbour of a neighbour is likely a neighbour. Each point starts with $k$ random
  * candidates; every round compares, for each point, the pairs among its new and old neighbours and reverse neighbours
  * (the "local join"), and each pair may enter the other's list. Only pairs with at least one entry new since the last
- * round are compared (the incremental search), and each list is sampled to ⌈ρk⌉ entries. The search stops when a
- * round changes fewer than δ·n·k list entries. Cost is about O(n k² ρ²) distances per round instead of the O(n²) of
+ * round are compared (the incremental search), and each list is sampled to $\lceil\rho k\rceil$ entries. The search stops when a
+ * round changes fewer than $\delta n k$ list entries. Cost is about $\mathcal{O}(n k^2 \rho^2)$ distances per round instead of the $\mathcal{O}(n^2)$ of
  * exact search.
  */
 
@@ -19,31 +19,48 @@ import { rowsOf } from './search'
 export interface NearestNeighbourDescentOptions {
   /** The randomness of the initial lists and the sampling. */
   stream: Stream
-  /** Sample rate ρ of each round's candidate lists (default 1, umap-learn's choice; Dong et al. use 0.5–1). */
+  /** Sample rate $\rho$ of each round's candidate lists (default 1, umap-learn's choice; Dong et al. use 0.5–1). */
   sampleRate?: number
-  /** Stop when a round updates fewer than δ·n·k entries (default 0.001). */
+  /** Stop when a round updates fewer than $\delta n k$ entries (default 0.001). */
   delta?: number
   /** Most rounds (default 30). */
   maxRounds?: number
 }
 
-/** The k nearest other points of each row, nearest first, and the number of rounds run. */
+/** The $k$ nearest other points of each row, nearest first, and the number of rounds run. */
 export interface NeighbourLists {
+  /** Discriminator kind. */
   readonly kind: 'neighbours'
-  /** Indices [n, k] (int32). */
+  /** Indices tensor $[n, k]$ (int32). */
   readonly indices: Tensor
-  /** Euclidean distances [n, k], matching `indices`. */
+  /** Euclidean distances tensor $[n, k]$, matching `indices`. */
   readonly distances: Tensor
   /** Distances computed (the initial lists and every local join). */
   readonly distanceEvaluations: number
+  /** Total descent rounds performed. */
   readonly rounds: number
   /** Entries changed in each round. */
   readonly updates: readonly number[]
 }
 
 /**
- * The approximate k nearest neighbours (the point itself excluded) of the n rows of x (n × d) under the Euclidean
- * distance, by nearest-neighbour descent (module notes). k must lie in 1 … n − 1.
+ * The approximate $k$ nearest neighbours (the point itself excluded) of the $n$ rows of $x$ ($n \times d$) under the Euclidean
+ * distance, by nearest-neighbour descent (module notes). $k$ must lie in $1 \dots n - 1$.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param k - Number of neighbours $k$ to search for per point.
+ * @param options - Descent options including random stream.
+ * @param options.stream - Random stream for sampling.
+ * @param options.sampleRate - Sampling rate $\rho$ for candidates (default 1).
+ * @param options.delta - Early stopping threshold $\delta$ (default 0.001).
+ * @param options.maxRounds - Maximum number of descent rounds (default 30).
+ * @returns Approximate $k$-NN graph lists and diagnostics.
+ *
+ * @example Approximate k-NN graph with NN-descent
+ * const s = stream(42)
+ * const data = [[0, 0], [0, 1], [1, 0], [1, 1], [5, 5], [5, 6]]
+ * const graph = nearestNeighbourDescent(data, 2, { stream: s })
+ * print('Nearest neighbours for point 0:\n' + graph.indices)
  */
 export function nearestNeighbourDescent(
   x: MatrixLike,

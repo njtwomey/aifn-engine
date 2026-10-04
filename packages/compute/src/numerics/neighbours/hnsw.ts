@@ -1,13 +1,13 @@
 /**
  * Hierarchical navigable small-world graphs (Malkov and Yashunin 2018, "Efficient and robust approximate nearest
  * neighbor search using hierarchical navigable small world graphs", IEEE TPAMI 42(4)). Every point gets a top layer
- * ℓ = ⌊−ln U · m_L⌋ with U ~ U(0, 1) and m_L = 1/ln M, so layer ℓ holds about a fraction M^{−ℓ} of the points. Each layer
- * is a proximity graph on its points: a point inserted at layer ℓ links to up to M of its nearest (2M on layer 0),
+ * $\ell = \lfloor -\ln U \cdot m_L \rfloor$ with $U \sim \mathcal{U}(0, 1)$ and $m_L = 1/\ln M$, so layer $\ell$ holds about a fraction $M^{-\ell}$ of the points. Each layer
+ * is a proximity graph on its points: a point inserted at layer $\ell$ links to up to $M$ of its nearest ($2M$ on layer $0$),
  * chosen by the neighbour-selection heuristic that keeps a candidate only when it is closer to the new point than to
  * every neighbour already kept, so links spread in direction (Algorithm 4).
  *
  * A search enters at the top layer's entry point and walks greedily to the nearest point it can reach on each layer
- * (beam width 1), then drops a layer and starts from there; on layer 0 it runs a beam search of width ef ≥ k
+ * (beam width 1), then drops a layer and starts from there; on layer 0 it runs a beam search of width $ef \ge k$
  * (Algorithms 2 and 5). The long links of the sparse upper layers cross the space in a few hops; the dense bottom layer
  * refines. `trace` records each layer's expanded path and every point whose distance was computed.
  */
@@ -28,19 +28,25 @@ import {
 
 /** A built HNSW index. */
 export interface HnswIndex {
+  /** Discriminator kind. */
   readonly kind: 'hnsw-index'
+  /** Total number of indexed points $n$. */
   readonly n: Size
+  /** Dimensionality $d$. */
   readonly d: Size
+  /** Flattened point data array ($n \times d$). */
   readonly data: Float64Array
+  /** Distance metric used. */
   readonly metric: NeighbourMetric
-  /** Links per point on layers ≥ 1 (M) and on layer 0 (2M). */
+  /** Links per point on layers $\ge 1$ ($M$) and on layer $0$ ($2M$). */
   readonly M: Size
   /** The top layer of every point. */
   readonly levels: Int32Array
-  /** links[ℓ][i]: the neighbours of point i on layer ℓ (empty when i is not on layer ℓ). */
+  /** `links[layer][i]`: the neighbours of point $i$ on layer `layer` (empty when $i$ is not on layer `layer`). */
   readonly links: readonly (readonly (readonly number[])[])[]
-  /** The entry point: a point on the top layer. */
+  /** The entry point index on the top layer. */
   readonly entry: number
+  /** Topmost layer index. */
   readonly topLayer: number
   /** Distances computed during construction. */
   readonly buildDistanceEvaluations: number
@@ -48,22 +54,28 @@ export interface HnswIndex {
 
 /** Options of {@link hnswIndex}. */
 export interface HnswOptions {
+  /** Random stream. */
   stream: Stream
-  /** Links per point per layer (default 16; layer 0 allows 2M). */
+  /** Links per point per layer (default 16; layer $0$ allows $2M$). */
   M?: Size
   /** Beam width while inserting (default 200, as hnswlib). */
   efConstruction?: Size
-  /** The level multiplier m_L (default 1/ln M). */
+  /** The level multiplier $m_L$ (default $1/\ln M$). */
   levelMultiplier?: number
-  /** Select neighbours by the heuristic (default true) or simply the M nearest. */
+  /** Select neighbours by the heuristic (default `true`) or simply the $M$ nearest. */
   heuristic?: boolean
-  /** Default `euclidean`. */
+  /** Metric to evaluate distances with (default `'euclidean'`). */
   metric?: NeighbourMetric
 }
 
 type Scored = { i: number; d: number }
 
-/** Insert into an array sorted by distance (then index), keeping it sorted. */
+/**
+ * Insert into an array sorted by distance (then index), keeping it sorted.
+ *
+ * @param list - Sorted candidate array to insert into.
+ * @param e - Candidate point to insert.
+ */
 function insertSorted(list: Scored[], e: Scored): void {
   let lo = 0
   let hi = list.length
@@ -81,8 +93,15 @@ interface Searcher {
 }
 
 /**
- * Beam search on one layer from the entry points (Algorithm 2): returns the ef nearest found, nearest first, the points
+ * Beam search on one layer from the entry points (Algorithm 2): returns the $ef$ nearest found, nearest first, the points
  * expanded in order and every point whose distance was computed.
+ *
+ * @param s - Graph searcher providing distance and links.
+ * @param q - Query coordinates array.
+ * @param entries - Entry points to begin the search from.
+ * @param ef - Beam search capacity.
+ * @param layer - Layer index to search.
+ * @returns Object with found candidates, expanded nodes, and visited set.
  */
 function searchLayer(
   s: Searcher,
@@ -118,7 +137,15 @@ function searchLayer(
   return { found, expanded, visited: [...visited] }
 }
 
-/** Choose up to m neighbours of a point from candidates sorted nearest first (Algorithm 4, or the m nearest). */
+/**
+ * Choose up to $m$ neighbours of a point from candidates sorted nearest first (Algorithm 4, or the $m$ nearest).
+ *
+ * @param candidates - Sorted candidates array.
+ * @param m - Target number of neighbours.
+ * @param heuristic - Whether to apply the diversity heuristic.
+ * @param between - Function evaluating distance between two stored point indices.
+ * @returns Selected neighbour indices.
+ */
 function selectNeighbours(
   candidates: readonly Scored[],
   m: number,
@@ -134,7 +161,25 @@ function selectNeighbours(
   return kept.map((c) => c.i)
 }
 
-/** Build an HNSW index by inserting the rows of x in order (Algorithm 1). */
+/**
+ * Build an HNSW index by inserting the rows of $x$ in order (Algorithm 1).
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param options - Construction options including random stream.
+ * @param options.stream - Random stream for layer assignment.
+ * @param options.M - Number of bi-directional links per node (default 16).
+ * @param options.efConstruction - Size of dynamic candidate list during construction (default 200).
+ * @param options.levelMultiplier - Level multiplier $m_L$ (default $1/\ln M$).
+ * @param options.heuristic - Whether to use the neighbour diversity heuristic (default `true`).
+ * @param options.metric - Distance metric (default `'euclidean'`).
+ * @returns Built HNSW index structure.
+ *
+ * @example Build an HNSW index
+ * const s = stream(42)
+ * const data = [[0, 0], [1, 1], [2, 2], [3, 3]]
+ * const index = hnswIndex(data, { stream: s, M: 4 })
+ * print('Index points:', index.n)
+ */
 export function hnswIndex(x: MatrixLike, options: HnswOptions): HnswIndex {
   const { n, d, data } = rowsOf(x, 'hnswIndex')
   const { M = 16, efConstruction = 200, heuristic = true, metric = 'euclidean' } = options
@@ -205,8 +250,11 @@ export function hnswIndex(x: MatrixLike, options: HnswOptions): HnswIndex {
 
 /** One layer of an HNSW search: the points expanded in order (the greedy path on upper layers) and those evaluated. */
 export interface HnswLayerTrace {
+  /** Layer index. */
   readonly layer: number
+  /** Point indices expanded in order on this layer. */
   readonly expanded: readonly number[]
+  /** Point indices visited on this layer. */
   readonly visited: readonly number[]
   /** The nearest point found on the layer: the entry point of the next. */
   readonly nearest: number
@@ -214,10 +262,27 @@ export interface HnswLayerTrace {
 
 /** The answer to one HNSW query with its descent through the layers, top first. */
 export interface HnswQueryResult extends QueryResult {
+  /** Trace of search descent across graph layers. */
   readonly layers: readonly HnswLayerTrace[]
 }
 
-/** The k nearest points found by the layered search with beam width ef on layer 0 (default max(k, 50)). */
+/**
+ * The $k$ nearest points found by the layered search with beam width $ef$ on layer $0$ (default $\max(k, 50)$).
+ *
+ * @param index - HNSW index to search.
+ * @param query - Query vector of length $d$.
+ * @param k - Number of nearest neighbours $k$ to return.
+ * @param options - Search options.
+ * @param options.ef - Beam width on layer 0 (default $\max(k, 50)$).
+ * @returns Query result containing $k$ nearest indices, distances, and layer traces.
+ *
+ * @example Query nearest neighbours using HNSW
+ * const s = stream(42)
+ * const data = [[0, 0], [1, 1], [2, 2], [3, 3]]
+ * const index = hnswIndex(data, { stream: s, M: 4 })
+ * const res = hnswQuery(index, [1.1, 0.9], 2)
+ * print('Nearest index:', res.indices[0])
+ */
 export function hnswQuery(index: HnswIndex, query: VectorLike, k: Size, options: { ef?: Size } = {}): HnswQueryResult {
   const q = queryOf(query, index.d, 'hnswQuery')
   checkK(k, index.n, 'hnswQuery')
@@ -241,7 +306,24 @@ export function hnswQuery(index: HnswIndex, query: VectorLike, k: Size, options:
   return { indices: top.map((e) => e.i), distances: top.map((e) => e.d), distanceEvaluations: evaluations, layers }
 }
 
-/** {@link hnswQuery} for every row of `queries`. */
+/**
+ * Search nearest neighbours across multiple queries using an HNSW index.
+ *
+ * @param index - HNSW index to search.
+ * @param queries - Query points matrix ($m \times d$).
+ * @param k - Number of nearest neighbours $k$ to return per query.
+ * @param options - Search options.
+ * @param options.ef - Beam width on layer 0 (default $\max(k, 50)$).
+ * @returns Stacked `Neighbours` object.
+ *
+ * @example Search nearest neighbours with HNSW for multiple queries
+ * const s = stream(42)
+ * const data = [[0, 0], [1, 1], [2, 2], [3, 3]]
+ * const queries = [[0.1, 0.1], [2.1, 2.1]]
+ * const index = hnswIndex(data, { stream: s, M: 4 })
+ * const res = hnswSearch(index, queries, 2)
+ * print('Nearest indices:\n' + res.indices)
+ */
 export function hnswSearch(index: HnswIndex, queries: MatrixLike, k: Size, options: { ef?: Size } = {}): Neighbours {
   const Q = rowsOf(queries, 'hnswSearch')
   return stackResults(

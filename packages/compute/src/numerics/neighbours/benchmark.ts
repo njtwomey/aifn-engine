@@ -1,6 +1,6 @@
 /**
  * Measuring approximate search the way ann-benchmarks does (Aumüller, Bernhardsson and Faithfull 2020,
- * "ANN-Benchmarks: a benchmarking tool for approximate nearest neighbor algorithms", Information Systems 87): recall@k
+ * "ANN-Benchmarks: a benchmarking tool for approximate nearest neighbor algorithms", Information Systems 87): $\operatorname{recall@}k$
  * against the exact answer, queries per second, and the distance evaluations per query, a cost that does not depend on
  * the machine.
  */
@@ -12,8 +12,19 @@ import { now } from 'aifn-compute/foundation/trace'
 import type { Neighbours } from './search'
 
 /**
- * Recall@k: the mean over queries of |A ∩ E| / k, where A holds the first k indices found and E the exact k nearest.
- * Both are m × (≥ k) index matrices (or `Neighbours`); −1 entries (no answer) never match.
+ * $\operatorname{Recall@}k$: the mean over queries of $|A \cap E| / k$, where $A$ holds the first $k$ indices found and $E$ the exact $k$ nearest.
+ * Both are $m \times (\ge k)$ index matrices (or `Neighbours`); $-1$ entries (no answer) never match.
+ *
+ * @param found - Retrieved neighbour indices tensor or `Neighbours` object.
+ * @param exact - Ground-truth neighbour indices tensor or `Neighbours` object.
+ * @param k - Number of neighbours $k$ to consider (defaults to minimum width).
+ * @returns Average recall score in $[0, 1]$.
+ *
+ * @example Evaluate recall@k of search results
+ * const exact = tensor([[0, 1, 2]])
+ * const found = tensor([[0, 1, 3]])
+ * const rec = searchRecall(found, exact, 3)
+ * print('Recall@3:', rec)
  */
 export function searchRecall(found: Tensor | Neighbours, exact: Tensor | Neighbours, k?: Size): number {
   const a = 'kind' in found && found.kind === 'neighbours' ? found.indices : (found as Tensor)
@@ -36,18 +47,33 @@ export function searchRecall(found: Tensor | Neighbours, exact: Tensor | Neighbo
 
 /** One method's measurements over a query set. */
 export interface SearchBenchmark {
-  /** Recall@k against the exact answer. */
+  /** $\operatorname{Recall@}k$ against the exact answer. */
   readonly recall: number
   /** Wall-clock seconds for all queries (median of `repeats`). */
   readonly seconds: number
+  /** Throughput in queries per second. */
   readonly queriesPerSecond: number
   /** Mean distance evaluations per query. */
   readonly distancesPerQuery: number
 }
 
 /**
- * Time `search` over m queries (`repeats` times, default 3, the median kept) and score its answer against `exact`.
+ * Time `search` over $m$ queries (`repeats` times, default 3, the median kept) and score its answer against `exact`.
  * Timing is the machine's; recall and distances per query are reproducible.
+ *
+ * @param search - Callback executing search and returning `Neighbours`.
+ * @param exact - Ground-truth exact `Neighbours` to compare against.
+ * @param options - Benchmark options.
+ * @param options.k - Number of neighbours $k$ to score (defaults to full width).
+ * @param options.repeats - Number of timing repetitions (default 3).
+ * @returns Benchmark measurement summary.
+ *
+ * @example Benchmark a search function against exact results
+ * const data = [[0, 0], [1, 1], [2, 2]]
+ * const queries = [[0.1, 0.1]]
+ * const exact = bruteForceNeighbours(data, queries, 2)
+ * const b = benchmarkSearch(() => bruteForceNeighbours(data, queries, 2), exact)
+ * print('Benchmark recall:', b.recall)
  */
 export function benchmarkSearch(
   search: () => Neighbours,

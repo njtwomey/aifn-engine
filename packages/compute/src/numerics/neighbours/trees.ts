@@ -1,5 +1,5 @@
 /**
- * Space-partitioning trees for exact nearest-neighbour search: the k-d tree (Bentley 1975, "Multidimensional binary
+ * Space-partitioning trees for exact nearest-neighbour search: the $k$-d tree (Bentley 1975, "Multidimensional binary
  * search trees used for associative searching", CACM 18(9); Friedman, Bentley and Finkel 1977, ACM TOMS 3(3)) and the
  * ball tree (Omohundro 1989, "Five balltree construction algorithms", ICSI TR-89-063; Uhlmann 1991), built as
  * scikit-learn's `KDTree` and `BallTree` are: each node splits its points at the median of the coordinate with the
@@ -7,10 +7,10 @@
  * and algorithms for nearest neighbor search in general metric spaces", SODA) instead splits a node's points at the
  * median distance from one of them, the vantage point.
  *
- * A k-d node keeps the bounding box of its points, a ball node the centroid and the radius that covers them, and a
- * vantage-point node the shell [lo, hi] of distances from its parent's vantage point that holds its points. The search
+ * A $k$-d node keeps the bounding box of its points, a ball node the centroid and the radius that covers them, and a
+ * vantage-point node the shell $[lo, hi]$ of distances from its parent's vantage point that holds its points. The search
  * is depth first, nearer child first, and skips a node whose lower bound on the distance to any of its points (the
- * distance from the query to the box, to the ball's surface, or to the shell) already exceeds the k-th best distance found. The
+ * distance from the query to the box, to the ball's surface, or to the shell) already exceeds the $k$-th best distance found. The
  * answer is exact; what the tree saves is distance evaluations, which `visits` records node by node.
  */
 
@@ -31,48 +31,58 @@ import {
 /** The metrics a tree prunes exactly with (the cosine distance breaks the triangle inequality). */
 export type TreeMetric = Exclude<NeighbourMetric, 'cosine'>
 
-/** One node of a k-d or ball tree. Its points are `order[start … end − 1]`. */
+/** One node of a $k$-d or ball tree. Its points are `order[start … end − 1]`. */
 export interface SpaceTreeNode {
+  /** Index into order array where this node's points begin. */
   readonly start: number
+  /** Index into order array where this node's points end. */
   readonly end: number
-  /** Child node ids, −1 at a leaf. */
+  /** Left child node ID, or $-1$ at a leaf. */
   readonly left: number
+  /** Right child node ID, or $-1$ at a leaf. */
   readonly right: number
+  /** Node depth in the tree ($0$ at the root). */
   readonly depth: number
   /**
-   * k-d tree: the split coordinate and value (points with a smaller rank go left); −1 and NaN at a leaf. Vantage-point
-   * tree: `dim` is −1 and `split` is the median distance μ from the vantage point at an internal node.
+   * $k$-d tree: split coordinate axis index (points with smaller value go left); $-1$ at a leaf.
+   * Vantage-point tree: `dim` is $-1$ and `split` is the median distance $\mu$ from the vantage point.
    */
   readonly dim: number
+  /** Split coordinate value or median distance threshold; `NaN` at a leaf. */
   readonly split: number
-  /** k-d tree: the bounding box of the node's points. */
+  /** $k$-d tree: lower corner of bounding box. */
   readonly lower?: readonly number[]
+  /** $k$-d tree: upper corner of bounding box. */
   readonly upper?: readonly number[]
-  /** Ball tree: the centroid of the node's points and the largest distance from it to one of them. */
+  /** Ball tree: centroid coordinate of points in this node. */
   readonly centre?: readonly number[]
+  /** Ball tree: enclosing ball radius. */
   readonly radius?: number
-  /** Vantage-point tree, internal node: the index of its vantage point (its points nearer than `split` go left). */
+  /** Vantage-point tree: index of the vantage point. */
   readonly vantage?: number
-  /**
-   * Vantage-point tree, below the root: the parent's vantage point and the least and greatest distance from it to one
-   * of this node's points. Every point of the node lies in that shell.
-   */
+  /** Vantage-point tree: anchor point of parent's vantage point. */
   readonly anchor?: readonly number[]
+  /** Vantage-point tree: shell distance interval $[lo, hi]$ holding this node's points. */
   readonly shell?: readonly [number, number]
 }
 
-/** A built k-d tree or ball tree over n points of width d. */
+/** A built $k$-d tree or ball tree over $n$ points of width $d$. */
 export interface SpaceTree {
+  /** Discriminator kind of space tree. */
   readonly kind: 'kd-tree' | 'ball-tree' | 'vp-tree'
+  /** Number of data points $n$. */
   readonly n: Size
+  /** Dimensionality $d$. */
   readonly d: Size
-  /** The points, row-major n × d (a copy). */
+  /** The points, row-major $n \times d$ (a copy). */
   readonly data: Float64Array
   /** The point indices, permuted so that every node's points are contiguous. */
   readonly order: Int32Array
-  /** Node 0 is the root; children follow their parent. */
+  /** Node array, where node $0$ is the root and children follow their parent. */
   readonly nodes: readonly SpaceTreeNode[]
+  /** Maximum number of points in a leaf node. */
   readonly leafSize: Size
+  /** Distance metric used. */
   readonly metric: TreeMetric
 }
 
@@ -84,6 +94,16 @@ export interface SpaceTreeOptions {
   metric?: TreeMetric
 }
 
+/**
+ * Build a space-partitioning tree of the given kind.
+ *
+ * @param kind - Tree structure kind: `'kd-tree'`, `'ball-tree'`, or `'vp-tree'`.
+ * @param x - Input data matrix ($n \times d$).
+ * @param options - Tree construction options.
+ * @param options.leafSize - Maximum points per leaf (default 40).
+ * @param options.metric - Metric (default `'euclidean'`).
+ * @returns Built space-partitioning tree.
+ */
 function build(kind: SpaceTree['kind'], x: MatrixLike, options: SpaceTreeOptions): SpaceTree {
   const where = kind === 'kd-tree' ? 'kdTree' : kind === 'ball-tree' ? 'ballTree' : 'vpTree'
   const { leafSize = 40, metric = 'euclidean' } = options
@@ -175,30 +195,78 @@ function build(kind: SpaceTree['kind'], x: MatrixLike, options: SpaceTreeOptions
   return { kind, n, d, data: Float64Array.from(data), order, nodes, leafSize, metric }
 }
 
-/** A k-d tree over the rows of x (n × d): median splits on the coordinate of largest spread, boxes at every node. */
+/**
+ * A $k$-d tree over the rows of $x$ ($n \times d$): median splits on the coordinate of largest spread, boxes at every node.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param options - Tree construction options.
+ * @param options.leafSize - Maximum points per leaf (default 40).
+ * @param options.metric - Metric (default `'euclidean'`).
+ * @returns Built $k$-d tree.
+ *
+ * @example Build a k-d tree
+ * const data = [[0, 0], [1, 2], [2, 1], [3, 3]]
+ * const tree = kdTree(data, { leafSize: 2 })
+ * print('Nodes built:', tree.nodes.length)
+ */
 export function kdTree(x: MatrixLike, options: SpaceTreeOptions = {}): SpaceTree {
   return build('kd-tree', x, options)
 }
 
-/** A ball tree over the rows of x (n × d): the same splits as the k-d tree, a centroid and radius at every node. */
+/**
+ * A ball tree over the rows of $x$ ($n \times d$): the same splits as the $k$-d tree, a centroid and radius at every node.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param options - Tree construction options.
+ * @param options.leafSize - Maximum points per leaf (default 40).
+ * @param options.metric - Metric (default `'euclidean'`).
+ * @returns Built ball tree.
+ *
+ * @example Build a ball tree
+ * const data = [[0, 0], [1, 2], [2, 1], [3, 3]]
+ * const tree = ballTree(data, { leafSize: 2 })
+ * print('Nodes built:', tree.nodes.length)
+ */
 export function ballTree(x: MatrixLike, options: SpaceTreeOptions = {}): SpaceTree {
   return build('ball-tree', x, options)
 }
 
 /**
- * A vantage-point tree over the rows of x (n × d): each node picks the point farthest from its centroid as vantage point
- * and splits its points at the median distance μ from it; a child keeps the shell of distances that holds its points.
+ * A vantage-point tree over the rows of $x$ ($n \times d$): each node picks the point farthest from its centroid as vantage point
+ * and splits its points at the median distance $\mu$ from it; a child keeps the shell of distances that holds its points.
  * Only the triangle inequality is used, so any of the tree metrics works.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param options - Tree construction options.
+ * @param options.leafSize - Maximum points per leaf (default 40).
+ * @param options.metric - Metric (default `'euclidean'`).
+ * @returns Built vantage-point tree.
+ *
+ * @example Build a vantage-point tree
+ * const data = [[0, 0], [1, 2], [2, 1], [3, 3]]
+ * const tree = vpTree(data, { leafSize: 2 })
+ * print('Nodes built:', tree.nodes.length)
  */
 export function vpTree(x: MatrixLike, options: SpaceTreeOptions = {}): SpaceTree {
   return build('vp-tree', x, options)
 }
 
 /**
- * A lower bound on the distance from q to any point of a node: the distance to its box (k-d), to its ball's surface
+ * A lower bound on the distance from $q$ to any point of a node: the distance to its box ($k$-d), to its ball's surface
  * (ball tree), or to the shell of distances from the parent's vantage point that holds its points (vantage-point tree:
- * max(0, lo − s, s − hi) for s the query's distance to that point, by the triangle inequality); 0 when the query is
- * inside, and 0 at a vantage-point tree's root.
+ * $\max(0, lo - s, s - hi)$ for $s$ the query's distance to that point, by the triangle inequality); $0$ when the query is
+ * inside, and $0$ at a vantage-point tree's root.
+ *
+ * @param tree - Space tree instance.
+ * @param node - Node index in tree.
+ * @param q - Query coordinates array.
+ * @returns Lower bound on the distance to any point in the node.
+ *
+ * @example Compute lower bound of root node
+ * const data = [[0, 0], [1, 1], [2, 2]]
+ * const tree = kdTree(data)
+ * const lb = nodeLowerBound(tree, 0, [5, 5])
+ * print('Lower bound:', lb)
  */
 export function nodeLowerBound(tree: SpaceTree, node: number, q: ArrayLike<number>): number {
   const nd = tree.nodes[node]
@@ -229,24 +297,39 @@ export function nodeLowerBound(tree: SpaceTree, node: number, q: ArrayLike<numbe
 
 /**
  * One event of a tree search: the node reached, its lower bound, and what the search did: `descend` into its children,
- * `scan` its points (a leaf), or `prune` it because the bound exceeded the k-th best distance `worst` held then.
+ * `scan` its points (a leaf), or `prune` it because the bound exceeded the $k$-th best distance `worst` held then.
  */
 export interface TreeVisit {
+  /** Node ID visited. */
   readonly node: number
+  /** Lower bound distance to query for this node. */
   readonly bound: number
+  /** Action taken: descend into children, scan leaf points, or prune subtree. */
   readonly action: 'descend' | 'scan' | 'prune'
-  /** The k-th best distance after the event (Infinity until k points are held). */
+  /** The $k$-th best distance after the event ($\infty$ until $k$ points are held). */
   readonly worst: number
 }
 
 /** The answer to one tree query with its visit order. */
 export interface TreeQueryResult extends QueryResult {
+  /** Trace of all node visits performed during the search. */
   readonly visits: readonly TreeVisit[]
 }
 
 /**
- * The exact k nearest points of the tree to the query, by depth-first branch and bound (module notes), with every
+ * The exact $k$ nearest points of the tree to the query, by depth-first branch and bound (module notes), with every
  * node visit recorded in order. Ties to the smaller index, as brute force.
+ *
+ * @param tree - Space tree to search.
+ * @param query - Query vector of length $d$.
+ * @param k - Number of nearest neighbours $k$ to return.
+ * @returns Query result containing $k$ nearest indices, distances, and visit history.
+ *
+ * @example Query nearest neighbours in a tree
+ * const data = [[0, 0], [1, 1], [2, 2], [3, 3]]
+ * const tree = kdTree(data)
+ * const res = treeQuery(tree, [0.9, 0.9], 2)
+ * print('Nearest index:', res.indices[0])
  */
 export function treeQuery(tree: SpaceTree, query: VectorLike, k: Size): TreeQueryResult {
   const q = queryOf(query, tree.d, 'treeQuery')
@@ -284,7 +367,21 @@ export function treeQuery(tree: SpaceTree, query: VectorLike, k: Size): TreeQuer
   return { indices: best.indices, distances: best.distances, distanceEvaluations: evaluations, visits }
 }
 
-/** The exact k nearest points of the tree to each row of `queries` (m × d), as scikit-learn's `tree.query`. */
+/**
+ * The exact $k$ nearest points of the tree to each row of `queries` ($m \times d$), as scikit-learn's `tree.query`.
+ *
+ * @param tree - Space tree to search.
+ * @param queries - Query points matrix ($m \times d$).
+ * @param k - Number of nearest neighbours $k$ to return.
+ * @returns Nearest neighbours results containing indices and distances tensors.
+ *
+ * @example Search nearest neighbours for multiple queries
+ * const data = [[0, 0], [1, 1], [2, 2], [3, 3]]
+ * const queries = [[0.1, 0.1], [2.1, 2.1]]
+ * const tree = kdTree(data)
+ * const res = treeSearch(tree, queries, 2)
+ * print('Nearest indices:\n' + res.indices)
+ */
 export function treeSearch(tree: SpaceTree, queries: MatrixLike, k: Size): Neighbours {
   const Q = rowsOf(queries, 'treeSearch')
   const results: QueryResult[] = []

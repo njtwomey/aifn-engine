@@ -1,8 +1,8 @@
 /**
- * Vector-quantisation codebooks, the coarse and fine quantisers of inverted files and product quantisation: k-means++
+ * Vector-quantisation codebooks, the coarse and fine quantisers of inverted files and product quantisation: $k$-means++
  * seeding (Arthur and Vassilvitskii 2007, "k-means++: the advantages of careful seeding", SODA), the assignment of rows
  * to their nearest codeword, the centroid update of Lloyd's algorithm (Lloyd 1982, "Least squares quantization in
- * PCM", IEEE Trans. Inf. Theory 28(2)) and a codebook trained by running them. `aifn-methods`'s k-means model steps
+ * PCM", IEEE Trans. Inf. Theory 28(2)) and a codebook trained by running them. `aifn-methods`'s $k$-means model steps
  * through the same assignment and update.
  */
 
@@ -13,20 +13,33 @@ import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { squaredRowDistance } from 'aifn-compute/numerics/linalg'
 import { rowsOf } from './search'
 
-/** The result of k-means++ seeding. */
+/** The result of $k$-means++ seeding. */
 export interface KMeansPlusPlus {
   /** The chosen rows, in the order picked. */
   indices: Tensor
-  /** Their coordinates [k, d]. */
+  /** Their coordinates $[k, d]$. */
   centroids: Tensor
-  /** Pick j's sampling probabilities over the rows [k, n]: uniform for the first, D(x)² / Σ D² after. */
+  /** Pick $j$'s sampling probabilities over the rows $[k, n]$: uniform for the first, $D(\xvec)^2 / \sum D^2$ after. */
   probabilities: Tensor
 }
 
 /**
- * k-means++ seeding: the first centre is a uniform row; each next centre is row x with probability D(x)² / Σ D², D the
- * distance to the nearest centre so far. With `trials` > 1 each pick draws that many candidates and keeps the one that
- * lowers the potential most (scikit-learn's greedy variant uses 2 + ⌊log k⌋). Pick j draws from `child(s, 'pick', j)`.
+ * $k$-means++ seeding: the first centre is a uniform row; each next centre is row $\xvec$ with probability $D(\xvec)^2 / \sum D^2$, $D$ the
+ * distance to the nearest centre so far. With `trials` $> 1$ each pick draws that many candidates and keeps the one that
+ * lowers the potential most (scikit-learn's greedy variant uses $2 + \lfloor\log k\rfloor$). Pick $j$ draws from `child(s, 'pick', j)`.
+ *
+ * @param s - Random stream.
+ * @param x - Input data matrix ($n \times d$).
+ * @param k - Number of centres $k$ to seed.
+ * @param params - Optional parameters.
+ * @param params.trials - Number of candidate draws per pick (default 1).
+ * @returns Result of $k$-means++ seeding.
+ *
+ * @example Seed initial centroids using k-means++
+ * const s = stream(42)
+ * const data = [[0, 0], [0, 1], [10, 10], [10, 11]]
+ * const init = kmeansPlusPlus(s, data, 2)
+ * print('Seeded centroids:\n' + init.centroids)
  */
 export function kmeansPlusPlus(s: Stream, x: MatrixLike, k: Size, params: { trials?: number } = {}): KMeansPlusPlus {
   const { n, d, data: v } = rowsOf(x, 'kmeansPlusPlus')
@@ -84,15 +97,27 @@ export function kmeansPlusPlus(s: Stream, x: MatrixLike, k: Size, params: { tria
 
 /** The nearest codeword of every row. */
 export interface Assignment {
-  /** Codeword index per row [n] (int32), ties to the lower index. */
+  /** Codeword index per row $[n]$ (int32), ties to the lower index. */
   labels: Tensor
-  /** Rows per codeword [k]. */
+  /** Rows per codeword $[k]$. */
   sizes: Tensor
-  /** Σᵢ ‖xᵢ − c_labelᵢ‖², the quantisation error (k-means inertia). */
+  /** $\sum_i \|\xvec_i - \mathbf{c}_{\mathrm{label}_i}\|^2$, the quantisation error ($k$-means inertia). */
   inertia: number
 }
 
-/** Assign every row of x (n × d) to its nearest row of the codebook (k × d) in squared Euclidean distance. */
+/**
+ * Assign every row of $x$ ($n \times d$) to its nearest row of the codebook ($k \times d$) in squared Euclidean distance.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param codebook - Codebook centroid matrix ($k \times d$).
+ * @returns Nearest-codeword assignments, cluster sizes, and total inertia.
+ *
+ * @example Assign points to nearest codewords
+ * const data = [[0, 0.1], [10, 9.9]]
+ * const codebook = [[0, 0], [10, 10]]
+ * const a = assignNearest(data, codebook)
+ * print('Assigned labels:\n' + a.labels)
+ */
 export function assignNearest(x: MatrixLike, codebook: MatrixLike): Assignment {
   const X = rowsOf(x, 'assignNearest')
   const C = rowsOf(codebook, 'assignNearest')
@@ -119,7 +144,7 @@ export function assignNearest(x: MatrixLike, codebook: MatrixLike): Assignment {
 
 /** The update step of Lloyd's algorithm. */
 export interface LloydUpdate {
-  /** Each codeword moved to the mean of its rows [k, d]; an empty one stays where it was. */
+  /** Each codeword moved to the mean of its rows $[k, d]$; an empty one stays where it was. */
   centroids: Tensor
   /** Codewords that had no rows. */
   empty: number[]
@@ -127,7 +152,21 @@ export interface LloydUpdate {
   shift: number
 }
 
-/** Move every codeword (k × d) to the mean of the rows of x assigned to it by `labels`. */
+/**
+ * Move every codeword ($k \times d$) to the mean of the rows of $x$ assigned to it by `labels`.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param labels - Cluster labels tensor of length $n$.
+ * @param codebook - Current codebook centroids matrix ($k \times d$).
+ * @returns Centroids after update, empty cluster list, and total shift.
+ *
+ * @example Update centroids from cluster assignments
+ * const data = [[0, 0], [0, 2], [10, 8], [10, 12]]
+ * const labels = tensor([0, 0, 1, 1])
+ * const codebook = [[0, 0], [10, 10]]
+ * const update = lloydUpdate(data, labels, codebook)
+ * print('Updated centroids:\n' + update.centroids)
+ */
 export function lloydUpdate(x: MatrixLike, labels: Tensor, codebook: MatrixLike): LloydUpdate {
   const X = rowsOf(x, 'lloydUpdate')
   const C = rowsOf(codebook, 'lloydUpdate')
@@ -155,7 +194,7 @@ export function lloydUpdate(x: MatrixLike, labels: Tensor, codebook: MatrixLike)
 
 /** A trained codebook. */
 export interface Codebook extends Assignment {
-  /** The codewords [k, d]. */
+  /** The codewords $[k, d]$. */
   centroids: Tensor
   /** Lloyd iterations run. */
   iterations: number
@@ -163,16 +202,31 @@ export interface Codebook extends Assignment {
 
 /** Options of {@link trainCodebook}. */
 export interface CodebookOptions {
+  /** Random stream. */
   stream: Stream
   /** Most Lloyd iterations (default 25, as faiss's `Clustering`). */
   iterations?: number
-  /** Start Lloyd's iterations from these codewords (k × d) instead of a k-means++ seeding (a warm start). */
+  /** Start Lloyd's iterations from these codewords ($k \times d$) instead of a $k$-means++ seeding (a warm start). */
   initial?: MatrixLike
 }
 
 /**
- * A k-codeword vector quantiser of the rows of x: k-means++ seeding from `child(stream, 'seed')` (or `initial`), then Lloyd's
- * iterations until no label changes or `iterations` is reached. When k ≥ n every row is its own codeword.
+ * A $k$-codeword vector quantiser of the rows of $x$: $k$-means++ seeding from `child(stream, 'seed')` (or `initial`), then Lloyd's
+ * iterations until no label changes or `iterations` is reached. When $k \ge n$ every row is its own codeword.
+ *
+ * @param x - Input data matrix ($n \times d$).
+ * @param k - Number of codewords $k$.
+ * @param options - Training options including random stream.
+ * @param options.stream - Random stream for centroid seeding.
+ * @param options.iterations - Maximum Lloyd iterations (default 25).
+ * @param options.initial - Initial centroids for warm-start ($k \times d$).
+ * @returns Trained codebook with centroids and assignments.
+ *
+ * @example Train a codebook with k-means
+ * const s = stream(42)
+ * const data = [[0, 0], [0, 1], [10, 10], [10, 11]]
+ * const cb = trainCodebook(data, 2, { stream: s })
+ * print('Trained centroids:\n' + cb.centroids)
  */
 export function trainCodebook(x: MatrixLike, k: Size, options: CodebookOptions): Codebook {
   const X = rowsOf(x, 'trainCodebook')

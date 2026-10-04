@@ -1,11 +1,11 @@
 /**
  * `aifn-compute/numerics/neighbours`: nearest-neighbour search, exact and approximate, as scikit-learn's `neighbors` and faiss.
  *
- * - Exact: `bruteForceNeighbours` (the reference), the k-d, ball and vantage-point trees (`kdTree`, `ballTree`, `vpTree`, `treeQuery` with
+ * - Exact: `bruteForceNeighbours` (the reference), the $k$-d, ball and vantage-point trees (`kdTree`, `ballTree`, `vpTree`, `treeQuery` with
  *   its visit order, `treeSearch`).
- * - Hashing: random-hyperplane and p-stable families (`hyperplaneFamily`, `pStableFamily`), `lshIndex`, `lshQuery`, and
+ * - Hashing: random-hyperplane and $p$-stable families (`hyperplaneFamily`, `pStableFamily`), `lshIndex`, `lshQuery`, and
  *   the banding shared with MinHash (`lshBands`, `lshCandidates`, `lshProbability`, `lshThreshold`).
- * - Graphs: `nearestNeighbourDescent` (k-NN graphs), HNSW (`hnswIndex`, `hnswQuery` with its layer-by-layer trace).
+ * - Graphs: `nearestNeighbourDescent` ($k$-NN graphs), HNSW (`hnswIndex`, `hnswQuery` with its layer-by-layer trace).
  * - Quantisation: codebooks (`kmeansPlusPlus`, `assignNearest`, `lloydUpdate`, `trainCodebook`), the inverted file
  *   (`ivfIndex`, `ivfQuery`), product quantisation and OPQ (`productQuantiser`, `optimisedProductQuantiser`,
  *   `pqEncode`, `pqDecode`, `pqDistanceTable`, `pqQuery`).

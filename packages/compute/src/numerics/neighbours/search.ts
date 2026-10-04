@@ -1,6 +1,6 @@
 /**
  * What every index of `aifn-compute/numerics/neighbours` shares: points read as rows, the distance between two rows, a bounded
- * list of the k best candidates, the result of a search and the exact search by brute force that every other method is
+ * list of the $k$ best candidates, the result of a search and the exact search by brute force that every other method is
  * checked against.
  */
 
@@ -12,14 +12,23 @@ import { rowDistance } from 'aifn-compute/numerics/linalg'
 /** The distances the indexes support: those of scipy's `cdist` that are metrics on rows, and the cosine distance. */
 export type NeighbourMetric = 'euclidean' | 'sqeuclidean' | 'manhattan' | 'chebyshev' | 'cosine'
 
-/** Points as rows: n × d values, row-major. */
+/** Points as rows: $n \times d$ values, row-major. */
 export interface Rows {
+  /** Number of rows $n$. */
   readonly n: Size
+  /** Number of columns/dimensions $d$. */
   readonly d: Size
+  /** Flat row-major array of size $n \times d$. */
   readonly data: Float64Array
 }
 
-/** The rows of a matrix (a rank-1 input is one point). */
+/**
+ * The rows of a matrix (a rank-1 input is one point).
+ *
+ * @param x - Matrix or vector input.
+ * @param where - Context name for error reporting.
+ * @returns Rows representation of $x$.
+ */
 export function rowsOf(x: MatrixLike | VectorLike, where: string): Rows {
   const vector = isTensor(x)
     ? x.shape.length === 1
@@ -32,14 +41,31 @@ export function rowsOf(x: MatrixLike | VectorLike, where: string): Rows {
   return { n: m, d: n, data }
 }
 
-/** One query point as a float64 vector of width d. */
+/**
+ * One query point as a float64 vector of width $d$.
+ *
+ * @param q - Query vector.
+ * @param d - Expected feature dimension $d$.
+ * @param where - Context name for error reporting.
+ * @returns Dense float64 query array.
+ */
 export function queryOf(q: VectorLike, d: Size, where: string): Float64Array {
   const v = dense.toF64(q, where)
   if (v.length !== d) throw new ShapeError(where, `${where}: the query has ${v.length} values, the index ${d}`)
   return v
 }
 
-/** The distance between row i of `a` and row j of `b` (both of width d) under a metric. */
+/**
+ * The distance between row $i$ of `a` and row $j$ of `b` (both of width $d$) under a metric.
+ *
+ * @param metric - Distance metric name.
+ * @param a - First data buffer.
+ * @param i - Row index in $a$.
+ * @param b - Second data buffer.
+ * @param j - Row index in $b$.
+ * @param d - Dimension of rows.
+ * @returns Distance between the two rows.
+ */
 export const distanceOf = (
   metric: NeighbourMetric,
   a: ArrayLike<number>,
@@ -49,27 +75,55 @@ export const distanceOf = (
   d: number,
 ): number => rowDistance(a, i, b, j, d, metric)
 
-/** Throws unless k lies in 1 … n. */
+/**
+ * Throws unless $k$ lies in $1 \dots n$.
+ *
+ * @param k - Number of neighbours requested.
+ * @param n - Total number of candidate points.
+ * @param where - Context name for error reporting.
+ */
 export function checkK(k: Size, n: Size, where: string): void {
   if (!(Number.isInteger(k) && k >= 1 && k <= n))
     throw new DomainError(where, `${where}: k = ${k} must lie in 1 … ${n}`)
 }
 
 /**
- * The k best candidates seen so far, nearest first (ties to the smaller index): the bounded priority list every search
- * keeps. `worst()` is the distance a new candidate must beat (Infinity until k are held). A NaN distance (the cosine
- * distance of a zero row) ranks as +∞: it is held only when nothing better fills the list, and it is reported as NaN.
+ * The $k$ best candidates seen so far, nearest first (ties to the smaller index): the bounded priority list every search
+ * keeps. `worst()` is the distance a new candidate must beat ($\infty$ until $k$ are held). A `NaN` distance (the cosine
+ * distance of a zero row) ranks as $+\infty$: it is held only when nothing better fills the list, and it is reported as `NaN`.
  */
 export interface KBest {
+  /** Capacity $k$. */
   readonly k: Size
+  /** Sorted candidate indices. */
   readonly indices: number[]
+  /** Sorted candidate distances. */
   readonly distances: number[]
+  /** Returns the distance a new candidate must beat. */
   worst(): number
-  /** Offer a candidate; true when it entered the list. Each index is held at most once. */
+  /**
+   * Offer a candidate; true when it entered the list. Each index is held at most once.
+   *
+   * @param index - Point index.
+   * @param distance - Distance to query.
+   * @returns `true` if candidate entered the list, `false` otherwise.
+   */
   offer(index: number, distance: number): boolean
 }
 
-/** An empty {@link KBest} list of capacity k. */
+/**
+ * An empty {@link KBest} list of capacity $k$.
+ *
+ * @param k - Capacity $k$.
+ * @returns New $k$-best candidate tracker.
+ *
+ * @example Track the 2 best candidates
+ * const best = kBest(2)
+ * best.offer(0, 5.0)
+ * best.offer(1, 2.0)
+ * best.offer(2, 3.5)
+ * print('Best indices:', best.indices)
+ */
 export function kBest(k: Size): KBest {
   const indices: number[] = []
   const distances: number[] = []
@@ -99,24 +153,35 @@ export function kBest(k: Size): KBest {
   }
 }
 
-/** The answer to one query: the k nearest found, nearest first, and the number of distances computed to find them. */
+/** The answer to one query: the $k$ nearest found, nearest first, and the number of distances computed to find them. */
 export interface QueryResult {
+  /** Array of $k$ nearest indices. */
   readonly indices: readonly number[]
+  /** Array of $k$ nearest distances. */
   readonly distances: readonly number[]
   /** Distances between the query and stored points evaluated (the cost every index tries to cut). */
   readonly distanceEvaluations: number
 }
 
-/** The answers to m queries: indices (int32) and distances, both m × k, nearest first. */
+/** The answers to $m$ queries: indices (int32) and distances, both $m \times k$, nearest first. */
 export interface Neighbours {
+  /** Discriminator kind. */
   readonly kind: 'neighbours'
+  /** Tensor of nearest neighbour indices, shape $[m, k]$. */
   readonly indices: Tensor
+  /** Tensor of nearest neighbour distances, shape $[m, k]$. */
   readonly distances: Tensor
   /** Distances evaluated over all queries. */
   readonly distanceEvaluations: number
 }
 
-/** Stack per-query results (each of length k) into a `Neighbours`. */
+/**
+ * Stack per-query results (each of length $k$) into a `Neighbours`.
+ *
+ * @param results - Array of query results.
+ * @param k - Number of neighbours $k$.
+ * @returns Stacked `Neighbours` object.
+ */
 export function stackResults(results: readonly QueryResult[], k: Size): Neighbours {
   const m = results.length
   const idx = new Int32Array(m * k).fill(-1)
@@ -139,16 +204,30 @@ export function stackResults(results: readonly QueryResult[], k: Size): Neighbou
 
 /** Options of {@link bruteForceNeighbours}. */
 export interface BruteForceOptions {
-  /** Default `euclidean`. */
+  /** Metric to evaluate distances with (default `'euclidean'`). */
   metric?: NeighbourMetric
-  /** Leave each query's own row out (queries are the data, as in a k-NN graph). Default false. */
+  /** Leave each query's own row out (queries are the data, as in a $k$-NN graph). Default `false`. */
   excludeSelf?: boolean
 }
 
 /**
- * The exact k nearest rows of `data` (n × d) to each row of `queries` (m × d) by scanning all n: O(nmd), the reference
- * for every index. Nearest first, ties to the smaller index. With `excludeSelf` the queries must be the data and row i
- * never answers query i.
+ * The exact $k$ nearest rows of `data` ($n \times d$) to each row of `queries` ($m \times d$) by scanning all $n$: $\mathcal{O}(nmd)$, the reference
+ * for every index. Nearest first, ties to the smaller index. With `excludeSelf` the queries must be the data and row $i$
+ * never answers query $i$.
+ *
+ * @param data - Reference dataset matrix ($n \times d$).
+ * @param queries - Query points matrix ($m \times d$).
+ * @param k - Number of nearest neighbours $k$ to return.
+ * @param options - Search options.
+ * @param options.metric - Distance metric to use (default `'euclidean'`).
+ * @param options.excludeSelf - Whether to exclude self-match when querying dataset against itself (default `false`).
+ * @returns Nearest neighbours results containing indices and distances tensors.
+ *
+ * @example Find 2 nearest neighbours by brute force
+ * const data = [[0, 0], [1, 0], [0, 1], [1, 1]]
+ * const queries = [[0.1, 0.1]]
+ * const res = bruteForceNeighbours(data, queries, 2)
+ * print('Nearest indices:\n' + res.indices)
  */
 export function bruteForceNeighbours(
   data: MatrixLike,
@@ -176,7 +255,22 @@ export function bruteForceNeighbours(
   return stackResults(results, k)
 }
 
-/** The exact k nearest rows of `data` to one query, by scanning (see {@link bruteForceNeighbours}). */
+/**
+ * The exact $k$ nearest rows of `data` to one query, by scanning (see {@link bruteForceNeighbours}).
+ *
+ * @param data - Reference dataset matrix ($n \times d$).
+ * @param query - Query vector of length $d$.
+ * @param k - Number of nearest neighbours $k$ to return.
+ * @param options - Query options.
+ * @param options.metric - Distance metric to use (default `'euclidean'`).
+ * @returns Query result containing $k$ nearest indices and distances.
+ *
+ * @example Query nearest neighbours for a single vector
+ * const data = [[0, 0], [1, 1], [2, 2]]
+ * const q = [0.2, 0.1]
+ * const res = bruteForceQuery(data, q, 2)
+ * print('Nearest indices:', res.indices)
+ */
 export function bruteForceQuery(
   data: MatrixLike,
   query: VectorLike,
