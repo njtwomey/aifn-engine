@@ -3,17 +3,17 @@ name: Pages
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pages-${{ github.ref }}
+  group: pages
   cancel-in-progress: true
 
 jobs:
+  # Only builds the site, so it publishes in about a minute; the Check workflow runs the lints and tests alongside.
   build:
     runs-on: ubuntu-24.04
     steps:
@@ -23,22 +23,17 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # The Python lint inside `make lint` is skipped here (no uv); everything else in `make check` runs.
-      - run: make check
       - id: pages
-        if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v6
       - run: make examples-build
         env:
           # `/<repository>/` for a project site, `/` under a custom domain.
           EXAMPLES_BASE: ${{ steps.pages.outputs.base_path }}/
-      - if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: examples/dist
 
   deploy:
-    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-24.04
     permissions:

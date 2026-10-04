@@ -4,7 +4,7 @@
 PY_SRC := packages/compute/test/fixtures packages/methods/test/fixtures scripts
 PRETTIER_FILES := git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f; do [ -f "$$f" ] && printf "%s\0" "$$f"; done' _
 
-.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check package examples examples-check examples-build clean
+.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check package examples examples-check examples-build shots thumbs clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -63,6 +63,12 @@ examples-build: ## Build the examples gallery into examples/dist (EXAMPLES_BASE=
 	npx vite build --config examples/vite.config.ts
 	@# GitHub Pages serves 404.html for unknown paths, which lets the single-page app open /<section>/<slug> directly.
 	cp examples/dist/index.html examples/dist/404.html
+
+shots: ## Screenshot example pages and figures into .scratch/shots (ARGS="--only lines/line-chart --theme dark ..."; needs Chrome)
+	node scripts/screenshot.ts $(ARGS)
+
+thumbs: ## Rebuild the gallery thumbnails in examples/public/thumbs (ARGS="--only lines" for a section; needs Chrome)
+	node scripts/screenshot.ts --thumbs --no-sliders $(ARGS)
 
 clean: ## Remove build output and caches
 	rm -rf packages/*/dist examples/dist node_modules/.tmp node_modules/.vite .ruff_cache

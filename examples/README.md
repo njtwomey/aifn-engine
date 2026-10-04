@@ -35,6 +35,6 @@ The gallery, the sidebar and the page are generated from the files. The code sho
 source, imported with `?raw` (`src/shell/snippet.ts`): imports are kept (except `@examples/recipe`), the `recipe` block
 is dropped, and when the file has `// region` … `// endregion` blocks (a note may follow the word; in JSX, `{/* region */}`) only those are shown, so boilerplate stays in the
 file but out of the snippet. A line ending in `// hide` is dropped. Keep examples to 10–40 lines; `make examples-check`
-warns above 45.
+warns above 45. Then run `make thumbs ARGS="--only <section>/<slug>"` for the gallery card.
 
 Code is highlighted by `CodeBlock` from `aifn-render` (read-only, copyable; Lezer's TSX grammar, no editor).
