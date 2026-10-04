@@ -5,8 +5,8 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     environment: 'node',
-    // Several tests take 2–5 s alone (fits, samplers, the name lint) and miss vitest's 5 s default when the machine is
-    // busy; a generous default stops load-dependent failures. Long training tests still set their own.
-    testTimeout: 30_000,
+    // Several tests take 2–10 s alone (fits, samplers, the name lint) and several times that on a shared CI runner, so
+    // the default is generous; it only bounds a hung test. Long training tests still set their own.
+    testTimeout: 120_000,
   },
 })
