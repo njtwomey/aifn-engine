@@ -12,6 +12,8 @@ const renderSrc = path.join(import.meta.dirname, '..', 'packages', 'render', 'sr
  */
 export default defineConfig({
   root: import.meta.dirname,
+  // The path the app is served under: `/` locally, `/<repository>/` on GitHub Pages (set by the deploy workflow).
+  base: process.env.EXAMPLES_BASE ?? '/',
   plugins: [
     react(),
     tailwindcss(),

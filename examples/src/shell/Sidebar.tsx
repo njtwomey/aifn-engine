@@ -4,7 +4,7 @@ import { Button, Input, ThemeToggle, cn } from 'aifn-render'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from 'aifn-render/ui/collapsible'
 import { SECTIONS } from '@examples/recipe'
 import { ENTRIES } from './registry'
-import { onLink } from './paths'
+import { hrefOf, onLink } from './paths'
 
 /**
  * The index: the gallery link, then each section's recipes as an accordion (one section open at a time; the current
@@ -25,8 +25,8 @@ export function Sidebar({ current, onClose }: { current: string; onClose: () => 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b px-4 py-3">
-        <a href="/" onClick={onLink('')} className="flex-1 truncate text-sm font-semibold tracking-tight">
-          aifn-render examples
+        <a href={hrefOf('')} onClick={onLink('')} className="flex-1 truncate text-sm font-semibold tracking-tight">
+          AIFN Engine
         </a>
         <ThemeToggle />
         <Button variant="ghost" size="icon-sm" className="md:hidden" aria-label="Close index" onClick={onClose}>
@@ -45,7 +45,7 @@ export function Sidebar({ current, onClose }: { current: string; onClose: () => 
       </div>
       <nav aria-label="Recipes" className="min-h-0 flex-1 overflow-y-auto px-2 py-3 text-sm">
         <a
-          href="/"
+          href={hrefOf('')}
           onClick={onLink('')}
           aria-current={current === '' ? 'page' : undefined}
           className={cn(
@@ -75,7 +75,7 @@ export function Sidebar({ current, onClose }: { current: string; onClose: () => 
                 {items.map((e) => (
                   <a
                     key={e.path}
-                    href={`/${e.path}`}
+                    href={hrefOf(e.path)}
                     onClick={onLink(e.path)}
                     aria-current={e.path === current ? 'page' : undefined}
                     className={cn(

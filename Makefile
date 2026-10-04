@@ -4,7 +4,7 @@
 PY_SRC := packages/compute/test/fixtures packages/methods/test/fixtures scripts
 PRETTIER_FILES := git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f; do [ -f "$$f" ] && printf "%s\0" "$$f"; done' _
 
-.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check package examples examples-check clean
+.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check package examples examples-check examples-build clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -52,12 +52,17 @@ fixtures-check: ## Regenerate every fixture in memory and fail if any differs fr
 package: ## Build aifn-compute as a publishable package in packages/compute/dist (ARGS="--version x.y.z")
 	node scripts/package.ts $(ARGS)
 
-examples: ## Run the aifn-render examples gallery → http://localhost:5192/
-	@echo "aifn-render examples → http://localhost:5192/  (recipes at /<section>/<slug>)"
+examples: ## Run the AIFN Engine site (front page and examples gallery) → http://localhost:5192/
+	@echo "AIFN Engine examples → http://localhost:5192/  (recipes at /<section>/<slug>)"
 	npx vite --config examples/vite.config.ts
 
 examples-check: ## Render every example recipe on the server and report any that throw
 	node examples/check.ts
 
+examples-build: ## Build the examples gallery into examples/dist (EXAMPLES_BASE=/<path>/ when not served from /)
+	npx vite build --config examples/vite.config.ts
+	@# GitHub Pages serves 404.html for unknown paths, which lets the single-page app open /<section>/<slug> directly.
+	cp examples/dist/index.html examples/dist/404.html
+
 clean: ## Remove build output and caches
-	rm -rf packages/*/dist node_modules/.tmp node_modules/.vite .ruff_cache
+	rm -rf packages/*/dist examples/dist node_modules/.tmp node_modules/.vite .ruff_cache

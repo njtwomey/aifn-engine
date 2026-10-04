@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { CodeBlock, FigurePage } from 'aifn-render'
 import { SECTIONS } from '@examples/recipe'
 import { ENTRIES, type Entry } from './registry'
-import { onLink } from './paths'
+import { hrefOf, onLink } from './paths'
 import { Prose } from './Prose'
 
 /** One recipe: the question, a sentence or two, the live example and the example's own (trimmed) source. */
@@ -16,7 +16,7 @@ export function RecipePage({ entry }: { entry: Entry }) {
     <FigurePage scope={entry.path} key={entry.path}>
       <header className="space-y-1.5">
         <a
-          href={`/#${section.id}`}
+          href={`${hrefOf('')}#${section.id}`}
           onClick={onLink('')}
           className="text-xs font-medium tracking-wide text-muted-foreground uppercase hover:text-foreground"
         >
@@ -38,7 +38,7 @@ export function RecipePage({ entry }: { entry: Entry }) {
 function Neighbour({ entry, dir }: { entry: Entry; dir: 'prev' | 'next' }) {
   return (
     <a
-      href={`/${entry.path}`}
+      href={hrefOf(entry.path)}
       onClick={onLink(entry.path)}
       className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
     >

@@ -1,11 +1,23 @@
-/** URLs: `/` is the gallery, `/<section>/<slug>` a recipe, `#<figure-id>` a figure on it. */
+/**
+ * URLs: `/` is the gallery, `/<section>/<slug>` a recipe, `#<figure-id>` a figure on it, all under Vite's `base` (`/`
+ * in development; the repository path when the gallery is published to GitHub Pages).
+ */
+
+const BASE = import.meta.env.BASE_URL
+
+/** The URL of an in-app path (`''` is the gallery). */
+export const hrefOf = (path: string) => `${BASE}${path}`
 
 /** The current path without slashes at either end. */
-export const currentPath = () => decodeURIComponent(location.pathname.replace(/^\/+|\/+$/g, ''))
+export const currentPath = () => {
+  const { pathname } = location
+  const local = pathname.startsWith(BASE) ? pathname.slice(BASE.length) : pathname
+  return decodeURIComponent(local.replace(/^\/+|\/+$/g, ''))
+}
 
 /** Opens a path in place (the shell listens for `popstate`). */
 export function go(path: string) {
-  if (`/${path}` !== location.pathname || location.hash) history.pushState(null, '', `/${path}`)
+  if (hrefOf(path) !== location.pathname || location.hash) history.pushState(null, '', hrefOf(path))
   dispatchEvent(new PopStateEvent('popstate'))
 }
 
@@ -19,4 +31,4 @@ export function onLink(path: string) {
 }
 
 /** The theme-specific thumbnail of a recipe (`public/thumbs`). */
-export const thumbnailOf = (path: string, theme: 'light' | 'dark') => `/thumbs/${path}-${theme}.png`
+export const thumbnailOf = (path: string, theme: 'light' | 'dark') => `${BASE}thumbs/${path}-${theme}.png`

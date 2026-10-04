@@ -1,6 +1,6 @@
-# aifn-render examples
+# AIFN Engine examples
 
-A gallery of recipes for `aifn-render`, in the manner of the Matplotlib gallery: each page answers one question ("How
+The site published to GitHub Pages: a front page introducing the engine, then a gallery of recipes for `aifn-render`, in the manner of the Matplotlib gallery: each page answers one question ("How
 do I draw a line chart?") with the live chart, the few lines that make it, and a sentence or two. It is about
 rendering and UX only; data are inline arrays or a few lines of plain maths, and `aifn-compute` appears only where a render
 feature takes an `aifn-compute` object (a distribution for `Density`, a `Tree` for `TreeView`, an `Algorithm` for a trace).
