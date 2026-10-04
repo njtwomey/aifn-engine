@@ -60,13 +60,14 @@ export const loadContent = () => (loading ??= import('virtual:aifn-docs/content'
 
 export type TypeRef = { name: string; path: string; signature: string; summary: string }
 
-let types: Map<string, { module: string; ref: TypeRef }[]> | null = null
+let types: Map<string, { module: string; file: string; public: boolean; ref: TypeRef }[]> | null = null
 
 /**
- * The documented type a name refers to from a module (`<package>/<path>`): the module's own, else the one type of that
- * name anywhere; null when there is none or the name is ambiguous. Needs the content to have loaded.
+ * The type a name refers to from a source file (`file`, repository-relative) of a module (`<package>/<path>`): the
+ * file's own, else the module's (a public one first), else the one public type of that name anywhere; null when there
+ * is none or the name is ambiguous. Needs the content to have loaded.
  */
-export function typeRef(name: string, module: string): TypeRef | null {
+export function typeRef(name: string, module: string, file: string): TypeRef | null {
   if (!loaded) return null
   if (!types) {
     types = new Map()
@@ -76,11 +77,15 @@ export function typeRef(name: string, module: string): TypeRef | null {
         const file = e.file.replace(/^.*\//, '').replace(/\.ts$/, '')
         const summary = e.doc.split(/\n\s*\n/)[0].replace(/\s+/g, ' ')
         const ref = { name: e.name, path: `${key}/${file}`, signature: e.signature, summary }
-        types.set(e.name, [...(types.get(e.name) ?? []), { module: key, ref }])
+        const entry = { module: key, file: e.file, public: e.visibility === 'public', ref }
+        types.set(e.name, [...(types.get(e.name) ?? []), entry])
       }
   }
   const all = types.get(name) ?? []
-  return all.find((t) => t.module === module)?.ref ?? (all.length === 1 ? all[0].ref : null)
+  const mine = all.filter((t) => t.module === module)
+  const open = all.filter((t) => t.public)
+  const found = mine.find((t) => t.file === file) ?? mine.find((t) => t.public) ?? mine[0]
+  return found?.ref ?? (open.length === 1 ? open[0].ref : null)
 }
 
 /** A node's content, or null while the content chunk loads. */

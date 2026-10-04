@@ -1,7 +1,8 @@
 /**
- * The symmetric inverse square root S^{−1/2} = V Λ^{−1/2} Vᵀ of a symmetric positive-definite matrix, from its
- * eigendecomposition S = V Λ Vᵀ: the whitening map of a covariance (CCA's C_xx^{−1/2}) and FastICA's symmetric
- * decorrelation (WWᵀ)^{−1/2} W (Hyvärinen and Oja, 2000).
+ * The symmetric inverse square root $\Smat^{-1/2} = \Vmat \Lambdamat^{-1/2} \Vmat^\top$ of a symmetric
+ * positive-definite matrix, from its eigendecomposition $\Smat = \Vmat \Lambdamat \Vmat^\top$: the whitening map of a
+ * covariance (CCA's $\Cmat_{xx}^{-1/2}$) and FastICA's symmetric decorrelation $(\Wmat\Wmat^\top)^{-1/2} \Wmat$
+ * (Hyvärinen and Oja, 2000).
  */
 
 import type { MatrixLike } from 'aifn-compute/foundation/contracts'
@@ -13,15 +14,28 @@ import { eigh } from './eigh'
 export type InverseSqrtOptions = {
   /**
    * Eigenvalues below `floor` are raised to it rather than refused, as scikit-learn's FastICA clips at the smallest
-   * normal double. Omitted: an eigenvalue at or below 1e−12 times the largest throws `NumericalError` ('singular').
+   * normal double. Omitted: an eigenvalue at or below $10^{-12}$ times the largest throws `NumericalError`
+   * ('singular').
    */
   floor?: number
 }
 
 /**
- * S^{−1/2} [d, d] of a symmetric positive-definite S [d, d] (only its lower triangle is read), by `eigh`. Throws
- * `ShapeError` for a non-square matrix and `NumericalError` ('singular') for a singular or indefinite one unless a
- * `floor` is given.
+ * $\Smat^{-1/2}$ $[d, d]$ of a symmetric positive-definite $\Smat$ $[d, d]$ (only its lower triangle is read), by
+ * `eigh`. Throws `ShapeError` for a non-square matrix and `NumericalError` ('singular') for a singular or indefinite
+ * one unless a `floor` is given.
+ *
+ * @param S The matrix $\Smat$ ($d \times d$, symmetric positive definite), as a tensor or nested arrays. Only its lower
+ *   triangle is read, and it is not modified.
+ * @param options How to treat eigenvalues that are too small to invert (default: throw `NumericalError`). A `floor`
+ *   that is not positive throws `DomainError`.
+ * @returns $\Smat^{-1/2}$ as a new symmetric $d \times d$ float64 tensor.
+ *
+ * @example Whiten with the inverse square root
+ * const S = tensor([[4, 1], [1, 3]])
+ * const W = symmetricInverseSqrt(S)
+ * print('S^(-1/2) =', W)
+ * print('W S W =', matmul(matmul(W, S), W))
  */
 export function symmetricInverseSqrt(S: MatrixLike, options: InverseSqrtOptions = {}): Tensor {
   const op = 'symmetricInverseSqrt'

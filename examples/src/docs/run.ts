@@ -2,7 +2,8 @@
  * Running a documentation example: the code is compiled with `new Function`, with the exports of the module it
  * documents and the common surface of `aifn-compute` (tensors, `grad`, streams, runners) in scope, as if imported by
  * name. It reads like a notebook cell: every statement that is an expression on a line of its own shows its value,
- * and `print` adds lines of output.
+ * and `print` adds lines of output. The code runs in its own block, so its `const apply` or `let sum` shadows a name
+ * of the scope instead of colliding with it.
  *
  * Examples run on the page's own thread, so an edit that loops forever hangs the tab; they are meant to be small.
  */
@@ -133,7 +134,7 @@ export function runExample(code: string, scope: Scope): ExampleResult {
     ms: performance.now() - t0,
   })
   try {
-    const fn = new Function(...names, 'print', '__show', `"use strict";\n${source}`)
+    const fn = new Function(...names, 'print', '__show', `"use strict";{\n${source}\n}`)
     const value = fn(...names.map((n) => scope.names[n]), print, show)
     return done(true, value === undefined ? '' : format(value), '')
   } catch (e) {

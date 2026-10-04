@@ -24,8 +24,8 @@ export { EPS }
 /**
  * Raised when a linear-algebra operation cannot produce a meaningful result: a singular system passed to a solver or a
  * non-finite input. Factorisations report such conditions in their results instead (`singular`, `failed`), so a caller
- * that must not throw can factor first and check. A `NumericalError` (from `aifn-compute/foundation/tensor`), so a catch of either works;
- * shape mismatches raise `ShapeError` and refused derivatives `NotDifferentiableError`.
+ * that must not throw can factor first and check. A `NumericalError` (from `aifn-compute/foundation/tensor`), so a
+ * catch of either works; shape mismatches raise `ShapeError` and refused derivatives `NotDifferentiableError`.
  *
  * @example Catch it and read why
  * try {
@@ -51,10 +51,28 @@ export class LinAlgError extends NumericalError {
   }
 }
 
-/** A dense row-major working copy of a matrix: `a[i * n + j]` is element (i, j). */
-export type Dense = { m: number; n: number; a: Float64Array }
+/**
+ * A dense row-major working copy of an $m \times n$ matrix (`m` rows, `n` columns): `a[i * n + j]` is element
+ * $(i, j)$.
+ */
+export type Dense = {
+  /** The number of rows $m$. */
+  m: number
+  /** The number of columns $n$. */
+  n: number
+  /** The $m n$ entries, row by row. */
+  a: Float64Array
+}
 
-/** Copy a rank-2 value (untraced) into a dense float64 working array, checking that every element is finite. */
+/**
+ * Copy a rank-2 value (untraced) into a dense float64 working array, checking that every element is finite.
+ *
+ * @param x The matrix to copy ($m \times n$); a traced value is read through its concrete value. It is not modified.
+ *   Anything that is not of rank 2 throws `ShapeError`, and a non-finite entry `LinAlgError`.
+ * @param where The caller's name, used in error messages.
+ * @returns A fresh row-major copy of the $m \cdot n$ values with the dimensions `m` and `n`, which the caller may
+ *   overwrite.
+ */
 export function dense(x: Value, where: string): Dense {
   const t = unwrap(x)
   if (!isTensor(t) || t.shape.length !== 2) {
@@ -70,7 +88,15 @@ export function dense(x: Value, where: string): Dense {
   return { m: t.shape[0], n: t.shape[1], a }
 }
 
-/** As `dense`, and check that the matrix is square. */
+/**
+ * As `dense`, and check that the matrix is square.
+ *
+ * @param x The square matrix to copy ($n \times n$); a traced value is read through its concrete value. It is not
+ *   modified. A matrix that is not square throws `ShapeError`.
+ * @param where The caller's name, used in error messages.
+ * @returns A fresh row-major copy of the $n^2$ values with its dimensions (`m` and `n` are equal), which the caller
+ *   may overwrite.
+ */
 export function denseSquare(x: Value, where: string): Dense {
   const d = dense(x, where)
   if (d.m !== d.n) throw new ShapeError(where, `${where}: expected a square matrix, got ${d.m}×${d.n}`)
@@ -79,7 +105,14 @@ export function denseSquare(x: Value, where: string): Dense {
 
 /**
  * A matrix argument of the matrix-equation solvers as a float64 tensor: a matrix as given, a vector (a tensor of rank
- * 1 or an array of numbers) as a column, a number or a rank-0 tensor as 1×1.
+ * 1 or an array of numbers) as a column, a number or a rank-0 tensor as $1 \times 1$.
+ *
+ * @param a The argument: a matrix (a rank-2 tensor or an array of equally long rows), a vector (a rank-1 tensor or an
+ *   array of numbers, taken as one column) or a single number. It is copied, not modified; a tensor of rank above 2
+ *   or rows of unequal length throw `ShapeError`.
+ * @param where The caller's name, used in error messages.
+ * @returns A new float64 tensor of rank 2: $m \times n$ for a matrix, $n \times 1$ for a vector of $n$ values,
+ *   $1 \times 1$ for a number and $0 \times 0$ for an empty array.
  */
 export function asMatrix(a: MatrixLike | VectorLike | number, where: string): Tensor {
   if (typeof a === 'number') return fromData(Float64Array.of(a), [1, 1])
@@ -103,29 +136,62 @@ export function asMatrix(a: MatrixLike | VectorLike | number, where: string): Te
   return fromData(out, [rows.length, c])
 }
 
-/** Wrap a dense array as a matrix tensor. */
+/**
+ * Wrap a dense row-major array as an $m \times n$ matrix tensor.
+ *
+ * @param a The entries as a row-major array of $m \cdot n$ values (element $(i, j)$ at index `i * n + j`). It is
+ *   handed to the tensor as given, not copied here.
+ * @param m The number of rows.
+ * @param n The number of columns.
+ * @returns The $m \times n$ tensor holding those entries.
+ */
 export function matrix(a: Float64Array, m: number, n: number): Tensor {
   return fromData(a, [m, n])
 }
 
-/** Wrap a Float64Array as a vector tensor. */
+/**
+ * Wrap a Float64Array as a vector tensor.
+ *
+ * @param a The entries of the vector, in order. It is handed to the tensor as given, not copied here.
+ * @returns The rank-1 tensor of `a.length` values.
+ */
 export function vector(a: Float64Array): Tensor {
   return fromData(a, [a.length])
 }
 
-/** Largest absolute entry. */
+/**
+ * The largest absolute entry of a dense array (0 for an empty one).
+ *
+ * @param a The entries to scan, in any layout (a matrix's row-major data, for instance). Read only.
+ * @returns $\max_k \lvert a_k \rvert$, or 0 when `a` is empty.
+ */
 export function maxAbs(a: Float64Array): number {
   let m = 0
   for (let k = 0; k < a.length; k++) m = Math.max(m, Math.abs(a[k]))
   return m
 }
 
-/** A well-conditioned n×n test matrix (a random matrix plus 4I), for the generated primitive tests. */
+/**
+ * A well-conditioned $n \times n$ test matrix (a random matrix plus $4\Imat$), for the generated primitive tests.
+ *
+ * @param draw The test's source of random tensors: called once, for an $n \times n$ matrix with entries in its
+ *   default domain, $[-2, 2]$.
+ * @param n The number of rows (and columns) of the matrix.
+ * @returns The $n \times n$ matrix: the drawn one with 4 added to each diagonal entry.
+ */
 export function wellConditioned(draw: Draw, n: number): Tensor {
   return add(draw([n, n]), mul(4, eye(n)))
 }
 
-/** A symmetric positive-definite n×n test matrix (B Bᵀ + 3I), for the generated primitive tests. */
+/**
+ * A symmetric positive-definite $n \times n$ test matrix ($\Bmat\Bmat^\top + 3\Imat$), for the generated primitive
+ * tests.
+ *
+ * @param draw The test's source of random tensors: called once, for the $n \times n$ matrix $\Bmat$ with entries in
+ *   its default domain, $[-2, 2]$.
+ * @param n The number of rows (and columns) of the matrix.
+ * @returns The symmetric $n \times n$ matrix $\Bmat\Bmat^\top + 3\Imat$, whose eigenvalues are at least 3.
+ */
 export function positiveDefinite(draw: Draw, n: number): Tensor {
   const b = draw([n, n])
   return add(matmul(b, transpose(b)), mul(3, eye(n)))

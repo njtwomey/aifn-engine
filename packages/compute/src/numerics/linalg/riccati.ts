@@ -1,7 +1,8 @@
 /**
  * Algebraic Riccati equations. Continuous (CARE) by Kleinman's Newton iteration or the matrix sign function of the
  * Hamiltonian; discrete (DARE) by the Riccati recursion (value iteration) or the structure-preserving doubling
- * algorithm. Every solver is a traceable algorithm whose state carries the current P, the gain K, the residual of the
+ * algorithm. Every solver is a traceable algorithm whose state carries the current $\Pmat$, the gain $\Kmat$, the
+ * residual of the
  * equation and the runner's `Status` flags. Sources are cited at each solver; scipy's `solve_continuous_are` and
  * `solve_discrete_are` are the references.
  */
@@ -36,7 +37,10 @@ import { luFactor, luSolve } from './lu'
 import { lyapunov } from './lyapunov'
 import { lstsq } from './svd'
 
-/** The data of a Riccati equation: dynamics (A, B) and quadratic costs xᵀQx + uᵀRu (Q ⪰ 0, R ≻ 0). */
+/**
+ * The data of a Riccati equation: dynamics ($\Amat$, $\Bmat$) and quadratic costs
+ * $\xvec^\top\Qmat\xvec + \uvec^\top\Rmat\uvec$ ($\Qmat \succeq 0$, $\Rmat \succ 0$).
+ */
 export type RiccatiProblem = { A: MatrixLike; B: MatrixLike; Q: MatrixLike; R: MatrixLike }
 
 /** Why a Riccati solver cannot continue: a singular system, a non-finite iterate, or no stabilising start. */
@@ -44,13 +48,16 @@ export type RiccatiFailure = 'singular' | 'not finite' | 'not stabilisable'
 
 /** Fields every Riccati solver state carries (with the runner's `Status`). */
 export type RiccatiState = Status & {
-  /** The current solution estimate P (n×n, symmetric). */
+  /** The current solution estimate $\Pmat$ ($n \times n$, symmetric). */
   P: Matrix
-  /** The gain it gives: K = R⁻¹BᵀP (continuous) or (R + BᵀPB)⁻¹BᵀPA (discrete), m×n. */
+  /**
+   * The gain it gives: $\Kmat = \Rmat^{-1}\Bmat^\top\Pmat$ (continuous) or
+   * $(\Rmat + \Bmat^\top\Pmat\Bmat)^{-1}\Bmat^\top\Pmat\Amat$ (discrete), $m \times n$.
+   */
   K: Matrix
-  /** max |residual| of the Riccati equation at P, relative to 1 + max |P|. */
+  /** $\max |\text{residual}|$ of the Riccati equation at $\Pmat$, relative to $1 + \max |\Pmat|$. */
   residual: number
-  /** max |P_t − P_{t−1}| (Infinity at step 0). */
+  /** $\max |\Pmat_t - \Pmat_{t-1}|$ (Infinity at step 0). */
   change: number
   converged: boolean
   /** True when an iterate is not finite. */
@@ -63,20 +70,78 @@ export type RiccatiState = Status & {
 
 type Data = { A: Tensor; B: Tensor; Q: Tensor; R: Tensor; n: Size; m: Size; Rinv: Tensor; G: Tensor }
 
+/**
+ * The transpose.
+ *
+ * @param x The matrix to transpose ($r \times c$); not modified.
+ * @returns $\Xmat^\top$, a $c \times r$ matrix.
+ */
 const T = (x: Tensor): Tensor => transpose(x)
+/**
+ * The product of several matrices, left to right.
+ *
+ * @param xs The factors in order, at least one, with the columns of each matching the rows of the next.
+ * @returns The product of all the factors (the factor itself when there is only one).
+ */
 const mm = (...xs: Tensor[]): Tensor => xs.reduce((a, b) => matmul(a, b))
+/**
+ * The largest absolute entry (0 for an empty tensor).
+ *
+ * @param x The tensor whose entries are examined, of any shape.
+ * @returns $\max |x_i|$ over every entry, or 0 when `x` has no entries.
+ */
 const maxAbs = (x: Tensor): number => (x.shape.reduce((a, b) => a * b, 1) === 0 ? 0 : (max(abs(x)) as number))
+/**
+ * Is every entry finite?
+ *
+ * @param x The tensor whose entries are examined, of any shape.
+ * @returns True when no entry is NaN or infinite (also for an empty tensor).
+ */
 const allFinite = (x: Tensor): boolean => toFlat(x).every(Number.isFinite)
+/**
+ * The symmetric part $(\Xmat + \Xmat^\top)/2$.
+ *
+ * @param x The square matrix $\Xmat$; not modified.
+ * @returns A new symmetric matrix of the same size.
+ */
 const symmetrise = (x: Tensor): Tensor => mul(0.5, add(x, T(x)))
+/**
+ * An $r \times c$ matrix of NaN, for the state of a failed step.
+ *
+ * @param r The number of rows.
+ * @param c The number of columns.
+ * @returns A new $r \times c$ matrix with every entry NaN.
+ */
 const nans = (r: Size, c: Size): Tensor => full([r, c], NaN)
 
-/** X with A X = B, or null when A is singular to working precision or either side is not finite. */
+/**
+ * $\Xmat$ with $\Amat\Xmat = \Bmat$, or null when $\Amat$ is singular to working precision or either side is not
+ * finite.
+ *
+ * @param a The square coefficient matrix $\Amat$ ($n \times n$); factored by LU, not modified.
+ * @param b The right-hand side $\Bmat$, with $n$ rows; its columns are solved together.
+ * @returns The solution $\Xmat$, with the shape of `b`, or null when no reliable solution exists.
+ */
 function trySolve(a: Tensor, b: Tensor): Tensor | null {
   if (!allFinite(a) || !allFinite(b)) return null
   const f = luFactor(a)
   return f.singular ? null : luSolve(f, b)
 }
 
+/**
+ * The problem's matrices as tensors, with their shapes checked: $\Amat$ and $\Qmat$ are $n \times n$, $\Bmat$ is
+ * $n \times m$ and $\Rmat$ is $m \times m$.
+ *
+ * @param options The data of the Riccati equation, as the caller gave it.
+ * @param options.A The dynamics matrix $\Amat$ ($n \times n$).
+ * @param options.B The input matrix $\Bmat$ ($n \times m$).
+ * @param options.Q The state cost $\Qmat$ ($n \times n$, positive semi-definite; only its shape is checked).
+ * @param options.R The control cost $\Rmat$: $m \times m$, or any matrix of $m^2$ entries, which is reshaped to
+ *   $m \times m$. It must be invertible: a singular one throws `DomainError`.
+ * @param where The caller's name, used in error messages.
+ * @returns The four matrices as tensors with the sizes $n$ and $m$, `Rinv` $= \Rmat^{-1}$ and
+ *   `G` $= \Bmat\Rmat^{-1}\Bmat^\top$.
+ */
 function problem({ A, B, Q, R }: RiccatiProblem, where: string): Data {
   const a = asMatrix(A, `${where} A`)
   const b = asMatrix(B, `${where} B`)
@@ -93,12 +158,30 @@ function problem({ A, B, Q, R }: RiccatiProblem, where: string): Data {
   return { A: a, B: b, Q: q, R: r, n, m, Rinv, G: mm(b, Rinv, T(b)) }
 }
 
-/** The CARE residual AᵀP + PA − PBR⁻¹BᵀP + Q. */
+/**
+ * The CARE residual $\Amat^\top\Pmat + \Pmat\Amat - \Pmat\Bmat\Rmat^{-1}\Bmat^\top\Pmat + \Qmat$.
+ *
+ * @param d The checked problem data from `problem`: $\Amat$, $\Bmat$, $\Qmat$, $\Rmat$, their sizes $n$ and $m$,
+ *   $\Rmat^{-1}$ and $\Gmat = \Bmat\Rmat^{-1}\Bmat^\top$. Read, not modified.
+ * @param P The candidate solution $\Pmat$ ($n \times n$) at which the residual is evaluated.
+ * @returns The residual as an $n \times n$ matrix: zero when $\Pmat$ solves the CARE.
+ */
 function careResidual(d: Data, P: Tensor): Tensor {
   return add(sub(add(mm(T(d.A), P), mm(P, d.A)), mm(P, d.G, P)), d.Q)
 }
 
-/** The DARE residual AᵀPA − P − AᵀPB(R + BᵀPB)⁻¹BᵀPA + Q, and the gain, or null when R + BᵀPB is singular. */
+/**
+ * The DARE residual
+ * $\Amat^\top\Pmat\Amat - \Pmat - \Amat^\top\Pmat\Bmat(\Rmat + \Bmat^\top\Pmat\Bmat)^{-1}\Bmat^\top\Pmat\Amat + \Qmat$,
+ * and the gain, or null when $\Rmat + \Bmat^\top\Pmat\Bmat$ is singular.
+ *
+ * @param d The checked problem data from `problem`: $\Amat$, $\Bmat$, $\Qmat$, $\Rmat$, their sizes $n$ and $m$,
+ *   $\Rmat^{-1}$ and $\Gmat = \Bmat\Rmat^{-1}\Bmat^\top$. Read, not modified.
+ * @param P The candidate solution $\Pmat$ ($n \times n$) at which the residual and gain are evaluated.
+ * @returns `residual` ($n \times n$, zero when $\Pmat$ solves the DARE) and the gain
+ *   `K` $= (\Rmat + \Bmat^\top\Pmat\Bmat)^{-1}\Bmat^\top\Pmat\Amat$ ($m \times n$), or null when that system cannot be
+ *   solved.
+ */
 function dareParts(d: Data, P: Tensor): { residual: Tensor; K: Tensor } | null {
   const BtP = mm(T(d.B), P)
   const K = trySolve(add(d.R, mm(BtP, d.B)), mm(BtP, d.A))
@@ -108,9 +191,24 @@ function dareParts(d: Data, P: Tensor): { residual: Tensor; K: Tensor } | null {
   return { residual, K }
 }
 
+/**
+ * The residual's largest entry relative to the size of $\Pmat$.
+ *
+ * @param res The residual matrix of the Riccati equation at $\Pmat$.
+ * @param P The solution estimate $\Pmat$ that sets the scale.
+ * @returns $\max |\text{res}| / (1 + \max |\Pmat|)$.
+ */
 const relative = (res: Tensor, P: Tensor) => maxAbs(res) / (1 + maxAbs(P))
 
-/** A state with its flags set from `failure` (non-finite iterates diverge; other failures terminate). */
+/**
+ * A state with its flags set from `failure` (non-finite iterates diverge; other failures terminate).
+ *
+ * @param base The state without its flags: the step count `t`, `P`, `K`, `residual`, `change` and `failure`. Copied
+ *   into the result, not modified.
+ * @param converged Whether the convergence test passed at this state; it only counts when `failure` is null.
+ * @returns The full state, with `converged`, `diverged` (the failure is 'not finite') and `terminated` (any other
+ *   failure) filled in.
+ */
 function flagged(base: Omit<RiccatiState, 'diverged' | 'terminated' | 'converged'>, converged: boolean): RiccatiState {
   return {
     ...base,
@@ -120,6 +218,23 @@ function flagged(base: Omit<RiccatiState, 'diverged' | 'terminated' | 'converged
   }
 }
 
+/**
+ * The state of a continuous-time iteration at $\Pmat$: the gain, the relative residual of the CARE and the change from
+ * the previous iterate, with its flags.
+ *
+ * @param d The checked problem data from `problem`: $\Amat$, $\Bmat$, $\Qmat$, $\Rmat$, their sizes $n$ and $m$,
+ *   $\Rmat^{-1}$ and $\Gmat = \Bmat\Rmat^{-1}\Bmat^\top$. Read, not modified.
+ * @param t The step count recorded in the state (0 for the initial state).
+ * @param P The iterate $\Pmat$ ($n \times n$); it is symmetrised before use, and the symmetric part is what the state
+ *   holds.
+ * @param prev The previous iterate, from which `change` is measured, or null when there is none (`change` is then
+ *   Infinity).
+ * @param tolerance The convergence threshold: the state is converged when the relative residual is at most this, or
+ *   the change is at most this times $1 + \max |\Pmat|$.
+ * @param failure A failure the caller already found, recorded as given; null lets the function report 'not finite'
+ *   when $\Pmat$ has a non-finite entry.
+ * @returns The state at $\Pmat$, with the gain $\Kmat = \Rmat^{-1}\Bmat^\top\Pmat$.
+ */
 function careState(
   d: Data,
   t: Size,
@@ -145,12 +260,25 @@ function careState(
   )
 }
 
+/**
+ * The largest real part of the eigenvalues of $\Amat$ (negative when $\Amat$ is stable).
+ *
+ * @param A The real square matrix $\Amat$ whose eigenvalues are computed (by `eig`, without eigenvectors).
+ * @returns $\max_i \operatorname{Re} \lambda_i(\Amat)$.
+ */
 const maxReal = (A: Tensor) => Math.max(...toFlat(realPart(eig(A, { vectors: false }).values)))
 
 /**
- * An initial stabilising gain K₀ for Kleinman's iteration by Bass's method (Armstrong, 1975, "An extension of Bass'
- * algorithm for stabilizing linear continuous constant systems", IEEE TAC 20(1)): with β > max Re λ(A), solve
- * (A + βI)Z + Z(A + βI)ᵀ = 2BBᵀ; then K₀ = BᵀZ⁻¹ makes A − BK₀ stable when (A, B) is controllable.
+ * An initial stabilising gain $\Kmat_0$ for Kleinman's iteration by Bass's method (Armstrong, 1975, "An extension of
+ * Bass' algorithm for stabilizing linear continuous constant systems", IEEE TAC 20(1)): with
+ * $\beta > \max \operatorname{Re} \lambda(\Amat)$, solve
+ * $(\Amat + \beta\Imat)\Zmat + \Zmat(\Amat + \beta\Imat)^\top = 2\Bmat\Bmat^\top$; then
+ * $\Kmat_0 = \Bmat^\top\Zmat^{-1}$ makes $\Amat - \Bmat\Kmat_0$ stable when $(\Amat, \Bmat)$ is controllable.
+ *
+ * @param d The checked problem data from `problem`: $\Amat$, $\Bmat$, $\Qmat$, $\Rmat$, their sizes $n$ and $m$,
+ *   $\Rmat^{-1}$ and $\Gmat = \Bmat\Rmat^{-1}\Bmat^\top$. Read, not modified.
+ * @returns The gain $\Kmat_0$ ($m \times n$), or null when the Lyapunov equation or $\Zmat$ is singular (no
+ *   stabilising start was found).
  */
 function bassGain(d: Data): Tensor | null {
   const beta = Math.max(0, maxReal(d.A)) + 1
@@ -162,16 +290,33 @@ function bassGain(d: Data): Tensor | null {
 
 /** Options for the Riccati solvers. */
 export type RiccatiOptions = {
-  /** Stop when the relative residual or the change in P is below this. Default 1e-12. */
+  /** Stop when the relative residual or the change in $\Pmat$ is below this. Default $10^{-12}$. */
   tolerance?: number
 }
 
 /**
- * Kleinman's Newton iteration for the CARE AᵀP + PA − PBR⁻¹BᵀP + Q = 0 (Kleinman, 1968, "On an iterative technique
- * for Riccati equation computations", IEEE TAC 13(1)): given a stabilising gain K_k, solve the Lyapunov equation
- * (A − BK_k)ᵀP + P(A − BK_k) + Q + K_kᵀRK_k = 0 (the cost of the policy u = −K_k x), then set K_{k+1} = R⁻¹BᵀP.
- * Each P is a policy evaluation, P decreases monotonically, and convergence is quadratic near the solution. `init`
- * takes `{ K0 }` (default: Bass's stabilising gain; K₀ = 0 when A is already stable).
+ * Kleinman's Newton iteration for the CARE
+ * $\Amat^\top\Pmat + \Pmat\Amat - \Pmat\Bmat\Rmat^{-1}\Bmat^\top\Pmat + \Qmat = 0$ (Kleinman, 1968, "On an iterative
+ * technique for Riccati equation computations", IEEE TAC 13(1)): given a stabilising gain $\Kmat_k$, solve the Lyapunov
+ * equation
+ * $(\Amat - \Bmat\Kmat_k)^\top\Pmat + \Pmat(\Amat - \Bmat\Kmat_k) + \Qmat + \Kmat_k^\top\Rmat\Kmat_k = 0$ (the cost of
+ * the policy $\uvec = -\Kmat_k\xvec$), then set $\Kmat_{k+1} = \Rmat^{-1}\Bmat^\top\Pmat$. Each $\Pmat$ is a policy
+ * evaluation, $\Pmat$ decreases monotonically, and convergence is quadratic near the solution. `init` takes `{ K0 }`
+ * (default: Bass's stabilising gain; $\Kmat_0 = 0$ when $\Amat$ is already stable).
+ *
+ * @param prob The equation's data: the dynamics $\Amat$ ($n \times n$) and $\Bmat$ ($n \times m$) and the cost
+ *   weights $\Qmat$ ($n \times n$, positive semi-definite) and $\Rmat$ ($m \times m$, positive definite). Wrong
+ *   shapes throw `ShapeError`; a singular $\Rmat$ throws `DomainError`.
+ * @param options The stopping tolerance (default $10^{-12}$) on the relative residual and on the change in $\Pmat$.
+ * @returns The algorithm: `init` takes an optional starting gain `K0` ($m \times n$, which must stabilise
+ *   $\Amat - \Bmat\Kmat_0$, else the state fails with 'not stabilisable'), and each `step` is one Newton iteration.
+ *
+ * @example LQR for a double integrator, by Kleinman's iteration
+ * const problem = { A: [[0, 1], [0, 0]], B: [[0], [1]], Q: [[1, 0], [0, 1]], R: [[1]] }
+ * const state = run(kleinmanIteration(problem), undefined, 50)
+ * print('P =', state.P)
+ * print('K =', state.K)
+ * print('converged =', state.converged)
  */
 export function kleinmanIteration(
   prob: RiccatiProblem,
@@ -208,19 +353,36 @@ export function kleinmanIteration(
 
 /** The state of `riccatiMatrixSign`: a Riccati state plus the sign-function iterate. */
 export type SignState = RiccatiState & {
-  /** The iterate Z_k → sign(H), 2n×2n. */
+  /** The iterate $\Zmat_k \to \operatorname{sign}(\Hmat)$, $2n \times 2n$. */
   Z: Matrix
-  /** The determinant scaling c_k = |det Z_k|^{1/2n}. */
+  /** The determinant scaling $c_k = |\det \Zmat_k|^{1/2n}$. */
   scaling: number
 }
 
 /**
- * The CARE by the matrix sign function of the Hamiltonian H = [[A, −BR⁻¹Bᵀ], [−Q, −Aᵀ]] (Roberts, 1971, "Linear
- * model reduction and solution of the algebraic Riccati equation by use of the sign function"; Byers, 1987, "Solving
- * the algebraic Riccati equation with the matrix sign function"). Newton's iteration Z ← (Z/c + cZ⁻¹)/2 with
- * determinant scaling c = |det Z|^{1/2n} converges quadratically to W = sign(H), which is −1 on the stable invariant
- * subspace span[I; P]; hence [W₁₂; W₂₂ + I] P = −[W₁₁ + I; W₂₁], solved by least squares. No eigenvectors are needed.
- * `init` takes no start.
+ * The CARE by the matrix sign function of the Hamiltonian
+ * $\Hmat = \begin{bmatrix} \Amat & -\Bmat\Rmat^{-1}\Bmat^\top \\ -\Qmat & -\Amat^\top \end{bmatrix}$ (Roberts, 1971,
+ * "Linear model reduction and solution of the algebraic Riccati equation by use of the sign function"; Byers, 1987,
+ * "Solving the algebraic Riccati equation with the matrix sign function"). Newton's iteration
+ * $\Zmat \leftarrow (\Zmat/c + c\Zmat^{-1})/2$ with determinant scaling $c = |\det \Zmat|^{1/2n}$ converges
+ * quadratically to $\Wmat = \operatorname{sign}(\Hmat)$, which is $-1$ on the stable invariant subspace
+ * $\operatorname{span} \begin{bmatrix} \Imat \\ \Pmat \end{bmatrix}$; hence
+ * $\begin{bmatrix} \Wmat_{12} \\ \Wmat_{22} + \Imat \end{bmatrix} \Pmat =
+ * -\begin{bmatrix} \Wmat_{11} + \Imat \\ \Wmat_{21} \end{bmatrix}$, solved by least squares. No eigenvectors are
+ * needed. `init` takes no start.
+ *
+ * @param prob The equation's data: the dynamics $\Amat$ ($n \times n$) and $\Bmat$ ($n \times m$) and the cost
+ *   weights $\Qmat$ ($n \times n$, positive semi-definite) and $\Rmat$ ($m \times m$, positive definite). Wrong
+ *   shapes throw `ShapeError`; a singular $\Rmat$ throws `DomainError`.
+ * @param options The stopping tolerance (default $10^{-12}$) on the relative residual and on the change in $\Pmat$.
+ * @returns The algorithm: `init` ignores its argument and starts from $\Zmat_0 = \Hmat$, and each `step` is one scaled
+ *   Newton iteration, whose state also carries `Z` and `scaling`.
+ *
+ * @example The same CARE by the matrix sign function
+ * const problem = { A: [[0, 1], [0, 0]], B: [[0], [1]], Q: [[1, 0], [0, 1]], R: [[1]] }
+ * const state = run(riccatiMatrixSign(problem), undefined, 50)
+ * print('P =', state.P)
+ * print('converged =', state.converged)
  */
 export function riccatiMatrixSign(prob: RiccatiProblem, options: RiccatiOptions = {}): Algorithm<unknown, SignState> {
   const d = problem(prob, 'riccatiMatrixSign')
@@ -256,7 +418,13 @@ export function riccatiMatrixSign(prob: RiccatiProblem, options: RiccatiOptions 
   }
 }
 
-/** |det Z|^{1/N} for an N×N matrix, from the eigenvalue moduli (a product of moduli, taken in log space). */
+/**
+ * $|\det \Zmat|^{1/N}$ for an $N \times N$ matrix, from the eigenvalue moduli (a product of moduli, taken in log
+ * space).
+ *
+ * @param Z The real square matrix $\Zmat$ ($N \times N$) whose eigenvalues are computed.
+ * @returns The scaling $|\det \Zmat|^{1/N}$, or 1 when that is zero or not finite (so the iteration is left unscaled).
+ */
 function detScaling(Z: Tensor): number {
   const moduli = toFlat(complexAbs(eig(Z, { vectors: false }).values))
   let logAbs = 0
@@ -265,6 +433,23 @@ function detScaling(Z: Tensor): number {
   return Number.isFinite(c) && c > 0 ? c : 1
 }
 
+/**
+ * The state of a discrete-time iteration at $\Pmat$: the gain, the relative residual of the DARE and the change from
+ * the previous iterate, with its flags.
+ *
+ * @param d The checked problem data from `problem`: $\Amat$, $\Bmat$, $\Qmat$, $\Rmat$, their sizes $n$ and $m$,
+ *   $\Rmat^{-1}$ and $\Gmat = \Bmat\Rmat^{-1}\Bmat^\top$. Read, not modified.
+ * @param t The step count recorded in the state (0 for the initial state).
+ * @param P The iterate $\Pmat$ ($n \times n$); it is symmetrised before use, and the symmetric part is what the state
+ *   holds.
+ * @param prev The previous iterate, from which `change` is measured, or null when there is none (`change` is then
+ *   Infinity).
+ * @param tolerance The convergence threshold: the state is converged when the relative residual is at most this, or
+ *   the change is at most this times $1 + \max |\Pmat|$.
+ * @returns The state at $\Pmat$, with the gain $\Kmat = (\Rmat + \Bmat^\top\Pmat\Bmat)^{-1}\Bmat^\top\Pmat\Amat$. Its
+ *   failure is 'not finite' for a non-finite $\Pmat$ and 'singular' when the gain cannot be solved for ($\Kmat$ is then
+ *   NaN).
+ */
 function dareState(d: Data, t: Size, P: Tensor, prev: Tensor | null, tolerance: number): RiccatiState {
   const Ps = symmetrise(P)
   const finite = allFinite(Ps)
@@ -279,10 +464,26 @@ function dareState(d: Data, t: Size, P: Tensor, prev: Tensor | null, tolerance: 
 }
 
 /**
- * The DARE P = Q + AᵀPA − AᵀPB(R + BᵀPB)⁻¹BᵀPA by the Riccati recursion (value iteration, Bellman's dynamic
- * programming backwards in time; Bertsekas, 2017, "Dynamic Programming and Optimal Control", 4th ed., §3.1): P_t is
- * the optimal cost-to-go of a horizon-t problem, starting from P₀ (default 0). Converges linearly, at a rate set by
- * the slowest closed-loop pole, when (A, B) is stabilisable and (A, Q^{1/2}) detectable. `init` takes `{ P0 }`.
+ * The DARE
+ * $\Pmat = \Qmat + \Amat^\top\Pmat\Amat - \Amat^\top\Pmat\Bmat(\Rmat + \Bmat^\top\Pmat\Bmat)^{-1}\Bmat^\top\Pmat\Amat$
+ * by the Riccati recursion (value iteration, Bellman's dynamic programming backwards in time; Bertsekas, 2017, "Dynamic
+ * Programming and Optimal Control", 4th ed., §3.1): $\Pmat_t$ is the optimal cost-to-go of a horizon-$t$ problem,
+ * starting from $\Pmat_0$ (default 0). Converges linearly, at a rate set by the slowest closed-loop pole, when
+ * $(\Amat, \Bmat)$ is stabilisable and $(\Amat, \Qmat^{1/2})$ detectable. `init` takes `{ P0 }`.
+ *
+ * @param prob The equation's data: the dynamics $\Amat$ ($n \times n$) and $\Bmat$ ($n \times m$) and the cost
+ *   weights $\Qmat$ ($n \times n$, positive semi-definite) and $\Rmat$ ($m \times m$, positive definite). Wrong
+ *   shapes throw `ShapeError`; a singular $\Rmat$ throws `DomainError`.
+ * @param options The stopping tolerance (default $10^{-12}$) on the relative residual and on the change in $\Pmat$.
+ * @returns The algorithm: `init` takes an optional starting cost `P0` ($n \times n$, default zero), and each `step`
+ *   extends the horizon by one.
+ *
+ * @example The discrete-time Riccati recursion
+ * const problem = { A: [[1, 1], [0, 1]], B: [[0], [1]], Q: [[1, 0], [0, 1]], R: [[1]] }
+ * const state = run(riccatiRecursion(problem), undefined, 500)
+ * print('P =', state.P)
+ * print('K =', state.K)
+ * print('converged =', state.converged)
  */
 export function riccatiRecursion(
   prob: RiccatiProblem,
@@ -302,15 +503,37 @@ export function riccatiRecursion(
   }
 }
 
-/** The state of `riccatiDoubling`: a Riccati state plus the doubling iterates. */
-export type DoublingState = RiccatiState & { Ak: Matrix; Gk: Matrix }
+/**
+ * The state of `riccatiDoubling`: a Riccati state plus the doubling iterates $\Amat_k$ (`Ak`) and $\Gmat_k$ (`Gk`),
+ * both $n \times n$.
+ */
+export type DoublingState = RiccatiState & {
+  /** The doubling iterate $\Amat_k$ ($n \times n$). */
+  Ak: Matrix
+  /** The doubling iterate $\Gmat_k$ ($n \times n$). */
+  Gk: Matrix
+}
 
 /**
  * The DARE by the structure-preserving doubling algorithm (Chu, Fan, Lin & Wang, 2004, "Structure-preserving
- * algorithms for periodic discrete-time algebraic Riccati equations", Int. J. Control 77(8)): with G = BR⁻¹Bᵀ and
- * W = (I + G_kH_k)⁻¹, A_{k+1} = A_k W A_k, G_{k+1} = G_k + A_k W G_k A_kᵀ, H_{k+1} = H_k + A_kᵀ H_k W A_k. H_k → P and
- * each step doubles the horizon (H_k is the cost-to-go of horizon 2^k), so convergence is quadratic. `init` takes no
- * start.
+ * algorithms for periodic discrete-time algebraic Riccati equations", Int. J. Control 77(8)): with
+ * $\Gmat = \Bmat\Rmat^{-1}\Bmat^\top$ and $\Wmat = (\Imat + \Gmat_k\Hmat_k)^{-1}$,
+ * $\Amat_{k+1} = \Amat_k\Wmat\Amat_k$, $\Gmat_{k+1} = \Gmat_k + \Amat_k\Wmat\Gmat_k\Amat_k^\top$,
+ * $\Hmat_{k+1} = \Hmat_k + \Amat_k^\top\Hmat_k\Wmat\Amat_k$. $\Hmat_k \to \Pmat$ and each step doubles the horizon
+ * ($\Hmat_k$ is the cost-to-go of horizon $2^k$), so convergence is quadratic. `init` takes no start.
+ *
+ * @param prob The equation's data: the dynamics $\Amat$ ($n \times n$) and $\Bmat$ ($n \times m$) and the cost
+ *   weights $\Qmat$ ($n \times n$, positive semi-definite) and $\Rmat$ ($m \times m$, positive definite). Wrong
+ *   shapes throw `ShapeError`; a singular $\Rmat$ throws `DomainError`.
+ * @param options The stopping tolerance (default $10^{-12}$) on the relative residual and on the change in $\Pmat$.
+ * @returns The algorithm: `init` ignores its argument and starts from $\Amat_0 = \Amat$, $\Gmat_0 = \Gmat$,
+ *   $\Hmat_0 = \Qmat$, and each `step` is one doubling, whose state holds $\Hmat_k$ as `P` with `Ak` and `Gk`.
+ *
+ * @example Doubling converges in far fewer steps
+ * const problem = { A: [[1, 1], [0, 1]], B: [[0], [1]], Q: [[1, 0], [0, 1]], R: [[1]] }
+ * const state = run(riccatiDoubling(problem), undefined, 20)
+ * print('P =', state.P)
+ * print('converged =', state.converged)
  */
 export function riccatiDoubling(prob: RiccatiProblem, options: RiccatiOptions = {}): Algorithm<unknown, DoublingState> {
   const d = problem(prob, 'riccatiDoubling')

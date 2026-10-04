@@ -10,6 +10,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { createElement, type ComponentType, type ReactNode } from 'react'
 import { renderToString } from 'react-dom/server'
+import katex from 'katex'
 import { createServer } from 'vite'
 
 const root = import.meta.dirname
@@ -69,8 +70,14 @@ let failures = 0
 let total = 0
 let examples = 0
 let exampleFailures = 0
+let mathErrors = 0
 let functions = 0
 let covered = 0
+let declared = 0
+let described = 0
+const missing: string[] = []
+// `--missing <path prefix>` lists what a module or file still needs, e.g. `--missing compute/numerics/linalg/cholesky`.
+const missingFor = process.argv.includes('--missing') ? process.argv[process.argv.indexOf('--missing') + 1] : null
 try {
   const { Providers } = await server.ssrLoadModule('aifn-render')
   const { Gallery } = await server.ssrLoadModule('/src/shell/Gallery.tsx')
@@ -112,13 +119,63 @@ try {
   const { default: content } = await server.ssrLoadModule('virtual:aifn-docs/content')
   const { scopeOf, runExample } = await server.ssrLoadModule('/src/docs/run.ts')
   type Example = { title: string; code: string }
-  type Content = { examples: Example[]; exports: { name: string; kind: string; examples: Example[] }[] }
+  type Content = {
+    doc: string
+    fileDocs: Record<string, string>
+    examples: Example[]
+    exports: {
+      name: string
+      kind: string
+      doc: string
+      file: string
+      visibility: string
+      returns: string
+      params: { name: string; doc: string }[]
+      examples: Example[]
+    }[]
+  }
+  // Every `$…$` of a doc comment sets in KaTeX with the shared notation macros.
+  const { defaultMathMacros } = await server.ssrLoadModule('aifn-render')
+  const checkMaths = (where: string, text: string) => {
+    for (const m of text.replace(/`[^`]*`/g, '').matchAll(/\$([^$\n]+)\$/g)) {
+      try {
+        katex.renderToString(m[1], { throwOnError: true, strict: 'ignore', macros: { ...defaultMathMacros } })
+      } catch (e) {
+        mathErrors++
+        console.error(`FAIL  ${where}: $${m[1]}$ does not set: ${(e as Error).message.split('\n')[0]}`)
+      }
+    }
+  }
   for (const node of nodes) {
     const c = (content as Record<string, Content>)[`${node.pkg}/${node.path}`]
-    // Coverage: the functions (and classes) with at least one runnable example of their own.
-    const callable = c.exports.filter((x) => x.kind === 'function' || x.kind === 'class')
-    functions += callable.length
-    covered += callable.filter((x) => x.examples.some((e) => e.title !== '')).length
+    checkMaths(`${node.pkg}/${node.path}`, c.doc)
+    for (const [file, doc] of Object.entries(c.fileDocs)) {
+      const at = `${node.pkg}/${node.path}/${file}`
+      checkMaths(at, doc)
+      if (!doc && missingFor !== null && at.startsWith(missingFor))
+        missing.push(`${at}: the file has no opening comment`)
+    }
+    for (const x of c.exports) {
+      const where = `${node.pkg}/${node.path} · ${x.name}`
+      checkMaths(where, [x.doc, x.returns, ...x.params.map((p) => p.doc)].join('\n').replace(/\s+/g, ' '))
+    }
+    // The pattern: every function has a descriptive comment, and a key (public) one has a runnable example too.
+    for (const x of c.exports) {
+      if (x.kind !== 'function' && x.kind !== 'class') continue
+      const isKey = x.visibility === 'public'
+      const hasExample = x.examples.some((e) => e.title !== '')
+      declared++
+      if (x.doc) described++
+      if (isKey) functions++
+      if (isKey && hasExample) covered++
+      const at = `${node.pkg}/${node.path}/${x.file.replace(/^.*\//, '').replace(/\.ts$/, '')}`
+      if (missingFor !== null && at.startsWith(missingFor)) {
+        if (!x.doc) missing.push(`${at} · ${x.name}: no comment`)
+        const bare = x.params.filter((p) => !p.doc).map((p) => p.name)
+        if (bare.length) missing.push(`${at} · ${x.name}: parameters not described: ${bare.join(', ')}`)
+        else if (isKey && !hasExample) missing.push(`${at} · ${x.name}: key function without an example`)
+      }
+    }
     // Titled examples are runnable cells; untitled ones are illustrative fragments, shown as plain code.
     const all = [
       ...c.examples.map((e) => ({ at: e.title || 'example', e })),
@@ -146,7 +203,11 @@ try {
   await server.close()
 }
 console.log(
-  `${total} pages · ${failures} failed · ${examples} examples · ${exampleFailures} failed · ${importErrors} import boundary violations`,
+  `${total} pages · ${failures} failed · ${examples} examples · ${exampleFailures} failed · ${mathErrors} formulas failed · ${importErrors} import boundary violations`,
 )
-console.log(`example coverage (report only): ${covered} of ${functions} functions have a runnable example`)
-if (failures || exampleFailures || importErrors) process.exit(1)
+console.log(
+  `documentation (report only): ${covered} of ${functions} key functions have a runnable example; ` +
+    `${described} of ${declared} functions have a comment`,
+)
+if (missingFor !== null) console.log(missing.length ? missing.join('\n') : `${missingFor}: nothing missing`)
+if (failures || exampleFailures || mathErrors || importErrors) process.exit(1)

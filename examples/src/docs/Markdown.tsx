@@ -41,6 +41,11 @@ function blocks(text: string): Block[] {
   return out
 }
 
+/** One line of a doc comment with its inline marks set. */
+export function Inline({ text }: { text: string }) {
+  return <>{inline(text)}</>
+}
+
 /** The prose of a doc comment: the few Markdown forms the source uses (paragraphs, lists, code, maths, strong). */
 export function Markdown({ text, className }: { text: string; className?: string }) {
   const all = blocks(text)

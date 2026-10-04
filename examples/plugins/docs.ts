@@ -6,8 +6,12 @@
  *   its one-sentence summary and, for a module, its source files and the names each declares. The sidebar and the
  *   overview pages import it eagerly.
  * - `virtual:aifn-docs/content`: per node, the doc comment that opens its `index.ts`, its `@example` blocks, and its
- *   public exports (name, kind, signature, doc comment, examples), found by following the index's relative
- *   re-exports to the declarations. Large; pages import it lazily.
+ *   source files' declarations (name, kind, signature, doc comment, examples): every function, class and type, each
+ *   marked public (the index's relative re-exports lead to it), internal (exported by its file only) or local.
+ *   Large; pages import it lazily.
+ *
+ * `@param name text` and `@returns text` describe a function's parameters and result; the page sets them as a table
+ * beside the types the signature gives.
  *
  * A runnable `@example` is a title on the tag's line and code beneath it, in a module's opening comment or in an
  * export's doc comment: the app shows it as an editable cell that runs, and `make examples-check` runs them all. An
@@ -20,15 +24,26 @@ import ts from 'typescript'
 import type { Plugin } from 'vite'
 
 export type DocExample = { title: string; code: string }
+/** A parameter of a function: from its signature, with the description its `@param` tag gives. */
+export type DocParam = { name: string; type: string; optional: boolean; default: string; doc: string }
 export type DocExport = {
   name: string
   kind: 'function' | 'const' | 'class' | 'type'
   signature: string
   doc: string
+  /** A function's parameters in order; an options object written as a pattern lists each field as `options.<field>`. */
+  params: DocParam[]
+  /** What the `@returns` tag says. */
+  returns: string
   examples: DocExample[]
   /** The declaring file, relative to the repository, and its 1-based line. */
   file: string
   line: number
+  /**
+   * `public`: exported by the module's index, so importable. `internal`: exported by its file for the module's other
+   * files only. `local`: not exported.
+   */
+  visibility: 'public' | 'internal' | 'local'
 }
 export type DocContent = {
   doc: string
@@ -38,8 +53,11 @@ export type DocContent = {
   fileDocs: Record<string, string>
 }
 export type DocPackage = 'compute' | 'methods'
-/** A source file of a module: the public exports it declares, values before types. */
-export type DocFile = { name: string; values: string[]; types: string[]; examples: number }
+/**
+ * A source file of a module, by the names it declares: `key` are the public functions, classes and constants (the ones
+ * a reader calls), `supporting` the internal and local ones behind them, `types` every type.
+ */
+export type DocFile = { name: string; key: string[]; supporting: string[]; types: string[]; examples: number }
 export type DocTreeNode = {
   pkg: DocPackage
   /** The path within the package, e.g. `numerics/linalg`. */
@@ -49,7 +67,7 @@ export type DocTreeNode = {
   /** How many runnable (titled) examples the node holds (its own and its exports'). */
   examples: number
   children: DocTreeNode[]
-  /** A leaf module's source files that declare public exports, by name. */
+  /** A leaf module's source files, by name. */
   files: DocFile[]
 }
 export type DocTree = Record<DocPackage, DocTreeNode[]>
@@ -70,9 +88,21 @@ function unframe(comment: string): string {
     .trim()
 }
 
-/** A doc comment split into its prose and its `@example` blocks (other tags stay in the prose). */
-function splitDoc(text: string): { doc: string; examples: DocExample[] } {
-  const [doc, ...blocks] = text.split(/^@example[ \t]*/m)
+type Tags = { doc: string; params: Map<string, string>; returns: string; examples: DocExample[] }
+
+/** A doc comment split into its prose, its `@param` and `@returns` descriptions and its `@example` blocks. */
+function splitDoc(text: string): Tags {
+  const [head, ...blocks] = text.split(/^@example[ \t]*/m)
+  // Before the examples: the prose, then `@param name text` and `@returns text`, each running to the next tag.
+  const [doc, ...tags] = head.split(/^(?=@(?:param|returns?)\b)/m)
+  const params = new Map<string, string>()
+  let returns = ''
+  for (const tag of tags) {
+    const flat = tag.replace(/\s+/g, ' ').trim()
+    const param = /^@param (?:\{[^}]*\} )?([\w.$]+) ?-? ?(.*)$/.exec(flat)
+    if (param) params.set(param[1], param[2])
+    else returns = flat.replace(/^@returns? ?/, '')
+  }
   const examples = blocks.map((block) => {
     const [first, ...rest] = block.split('\n')
     // `@example code…` on one line has no title; otherwise the tag's line is the title.
@@ -81,7 +111,7 @@ function splitDoc(text: string): { doc: string; examples: DocExample[] } {
       ? { title: first.trim(), code: rest.join('\n').trim() }
       : { title: '', code: [first, ...rest].join('\n').trim() }
   })
-  return { doc: doc.trim(), examples: examples.filter((e) => e.code !== '') }
+  return { doc: doc.trim(), params, returns, examples: examples.filter((e) => e.code !== '') }
 }
 
 /** The first sentence of a doc comment, without the leading "`package/path`:" that module comments open with. */
@@ -140,31 +170,98 @@ function fileDoc(file: string): string {
   return m ? splitDoc(unframe(m[1])).doc : ''
 }
 
-/** The exported declarations of a file, by name (the first overload of a function stands for it). */
-function declarationsOf(file: string): Map<string, DocExport> {
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim()
+
+/**
+ * A function's parameters with their descriptions. A parameter written as an object pattern (`{ n = 20 }: {…} = {}`)
+ * is `options`, followed by one row per field (`options.n`), described by `@param options.n`, else by the comment on
+ * that field of its type.
+ */
+function paramsOf(sf: ts.SourceFile, fn: ts.SignatureDeclaration, docs: Map<string, string>): DocParam[] {
+  const out: DocParam[] = []
+  for (const p of fn.parameters) {
+    const type = p.type ? oneLine(p.type.getText()) : ''
+    const init = p.initializer ? oneLine(p.initializer.getText()) : ''
+    const optional = !!p.questionToken || !!p.initializer
+    if (ts.isIdentifier(p.name)) {
+      out.push({ name: p.name.text, type, optional, default: init, doc: docs.get(p.name.text) ?? '' })
+    } else if (ts.isObjectBindingPattern(p.name)) {
+      out.push({ name: 'options', type, optional, default: init, doc: docs.get('options') ?? '' })
+      const members = p.type && ts.isTypeLiteralNode(p.type) ? p.type.members : undefined
+      for (const el of p.name.elements) {
+        if (!ts.isIdentifier(el.name)) continue
+        const field = (el.propertyName ?? el.name).getText()
+        const member = members?.find((m) => m.name?.getText() === field)
+        const memberType = member && ts.isPropertySignature(member) && member.type ? oneLine(member.type.getText()) : ''
+        out.push({
+          name: `options.${field}`,
+          type: memberType,
+          optional: true,
+          default: el.initializer ? oneLine(el.initializer.getText()) : '',
+          doc: docs.get(`options.${field}`) ?? (member ? oneLine(docOf(sf, member)) : ''),
+        })
+      }
+    } else {
+      // An array pattern (`[[a, b], [c, d]]: Mat2`): named by its `@param`, in order, else by the pattern.
+      const named = [...docs.keys()].filter(
+        (k) => !k.includes('.') && !fn.parameters.some((q) => q.name.getText() === k),
+      )
+      const taken = out.filter((o) => named.includes(o.name)).length
+      const name = named[taken] ?? oneLine(p.name.getText())
+      out.push({ name, type, optional, default: init, doc: docs.get(name) ?? '' })
+    }
+  }
+  return out
+}
+
+/**
+ * The top-level declarations of a file, by name (the first overload of a function stands for it): every function,
+ * class and type, and the constants that are exported or made by a call (a primitive from `defineOp`, a registry).
+ */
+function declarationsOf(file: string): Map<string, DocExport & { exported: boolean }> {
   const sf = parse(file)
-  const out = new Map<string, DocExport>()
+  const out = new Map<string, DocExport & { exported: boolean }>()
   const rel = path.relative(repo, file)
-  const add = (name: string, kind: DocExport['kind'], node: ts.Node, signature: string) => {
+  let exported = false
+  const add = (
+    name: string,
+    kind: DocExport['kind'],
+    node: ts.Node,
+    signature: string,
+    fn?: ts.SignatureDeclaration,
+  ) => {
     if (out.has(name)) return
-    const { doc, examples } = splitDoc(docOf(sf, node))
+    const tags = splitDoc(docOf(sf, node))
     const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1
-    out.set(name, { name, kind, signature: squeeze(signature), doc, examples, file: rel, line })
+    out.set(name, {
+      name,
+      kind,
+      signature: squeeze(signature),
+      doc: tags.doc,
+      params: fn ? paramsOf(sf, fn, tags.params) : [],
+      returns: tags.returns,
+      examples: tags.examples,
+      file: rel,
+      line,
+      visibility: exported ? 'internal' : 'local',
+      exported,
+    })
   }
   for (const node of sf.statements) {
-    if (!isExported(node)) continue
+    exported = isExported(node)
     if (ts.isFunctionDeclaration(node) && node.name) {
       const end = node.body ? node.body.getStart() : node.getEnd()
-      add(node.name.text, 'function', node, sf.text.slice(node.getStart(), end))
+      add(node.name.text, 'function', node, sf.text.slice(node.getStart(), end), node)
     } else if (ts.isVariableStatement(node)) {
       for (const d of node.declarationList.declarations) {
         if (!ts.isIdentifier(d.name)) continue
         const init = d.initializer
         const fn = init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ? init : null
+        if (!exported && !fn && !(init && ts.isCallExpression(init))) continue
         const signature = fn
           ? `const ${d.name.text} = ${sf.text.slice(fn.getStart(), fn.body.getStart()).replace(/\s*=>\s*$/, '')}`
           : `const ${d.name.text}${d.type ? `: ${d.type.getText()}` : ''}`
-        add(d.name.text, fn ? 'function' : 'const', node, signature)
+        add(d.name.text, fn ? 'function' : 'const', node, signature, fn ?? undefined)
       }
     } else if (ts.isClassDeclaration(node) && node.name) {
       add(node.name.text, 'class', node, classSignature(sf, node))
@@ -187,7 +284,7 @@ function exportsOf(file: string, seen = new Set<string>()): DocExport[] {
   if (seen.has(file)) return []
   seen.add(file)
   const sf = parse(file)
-  const out: DocExport[] = [...declarationsOf(file).values()]
+  const out: DocExport[] = [...declarationsOf(file).values()].filter((d) => d.exported)
   for (const node of sf.statements) {
     if (!ts.isExportDeclaration(node) || !node.moduleSpecifier || !ts.isStringLiteral(node.moduleSpecifier)) continue
     const spec = node.moduleSpecifier.text
@@ -236,25 +333,38 @@ function build(): Built {
         const header = /^\s*\/\*\*[\s\S]*?\*\//.exec(sf.text)?.[0] ?? ''
         const { doc, examples } = splitDoc(unframe(header.trim()))
         const children = walk(pkg, path.join(dir, d.name), at)
-        // A parent's page lists its children; only a leaf module lists exports.
-        const exports = children.length ? [] : exportsOf(index).sort((a, b) => a.name.localeCompare(b.name))
+        // A parent's page lists its children; a leaf module lists its source files and everything they declare.
+        const exports: DocExport[] = []
         const fileDocs: Record<string, string> = {}
-        for (const e of exports) {
-          const name = path.basename(e.file, '.ts')
-          if (name !== 'index' && !(name in fileDocs)) fileDocs[name] = fileDoc(path.join(repo, e.file))
+        const files: DocFile[] = []
+        const runnable = (list: DocExample[]) => list.filter((e) => e.title !== '').length
+        if (!children.length) {
+          const isPublic = new Set(exportsOf(index).map((e) => `${e.file}:${e.line}`))
+          const moduleDir = path.join(dir, d.name)
+          const sources = fs
+            .readdirSync(moduleDir)
+            .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && !f.endsWith('.d.ts'))
+            .sort()
+          for (const source of sources) {
+            const name = path.basename(source, '.ts')
+            const declared = [...declarationsOf(path.join(moduleDir, source)).values()]
+              .map((e): DocExport => (isPublic.has(`${e.file}:${e.line}`) ? { ...e, visibility: 'public' } : e))
+              .sort((x, y) => x.line - y.line)
+            if (!declared.length) continue
+            exports.push(...declared)
+            if (name !== 'index') fileDocs[name] = fileDoc(path.join(moduleDir, source))
+            const values = declared.filter((e) => e.kind !== 'type')
+            files.push({
+              name,
+              key: values.filter((e) => e.visibility === 'public').map((e) => e.name),
+              supporting: values.filter((e) => e.visibility !== 'public').map((e) => e.name),
+              types: declared.filter((e) => e.kind === 'type').map((e) => e.name),
+              examples: declared.reduce((n, e) => n + runnable(e.examples), 0),
+            })
+          }
         }
         content[`${pkg}/${at}`] = { doc, examples, exports, fileDocs }
-        const runnable = (list: DocExample[]) => list.filter((e) => e.title !== '').length
         const count = runnable(examples) + exports.reduce((n, e) => n + runnable(e.examples), 0)
-        const byFile = new Map<string, DocFile>()
-        for (const e of exports) {
-          const name = path.basename(e.file, '.ts')
-          const file = byFile.get(name) ?? { name, values: [], types: [], examples: 0 }
-          ;(e.kind === 'type' ? file.types : file.values).push(e.name)
-          file.examples += runnable(e.examples)
-          byFile.set(name, file)
-        }
-        const files = [...byFile.values()].sort((a, b) => a.name.localeCompare(b.name))
         return { pkg, path: at, name: d.name, summary: summaryOf(doc), examples: count, children, files }
       })
       .sort((a, b) => a.name.localeCompare(b.name))

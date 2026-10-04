@@ -306,6 +306,25 @@ A module that needs one of these imports it; it does not keep a private copy.
 - Every `Algorithm` gets protocol tests: same seed → same trace; `seek(i)` equals `run(i)`; `extend` equals a longer
   `trace`.
 
+## Documentation
+
+The pages under `/compute` of the site are generated from this source (`examples/plugins/docs.ts`), so the documentation
+lives beside the code it describes:
+
+- **Every function has a doc comment** saying what it does, whether it is exported or not. Every source file's functions
+  are listed on its page: the module's public ones first, then the supporting ones behind them.
+- **A key function (one the module exports) also has at least one example**: `@example <title>` on a line of its own in
+  the doc comment, then the code. It runs in the page as an editable cell, with the module's exports and the common
+  surface of `aifn-compute` in scope; use `print(label, value)` to show results.
+- **Every parameter is described**: `@param name what it is` for each parameter and `@returns what comes back`, after
+  the prose and before the examples. Names, types and defaults come from the signature; the tag says what the value
+  is, its shape or units, and what is read or written. A field of an options object written inline is
+  `@param options.field`.
+- **Maths is TeX between dollar signs**, with the shared notation macros (`\Amat`, `\xvec`, `\Imat`; the list is in
+  `packages/render/src/layout/math-macros.tsx`): `$\Amat = \Lmat\Lmat^\top$`.
+- `make examples-check` runs every example and sets every formula, and fails when one throws or does not set.
+  `node examples/check.ts --missing compute/numerics/linalg` lists what a module (or one file of it) still lacks.
+
 ## Examples
 
 `make examples` starts the `aifn-render` gallery (http://localhost:5192/): one recipe per page, each a live figure

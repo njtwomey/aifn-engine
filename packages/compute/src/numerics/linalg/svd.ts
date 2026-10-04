@@ -1,7 +1,7 @@
 /**
  * Thin singular value decomposition by one-sided Jacobi (Hestenes, 1958; Demmel and Veselić, 1992, "Jacobi's method
- * is more accurate than QR", SIAM J. Matrix Anal. Appl. 13(4)): plane rotations orthogonalise the columns of A in
- * place; their norms are then the singular values. Small singular values come out with high relative accuracy.
+ * is more accurate than QR", SIAM J. Matrix Anal. Appl. 13(4)): plane rotations orthogonalise the columns of $\Amat$
+ * in place; their norms are then the singular values. Small singular values come out with high relative accuracy.
  * `pinv`, `lstsq` and `conditionNumber` are built on it.
  */
 
@@ -44,13 +44,14 @@ import {
 
 /** The result of `svd` (U, S and V traced for traced input). */
 export type SVD<T = Tensor> = {
-  /** Left singular vectors as columns, m×k with k = min(m, n). */
+  /** Left singular vectors as columns, $m \times k$ with $k = \min(m, n)$. */
   U: T
-  /** Singular values in descending order, length k. */
+  /** Singular values $\svec$ in descending order, length $k$. */
   S: T
   /**
-   * Right singular vectors as columns, n×k (so A = U diag(S) Vᵀ; NumPy returns Vᵀ as `vh`). Each pair (uⱼ, vⱼ) is
-   * signed so that the largest-magnitude component of vⱼ (the first of equals) is positive.
+   * Right singular vectors as columns, $n \times k$ (so $\Amat = \Umat \operatorname{diag}(\svec) \Vmat^\top$; NumPy
+   * returns $\Vmat^\top$ as `vh`). Each pair $(\uvec_j, \vvec_j)$ is signed so that the largest-magnitude component of
+   * $\vvec_j$ (the first of equals) is positive.
    */
   V: T
   /** Number of Jacobi sweeps used (NaN inside `vmap`). */
@@ -59,20 +60,39 @@ export type SVD<T = Tensor> = {
   converged: boolean
 }
 
+/** The working result of the one-sided Jacobi iteration on a tall matrix, on flat row-major arrays. */
 type Jacobi = {
+  /** The left singular vectors as columns, $m \times n$. */
   U: Float64Array
+  /** The $n$ singular values. */
   S: Float64Array
+  /** The right singular vectors as columns, $n \times n$. */
   V: Float64Array
+  /** The number of rows $m$. */
   m: number
+  /** The number of columns $n$. */
   n: number
+  /** The number of sweeps (passes over every pair of columns) that rotated something. */
   sweeps: number
+  /** False when the sweep limit ran out before a sweep left every pair of columns alone. */
   converged: boolean
 }
 
 /** The smallest normal double: a squared column norm below it has lost its precision to underflow. */
 const SUBNORMAL_SQUARE = 2.2250738585072014e-308
 
-/** One-sided Jacobi on an m×n matrix with m ≥ n (row-major in `a`, overwritten). */
+/**
+ * One-sided Jacobi on an $m \times n$ matrix with $m \ge n$ (row-major in `a`, overwritten).
+ *
+ * @param a The matrix $\Amat$ as a row-major array of $mn$ values. Rotated in place: on return its columns are mutually
+ *   orthogonal but not normalised (column $j$ is $s_j \uvec_j$), and the same array is returned as `U`.
+ * @param m The number of rows of $\Amat$.
+ * @param n The number of columns of $\Amat$, at most $m$.
+ * @param maxSweeps The most sweeps to run, a sweep being one pass of rotations over every pair of columns.
+ * @returns `U` (the rotated `a`), `S` (the $n$ column norms, the singular values in no particular order), `V` (the
+ *   $n \times n$ product of the rotations, row-major), `m` and `n` as given, `sweeps` (the number of sweeps that
+ *   rotated something) and `converged` (false when `maxSweeps` ran out first).
+ */
 function jacobi(a: Float64Array, m: number, n: number, maxSweeps: number): Jacobi {
   const V = new Float64Array(n * n)
   for (let i = 0; i < n; i++) V[i * n + i] = 1
@@ -134,8 +154,19 @@ function jacobi(a: Float64Array, m: number, n: number, maxSweeps: number): Jacob
 }
 
 /**
- * Normalise U's columns and complete those of zero singular values to an orthonormal set, sort by descending
- * singular value, and fix signs. Returns U (m×n), S (n), V (n×n).
+ * Normalise $\Umat$'s columns and complete those of zero singular values to an orthonormal set, sort by descending
+ * singular value, and fix signs. Returns $\Umat$ ($m \times n$), $\svec$ ($n$), $\Vmat$ ($n \times n$).
+ *
+ * @param options The result of `jacobi`; none of its arrays is modified.
+ * @param options.U The rotated matrix, row-major $m \times n$: orthogonal columns, each a left singular vector times
+ *   its singular value.
+ * @param options.S The $n$ singular values (the norms of `U`'s columns), in the order of the columns.
+ * @param options.V The right singular vectors as the columns of a row-major $n \times n$ array, in the same order.
+ * @param options.m The number of rows of `U`.
+ * @param options.n The number of columns of `U` (and the size of `V`).
+ * @returns New arrays: `U` (row-major $m \times n$, orthonormal columns), `S` ($n$ values, descending) and `V`
+ *   (row-major $n \times n$), each pair of vectors signed so that the largest-magnitude component of the column of
+ *   `V` (the first of equals) is positive.
  */
 function finish({ U, S, V, m, n }: Jacobi): { U: Float64Array; S: Float64Array; V: Float64Array } {
   const order = Array.from({ length: n }, (_, j) => j).sort((i, j) => S[j] - S[i])
@@ -158,7 +189,16 @@ function finish({ U, S, V, m, n }: Jacobi): { U: Float64Array; S: Float64Array; 
   return { U: u, S: s, V: v }
 }
 
-/** Set column `col` of u (m×n) to a unit vector orthogonal to columns 0…col−1, by Gram–Schmidt on basis vectors. */
+/**
+ * Set column `col` of `u` ($m \times n$) to a unit vector orthogonal to columns $0, \dots, \text{col} - 1$, by
+ * Gram–Schmidt on basis vectors.
+ *
+ * @param u The matrix as a row-major array of $mn$ values. Columns before `col` are read and must already be
+ *   orthonormal; column `col` is overwritten; later columns are untouched.
+ * @param m The number of rows of `u`.
+ * @param n The number of columns of `u`.
+ * @param col The index (from 0) of the column to fill.
+ */
 function fillOrthogonal(u: Float64Array, m: number, n: number, col: number): void {
   let best = new Float64Array(m)
   let bestNorm = -1
@@ -183,8 +223,17 @@ function fillOrthogonal(u: Float64Array, m: number, n: number, col: number): voi
 }
 
 /**
- * The SVD of a tall (m ≥ n, row-major in `data`, overwritten) matrix, with each pair of singular vectors signed so that
- * the largest-magnitude component of vⱼ (`signOn` 'V') or of uⱼ ('U') is positive.
+ * The SVD of a tall ($m \ge n$, row-major in `data`, overwritten) matrix, with each pair of singular vectors signed so
+ * that the largest-magnitude component of $\vvec_j$ (`signOn` 'V') or of $\uvec_j$ ('U') is positive.
+ *
+ * @param data The matrix as a row-major array of $mn$ values; used as working space and overwritten.
+ * @param m The number of rows of the matrix.
+ * @param n The number of columns of the matrix, at most $m$.
+ * @param maxSweeps The most Jacobi sweeps (passes over every pair of columns) to run before giving up.
+ * @param signOn Which vector of each pair fixes the sign: 'V' makes the largest-magnitude component of the right
+ *   vector positive, 'U' that of the left vector.
+ * @returns The decomposition as tensors: `U` ($m \times n$), `S` ($n$ values, descending) and `V` ($n \times n$), with
+ *   the number of `sweeps` used and whether the iteration `converged`.
  */
 function tall(data: Float64Array, m: number, n: number, maxSweeps: number, signOn: 'U' | 'V'): SVD {
   const raw = jacobi(data, m, n, maxSweeps)
@@ -205,6 +254,12 @@ function tall(data: Float64Array, m: number, n: number, maxSweeps: number, signO
 /** Parameters of the `svd` primitive (tall input): the sweep limit, the sign convention, and the SVD already found. */
 type Params = { readonly maxSweeps: number; readonly signOn: 'U' | 'V'; readonly found?: SVD }
 
+/**
+ * Throws `NumericalError` when the Jacobi iteration did not converge: such a decomposition has no derivative.
+ *
+ * @param p The primitive's parameters. Only `found` is read: the decomposition already computed for this input, whose
+ *   `converged` flag is checked. Nothing is thrown when `found` is absent.
+ */
 function refuseUnconverged(p: Params): void {
   if (p.found && !p.found.converged) {
     throw new NumericalError(
@@ -218,6 +273,14 @@ function refuseUnconverged(p: Params): void {
 /**
  * Refuse the projection term of a tall SVD at a zero singular value whose left vector's cotangent is used
  * (`used(j, b)`, every one by default), example by example inside `vmap`.
+ *
+ * @param examples The singular values, one array of $n$ values per batch example (a single one outside `vmap`), or
+ *   null when they are not known as numbers, in which case nothing is checked. Read only.
+ * @param m The number of rows of the decomposed matrix. Nothing is checked when $m = n$, where there is no projection
+ *   term.
+ * @param n The number of columns of the decomposed matrix, which is also the number of singular values.
+ * @param used Says whether the derivative needs the left singular vector of singular value `j` (index from 0) of
+ *   batch example `b`; a zero singular value throws only where it returns true. By default every one is needed.
  */
 function refuseZeroSingular(
   examples: readonly ArrayLike<number>[] | null,
@@ -241,12 +304,18 @@ function refuseZeroSingular(
   })
 }
 
-// Rules for the thin SVD A = U diag(s) Vᵀ of a tall m×n matrix (Townsend, 2016, "Differentiating the singular value
-// decomposition"; Seeger et al., 2017, arXiv:1710.08717), with Fᵢⱼ = 1/(sⱼ² − sᵢ²), S = diag(s), and P = UᵀȦV:
-//   ṡ = diag(P),  U̇ = U(F∘(PS + SPᵀ)) + (I − UUᵀ)ȦVS⁻¹,  V̇ = V(F∘(SP + PᵀS))  (V is square);
-//   Ā = U[diag(s̄) + (F∘(UᵀŪ − ŪᵀU))S + S(F∘(VᵀV̄ − V̄ᵀV))]Vᵀ + (I − UUᵀ)ŪS⁻¹Vᵀ.
-// Repeated singular values are handled as eigh's repeated eigenvalues. A wide matrix is decomposed through its
-// transpose. The output is U (m×n), s (n) and V (n×n) packed into one vector.
+/**
+ * The SVD primitive, with its derivative rules for the thin SVD $\Amat = \Umat \diag(\svec) \Vmat^\top$ of a tall $m
+ * \times n$ matrix (Townsend, 2016, "Differentiating the singular value decomposition"; Seeger et al., 2017,
+ * arXiv:1710.08717). With $F_{ij} = 1 / (s_j^2 - s_i^2)$, $\Smat = \diag(\svec)$ and $\Pmat = \Umat^\top \dot{\Amat}
+ * \Vmat$, the tangents are $\dot{\svec} = \diag(\Pmat)$, $\dot{\Umat} = \Umat (\Fmat \circ (\Pmat\Smat +
+ * \Smat\Pmat^\top)) + (\Imat - \Umat\Umat^\top) \dot{\Amat} \Vmat \Smat^{-1}$ and $\dot{\Vmat} = \Vmat (\Fmat \circ
+ * (\Smat\Pmat + \Pmat^\top\Smat))$ ($\Vmat$ is square); the adjoint is $\bar{\Amat} = \Umat [\diag(\bar{\svec}) +
+ * (\Fmat \circ (\Umat^\top \bar{\Umat} - \bar{\Umat}^\top \Umat)) \Smat + \Smat (\Fmat \circ (\Vmat^\top \bar{\Vmat} -
+ * \bar{\Vmat}^\top \Vmat))] \Vmat^\top + (\Imat - \Umat\Umat^\top) \bar{\Umat} \Smat^{-1} \Vmat^\top$. Repeated
+ * singular values are handled as `eigh`'s repeated eigenvalues. A wide matrix is decomposed through its transpose. The
+ * output is $\Umat$ ($m \times n$), $\svec$ ($n$) and $\Vmat$ ($n \times n$) packed into one vector.
+ */
 const svdOp: Op<Params> = definePrimitive<Params>({
   id: 'numerics/linalg/svd',
   arity: 1,
@@ -337,18 +406,40 @@ const svdOp: Op<Params> = definePrimitive<Params>({
   },
 })
 
-/** The tall SVD of a raw input, per the primitive's parameters. */
+/**
+ * The tall SVD of a raw input, per the primitive's parameters.
+ *
+ * @param a The matrix to decompose, $m \times n$ with $m \ge n$. Its values are copied, so it is not modified.
+ * @param p The primitive's parameters, of which the sweep limit `maxSweeps` and the sign convention `signOn` are read.
+ * @returns The decomposition as `tall` returns it: `U`, `S` and `V` with `sweeps` and `converged`.
+ */
 function decomposeTall(a: Value, p: Params): SVD {
   const { m, n, a: data } = dense(a, 'svd')
   return tall(data, m, n, p.maxSweeps, p.signOn)
 }
 
 /**
- * Thin singular value decomposition A = U diag(S) Vᵀ of an m×n matrix: U is m×k, S has length k and V is n×k, with
- * k = min(m, n) and S descending. Left singular vectors of zero singular values are completed to an orthonormal set.
+ * Thin singular value decomposition $\Amat = \Umat \operatorname{diag}(\svec) \Vmat^\top$ of an $m \times n$ matrix:
+ * $\Umat$ is $m \times k$, $\svec$ (the field `S`) has length $k$ and $\Vmat$ is $n \times k$, with $k = \min(m, n)$
+ * and $\svec$ descending. Left singular vectors of zero singular values are completed to an orthonormal set.
  * Differentiable in both modes (Townsend, 2016): repeated singular values are handled as `eigh`'s repeated eigenvalues
  * (`NumericalError` 'degenerate' unless the function is invariant), and the vectors of a zero singular value of a
  * non-square matrix have no derivative. Inside `vmap`, `sweeps` is NaN and an example that does not converge throws.
+ *
+ * @param a The matrix $\Amat$ to decompose, $m \times n$ with any of tall, square or wide; it is not modified. A
+ *   traced value makes the factors differentiable.
+ * @param options How long the Jacobi iteration may run.
+ * @param options.maxSweeps The most Jacobi sweeps (passes of rotations over every pair of columns) to run, 60 by
+ *   default. When they run out, `converged` is false and the factors are only approximate.
+ * @returns The factors `U`, `S` and `V`, with the number of `sweeps` used and whether the iteration `converged`.
+ *
+ * @example The thin singular value decomposition
+ * const A = tensor([[3, 0], [0, 4], [0, 0]])
+ * const { U, S, V, converged } = svd(A)
+ * print('S =', S)
+ * print('U =', U)
+ * print('V =', V)
+ * print('converged =', converged)
  */
 export function svd<X extends Value>(a: X, { maxSweeps = 60 }: { maxSweeps?: number } = {}): SVD<TensorResult<X>> {
   const [m, n] = shapeOfValue(a)
@@ -371,12 +462,24 @@ export function svd<X extends Value>(a: X, { maxSweeps = 60 }: { maxSweeps?: num
   return (wide ? { ...r, U: V, V: U } : { ...r, U, V }) as SVD<TensorResult<X>>
 }
 
-/** The default relative cutoff for treating a singular value as zero: max(m, n)·ε, as NumPy's `matrix_rank`. */
+/**
+ * The default relative cutoff for treating a singular value as zero: $\max(m, n) \cdot \varepsilon$, as NumPy's
+ * `matrix_rank`.
+ *
+ * @param m The number of rows of the matrix.
+ * @param n The number of columns of the matrix.
+ * @returns The cutoff as a fraction of the largest singular value.
+ */
 function defaultRtol(m: number, n: number): number {
   return Math.max(m, n) * EPS
 }
 
-/** The dense routines below read the SVD's values; under a transformation they say so instead of failing inside. */
+/**
+ * The dense routines below read the SVD's values; under a transformation they say so instead of failing inside.
+ *
+ * @param a The argument to check: a traced value throws `NotDifferentiableError`, anything else passes.
+ * @param where The name of the calling function, used in the error and its message.
+ */
 function concreteOnly(a: unknown, where: string): void {
   if (isTraced(a as Value))
     throw new NotDifferentiableError(
@@ -386,8 +489,21 @@ function concreteOnly(a: unknown, where: string): void {
 }
 
 /**
- * Moore–Penrose pseudo-inverse (n×m) of an m×n matrix from its SVD: singular values at most `rtol`·σ_max are
- * treated as zero (default max(m, n)·ε).
+ * Moore–Penrose pseudo-inverse ($n \times m$) of an $m \times n$ matrix from its SVD: singular values at most
+ * `rtol` $\cdot \sigma_{\max}$ are treated as zero (default $\max(m, n) \cdot \varepsilon$).
+ *
+ * @param a The matrix $\Amat$ to invert, $m \times n$ and of any rank; it is not modified. A traced value throws
+ *   `NotDifferentiableError`.
+ * @param options The cutoff below which a singular value counts as zero.
+ * @param options.rtol The cutoff as a fraction of the largest singular value: singular values at most `rtol` times it
+ *   are dropped rather than inverted. By default $\max(m, n) \cdot \varepsilon$.
+ * @returns The pseudo-inverse $\Amat^+$, an $n \times m$ matrix.
+ *
+ * @example The pseudo-inverse of a rectangular matrix
+ * const A = tensor([[1, 0], [0, 1], [1, 1]])
+ * const Ap = pinv(A)
+ * print('A⁺ =', Ap)
+ * print('A⁺ A =', matmul(Ap, A))
  */
 export function pinv(a: Tensor, { rtol }: { rtol?: number } = {}): Tensor {
   concreteOnly(a, 'pinv')
@@ -409,19 +525,39 @@ export function pinv(a: Tensor, { rtol }: { rtol?: number } = {}): Tensor {
 
 /** The result of `lstsq`. */
 export type LeastSquares = {
-  /** The minimum-norm least-squares solution (n, or n×r for a matrix right-hand side). */
+  /** The minimum-norm least-squares solution ($n$, or $n \times r$ for a matrix right-hand side). */
   x: Tensor
-  /** Squared residual norm ‖Ax − b‖² (per column for a matrix right-hand side). */
+  /** Squared residual norm $\lVert \Amat\xvec - \bvec \rVert^2$ (per column for a matrix right-hand side). */
   residuals: Tensor
   /** Numerical rank: the number of singular values above the cutoff. */
   rank: number
-  /** Singular values of A, descending. */
+  /** Singular values of $\Amat$, descending. */
   singularValues: Tensor
 }
 
 /**
- * Least squares: the x minimising ‖Ax − b‖, and among those the one of least norm, from the SVD of A (m×n) with
- * singular values at most `rtol`·σ_max treated as zero (default max(m, n)·ε). Rank deficiency is reported by `rank`.
+ * Least squares: the $\xvec$ minimising $\lVert \Amat\xvec - \bvec \rVert$, and among those the one of least norm,
+ * from the SVD of $\Amat$ ($m \times n$) with singular values at most `rtol` $\cdot \sigma_{\max}$ treated as zero
+ * (default $\max(m, n) \cdot \varepsilon$). Rank deficiency is reported by `rank`.
+ *
+ * @param a The matrix $\Amat$, $m \times n$ and of any rank; it is not modified. A traced value throws
+ *   `NotDifferentiableError`.
+ * @param b The right-hand side: a vector of $m$ values, or an $m \times r$ matrix whose columns are $r$ separate
+ *   problems solved together. It is not modified, and must not be traced.
+ * @param options The cutoff below which a singular value counts as zero.
+ * @param options.rtol The cutoff as a fraction of the largest singular value: singular values at most `rtol` times it
+ *   are left out of the solution and of `rank`. By default $\max(m, n) \cdot \varepsilon$.
+ * @returns The solution `x` (with $n$ values, or $n \times r$ for a matrix `b`), the squared residual norm of each
+ *   column in `residuals` ($r$ values, one for a vector `b`), the numerical `rank`, and the `singularValues` of
+ *   $\Amat$.
+ *
+ * @example Fit a line by least squares
+ * // y = 1 + 2x, observed at x = 0, 1, 2.
+ * const A = tensor([[1, 0], [1, 1], [1, 2]])
+ * const y = tensor([1, 3, 5])
+ * const { x, rank } = lstsq(A, y)
+ * print('intercept and slope =', x)
+ * print('rank =', rank)
  */
 export function lstsq(a: Tensor, b: Tensor, { rtol }: { rtol?: number } = {}): LeastSquares {
   concreteOnly(a, 'lstsq')
@@ -464,7 +600,19 @@ export function lstsq(a: Tensor, b: Tensor, { rtol }: { rtol?: number } = {}): L
   }
 }
 
-/** The 2-norm condition number σ_max / σ_min (∞ when σ_min = 0) of an m×n matrix, over its min(m, n) singular values. */
+/**
+ * The 2-norm condition number $\sigma_{\max} / \sigma_{\min}$ ($\infty$ when $\sigma_{\min} = 0$) of an $m \times n$
+ * matrix, over its $\min(m, n)$ singular values.
+ *
+ * @param a The matrix, $m \times n$; it is not modified. A traced value throws `NotDifferentiableError`.
+ * @returns The ratio of the largest singular value to the smallest: at least 1, `Infinity` for a matrix that is not of
+ *   full rank, and 0 for a matrix with no rows or no columns.
+ *
+ * @example Well and badly conditioned matrices
+ * print(conditionNumber(tensor([[1, 0], [0, 1]])))
+ * print(conditionNumber(tensor([[1, 1], [1, 1.0001]])))
+ * print(conditionNumber(tensor([[1, 2], [2, 4]])))
+ */
 export function conditionNumber(a: Tensor): number {
   concreteOnly(a, 'conditionNumber')
   const { S } = svd(a)

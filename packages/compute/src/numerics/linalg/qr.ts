@@ -1,7 +1,8 @@
 /**
  * QR factorisation by Householder reflections (Golub and Van Loan, 2013, Algorithm 5.2.1), with LAPACK's sign
- * convention (`dgeqrf`/`dlarfg`): each reflector maps its column to −sign(α)·‖x‖·e₁, so R's diagonal may be negative,
- * and a column that is already zero below the diagonal is left alone. This matches NumPy's `np.linalg.qr`.
+ * convention (`dgeqrf`/`dlarfg`): each reflector maps its column to
+ * $-\operatorname{sign}(\alpha) \cdot \lVert \xvec \rVert \cdot \evec_1$, so $\Rmat$'s diagonal may be negative, and a
+ * column that is already zero below the diagonal is left alone. This matches NumPy's `np.linalg.qr`.
  */
 
 import {
@@ -37,18 +38,29 @@ import {
 } from './rules'
 import { solveTriangular } from './triangular'
 
-/** The result of `qr` (Q and R traced for traced input). */
+/** The result of `qr` ($\Qmat$ and $\Rmat$ traced for traced input). */
 export type QR<T = Tensor> = {
-  /** Orthonormal columns: m×k for `reduced` (k = min(m, n)), m×m for `complete`. */
+  /** Orthonormal columns: $m \times k$ for `reduced` ($k = \min(m, n)$), $m \times m$ for `complete`. */
   Q: T
-  /** Upper triangular (trapezoidal): k×n for `reduced`, m×n for `complete`. */
+  /** Upper triangular (trapezoidal): $k \times n$ for `reduced`, $m \times n$ for `complete`. */
   R: T
 }
 
 /**
- * One Householder step on the row-major m×n working matrix r, in place: the reflector H = I − τvvᵀ (v[0] = 1, stored
- * from row j) that maps column j below the diagonal to −sign(α)·‖x‖·e₁, applied to columns j … n − 1. A column already
- * zero below the diagonal gives H = I (τ = 0), as `dlarfg`. `qr` and `householderSteps` both run this step.
+ * One Householder step on the row-major $m \times n$ working matrix `r`, in place: the reflector
+ * $\Hmat = \Imat - \tau\vvec\vvec^\top$ ($v_0 = 1$, stored from row $j$) that maps column $j$ below the diagonal to
+ * $-\operatorname{sign}(\alpha) \cdot \lVert \xvec \rVert \cdot \evec_1$, applied to columns $j, \dots, n - 1$. A
+ * column already zero below the diagonal gives $\Hmat = \Imat$ ($\tau = 0$), as `dlarfg`. `qr` and
+ * `householderSteps` both run this step.
+ *
+ * @param r The working matrix as a row-major array of $mn$ values, whose columns before $j$ are already reduced.
+ *   Modified in place: column $j$ gets its new diagonal entry and zeros below it, and columns after $j$ are
+ *   reflected from row $j$ down. Left untouched when the column is already zero below the diagonal.
+ * @param m The number of rows of the working matrix.
+ * @param n The number of columns of the working matrix.
+ * @param j The index (from 0) of the column to reduce, which is also the row its reflector starts at.
+ * @returns The reflector: `v`, its vector for rows $j, \dots, m - 1$ ($m - j$ values, the first of them 1), and
+ *   `tau`, its scalar $\tau$ (0 when nothing was reflected).
  */
 function reflectColumn(r: Float64Array, m: number, n: number, j: number): { v: Float64Array; tau: number } {
   const alpha = r[j * n + j]
@@ -74,7 +86,18 @@ function reflectColumn(r: Float64Array, m: number, n: number, j: number): { v: F
   return { v, tau }
 }
 
-/** Q ← Q·H in place for H = I − τvvᵀ acting on coordinates j … m − 1 (v stored from j); Q is m×m row-major. */
+/**
+ * $\Qmat \leftarrow \Qmat\Hmat$ in place for $\Hmat = \Imat - \tau\vvec\vvec^\top$ acting on coordinates
+ * $j, \dots, m - 1$ ($\vvec$ stored from $j$); $\Qmat$ is $m \times m$ row-major.
+ *
+ * @param q The matrix $\Qmat$ as a row-major array of $m^2$ values. Modified in place: its columns from $j$ on are
+ *   replaced by their reflection, and the earlier ones are untouched.
+ * @param m The number of rows (and columns) of $\Qmat$.
+ * @param v The reflector's vector for coordinates $j, \dots, m - 1$ ($m - j$ values), as `reflectColumn` returns it.
+ *   Read only.
+ * @param tau The reflector's scalar $\tau$; 0 means the identity, and `q` is left as it is.
+ * @param j The first coordinate (from 0) the reflector acts on.
+ */
 function applyReflectorRight(q: Float64Array, m: number, v: Float64Array, tau: number, j: number): void {
   if (tau === 0) return
   for (let row = 0; row < m; row++) {
@@ -85,7 +108,14 @@ function applyReflectorRight(q: Float64Array, m: number, v: Float64Array, tau: n
   }
 }
 
-/** Householder QR of a dense copy of A: `reflectColumn` for each of the k = min(m, n) columns, then Q. */
+/**
+ * Householder QR of a dense copy of $\Amat$: `reflectColumn` for each of the $k = \min(m, n)$ columns, then $\Qmat$.
+ *
+ * @param a The matrix $\Amat$ to factor, $m \times n$. Its values are copied, so it is not modified.
+ * @param mode Which factors to build: 'reduced' gives $\Qmat$ as $m \times k$ and $\Rmat$ as $k \times n$, 'complete'
+ *   gives a square $m \times m$ $\Qmat$ and an $m \times n$ $\Rmat$.
+ * @returns The factors `Q` and `R` as tensors, with $\Qmat\Rmat = \Amat$.
+ */
 function householder(a: Value, mode: 'reduced' | 'complete'): QR {
   const { m, n, a: r } = dense(a, 'qr')
   const k = Math.min(m, n)
@@ -118,26 +148,48 @@ function householder(a: Value, mode: 'reduced' | 'complete'): QR {
 
 /** One state of `householderSteps`. */
 export interface HouseholderState extends Status {
-  /** The working matrix: columns 0 … column − 1 reduced to upper-triangular form (m×n). */
+  /** The working matrix: columns $0, \dots, \text{column} - 1$ reduced to upper-triangular form ($m \times n$). */
   R: Tensor
-  /** The product H₀H₁⋯H_{column−1} of the reflectors so far (m×m, orthogonal); Q·R = A at every step. */
+  /**
+   * The product $\Hmat_0 \Hmat_1 \cdots \Hmat_{\text{column} - 1}$ of the reflectors so far ($m \times m$,
+   * orthogonal); $\Qmat\Rmat = \Amat$ at every step.
+   */
   Q: Tensor
-  /** The reflector vector v of the last step, zero above its column (length m; zeros at t = 0). */
+  /** The reflector vector $\vvec$ of the last step, zero above its column (length $m$; zeros at $t = 0$). */
   reflector: Tensor
-  /** τ of the last step (H = I − τvvᵀ; 0 at t = 0 or when the column was already reduced). */
+  /**
+   * $\tau$ of the last step ($\Hmat = \Imat - \tau\vvec\vvec^\top$; 0 at $t = 0$ or when the column was already
+   * reduced).
+   */
   tau: number
-  /** The next column to reduce; k = min(m, n) when done. */
+  /** The next column to reduce; $k = \min(m, n)$ when done. */
   column: number
-  /** ‖A − QR‖_F, which stays at rounding level. */
+  /** $\lVert \Amat - \Qmat\Rmat \rVert_F$, which stays at rounding level. */
   residual: number
+  /** True once every column has been reflected. */
   done: boolean
 }
 
 /**
  * Householder QR as a traceable algorithm (Golub and Van Loan, 2013, Algorithm 5.2.1): each step reflects one column
- * onto a multiple of e₁ below the diagonal and applies the reflector to the trailing columns, so after step j the first
- * j columns of R are upper triangular and Q = H₀⋯H_{j−1} is orthogonal with QR = A throughout. Done after
- * k = min(m, n) steps. The step is `qr`'s own (`reflectColumn`); `qr` runs it without keeping states.
+ * onto a multiple of $\evec_1$ below the diagonal and applies the reflector to the trailing columns, so after step $j$
+ * the first $j$ columns of $\Rmat$ are upper triangular and $\Qmat = \Hmat_0 \cdots \Hmat_{j-1}$ is orthogonal with
+ * $\Qmat\Rmat = \Amat$ throughout. Done after $k = \min(m, n)$ steps. The step is `qr`'s own (`reflectColumn`); `qr`
+ * runs it without keeping states.
+ *
+ * @param A The matrix $\Amat$ to factor, $m \times n$, as a tensor or nested rows of numbers. Its values are copied
+ *   once, so it is not modified.
+ * @returns The algorithm, which takes no input: run it with `run(alg, undefined, steps)`. Each state holds the
+ *   working `R` and the accumulated `Q` after one more column.
+ *
+ * @example Householder QR, one reflection at a time
+ * const A = tensor([[1, 1], [1, 0], [0, 1]])
+ * const alg = householderSteps(A)
+ * const first = run(alg, undefined, 1)
+ * print('after one reflection, R =', first.R)
+ * const last = run(alg, undefined, 10)
+ * print('finished =', last.done)
+ * print('R =', last.R)
  */
 export function householderSteps(A: MatrixLike): Algorithm<void, HouseholderState> {
   const { m, n, a: a0 } = dense(asMatrix(A, 'householderSteps'), 'householderSteps')
@@ -192,15 +244,32 @@ export function householderSteps(A: MatrixLike): Algorithm<void, HouseholderStat
   }
 }
 
-/** X R⁻¹ for upper-triangular R. */
+/**
+ * $\Xmat\Rmat^{-1}$ for upper-triangular $\Rmat$.
+ *
+ * @param x The matrix $\Xmat$, $p \times k$, whose rows are solved against $\Rmat$.
+ * @param R The upper-triangular matrix $\Rmat$, $k \times k$ and invertible; only its upper triangle is read.
+ * @returns $\Xmat\Rmat^{-1}$, with the shape of `x`.
+ */
 const rightSolve = (x: Value, R: Value) =>
   transpose(solveTriangular(R, transpose(x), { lower: false, transpose: true }))
-/** X R⁻ᵀ for upper-triangular R. */
+/**
+ * $\Xmat\Rmat^{-\top}$ for upper-triangular $\Rmat$.
+ *
+ * @param x The matrix $\Xmat$, $p \times k$, whose rows are solved against $\Rmat^\top$.
+ * @param R The upper-triangular matrix $\Rmat$, $k \times k$ and invertible; only its upper triangle is read.
+ * @returns $\Xmat\Rmat^{-\top}$, with the shape of `x`.
+ */
 const rightSolveTransposed = (x: Value, R: Value) => transpose(solveTriangular(R, transpose(x), { lower: false }))
 
 /**
- * A rank-deficient A (a zero diagonal entry of R) has no derivative of Q: report it rather than divide by zero, example
- * by example inside `vmap`.
+ * A rank-deficient $\Amat$ (a zero diagonal entry of $\Rmat$) has no derivative of $\Qmat$: report it rather than
+ * divide by zero, example by example inside `vmap`.
+ *
+ * @param R The triangular factor $\Rmat$, $k \times n$ (one per example inside `vmap`). Its first $k$ diagonal
+ *   entries are compared with $k\varepsilon$ times its largest entry; nothing is checked when its values are not
+ *   known as numbers.
+ * @param k The number of rows of $\Rmat$, $\min(m, n)$, which is the number of diagonal entries to check.
  */
 function refuseRankDeficient(R: Value, k: number): void {
   const examples = concreteExamples(R)
@@ -221,7 +290,16 @@ function refuseRankDeficient(R: Value, k: number): void {
   })
 }
 
-/** The tangents (Q̇, Ṙ) of a square or tall QR, A = QR with R k×k invertible, for a tangent Ȧ. */
+/**
+ * The tangents $(\dot{\Qmat}, \dot{\Rmat})$ of a square or tall QR, $\Amat = \Qmat\Rmat$ with $\Rmat$
+ * $k \times k$ invertible, for a tangent $\dot{\Amat}$.
+ *
+ * @param Q The factor $\Qmat$, $m \times k$ with orthonormal columns.
+ * @param R The factor $\Rmat$, $k \times k$, upper triangular and invertible.
+ * @param t The tangent $\dot{\Amat}$ of the factored matrix, $m \times k$.
+ * @param k The number of columns of $\Amat$ (the size of $\Rmat$).
+ * @returns The pair $\dot{\Qmat}$ ($m \times k$) and $\dot{\Rmat}$ ($k \times k$, upper triangular), in that order.
+ */
 function jvpTall(Q: Value, R: Value, t: Value, k: number): [Value, Value] {
   const C = matmul(transpose(Q), rightSolve(t, R))
   const low = mul(C, lowerMask(k, false))
@@ -231,18 +309,35 @@ function jvpTall(Q: Value, R: Value, t: Value, k: number): [Value, Value] {
   return [dQ, dR]
 }
 
-/** The adjoint Ā of a square or tall QR, A = QR with R k×k invertible, for cotangents (Q̄, R̄). */
+/**
+ * The adjoint $\bar{\Amat}$ of a square or tall QR, $\Amat = \Qmat\Rmat$ with $\Rmat$ $k \times k$ invertible, for
+ * cotangents $(\bar{\Qmat}, \bar{\Rmat})$.
+ *
+ * @param Q The factor $\Qmat$, $m \times k$ with orthonormal columns.
+ * @param R The factor $\Rmat$, $k \times k$, upper triangular and invertible.
+ * @param gQ The cotangent $\bar{\Qmat}$ of $\Qmat$, $m \times k$.
+ * @param gR The cotangent $\bar{\Rmat}$ of $\Rmat$, $k \times k$.
+ * @param k The number of columns of $\Amat$ (the size of $\Rmat$).
+ * @returns The cotangent $\bar{\Amat}$ of the factored matrix, $m \times k$.
+ */
 function vjpTall(Q: Value, R: Value, gQ: Value, gR: Value, k: number): Value {
   const M = sub(matmul(R, transpose(gR)), matmul(transpose(gQ), Q))
   return rightSolveTransposed(add(gQ, matmul(Q, symmetricFromLower(M, k))), R)
 }
 
-// Rules (Seeger et al., 2017, "Auto-differentiating linear algebra", arXiv:1710.08717; Walter and Lehmann, 2018; the
-// wide case from Liao et al., 2019, "Differentiable programming tensor networks", §B). For A = QR with k×k R
-// invertible and C = QᵀȦR⁻¹, Ω = tril(C, −1) − tril(C, −1)ᵀ:  Ṙ = (C − Ω)R and Q̇ = ȦR⁻¹ − QC + QΩ; the adjoint is
-// Ā = (Q̄ + Q·copyltu(M))R⁻ᵀ with M = RR̄ᵀ − Q̄ᵀQ and copyltu the symmetric matrix of M's lower triangle. A wide A = [X Y]
-// (X m×m) factors X = QU and gives R = [U QᵀY]: the square rule applies to X with Q̄ + YR̄_Yᵀ, and Ȳ = QR̄_Y.
-// The output is Q (m×k) and R (k×n) packed into one vector, for the reduced factorisation.
+/**
+ * The QR primitive, with its derivative rules (Seeger et al., 2017, "Auto-differentiating linear algebra",
+ * arXiv:1710.08717; Walter and Lehmann, 2018; the wide case from Liao et al., 2019, "Differentiable programming tensor
+ * networks", §B). For $\Amat = \Qmat\Rmat$ with the $k \times k$ $\Rmat$ invertible, $\Cmat = \Qmat^\top \dot{\Amat}
+ * \Rmat^{-1}$ and $\Omegamat = \operatorname{tril}(\Cmat, -1) - \operatorname{tril}(\Cmat, -1)^\top$: the tangents are
+ * $\dot{\Rmat} = (\Cmat - \Omegamat) \Rmat$ and $\dot{\Qmat} = \dot{\Amat} \Rmat^{-1} - \Qmat\Cmat + \Qmat\Omegamat$;
+ * the adjoint is $\bar{\Amat} = (\bar{\Qmat} + \Qmat \operatorname{copyltu}(\Mmat)) \Rmat^{-\top}$ with $\Mmat = \Rmat
+ * \bar{\Rmat}^\top - \bar{\Qmat}^\top \Qmat$ and copyltu the symmetric matrix of $\Mmat$'s lower triangle. A wide
+ * $\Amat = [\Xmat \; \Ymat]$ ($\Xmat$ is $m \times m$) factors $\Xmat = \Qmat\Umat$ and gives $\Rmat = [\Umat \;
+ * \Qmat^\top \Ymat]$: the square rule applies to $\Xmat$ with $\bar{\Qmat} + \Ymat \bar{\Rmat}_Y^\top$, and
+ * $\bar{\Ymat} = \Qmat \bar{\Rmat}_Y$. The output is $\Qmat$ ($m \times k$) and $\Rmat$ ($k \times n$) packed into one
+ * vector, for the reduced factorisation.
+ */
 const qrOp: Op<undefined> = definePrimitive<undefined>({
   id: 'numerics/linalg/qr',
   arity: 1,
@@ -302,10 +397,25 @@ const qrOp: Op<undefined> = definePrimitive<undefined>({
 })
 
 /**
- * QR factorisation A = QR of an m×n matrix by Householder reflections. `mode` `reduced` (default) gives the thin
- * factors; `complete` gives a square Q. Differentiable in both modes for the reduced factorisation of a matrix of full
- * rank (Seeger et al., 2017); a rank-deficient A throws `NumericalError` ('singular') when differentiated. The complete
- * factorisation of a tall matrix is not differentiable (its extra columns of Q are not unique) and refuses traced input.
+ * QR factorisation $\Amat = \Qmat\Rmat$ of an $m \times n$ matrix by Householder reflections. `mode` `reduced`
+ * (default) gives the thin factors; `complete` gives a square $\Qmat$. Differentiable in both modes for the reduced
+ * factorisation of a matrix of full rank (Seeger et al., 2017); a rank-deficient $\Amat$ throws `NumericalError`
+ * ('singular') when differentiated. The complete factorisation of a tall matrix is not differentiable (its extra
+ * columns of $\Qmat$ are not unique) and refuses traced input.
+ *
+ * @param a The matrix $\Amat$ to factor, $m \times n$ with any of tall, square or wide; it is not modified. A traced
+ *   value makes the factors differentiable.
+ * @param options Which factorisation to return.
+ * @param options.mode 'reduced' (the default) gives $\Qmat$ as $m \times k$ and $\Rmat$ as $k \times n$ with
+ *   $k = \min(m, n)$; 'complete' gives a square $m \times m$ $\Qmat$ and an $m \times n$ $\Rmat$.
+ * @returns The factors `Q` (orthonormal columns) and `R` (upper triangular; its diagonal may be negative).
+ *
+ * @example The reduced QR factorisation
+ * const A = tensor([[1, 1], [1, 0], [0, 1]])
+ * const { Q, R } = qr(A)
+ * print('Q =', Q)
+ * print('R =', R)
+ * print('Q R =', matmul(Q, R))
  */
 export function qr<X extends Value>(
   a: X,

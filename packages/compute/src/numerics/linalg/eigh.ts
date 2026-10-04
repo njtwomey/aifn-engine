@@ -2,8 +2,8 @@
  * Symmetric eigendecomposition by the cyclic Jacobi method (Jacobi, 1846; Golub and Van Loan, 2013, Algorithm 8.5.3,
  * with Rutishauser's (1971) stable rotation formulas). Each rotation zeroes one off-diagonal pair; sweeps repeat until
  * the off-diagonal mass is negligible. Jacobi is slower than tridiagonal QR but simple and accurate: eigenvalues are
- * found to within about ε‖A‖, and small ones of well-scaled matrices to high relative accuracy (Demmel and Veselić,
- * 1992).
+ * found to within about $\varepsilon \lVert \Amat \rVert$, and small ones of well-scaled matrices to high relative
+ * accuracy (Demmel and Veselić, 1992).
  */
 
 import {
@@ -44,7 +44,7 @@ export type Eigh<T = Tensor> = {
   /** Eigenvalues in descending order. */
   values: T
   /**
-   * Orthonormal eigenvectors as columns, column j for `values[j]`. Each is signed so that its largest-magnitude
+   * Orthonormal eigenvectors as columns, column $j$ for `values[j]`. Each is signed so that its largest-magnitude
    * component (the first of equals) is positive.
    */
   vectors: T
@@ -54,7 +54,16 @@ export type Eigh<T = Tensor> = {
   converged: boolean
 }
 
-/** The Jacobi iteration on a dense copy of A. */
+/**
+ * The Jacobi iteration on a dense copy of $\Amat$.
+ *
+ * @param a The symmetric matrix $\Amat$, $n \times n$. Only its lower triangle is read (the upper one is taken to be
+ *   its mirror image), and it is copied, so it is not modified.
+ * @param maxSweeps The most sweeps to run, a sweep being one pass of rotations over every off-diagonal pair.
+ * @returns The eigenvalues `values` ($n$ values, descending) and eigenvectors `vectors` ($n \times n$, as columns in
+ *   the same order), with the number of `sweeps` run and `converged` (false when `maxSweeps` ran out before the
+ *   off-diagonal mass fell below tolerance).
+ */
 function jacobi(a: Value, maxSweeps: number): Eigh {
   const { n, a: A } = denseSquare(a, 'eigh')
   // Symmetrise from the lower triangle, as LAPACK's dsyevd with UPLO='L'.
@@ -122,7 +131,12 @@ function jacobi(a: Value, maxSweeps: number): Eigh {
 /** Parameters of the `eigh` primitive: the sweep limit, and the decomposition already found for this input. */
 type Params = { readonly maxSweeps: number; readonly found?: Eigh }
 
-/** Differentiating a decomposition that did not converge would differentiate garbage: report it. */
+/**
+ * Differentiating a decomposition that did not converge would differentiate garbage: report it.
+ *
+ * @param p The primitive's parameters. Only `found` is read: the decomposition already computed for this input, whose
+ *   `converged` flag is checked. Nothing is thrown when `found` is absent.
+ */
 function refuseUnconverged(p: Params): void {
   if (p.found && !p.found.converged) {
     throw new NumericalError(
@@ -133,12 +147,16 @@ function refuseUnconverged(p: Params): void {
   }
 }
 
-// Rules (Giles, 2008, "Collected matrix derivative results", §3.1; Seeger et al., 2017, "Auto-differentiating linear
-// algebra", arXiv:1710.08717): with Ȧ the symmetric matrix of the tangent's lower triangle and P = VᵀȦV, the tangents
-// are λ̇ = diag(P) and V̇ = V(F∘P), and the adjoint is Ā = V(diag(λ̄) + F∘(VᵀV̄))Vᵀ read back through the lower
-// triangle, with Fᵢⱼ = 1/(λⱼ − λᵢ). At repeated eigenvalues F is undefined: the rules go through only when the
-// function is invariant within the degenerate subspace, and otherwise throw NumericalError ('degenerate').
-// The output is λ (n) and V (n×n) packed into one vector.
+/**
+ * The symmetric eigendecomposition primitive, with its derivative rules (Giles, 2008, "Collected matrix derivative
+ * results", §3.1; Seeger et al., 2017, "Auto-differentiating linear algebra", arXiv:1710.08717). With $\dot{\Amat}$ the
+ * symmetric matrix of the tangent's lower triangle and $\Pmat = \Vmat^\top \dot{\Amat} \Vmat$, the tangents are
+ * $\dot{\lambdavec} = \diag(\Pmat)$ and $\dot{\Vmat} = \Vmat (\Fmat \circ \Pmat)$, and the adjoint is $\bar{\Amat} =
+ * \Vmat (\diag(\bar{\lambdavec}) + \Fmat \circ (\Vmat^\top \bar{\Vmat})) \Vmat^\top$ read back through the lower
+ * triangle, with $F_{ij} = 1 / (\lambda_j - \lambda_i)$. At repeated eigenvalues $\Fmat$ is undefined: the rules go
+ * through only when the function is invariant within the degenerate subspace, and otherwise throw `NumericalError`
+ * ('degenerate'). The output is $\lambdavec$ ($n$) and $\Vmat$ ($n \times n$) packed into one vector.
+ */
 const eighOp: Op<Params> = definePrimitive<Params>({
   id: 'numerics/linalg/eigh',
   arity: 1,
@@ -195,12 +213,30 @@ const eighOp: Op<Params> = definePrimitive<Params>({
 })
 
 /**
- * Eigendecomposition A = V diag(λ) Vᵀ of a symmetric matrix (only its lower triangle is read), with eigenvalues in
- * descending order and eigenvectors as the columns of V. Differentiable in both modes (Giles, 2008): at repeated
- * eigenvalues only functions invariant within the degenerate subspace (a sum of the repeated eigenvalues, a projector
- * onto their subspace) have a derivative; others throw `NumericalError` ('degenerate'), as does differentiating a
- * decomposition that did not converge ('not-converged'). Inside `vmap`, `sweeps` is NaN and an example that does not
- * converge throws.
+ * Eigendecomposition $\Amat = \Vmat \operatorname{diag}(\lambdavec) \Vmat^\top$ of a symmetric matrix (only its lower
+ * triangle is read), with eigenvalues in descending order and eigenvectors as the columns of $\Vmat$. Differentiable
+ * in both modes (Giles, 2008): at repeated eigenvalues only functions invariant within the degenerate subspace (a sum
+ * of the repeated eigenvalues, a projector onto their subspace) have a derivative; others throw `NumericalError`
+ * ('degenerate'), as does differentiating a decomposition that did not converge ('not-converged'). Inside `vmap`,
+ * `sweeps` is NaN and an example that does not converge throws.
+ *
+ * @param a The symmetric matrix $\Amat$, $n \times n$. Only its lower triangle is read, so the upper one may hold
+ *   anything; it is not modified. A traced value makes the decomposition differentiable.
+ * @param options How long the Jacobi iteration may run.
+ * @param options.maxSweeps The most Jacobi sweeps (passes of rotations over every off-diagonal pair) to run, 100 by
+ *   default. When they run out, `converged` is false and the result is only approximate.
+ * @returns The eigenvalues `values` ($\lambdavec$, descending) and the eigenvectors `vectors` ($\Vmat$, as columns),
+ *   with the number of `sweeps` used and whether the iteration `converged`.
+ *
+ * @example Eigenvalues and eigenvectors of a symmetric matrix
+ * const { values, vectors } = eigh(tensor([[2, 1], [1, 2]]))
+ * print('values (descending) =', values)
+ * print('vectors (as columns) =', vectors)
+ *
+ * @example Rebuild the matrix from its decomposition
+ * const A = tensor([[2, 1], [1, 2]])
+ * const { values, vectors } = eigh(A)
+ * print(matmul(matmul(vectors, diag(values)), transpose(vectors)))
  */
 export function eigh<X extends Value>(a: X, { maxSweeps = 100 }: { maxSweeps?: number } = {}): Eigh<TensorResult<X>> {
   if (!isTraced(a)) return jacobi(a, maxSweeps) as Eigh<TensorResult<X>>

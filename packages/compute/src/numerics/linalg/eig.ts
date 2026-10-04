@@ -1,5 +1,6 @@
 /**
- * The general (non-symmetric) real eigenproblem, needed for linear systems x′ = Ax: stability of fixed points, modes
+ * The general (non-symmetric) real eigenproblem, needed for linear systems $\xvec' = \Amat\xvec$: stability of fixed
+ * points, modes
  * of a linear flow, poles of a state-space model and the roots of a polynomial (its companion matrix). Balancing
  * (Parlett & Reinsch, 1969), reduction to upper Hessenberg form by stabilised elimination (EISPACK `elmhes`), and the
  * shifted QR algorithm with Francis double shifts (EISPACK `hqr`), in the form of Press et al. (2007), "Numerical
@@ -12,7 +13,14 @@ import { NotDifferentiableError, NumericalError, ShapeError } from 'aifn-compute
 
 const { toMatrixF64 } = dense
 
-/** Balance a (1-based, n×n) matrix in place with powers of 2 (Parlett & Reinsch, 1969). */
+/**
+ * Balance a (1-based, $n \times n$) matrix in place with powers of 2 (Parlett & Reinsch, 1969).
+ *
+ * @param a The matrix as an array of rows indexed from 1 (`a[1..n][1..n]`; row 0 and column 0 are unused). Modified in
+ *   place: each row is scaled by a power of 2 and its column by the inverse power (a similarity transform, so the
+ *   eigenvalues are unchanged) until the row and column sums of absolute values are comparable.
+ * @param n The number of rows (and columns) of the matrix.
+ */
 function balance(a: number[][], n: number): void {
   const RADIX = 2
   const sqrdx = RADIX * RADIX
@@ -55,6 +63,15 @@ function balance(a: number[][], n: number): void {
  * Eigenvalues of an upper Hessenberg matrix (1-based, destroyed) by the shifted QR algorithm with Francis double
  * shifts and exceptional shifts at iterations 10 and 20 (EISPACK `hqr`). Returns false if an eigenvalue needed more
  * than 60 iterations.
+ *
+ * @param a The upper Hessenberg matrix as an array of rows indexed from 1 (`a[1..n][1..n]`; row 0 and column 0 are
+ *   unused). Overwritten by the iteration: its contents are meaningless on return.
+ * @param n The number of rows (and columns) of the matrix.
+ * @param wr Where the real parts of the eigenvalues are written, at indices 1 to $n$ (index 0 is unused), in the order
+ *   the iteration finds them (unsorted). After a failure the entries not yet found are left as they were.
+ * @param wi Where the imaginary parts of the eigenvalues are written, at indices 1 to $n$, matching `wr`. A complex
+ *   pair occupies two adjacent entries with opposite signs.
+ * @returns True when every eigenvalue was found; false when one needed more than 60 iterations.
  */
 function hqr(a: number[][], n: number, wr: number[], wi: number[]): boolean {
   let anorm = 0
@@ -191,7 +208,14 @@ function hqr(a: number[][], n: number, wr: number[], wi: number[]): boolean {
   return true
 }
 
-/** Reduce a (1-based, n×n) matrix in place to upper Hessenberg form by elimination with pivoting (EISPACK `elmhes`). */
+/**
+ * Reduce a (1-based, $n \times n$) matrix in place to upper Hessenberg form by elimination with pivoting (EISPACK
+ * `elmhes`).
+ *
+ * @param a The matrix as an array of rows indexed from 1 (`a[1..n][1..n]`; row 0 and column 0 are unused). Modified in
+ *   place: on return it is upper Hessenberg, with the same eigenvalues and exact zeros below the subdiagonal.
+ * @param n The number of rows (and columns) of the matrix.
+ */
 function elmhes(a: number[][], n: number): void {
   for (let m = 2; m < n; m++) {
     let x = 0
@@ -223,14 +247,14 @@ function elmhes(a: number[][], n: number): void {
 /** The eigenvalues and eigenvectors of a real square matrix, as complex128 tensors. */
 export type Eigen = {
   /**
-   * The eigenvalues, complex128 [n], sorted by real part (descending), then imaginary part (descending): complex ones
+   * The eigenvalues, complex128 $[n]$, sorted by real part (descending), then imaginary part (descending): complex ones
    * come in adjacent conjugate pairs, the positive imaginary part first. `realPart`/`imagPart` give float64 views.
    */
   values: Tensor
   /**
-   * The eigenvectors as columns, complex128 [n, n]: column k belongs to eigenvalue k. Each has unit 2-norm and its
-   * largest component real and positive (imaginary parts exactly 0 for a real eigenvalue). For a defective eigenvalue
-   * the columns of a repeated eigenvalue coincide. Zeros when `vectors: false`.
+   * The eigenvectors as columns, complex128 $[n, n]$: column $k$ belongs to eigenvalue $k$. Each has unit 2-norm and
+   * its largest component real and positive (imaginary parts exactly 0 for a real eigenvalue). For a defective
+   * eigenvalue the columns of a repeated eigenvalue coincide. Zeros when `vectors: false`.
    */
   vectors: Tensor
   /** False when the QR iteration did not converge (the eigenvalues are then unreliable). */
@@ -238,8 +262,19 @@ export type Eigen = {
 }
 
 /**
- * Solve (A − λI) v = b in complex arithmetic by Gaussian elimination with partial pivoting; a zero pivot is replaced
- * by a tiny one, which is what inverse iteration wants (the solution then points along the eigenvector).
+ * Solve $(\Amat - \lambda\Imat)\vvec = \bvec$ in complex arithmetic by Gaussian elimination with partial pivoting; a
+ * zero pivot is replaced by a tiny one, which is what inverse iteration wants (the solution then points along the
+ * eigenvector).
+ *
+ * @param a The real matrix $\Amat$ as a row-major array of $n^2$ values; read, not modified.
+ * @param n The number of rows (and columns) of $\Amat$.
+ * @param lr The real part of the shift $\lambda$.
+ * @param li The imaginary part of the shift $\lambda$.
+ * @param br The real parts of the right-hand side $\bvec$, $n$ values; read, not modified.
+ * @param bi The imaginary parts of the right-hand side $\bvec$, $n$ values; read, not modified.
+ * @param tiny The pivot threshold: a pivot whose modulus is below it has its real part replaced by this value, so the
+ *   elimination never divides by zero.
+ * @returns `xr` and `xi`, the real and imaginary parts of the solution $\vvec$, as new arrays of $n$ values each.
  */
 function shiftedSolve(a: Float64Array, n: number, lr: number, li: number, br: number[], bi: number[], tiny: number) {
   const mr = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => a[i * n + j] - (i === j ? lr : 0)))
@@ -286,7 +321,14 @@ function shiftedSolve(a: Float64Array, n: number, lr: number, li: number, br: nu
   return { xr, xi }
 }
 
-/** Normalise a complex vector to unit 2-norm with its largest component real and positive. */
+/**
+ * Normalise a complex vector to unit 2-norm with its largest component real and positive.
+ *
+ * @param xr The real parts of the vector's components. Modified in place; left as it is when the vector is zero or not
+ *   finite.
+ * @param xi The imaginary parts of the vector's components, the same length as `xr`. Modified in place: imaginary
+ *   parts smaller than $10^{-15}$ in magnitude after the normalisation are set to exactly 0.
+ */
 function normalise(xr: number[], xi: number[]): void {
   let big = 0
   let k = 0
@@ -310,14 +352,31 @@ function normalise(xr: number[], xi: number[]): void {
 }
 
 /**
- * The eigenvalues (and, unless `vectors: false`, eigenvectors) of a real n×n matrix A: A v = λ v. Eigenvalues come
- * from balancing, Hessenberg reduction and the Francis double-shift QR algorithm; each eigenvector from three steps of
- * inverse iteration with the shift λ perturbed by 1e-10‖A‖ so the shifted system is not exactly singular.
+ * The eigenvalues (and, unless `vectors: false`, eigenvectors) of a real $n \times n$ matrix $\Amat$:
+ * $\Amat\vvec = \lambda\vvec$. Eigenvalues come from balancing, Hessenberg reduction and the Francis double-shift QR
+ * algorithm; each eigenvector from three steps of inverse iteration with the shift $\lambda$ perturbed by
+ * $10^{-10} \lVert \Amat \rVert$ so the shifted system is not exactly singular.
  * Sorted by real part, then imaginary part, both descending (so the most unstable mode comes first). Not
- * differentiable: eigenvalues and eigenvectors of a general matrix may be complex, and aifn has no rule for them; traced
- * input throws `NotDifferentiableError` (use `eigh` for a symmetric matrix).
+ * differentiable: eigenvalues and eigenvectors of a general matrix may be complex, and aifn has no rule for them;
+ * traced input throws `NotDifferentiableError` (use `eigh` for a symmetric matrix).
  *
- * @example realPart(eig([[0, 1], [-2, -3]]).values) // [-1, -2]
+ * @param a The real square matrix $\Amat$ ($n \times n$), as a tensor or nested arrays; it need not be symmetric. Every
+ *   entry must be finite. Read, not modified.
+ * @param options What to compute beyond the eigenvalues.
+ * @param options.vectors Whether to compute the eigenvectors (default true). With false the inverse iteration is
+ *   skipped and `vectors` in the result is an $n \times n$ matrix of zeros.
+ * @returns The eigenvalues `values` (complex128, $n$ of them, sorted), the eigenvectors `vectors` as the columns of a
+ *   complex128 $n \times n$ matrix in the same order, and `converged`, false when the QR iteration gave up.
+ *
+ * @example Complex eigenvalues of a rotation
+ * // A quarter turn has eigenvalues ±i, so the values come back as complex numbers.
+ * const { values, converged } = eig(tensor([[0, -1], [1, 0]]))
+ * print('values =', values)
+ * print('converged =', converged)
+ *
+ * @example A non-symmetric matrix with real eigenvalues
+ * const { values } = eig(tensor([[2, 1], [0, 3]]), { vectors: false })
+ * print('values =', values)
  */
 export function eig(a: MatrixLike, { vectors = true }: { vectors?: boolean } = {}): Eigen {
   if (isTraced(a as unknown)) {

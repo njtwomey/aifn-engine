@@ -1,6 +1,6 @@
 /**
- * The matrix exponential e^A by Padé approximation with scaling and squaring (Higham, 2005), as used for linear
- * systems x′ = Ax (x(t) = e^{At} x₀) and the discretisation of continuous-time models.
+ * The matrix exponential $e^{\Amat}$ by Padé approximation with scaling and squaring (Higham, 2005), as used for linear
+ * systems $\xvec' = \Amat\xvec$ ($\xvec(t) = e^{\Amat t} \xvec_0$) and the discretisation of continuous-time models.
  */
 
 import {
@@ -49,11 +49,30 @@ const THETA: [number, number][] = [
 ]
 const THETA13 = 5.371920351148152
 
+/**
+ * `out += alpha * x`, in place, on flat arrays.
+ *
+ * @param out The array that is added to; modified in place.
+ * @param alpha The scalar that multiplies each entry of `x` before it is added.
+ * @param x The array to add, at least as long as `out`; read, not modified.
+ */
 const addScaled = (out: F64, alpha: number, x: F64) => {
   for (let i = 0; i < out.length; i++) out[i] += alpha * x[i]
 }
 
-/** U and V of the [m/m] Padé approximant r_m(A) = (V − U)⁻¹(V + U), from the even powers A², A⁴, … . */
+/**
+ * $\Umat$ and $\Vmat$ of the $[m/m]$ Padé approximant $r_m(\Amat) = (\Vmat - \Umat)^{-1}(\Vmat + \Umat)$, from the even
+ * powers $\Amat^2, \Amat^4, \dots$.
+ *
+ * @param A The (already scaled) matrix $\Amat$ as a row-major array of $n^2$ values; read, not modified.
+ * @param n The number of rows (and columns) of $\Amat$.
+ * @param m The Padé degree: 3, 5, 7, 9 or 13 (the degrees with coefficients in `PADE`).
+ * @param powers The even powers of $\Amat$, each a row-major array of $n^2$ values: entry $k - 1$ holds
+ *   $\Amat^{2k}$. Degrees below 13 read the powers up to $\Amat^{m-1}$; degree 13 reads $\Amat^2$, $\Amat^4$ and
+ *   $\Amat^6$ only. Not modified.
+ * @returns `U`, the odd part of the approximant's numerator (the terms with odd powers of $\Amat$), and `V`, the even
+ *   part, each as a new row-major array of $n^2$ values.
+ */
 function padeUV(A: F64, n: number, m: number, powers: F64[]): { U: F64; V: F64 } {
   const b = PADE[m]
   const I = identity(n)
@@ -91,17 +110,24 @@ function padeUV(A: F64, n: number, m: number, powers: F64[]): { U: F64; V: F64 }
   return { U: matMul(A, u, n, n, n), V }
 }
 
-/** The result of `expm`: e^A and how it was computed. */
+/** The result of `expm`: $e^{\Amat}$ and how it was computed. */
 export type MatrixExponential<T = Matrix> = {
-  /** e^A (n×n). */
+  /** $e^{\Amat}$ ($n \times n$). */
   value: T
   /** The Padé degree used (3, 5, 7, 9 or 13; NaN inside `vmap`, where it is per example). */
   degree: number
-  /** The number of squarings s: e^A = (r_m(A/2^s))^{2^s} (NaN inside `vmap`). */
+  /** The number of squarings $s$: $e^{\Amat} = (r_m(\Amat/2^s))^{2^s}$ (NaN inside `vmap`). */
   squarings: number
 }
 
-/** e^A of a dense row-major n×n matrix by scaling and squaring. */
+/**
+ * $e^{\Amat}$ of a dense row-major $n \times n$ matrix by scaling and squaring.
+ *
+ * @param A0 The matrix $\Amat$ as a row-major array of $n^2$ values; read, not modified. A non-finite entry throws
+ *   `NumericalError` ('not-finite').
+ * @param n The number of rows (and columns) of $\Amat$; 0 gives an empty $0 \times 0$ result.
+ * @returns `value`, $e^{\Amat}$ as an $n \times n$ tensor, with the Padé `degree` used and the number of `squarings`.
+ */
 function compute(A0: F64, n: number): MatrixExponential {
   for (let i = 0; i < A0.length; i++)
     if (!Number.isFinite(A0[i])) throw new NumericalError('expm', 'expm: the matrix must be finite', 'not-finite')
@@ -124,7 +150,13 @@ function compute(A0: F64, n: number): MatrixExponential {
   return { value: finish(A, n, 13, [B2, B4, B6], s), degree: 13, squarings: s }
 }
 
-/** A raw square matrix as dense data. */
+/**
+ * A raw square matrix as dense data.
+ *
+ * @param a The matrix, as a tensor or nested arrays; a matrix that is not square throws `ShapeError`.
+ * @param where The caller's name, used in error messages.
+ * @returns `A`, the entries as a row-major array of $n^2$ values, and `n`, the number of rows (and columns).
+ */
 function squareData(a: MatrixLike, where: string): { A: F64; n: number } {
   const { data, m: rows, n } = toMatrixF64(a, where)
   if (rows !== n) throw new ShapeError(where, `${where}: expected a square matrix, got ${rows}×${n}`)
@@ -132,9 +164,16 @@ function squareData(a: MatrixLike, where: string): { A: F64; n: number } {
 }
 
 /**
- * The Fréchet derivative L(A, E) = d/dt e^{A + tE} at t = 0, as the top-right block of e^{[[A, E], [0, A]]} (Van Loan,
- * 1978, "Computing integrals involving the matrix exponential", Theorem 1; Al-Mohy and Higham, 2009, "Computing the
- * Fréchet derivative of the matrix exponential", §1). Written with the `expm` primitive, so it differentiates again.
+ * The Fréchet derivative $L(\Amat, \Emat) = \frac{d}{dt} e^{\Amat + t\Emat}$ at $t = 0$, as the top-right block of
+ * $\exp \begin{bmatrix} \Amat & \Emat \\ 0 & \Amat \end{bmatrix}$ (Van Loan, 1978, "Computing integrals involving the
+ * matrix exponential", Theorem 1; Al-Mohy and Higham, 2009, "Computing the Fréchet derivative of the matrix
+ * exponential", §1). Written with the `expm` primitive, so it differentiates again.
+ *
+ * @param a The matrix $\Amat$ ($n \times n$) at which the derivative is taken; may be traced.
+ * @param e The direction $\Emat$ ($n \times n$) in which $\Amat$ is perturbed: a tangent in forward mode, the output's
+ *   adjoint in reverse mode. May be traced.
+ * @param n The number of rows (and columns) of $\Amat$ and $\Emat$.
+ * @returns $L(\Amat, \Emat)$ as an $n \times n$ matrix, traced when an input is.
  */
 function frechet(a: Value, e: Value, n: number): Value {
   const zero = zeros([n, n])
@@ -142,11 +181,14 @@ function frechet(a: Value, e: Value, n: number): Value {
   return slice(expmOp([block], {}), [0, n], [n, 2 * n])
 }
 
-/** Parameters of the `expm` primitive: e^A already computed for this input by the wrapper. */
+/** Parameters of the `expm` primitive: $e^{\Amat}$ already computed for this input by the wrapper. */
 type Params = { readonly found?: Tensor }
 
-// Rules: the tangent is L(A, Ȧ) and, since L(A, ·)ᵀ = L(Aᵀ, ·) for real A, the adjoint is Ā = L(Aᵀ, Ȳ) (Al-Mohy and
-// Higham, 2009, §1; Najfeld and Havel, 1995).
+/**
+ * The matrix exponential primitive, with its derivative rules. The tangent is the Fréchet derivative $L(\Amat,
+ * \dot{\Amat})$ and, since $L(\Amat, \cdot)^\top = L(\Amat^\top, \cdot)$ for real $\Amat$, the adjoint is $\bar{\Amat}
+ * = L(\Amat^\top, \bar{\Ymat})$ (Al-Mohy and Higham, 2009, §1; Najfeld and Havel, 1995).
+ */
 const expmOp: Op<Params> = definePrimitive<Params>({
   id: 'numerics/linalg/expm',
   arity: 1,
@@ -164,13 +206,28 @@ const expmOp: Op<Params> = definePrimitive<Params>({
 })
 
 /**
- * The matrix exponential e^A = Σ A^k/k! of a real square matrix by the scaling and squaring method with Padé
- * approximants (Higham, 2005, Algorithm 2.3, as scipy's `expm`): pick the smallest Padé degree m whose accuracy bound
- * θ_m covers ‖A‖₁, or scale A by 2^{−s} until ‖A/2^s‖₁ ≤ θ₁₃ and use degree 13, solve (V − U) R = V + U, then square
- * R s times. Accurate to near machine precision relative to ‖e^A‖ for normal matrices. Differentiable in both modes
- * through the Fréchet derivative (Van Loan's block matrix, which costs one exponential of a 2n×2n matrix).
+ * The matrix exponential $e^{\Amat} = \sum_k \Amat^k/k!$ of a real square matrix by the scaling and squaring method
+ * with Padé approximants (Higham, 2005, Algorithm 2.3, as scipy's `expm`): pick the smallest Padé degree $m$ whose
+ * accuracy bound $\theta_m$ covers $\lVert \Amat \rVert_1$, or scale $\Amat$ by $2^{-s}$ until
+ * $\lVert \Amat/2^s \rVert_1 \le \theta_{13}$ and use degree 13, solve
+ * $(\Vmat - \Umat)\Rmat = \Vmat + \Umat$, then square $\Rmat$ $s$ times. Accurate to near machine precision relative
+ * to $\lVert e^{\Amat} \rVert$ for normal matrices. Differentiable in both modes through the Fréchet derivative (Van
+ * Loan's block matrix, which costs one exponential of a $2n \times 2n$ matrix).
  *
- * @example expm([[0, 1], [-1, 0]]).value // rotation by 1 radian: [[cos 1, sin 1], [−sin 1, cos 1]]
+ * @param a The real square matrix $\Amat$ ($n \times n$), as a tensor or nested arrays; every entry must be finite. A
+ *   traced value makes the result differentiable.
+ * @returns `value`, $e^{\Amat}$ ($n \times n$, traced when `a` is), with the Padé `degree` used and the number of
+ *   `squarings` (both NaN inside `vmap`, where they differ per example).
+ *
+ * @example The exponential of a rotation generator is a rotation
+ * // exp of [[0, −θ], [θ, 0]] is the rotation by θ; here θ = π/2.
+ * const { value } = expm(tensor([[0, -Math.PI / 2], [Math.PI / 2, 0]]))
+ * print(value)
+ *
+ * @example How the result was computed
+ * const { degree, squarings } = expm(tensor([[1, 2], [3, 4]]))
+ * print('Padé degree =', degree)
+ * print('squarings =', squarings)
  */
 export function expm(a: MatrixLike): MatrixExponential
 export function expm(a: Traced): MatrixExponential<Traced>
@@ -187,6 +244,19 @@ export function expm(a: MatrixLike | Traced): MatrixExponential<Matrix | Traced>
   return { ...r, value: expmOp([a], { found: r.value }) as Traced }
 }
 
+/**
+ * The exponential from the degree-`m` Padé approximant of the scaled matrix: solve
+ * $(\Vmat - \Umat)\Rmat = \Vmat + \Umat$, then square $\Rmat$ `squarings` times to undo the scaling.
+ *
+ * @param A The scaled matrix $\Amat/2^s$ as a row-major array of $n^2$ values; read, not modified.
+ * @param n The number of rows (and columns) of the matrix.
+ * @param m The Padé degree: 3, 5, 7, 9 or 13.
+ * @param powers The even powers of the scaled matrix that degree `m` needs, each a row-major array of $n^2$ values:
+ *   entry $k - 1$ holds the power $2k$. Not modified.
+ * @param squarings The number $s$ of times the approximant is squared, matching the scaling by $2^{-s}$ already
+ *   applied to `A` and `powers` (0 for none).
+ * @returns $e^{\Amat}$ of the unscaled matrix as an $n \times n$ tensor.
+ */
 function finish(A: F64, n: number, m: number, powers: F64[], squarings: number): Matrix {
   const { U, V } = padeUV(A, n, m, powers)
   const P = new Float64Array(n * n)

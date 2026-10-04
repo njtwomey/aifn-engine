@@ -14,13 +14,27 @@ import { eigh } from './eigh'
 type F64 = dense.F64
 
 /**
- * A linear operator: a dense n × n matrix, or a function returning A·v for a vector v (matrix-free: a sparse matrix,
- * a graph Laplacian, a Hessian–vector product). Shared by the iterative solvers (`linearConjugateGradient`,
- * `eigsh`).
+ * A linear operator: a dense $n \times n$ matrix, or a function returning $\Amat\vvec$ for a vector $\vvec$
+ * (matrix-free: a sparse matrix, a graph Laplacian, a Hessian–vector product). Shared by the iterative solvers
+ * (`linearConjugateGradient`, `eigsh`).
  */
 export type LinearOperator = MatrixLike | ((v: Vector) => VectorLike)
 
-/** A·v on working arrays for an operator of size n; `where` names the caller in errors. */
+/**
+ * $\Amat\vvec$ on working arrays for an operator of size $n$; `where` names the caller in errors.
+ *
+ * @param A The operator $\Amat$: an $n \times n$ matrix (copied once, here), or a function that returns
+ *   $\Amat\vvec$ for a vector $\vvec$ of $n$ values.
+ * @param n The size of the operator: the length of the vectors it takes and returns.
+ * @param where The name of the calling function, used as the prefix of error messages (a matrix that is not
+ *   $n \times n$, or a function that returns other than $n$ values, throws).
+ * @returns The map $\vvec \mapsto \Amat\vvec$ on flat arrays of $n$ values: it reads its argument and returns
+ *   the product as another array.
+ *
+ * @example A matrix as a function v ↦ Av
+ * const apply = operatorOf(tensor([[2, 1], [1, 2]]), 2, 'example')
+ * print(apply(Float64Array.of(1, 0)))
+ */
 export function operatorOf(A: LinearOperator, n: Size, where: string): (v: F64) => F64 {
   if (typeof A === 'function')
     return (v) => {
@@ -38,53 +52,92 @@ export type EigshWhich = 'largest' | 'smallest' | 'magnitude'
 
 /** Options for `eigsh`. */
 export type EigshOptions = {
-  /** The number of eigenpairs k (1 ≤ k < n). Default 6, as scipy. */
+  /** The number of eigenpairs $k$ ($1 \le k < n$). Default 6, as scipy. */
   k?: Size
   /** Which end of the spectrum. Default `'largest'`. */
   which?: EigshWhich
-  /** The basis size m (Lanczos vectors per cycle, k < m ≤ n). Default min(n, max(2k + 1, 20)), as scipy's ncv. */
+  /**
+   * The basis size $m$ (Lanczos vectors per cycle, $k < m \le n$). Default $\min(n, \max(2k + 1, 20))$, as scipy's
+   * ncv.
+   */
   basis?: Size
-  /** A Ritz pair (θ, x) is converged when ‖Ax − θx‖ ≤ tolerance · ‖A‖ (estimated by max |θ|). Default 1e-10. */
+  /**
+   * A Ritz pair $(\theta, \xvec)$ is converged when $\lVert \Amat\xvec - \theta\xvec \rVert$ is at most
+   * `tolerance` times $\lVert \Amat \rVert$ (estimated by $\max_i \lvert \theta_i \rvert$). Default 1e-10.
+   */
   tolerance?: Scalar
   /** Most restart cycles. Default 1000. */
   maxRestarts?: Size
-  /** The starting vector (length n), or a stream to draw it from. Default: drawn from `stream('eigsh')`. */
+  /** The starting vector (length $n$), or a stream to draw it from. Default: drawn from `stream('eigsh')`. */
   start?: VectorLike | Stream
 }
 
 /** The result of `eigsh`. */
 export type EigshResult = {
-  /** The k eigenvalues: descending for `largest`, ascending for `smallest`, by descending |λ| for `magnitude`. */
+  /**
+   * The $k$ eigenvalues: descending for `largest`, ascending for `smallest`, by descending $\lvert \lambda \rvert$
+   * for `magnitude`.
+   */
   values: Vector
-  /** The eigenvectors as columns [n, k], unit length, column j for `values[j]`. */
+  /** The eigenvectors as columns ($n \times k$), unit length, column $j$ for `values[j]`. */
   vectors: Matrix
-  /** ‖Ax − θx‖ of each pair (the Lanczos estimate). */
+  /** $\lVert \Amat\xvec - \theta\xvec \rVert$ of each pair (the Lanczos estimate). */
   residuals: Vector
-  /** True when all k pairs met the tolerance. */
+  /** True when all $k$ pairs met the tolerance. */
   converged: boolean
   /** Restart cycles used. */
   restarts: Size
-  /** Products A·v used. */
+  /** Products $\Amat\vvec$ used. */
   products: Size
 }
 
+/**
+ * Is `x` a random stream (rather than a start vector)?
+ *
+ * @param x The `start` option of `eigsh`: a vector (an array, a typed array or a tensor), a stream, or undefined.
+ * @returns True when `x` is a stream: an object with a `key` field that is neither an array nor a typed array.
+ */
 const isStream = (x: unknown): x is Stream =>
   typeof x === 'object' && x !== null && !Array.isArray(x) && !ArrayBuffer.isView(x) && 'key' in (x as object)
 
 /**
- * The k extreme eigenpairs of a symmetric operator A of size n by thick-restart Lanczos, touching A only through
- * products A·v (so A may be a function: matrix-free). Each cycle extends an orthonormal basis U = [u₁ … u_m] of a
- * Krylov space by the Lanczos recurrence A uⱼ = U T eⱼ + βⱼ uⱼ₊₁, with full reorthogonalisation (each new vector is
- * orthogonalised twice against all of U, so the basis stays orthonormal to rounding and no spurious copies of
- * converged eigenvalues appear). The eigenpairs (θᵢ, yᵢ) of the small m × m projection T = UᵀAU are Ritz pairs
- * (θᵢ, U yᵢ) with residual norm ‖A U yᵢ − θᵢ U yᵢ‖ = β_m |e_mᵀ yᵢ|. When the wanted k have not converged, the
- * method restarts thickly: it keeps the p ≈ k + (m − k)/2 best Ritz vectors and the residual direction u_{m+1}, so T
- * becomes diagonal plus one arrow row (β_m e_mᵀ yᵢ), and Lanczos continues from there. This is mathematically the
- * implicitly restarted Lanczos method that ARPACK (and scipy's `eigsh`) runs, with exact shifts.
+ * The $k$ extreme eigenpairs of a symmetric operator $\Amat$ of size $n$ by thick-restart Lanczos, touching $\Amat$
+ * only through products $\Amat\vvec$ (so $\Amat$ may be a function: matrix-free). Each cycle extends an orthonormal
+ * basis $\Umat = [\uvec_1 \dots \uvec_m]$ of a Krylov space by the Lanczos recurrence
+ * $\Amat\uvec_j = \Umat\Tmat\evec_j + \beta_j \uvec_{j+1}$, with full reorthogonalisation (each new vector is
+ * orthogonalised twice against all of $\Umat$, so the basis stays orthonormal to rounding and no spurious copies of
+ * converged eigenvalues appear). The eigenpairs $(\theta_i, \yvec_i)$ of the small $m \times m$ projection
+ * $\Tmat = \Umat^\top\Amat\Umat$ are Ritz pairs $(\theta_i, \Umat\yvec_i)$ with residual norm
+ * $\lVert \Amat\Umat\yvec_i - \theta_i \Umat\yvec_i \rVert = \beta_m \lvert \evec_m^\top \yvec_i \rvert$.
+ * When the wanted $k$ have not converged, the method restarts thickly: it keeps the $p \approx k + (m - k)/2$ best
+ * Ritz vectors and the residual direction $\uvec_{m+1}$, so $\Tmat$ becomes diagonal plus one arrow row
+ * ($\beta_m \evec_m^\top \yvec_i$), and Lanczos continues from there. This is mathematically the implicitly
+ * restarted Lanczos method that ARPACK (and scipy's `eigsh`) runs, with exact shifts.
  *
- * Cost per cycle: m − p products A·v and O(n m²) for the reorthogonalisation. For the smallest eigenvalues of a
- * Laplacian, `which: 'smallest'` converges slowly when the bottom of the spectrum is clustered; a shifted operator
- * (A − σI)⁻¹ or σI − A turns them into the largest. Throws `DomainError` for k outside [1, n).
+ * Cost per cycle: $m - p$ products $\Amat\vvec$ and $O(n m^2)$ for the reorthogonalisation. For the smallest
+ * eigenvalues of a Laplacian, `which: 'smallest'` converges slowly when the bottom of the spectrum is clustered; a
+ * shifted operator $(\Amat - \sigma\Imat)^{-1}$ or $\sigma\Imat - \Amat$ turns them into the largest. Throws
+ * `DomainError` for $k$ outside $[1, n)$.
+ *
+ * @param A The symmetric operator $\Amat$: an $n \times n$ matrix, or a function returning $\Amat\vvec$ for a
+ *   vector $\vvec$ of $n$ values. Symmetry is assumed, not checked.
+ * @param n The size of the operator (the length of the vectors it acts on); an integer of at least 2.
+ * @param options How many eigenpairs and which end of the spectrum, the basis size, the tolerance, the restart limit
+ *   and the starting vector (default: the 6 largest, or $n - 1$ of them when $n \le 6$).
+ * @returns The `values` and `vectors` (eigenvectors as columns) of the $k$ pairs, with their `residuals`, whether all
+ *   `converged`, and the `restarts` and `products` used. Pairs that did not converge are still returned.
+ *
+ * @example The largest eigenvalues of a symmetric matrix, matrix-free
+ * // The 1-D Laplacian of size 50, given only as a function v ↦ Av.
+ * const n = 50
+ * const laplacian = (v) => {
+ *   const x = toArray(v)
+ *   return x.map((xi, i) => 2 * xi - (x[i - 1] ?? 0) - (x[i + 1] ?? 0))
+ * }
+ * const { values, converged, products } = eigsh(laplacian, n, { k: 3 })
+ * print('top 3 eigenvalues =', values)
+ * print('converged =', converged)
+ * print('matrix–vector products =', products)
  */
 export function eigsh(A: LinearOperator, n: Size, options: EigshOptions = {}): EigshResult {
   const where = 'eigsh'

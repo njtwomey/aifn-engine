@@ -1,7 +1,8 @@
 /**
  * Triangular solves by forward and back substitution (Golub and Van Loan, 2013, "Matrix Computations", 4th ed.,
- * Algorithms 3.1.1–3.1.2), as a primitive with its derivative rules: for X = T⁻¹B the cotangents are
- * B̄ = T⁻ᵀX̄ and T̄ = −B̄Xᵀ restricted to T's triangle, and the tangent is Ẋ = T⁻¹(Ḃ − ṪX) (Giles, 2008, §2.2.3).
+ * Algorithms 3.1.1–3.1.2), as a primitive with its derivative rules: for $\Xmat = \Tmat^{-1}\Bmat$ the cotangents are
+ * $\bar{\Bmat} = \Tmat^{-\top}\bar{\Xmat}$ and $\bar{\Tmat} = -\bar{\Bmat}\Xmat^\top$ restricted to $\Tmat$'s
+ * triangle, and the tangent is $\dot{\Xmat} = \Tmat^{-1}(\dot{\Bmat} - \dot{\Tmat}\Xmat)$ (Giles, 2008, §2.2.3).
  */
 
 import {
@@ -26,17 +27,29 @@ import { column, float64Aval, foldColumns, kernelBatch, lowerMask, upperMask } f
 
 /** Options of `solveTriangular`. */
 export type TriangularOptions = {
-  /** T is lower triangular (default true); otherwise upper. Only that triangle of T is read. */
+  /** $\Tmat$ is lower triangular (default true); otherwise upper. Only that triangle of $\Tmat$ is read. */
   lower?: boolean
-  /** Solve Tᵀ X = B instead of T X = B (default false). */
+  /** Solve $\Tmat^\top\Xmat = \Bmat$ instead of $\Tmat\Xmat = \Bmat$ (default false). */
   transpose?: boolean
-  /** Take T's diagonal as ones without reading it (default false). */
+  /** Take $\Tmat$'s diagonal as ones without reading it (default false). */
   unitDiagonal?: boolean
 }
 
 type Params = Required<TriangularOptions>
 
-/** Solve in place on a dense n×r right-hand side. Throws on a zero diagonal. */
+/**
+ * Solve in place on a dense $n \times r$ right-hand side. Throws on a zero diagonal.
+ *
+ * @param t The triangular matrix $\Tmat$ as a row-major array of $n^2$ values. Only the triangle named by `p.lower`
+ *   is read (and not its diagonal when `p.unitDiagonal`); it is not modified.
+ * @param n The number of rows (and columns) of $\Tmat$.
+ * @param b The right-hand side $\Bmat$ as a row-major array of $n \cdot r$ values. Overwritten with the solution
+ *   $\Xmat$.
+ * @param r The number of columns of the right-hand side (1 for a vector).
+ * @param p Which system to solve: `lower` says which triangle of $\Tmat$ holds the matrix, `transpose` solves with
+ *   $\Tmat^\top$ instead of $\Tmat$, and `unitDiagonal` takes the diagonal as ones.
+ * @param where The caller's name, used in error messages.
+ */
 export function substitute(t: Float64Array, n: number, b: Float64Array, r: number, p: Params, where: string): void {
   // Tᵀ of a lower matrix is upper: solving with Tᵀ walks the other way and reads T by columns.
   const forward = p.lower !== p.transpose
@@ -55,13 +68,26 @@ export function substitute(t: Float64Array, n: number, b: Float64Array, r: numbe
   }
 }
 
-/** T's triangle as read (with its diagonal unless the diagonal is taken as ones), as a constant mask. */
+/**
+ * $\Tmat$'s triangle as read (with its diagonal unless the diagonal is taken as ones), as a constant mask.
+ *
+ * @param n The number of rows (and columns) of $\Tmat$.
+ * @param p The parameters of the solve: `lower` chooses the lower or upper triangle, and `unitDiagonal` leaves the
+ *   diagonal out of the mask (`transpose` is not used).
+ * @returns An $n \times n$ matrix with ones at the entries of $\Tmat$ that the solve reads and zeros elsewhere.
+ */
 const readMask = (n: number, p: Params) => (p.lower ? lowerMask(n, !p.unitDiagonal) : upperMask(n, !p.unitDiagonal))
 
-// op(T) X = B with op(T) = T or Tᵀ. Reverse: B̄ = op(T)⁻ᵀX̄ and T̄ = −B̄Xᵀ (or −XB̄ᵀ for Tᵀ), restricted to the triangle
-// read (Giles, 2008, §2.2.3). Forward: Ẋ = op(T)⁻¹(Ḃ − op(Ṫ)X) (Giles, 2008, §2.2.3). Linear in B, with transpose
-// B̄ = op(T)⁻ᵀX̄. Batch: an unbatched T solves every example at once, the batch folded into B's columns; a batched T
-// goes through the batched kernel (one impl call looping over the contiguous examples).
+/**
+ * The triangular solve primitive, $\operatorname{op}(\Tmat) \Xmat = \Bmat$ where $\operatorname{op}(\Tmat)$ is $\Tmat$
+ * or $\Tmat^\top$, with its derivative rules (Giles, 2008, §2.2.3). Reverse: $\bar{\Bmat} =
+ * \operatorname{op}(\Tmat)^{-\top} \bar{\Xmat}$ and $\bar{\Tmat} = -\bar{\Bmat} \Xmat^\top$ (or $-\Xmat
+ * \bar{\Bmat}^\top$ for $\Tmat^\top$), restricted to the triangle read. Forward: $\dot{\Xmat} =
+ * \operatorname{op}(\Tmat)^{-1} (\dot{\Bmat} - \operatorname{op}(\dot{\Tmat}) \Xmat)$. Linear in $\Bmat$, with
+ * transpose $\bar{\Bmat} = \operatorname{op}(\Tmat)^{-\top} \bar{\Xmat}$. Batch: an unbatched $\Tmat$ solves every
+ * example at once, the batch folded into $\Bmat$'s columns; a batched $\Tmat$ goes through the batched kernel (one impl
+ * call looping over the contiguous examples).
+ */
 const solveTriangularOp: Op<Params> = defineOp<Params>(
   'numerics/linalg/solveTriangular',
   ([t, b], p) => {
@@ -122,8 +148,29 @@ const solveTriangularOp: Op<Params> = defineOp<Params>(
 )
 
 /**
- * Solve T X = B (or Tᵀ X = B) for triangular T (n×n) and B (n or n×r), by substitution. Only T's triangle is read.
- * Throws `LinAlgError` ('singular') when a diagonal entry is exactly zero.
+ * Solve $\Tmat\Xmat = \Bmat$ (or $\Tmat^\top\Xmat = \Bmat$) for triangular $\Tmat$ ($n \times n$) and $\Bmat$ ($n$ or
+ * $n \times r$), by substitution. Only $\Tmat$'s triangle is read. Throws `LinAlgError` ('singular') when a diagonal
+ * entry is exactly zero.
+ *
+ * @param t The triangular matrix $\Tmat$ ($n \times n$). Only the triangle chosen by `lower` is read, so the other
+ *   one may hold anything. Not modified; a traced value makes the solution differentiable in it.
+ * @param b The right-hand side $\Bmat$: a vector of $n$ values, or an $n \times r$ matrix whose columns are solved
+ *   together. Not modified.
+ * @param options Which triangular system to solve (default: lower triangular, not transposed, diagonal as stored).
+ * @param options.lower When true (the default) $\Tmat$ is lower triangular and its lower triangle is read; when
+ *   false, upper.
+ * @param options.transpose When true, solve $\Tmat^\top\Xmat = \Bmat$ instead of $\Tmat\Xmat = \Bmat$ (default
+ *   false).
+ * @param options.unitDiagonal When true, take $\Tmat$'s diagonal as ones without reading it (default false).
+ * @returns The solution $\Xmat$, with the shape of `b`.
+ *
+ * @example Forward substitution with a lower-triangular matrix
+ * const L = tensor([[2, 0], [1, 3]])
+ * print(solveTriangular(L, tensor([2, 7])))
+ *
+ * @example An upper-triangular system
+ * const U = tensor([[2, 1], [0, 3]])
+ * print(solveTriangular(U, tensor([5, 6]), { lower: false }))
  */
 export function solveTriangular<T extends Value, B extends Value>(
   t: T,

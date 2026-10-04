@@ -185,12 +185,18 @@ function DocsNav({ pkg, current }: { pkg: DocPackage; current: string }) {
                   {f.examples > 0 && <span className="ml-1.5 text-[10px] text-muted-foreground">●</span>}
                 </a>
                 {at === current &&
-                  f.values.map((name) => (
+                  [
+                    ...f.key.map((name) => ({ name, key: true })),
+                    ...f.supporting.map((name) => ({ name, key: false })),
+                  ].map(({ name, key }) => (
                     <a
                       key={name}
                       href={`${hrefOf(at)}#${name}`}
                       onClick={onLink(at, name)}
-                      className="block truncate rounded-md py-0.5 font-mono text-xs text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                      className={cn(
+                        'block truncate rounded-md py-0.5 font-mono text-xs hover:bg-sidebar-accent hover:text-sidebar-foreground',
+                        key ? 'text-sidebar-foreground/80' : 'text-sidebar-foreground/45',
+                      )}
                       style={indent(depth + 2)}
                     >
                       {name}
@@ -225,14 +231,16 @@ function DocsNav({ pkg, current }: { pkg: DocPackage; current: string }) {
             <span className="font-normal normal-case tabular-nums">{n.children.length || ''}</span>
           </CollapsibleTrigger>
           <CollapsibleContent className="pb-2 pl-3">
-            <a
-              href={hrefOf(nodePath(n))}
-              onClick={onLink(nodePath(n))}
-              aria-current={nodePath(n) === current ? 'page' : undefined}
-              className={linkClass(nodePath(n) === current)}
-            >
-              {n.children.length ? 'About' : n.name}
-            </a>
+            {n.children.length === 0 && (
+              <a
+                href={hrefOf(nodePath(n))}
+                onClick={onLink(nodePath(n))}
+                aria-current={nodePath(n) === current ? 'page' : undefined}
+                className={linkClass(nodePath(n) === current)}
+              >
+                {n.name}
+              </a>
+            )}
             {n.children.map((c) => link(c, 0))}
           </CollapsibleContent>
         </Collapsible>
