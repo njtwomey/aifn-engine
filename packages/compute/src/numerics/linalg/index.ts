@@ -32,6 +32,30 @@
  *   modified; `gramSchmidt` runs it), `householderSteps` (the step `qr` itself runs), `jacobiSteps` and
  *   `gaussSeidelSteps` (with SOR; `solveStationary` runs them) and `powerIterationSteps` (and inverse iteration).
  * - Closed forms on 2×2 tuples: `det2`, `apply2`, `inv2`, `eigh2`, `eig2`, `cholesky2`, `svd2`.
+ *
+ * @example Solve a linear system
+ * const A = tensor([[4, 1], [1, 3]])
+ * const b = tensor([1, 2])
+ * solve(A, b)
+ *
+ * @example Eigenvalues and eigenvectors of a symmetric matrix
+ * const { values, vectors } = eigh(tensor([[2, 1], [1, 2]]))
+ * print('values (descending) =', values)
+ * print('vectors (as columns) =', vectors)
+ *
+ * @example A singular system throws instead of returning NaN
+ * const singular = tensor([[1, 2], [2, 4]])
+ * try {
+ *   solve(singular, tensor([1, 1]))
+ * } catch (e) {
+ *   print(e.name + ':', e.message)
+ * }
+ * print('condition number =', conditionNumber(singular))
+ *
+ * @example Differentiate through a solve
+ * // d/db of sum(A⁻¹ b) is the column sums of A⁻¹.
+ * const A = tensor([[4, 1], [1, 3]])
+ * grad((b) => sum(solve(A, b)))(tensor([1, 2]))
  */
 
 export { LinAlgError } from './dense'

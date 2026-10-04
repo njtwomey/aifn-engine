@@ -461,7 +461,7 @@ function select(all: readonly string[]): Target[] {
 type Viewport = { width: number; height: number; mobile: boolean; suffix: string }
 
 // The app being shot: the examples gallery.
-const APP = { dir: path.join(REPO, 'examples'), start: '/', nav: 'Recipes', out: '.scratch/shots' }
+const APP = { dir: path.join(REPO, 'examples'), start: '/render', nav: 'Recipes', out: '.scratch/shots' }
 const OUT = path.join(REPO, APP.out)
 const THUMBS = path.join(APP.dir, 'public/thumbs')
 
@@ -776,7 +776,7 @@ async function run() {
     await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier })
     // The registry, as the shell lists it: every recipe under src/recipes.
     const all = await cdp.eval<string[]>(
-      `[...document.querySelectorAll('nav[aria-label="${APP.nav}"] a[href]')].map((a) => decodeURIComponent(a.getAttribute('href').slice(1)))`,
+      `[...document.querySelectorAll('nav[aria-label="${APP.nav}"] a[href]')].map((a) => decodeURIComponent(a.getAttribute('href').slice(1)).replace(/^render[/]?/, ''))`,
     )
     return all
   }
@@ -810,14 +810,14 @@ async function run() {
         rmSync(dir, { recursive: true, force: true })
         mkdirSync(dir, { recursive: true })
         log = []
-        const url = `${base}/${target.path}`
+        const url = `${base}/render/${target.path}`
         await cdp.eval(`(async () => {
           const key = ${JSON.stringify(target.path)}
-          history.pushState(null, '', '/' + key)
+          history.pushState(null, '', '/render/' + key)
           dispatchEvent(new PopStateEvent('popstate'))
           const current = () => document.querySelector('nav[aria-label="${APP.nav}"] a[aria-current="page"]')?.getAttribute('href')
           const t0 = performance.now()
-          while (decodeURIComponent((current() ?? '').slice(1)) !== key && performance.now() - t0 < 10000)
+          while (decodeURIComponent((current() ?? '').slice(1)).replace(/^render[/]?/, '') !== key && performance.now() - t0 < 10000)
             await new Promise((r) => setTimeout(r, 20))
           document.querySelector('main')?.scrollTo({ top: 0, behavior: 'instant' })
         })()`)

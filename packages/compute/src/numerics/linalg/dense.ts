@@ -26,6 +26,23 @@ export { EPS }
  * non-finite input. Factorisations report such conditions in their results instead (`singular`, `failed`), so a caller
  * that must not throw can factor first and check. A `NumericalError` (from `aifn-compute/foundation/tensor`), so a catch of either works;
  * shape mismatches raise `ShapeError` and refused derivatives `NotDifferentiableError`.
+ *
+ * @example Catch it and read why
+ * try {
+ *   solve(tensor([[1, 2], [2, 4]]), tensor([1, 1]))
+ * } catch (e) {
+ *   print(e.name, 'of kind', e.kind)
+ *   print(e.message)
+ *   print('a LinAlgError:', e instanceof LinAlgError)
+ *   print('a NumericalError:', e instanceof NumericalError)
+ * }
+ *
+ * @example Factor first to test without throwing
+ * const f = luFactor(tensor([[1, 2], [2, 4]]))
+ * print('singular =', f.singular)
+ * const g = luFactor(tensor([[4, 1], [1, 3]]))
+ * print('singular =', g.singular)
+ * print('x =', luSolve(g, tensor([1, 2])))
  */
 export class LinAlgError extends NumericalError {
   constructor(message: string, kind: NumericalKind) {

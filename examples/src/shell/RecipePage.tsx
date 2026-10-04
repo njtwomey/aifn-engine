@@ -16,14 +16,14 @@ export function RecipePage({ entry }: { entry: Entry }) {
     <FigurePage scope={entry.path} key={entry.path}>
       <header className="space-y-1.5">
         <a
-          href={`${hrefOf('')}#${section.id}`}
-          onClick={onLink('')}
+          href={`${hrefOf('render')}#${section.id}`}
+          onClick={onLink('render')}
           className="text-xs font-medium tracking-wide text-muted-foreground uppercase hover:text-foreground"
         >
           {section.title}
         </a>
         <h1 className="text-xl font-semibold tracking-tight">{entry.question}</h1>
-        <Prose text={entry.explain} className="max-w-prose text-sm text-muted-foreground" />
+        <Prose text={entry.explain} className="text-base text-muted-foreground" />
       </header>
       <Example />
       <CodeBlock code={entry.snippet} title={entry.file} />

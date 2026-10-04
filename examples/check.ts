@@ -67,6 +67,10 @@ const server = await createServer({
 })
 let failures = 0
 let total = 0
+let examples = 0
+let exampleFailures = 0
+let functions = 0
+let covered = 0
 try {
   const { Providers } = await server.ssrLoadModule('aifn-render')
   const { Gallery } = await server.ssrLoadModule('/src/shell/Gallery.tsx')
@@ -87,7 +91,51 @@ try {
       console.error(`FAIL  ${name}: ${(e as Error).message.split('\n')[0]}`)
     }
   }
-  render('gallery', () => createElement(Gallery as ComponentType))
+  const { Home } = await server.ssrLoadModule('/src/shell/Home.tsx')
+  const { PackagePage, NodePage, FilePage } = await server.ssrLoadModule('/src/docs/DocsPages.tsx')
+  const { TREE } = await server.ssrLoadModule('/src/docs/data.ts')
+  render('home', () => createElement(Home as ComponentType))
+  render('render', () => createElement(Gallery as ComponentType))
+  type Node = { pkg: string; path: string; children: Node[]; files: { name: string }[] }
+  const nodes: Node[] = []
+  const walk = (list: Node[]) => list.forEach((n) => (nodes.push(n), walk(n.children)))
+  for (const pkg of ['compute', 'methods']) {
+    render(pkg, () => createElement(PackagePage, { pkg }))
+    walk(TREE[pkg])
+  }
+  for (const node of nodes) render(`${node.pkg}/${node.path}`, () => createElement(NodePage, { node }))
+  for (const node of nodes)
+    for (const file of node.files)
+      render(`${node.pkg}/${node.path}/${file.name}`, () => createElement(FilePage, { node, file }))
+
+  // Every documentation example runs, in the scope the page gives it.
+  const { default: content } = await server.ssrLoadModule('virtual:aifn-docs/content')
+  const { scopeOf, runExample } = await server.ssrLoadModule('/src/docs/run.ts')
+  type Example = { title: string; code: string }
+  type Content = { examples: Example[]; exports: { name: string; kind: string; examples: Example[] }[] }
+  for (const node of nodes) {
+    const c = (content as Record<string, Content>)[`${node.pkg}/${node.path}`]
+    // Coverage: the functions (and classes) with at least one runnable example of their own.
+    const callable = c.exports.filter((x) => x.kind === 'function' || x.kind === 'class')
+    functions += callable.length
+    covered += callable.filter((x) => x.examples.some((e) => e.title !== '')).length
+    // Titled examples are runnable cells; untitled ones are illustrative fragments, shown as plain code.
+    const all = [
+      ...c.examples.map((e) => ({ at: e.title || 'example', e })),
+      ...c.exports.flatMap((x) => x.examples.map((e) => ({ at: x.name, e }))),
+    ].filter(({ e }) => e.title !== '')
+    if (!all.length) continue
+    const scope = await scopeOf(node.pkg, node.path)
+    for (const { at, e } of all) {
+      examples++
+      const r = runExample(e.code, scope)
+      if (!r.ok) {
+        exampleFailures++
+        console.error(`FAIL  ${node.pkg}/${node.path} · ${at}: ${r.error}`)
+      } else if (process.argv.includes('--show'))
+        console.log(`ok    ${node.pkg}/${node.path} · ${at}\n${[...r.output, r.value].join('\n')}\n`)
+    }
+  }
   for (const entry of ENTRIES as { path: string; snippet: string }[]) {
     render(entry.path, () => createElement(RecipePage, { entry }))
     const lines = entry.snippet.split('\n').length
@@ -97,5 +145,8 @@ try {
 } finally {
   await server.close()
 }
-console.log(`${total} pages · ${failures} failed · ${importErrors} import boundary violations`)
-if (failures || importErrors) process.exit(1)
+console.log(
+  `${total} pages · ${failures} failed · ${examples} examples · ${exampleFailures} failed · ${importErrors} import boundary violations`,
+)
+console.log(`example coverage (report only): ${covered} of ${functions} functions have a runnable example`)
+if (failures || exampleFailures || importErrors) process.exit(1)

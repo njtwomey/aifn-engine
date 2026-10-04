@@ -2,13 +2,14 @@ import path from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+import { aifnDocs } from './plugins/docs.ts'
 
 const src = path.join(import.meta.dirname, 'src')
 const renderSrc = path.join(import.meta.dirname, '..', 'packages', 'render', 'src')
 
 /**
- * aifn-render examples: a tutorial reference for the rendering system. It depends on aifn-render (and aifn where a
- * render feature takes an aifn object) and third-party packages only.
+ * The AIFN Engine site: the front page, the generated pages of aifn-compute and aifn-methods (`plugins/docs.ts`) and
+ * the aifn-render gallery.
  */
 export default defineConfig({
   root: import.meta.dirname,
@@ -17,6 +18,7 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    aifnDocs(),
     // aifn registers each primitive once at import and a second registration throws, so an edit to package source
     // reloads the page instead of hot-updating the module. Only source files count: the gallery
     // thumbnails in public/ are regenerated screenshots, and must not reload an open page on every write.

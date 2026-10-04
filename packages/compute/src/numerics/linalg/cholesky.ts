@@ -1,11 +1,12 @@
 /**
- * Cholesky factorisation A = LLᵀ with jitter reporting, and the solves and log-determinant built on it.
+ * Cholesky factorisation $\Amat = \Lmat\Lmat^\top$ with jitter reporting, and the solves and log-determinant built on
+ * it.
  *
  * The factorisation is the column-by-column (Cholesky–Crout) algorithm of Golub and Van Loan (2013), Algorithm 4.2.2.
- * When a pivot is not positive, the smallest jitter j = s·10ᵏ (s the mean diagonal) that lets A + jI factor is
- * added and reported, in the manner of GPy's `jitchol` (Rasmussen and Williams, 2006, §A.4, recommend adding a small
- * multiple of I for numerical stability). The derivative rule is Murray (2016), "Differentiation of the Cholesky
- * decomposition", arXiv:1602.07527: eq. 10 (reverse) and §3.1 (forward).
+ * When a pivot is not positive, the smallest jitter $j = s \cdot 10^k$ ($s$ the mean diagonal) that lets $\Amat +
+ * j\Imat$ factor is added and reported, in the manner of GPy's `jitchol` (Rasmussen and Williams, 2006, §A.4, recommend
+ * adding a small multiple of I for numerical stability). The derivative rule is Murray (2016), "Differentiation of the
+ * Cholesky decomposition", arXiv:1602.07527: eq. 10 (reverse) and §3.1 (forward).
  */
 
 import {
@@ -174,14 +175,32 @@ const choleskyOp: Op<Params> = defineOp<Params>(
 )
 
 /**
- * Cholesky factor of a symmetric positive-definite matrix A (n×n; only its lower triangle is read): lower-triangular L
- * with LLᵀ = A + jitter·I. The matrix is factored once per jitter tried, and the factor the search ends on is the
- * result. Failure is reported, never hidden: `jitter` says what was added, and `failed` that nothing allowed worked
- * (L is then partial but NaN-free, and differentiating it throws `NumericalError` 'not-positive-definite'). A
- * non-finite entry throws `LinAlgError`. Differentiable in both modes (Murray, 2016). Inside `vmap` each example is
- * factored with its own jitter search, which is not reported (`jitter` is NaN), and a failed example throws.
+ * Cholesky factor of a symmetric positive-definite matrix $\Amat$ ($n \times n$; only its lower triangle is read):
+ * lower-triangular $\Lmat$ with $\Lmat\Lmat^\top = \Amat + \text{jitter} \cdot \Imat$. The matrix is factored once per
+ * jitter tried, and the factor the search ends on is the result. Failure is reported, never hidden: `jitter` says what
+ * was added, and `failed` that nothing allowed worked (L is then partial but NaN-free, and differentiating it throws
+ * `NumericalError` 'not-positive-definite'). A non-finite entry throws `LinAlgError`. Differentiable in both modes
+ * (Murray, 2016). Inside `vmap` each example is factored with its own jitter search, which is not reported (`jitter` is
+ * NaN), and a failed example throws.
  *
- * @example const { L, jitter } = cholesky(K) // jitter > 0 means K was not numerically positive definite
+ * @example Factor a positive-definite matrix
+ * const A = tensor([[4, 1], [1, 3]])
+ * const { L, jitter } = cholesky(A)
+ * print('L =', L)
+ * print('L Lᵀ =', matmul(L, transpose(L)))
+ * print('jitter =', jitter)
+ *
+ * @example Failure is reported, not hidden
+ * // Eigenvalues 3 and −1: not positive definite, and with no jitter allowed the factorisation stops at column 1.
+ * const { failed, failedAt } = cholesky(tensor([[1, 2], [2, 1]]), { jitter: false })
+ * print('failed =', failed)
+ * print('failed at column', failedAt)
+ *
+ * @example Jitter rescues a matrix that is only just singular
+ * // A kernel matrix of two identical points: jitter > 0 says it was not numerically positive definite.
+ * const { jitter, failed } = cholesky(tensor([[1, 1], [1, 1]]))
+ * print('jitter =', jitter)
+ * print('failed =', failed)
  */
 export function cholesky<X extends Value>(a: X, options: CholeskyOptions = {}): Cholesky<TensorResult<X>> {
   const { jitter = 'auto', maxRelativeJitter = 1e-2 } = options
@@ -197,13 +216,42 @@ export function cholesky<X extends Value>(a: X, options: CholeskyOptions = {}): 
   return { L, jitter: chosen, failed, failedAt }
 }
 
-/** Solve A X = B given A's Cholesky factor L (n×n) and B (n or n×r), by two triangular solves (differentiable). */
+/**
+ * Solve $\Amat\Xmat = \Bmat$ given $\Amat$'s Cholesky factor $\Lmat$ ($n \times n$) and $\Bmat$ ($n$ or $n \times r$),
+ * by two triangular solves (differentiable).
+ *
+ * @example Factor once, then solve for several right-hand sides
+ * const { L } = cholesky(tensor([[4, 1], [1, 3]]))
+ * print('x1 =', choleskySolve(L, tensor([1, 2])))
+ * print('x2 =', choleskySolve(L, tensor([0, 1])))
+ *
+ * @example A matrix of right-hand sides solves every column at once
+ * const A = tensor([[4, 1], [1, 3]])
+ * const { L } = cholesky(A)
+ * const X = choleskySolve(L, tensor([[1, 0], [0, 1]]))
+ * print('A⁻¹ =', X)
+ * print('A A⁻¹ =', matmul(A, X))
+ */
 export function choleskySolve<L extends Value, B extends Value>(L: L, b: B): TensorResult<L | B> {
   const y = solveTriangular(L, b)
   return solveTriangular(L, y, { transpose: true }) as TensorResult<L | B>
 }
 
-/** log det A = 2 Σ log Lᵢᵢ from A's Cholesky factor L. */
+/**
+ * $\log\det \Amat = 2 \sum_i \log L_{ii}$ from $\Amat$'s Cholesky factor $\Lmat$.
+ *
+ * @example The log-determinant from the factor
+ * const A = tensor([[4, 1], [1, 3]])
+ * const { L } = cholesky(A)
+ * print('log det A =', choleskyLogDet(L))
+ * print('log(det A) =', Math.log(det(A)))
+ *
+ * @example It stays finite where the determinant overflows
+ * // 400 on the diagonal of a 150×150 matrix: det A = 400¹⁵⁰ is beyond float64, its logarithm is not.
+ * const big = mul(eye(150), 400)
+ * print('det A =', det(big))
+ * print('log det A =', choleskyLogDet(cholesky(big).L))
+ */
 export function choleskyLogDet<L extends Value>(L: L): NumberResult<L> {
   return mul(2, sum(log(diagonal(L)))) as NumberResult<L>
 }

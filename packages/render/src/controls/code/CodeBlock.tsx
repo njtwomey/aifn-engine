@@ -8,7 +8,7 @@
  *
  *   <CodeBlock code={source} />
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { tsxLanguage } from '@codemirror/lang-javascript'
 import { highlightCode, tagHighlighter, tags as t } from '@lezer/highlight'
@@ -21,6 +21,11 @@ export type CodeBlockProps = {
   title?: string
   /** Line numbers in the gutter (default false). */
   lineNumbers?: boolean
+  /**
+   * Draws a token in place of its text (in the token's colour), e.g. a type name as a link to its definition; return
+   * undefined to keep the text. The copied code is unchanged.
+   */
+  renderToken?: (text: string) => ReactNode | undefined
   className?: string
 }
 
@@ -55,7 +60,7 @@ function highlight(code: string): Token[][] {
   return lines
 }
 
-export function CodeBlock({ code, title, lineNumbers = false, className }: CodeBlockProps) {
+export function CodeBlock({ code, title, lineNumbers = false, renderToken, className }: CodeBlockProps) {
   const lines = useMemo(() => highlight(code), [code])
   const [copied, setCopied] = useState(false)
   const copy = () => {
@@ -96,10 +101,10 @@ export function CodeBlock({ code, title, lineNumbers = false, className }: CodeB
                   : line.map((tok, j) =>
                       tok.cls ? (
                         <span key={j} className={tok.cls}>
-                          {tok.text}
+                          {renderToken?.(tok.text) ?? tok.text}
                         </span>
                       ) : (
-                        tok.text
+                        (renderToken?.(tok.text) ?? tok.text)
                       ),
                     )}
               </span>

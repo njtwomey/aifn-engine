@@ -15,7 +15,7 @@ export type Entry = Recipe & {
   section: SectionId
   /** The file name without its order prefix, e.g. `line-chart`. */
   slug: string
-  /** The URL path without the leading slash: `<section>/<slug>`. */
+  /** The URL path without the leading slash: `render/<section>/<slug>`. */
   path: string
   /** The file, relative to the app, e.g. `src/recipes/lines/01-line-chart.tsx`. */
   file: string
@@ -35,7 +35,7 @@ export const ENTRIES: readonly Entry[] = Object.entries(modules)
       ...mod.recipe,
       section: section as SectionId,
       slug,
-      path: `${section}/${slug}`,
+      path: `render/${section}/${slug}`,
       file: `src/recipes/${section}/${name}.tsx`,
       Example: mod.default,
       snippet: snippetOf(sources[key] ?? ''),
