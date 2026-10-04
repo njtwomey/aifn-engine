@@ -165,7 +165,7 @@ fn(
   {
     key: 'lpllpGraph',
     name: 'LP-LLP graph',
-    tex: 'W_{ij} = e^{-\\gamma\\lVert x_i - x_j\\rVert^2},\; S = D^{-1}W,\; P = (1-\\alpha)(I - \\alpha S)^{-1}',
+    tex: 'W_{ij} = e^{-\\gamma\\lVert x_i - x_j\\rVert^2},\\; S = D^{-1}W,\\; P = (1-\\alpha)(I - \\alpha S)^{-1}',
     summary: 'The affinities, the random-walk matrix and the propagation matrix LP-LLP uses.',
     role: 'construction',
     notes: LLP,
@@ -347,7 +347,7 @@ fn(
   {
     key: 'localLogistic',
     name: 'Local likelihood logistic regression',
-    tex: '\\hat r(x) = \\sigma(\\hat\\beta_0),\; \\hat\\beta = \\arg\\max_\\beta \\textstyle\\sum_i K_h(x - x_i)\\, \\ell(y_i, \\langle \\beta, A_p(x_i - x) \\rangle)',
+    tex: '\\hat r(x) = \\sigma(\\hat\\beta_0),\\; \\hat\\beta = \\arg\\max_\\beta \\textstyle\\sum_i K_h(x - x_i)\\, \\ell(y_i, \\langle \\beta, A_p(x_i - x) \\rangle)',
     summary:
       'A kernel-weighted logistic fit of a local polynomial in x_i − x, with the sandwich variance of its log-odds.',
     role: 'fit',

@@ -42,7 +42,11 @@ const parent = new Map([[start, -1]])
 const frames: number[][] = []
 for (const queue = [start]; queue.length > 0 && !parent.has(goal);) {
   const c = queue.shift()!
-  for (const n of neighbours(c)) if (!parent.has(n)) (parent.set(n, c), queue.push(n))
+  for (const n of neighbours(c))
+    if (!parent.has(n)) {
+      parent.set(n, c)
+      queue.push(n)
+    }
   frames.push(Array.from({ length: W * H }, (_, s) => (queue.includes(s) ? 1 : parent.has(s) ? 0 : -1)))
 }
 const last = [...frames[frames.length - 1]]

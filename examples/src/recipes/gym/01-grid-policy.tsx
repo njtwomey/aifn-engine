@@ -43,7 +43,10 @@ dist[goal] = 0
 for (const queue = [goal]; queue.length > 0;) {
   const c = queue.shift()!
   for (const m of MOVES)
-    if (next(c, m) >= 0 && dist[next(c, m)] === Infinity) (queue.push(next(c, m)), (dist[next(c, m)] = dist[c] + 1))
+    if (next(c, m) >= 0 && dist[next(c, m)] === Infinity) {
+      queue.push(next(c, m))
+      dist[next(c, m)] = dist[c] + 1
+    }
 }
 const policy = dist.map((d, c) => (d > 0 && d < Infinity ? MOVES.findIndex((m) => dist[next(c, m)] === d - 1) : -1))
 const path = [MAZE.cells.indexOf('start')]

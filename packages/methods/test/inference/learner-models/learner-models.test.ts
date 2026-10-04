@@ -162,7 +162,11 @@ describe('recovery on simulated learners', () => {
       ;(d.structural[k] ? s : o).push(r)
     })
     // AUROC by counting pairs.
-    for (const a of s) for (const c of o) (pairs++, (hit += a > c ? 1 : a === c ? 0.5 : 0))
+    for (const a of s)
+      for (const c of o) {
+        pairs++
+        hit += a > c ? 1 : a === c ? 0.5 : 0
+      }
     expect(hit / pairs).toBeGreaterThan(0.85)
   })
 })

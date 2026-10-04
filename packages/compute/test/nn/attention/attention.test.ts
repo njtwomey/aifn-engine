@@ -321,7 +321,7 @@ describe('positions', () => {
     expect(bias.shape).toEqual([2, 3, 3])
     // Query 2, key 0: relative −2, bucket 2; query 0, key 2: relative +2, bucket 16 + 2.
     expect(flat(bias)[2 * 3 + 0]).toBe(2)
-    expect(flat(bias)[0 * 3 + 2]).toBe(18)
+    expect(flat(bias)[2]).toBe(18)
     const g = unwrap(grad((t: Value) => sum(t5RelativeBias(t, [0, 1, 2], [0, 1, 2])))(table) as Value) as Tensor
     expect(flat(g).reduce((a, b) => a + b, 0)).toBe(18)
   })

@@ -147,7 +147,11 @@ function sampleUnseen(s: Stream, seen: ReadonlySet<number>, items: Size): number
 function allPairs(users: readonly number[], items: Size) {
   const u: number[] = []
   const i: number[] = []
-  for (const v of users) for (let j = 0; j < items; j++) (u.push(v), i.push(j))
+  for (const v of users)
+    for (let j = 0; j < items; j++) {
+      u.push(v)
+      i.push(j)
+    }
   return { u, i }
 }
 
@@ -476,7 +480,10 @@ export function neuralRecommender(
           const onehot = new Float64Array(B * L * items)
           let real = 0
           t.forEach((j, r) => {
-            if (j !== pad) ((onehot[r * items + j] = 1), real++)
+            if (j !== pad) {
+              onehot[r * items + j] = 1
+              real++
+            }
           })
           const ce = softmaxCrossEntropy(logits, fromData(onehot, [B * L, items]), { reduction: 'sum' })
           return add(mul(1 / rowsOf(real), ce), mul(lambda, l2(p.item)))

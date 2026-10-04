@@ -50,7 +50,9 @@ describe('classConditionalNoise', () => {
     const flipped = toFlat(d.flipped)
     let a = 0
     let b = 0
-    for (let i = 0; i < 20000; i++) clean[i] === 1 ? (a += flipped[i]) : (b += flipped[i])
+    for (let i = 0; i < 20000; i++)
+      if (clean[i] === 1) a += flipped[i]
+      else b += flipped[i]
     expect(a / 10000).toBeCloseTo(0.05, 1)
     expect(b / 10000).toBeCloseTo(0.2, 1)
   })

@@ -1,5 +1,5 @@
 import { ChevronRight, Search, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Button, Input, ThemeToggle, cn } from 'aifn-render'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from 'aifn-render/ui/collapsible'
 import { SECTIONS } from '@examples/recipe'
@@ -14,9 +14,12 @@ export function Sidebar({ current, onClose }: { current: string; onClose: () => 
   const [query, setQuery] = useState('')
   const currentSection = ENTRIES.find((e) => e.path === current)?.section ?? null
   const [open, setOpen] = useState<string | null>(currentSection)
-  useEffect(() => {
+  // Navigation opens the page's section: state adjusted during render when the section changes, not in an effect.
+  const [seen, setSeen] = useState(currentSection)
+  if (seen !== currentSection) {
+    setSeen(currentSection)
     if (currentSection) setOpen(currentSection)
-  }, [currentSection])
+  }
   const q = query.trim().toLowerCase()
   const shown = useMemo(
     () => ENTRIES.filter((e) => !q || `${e.title} ${e.question} ${e.section}`.toLowerCase().includes(q)),

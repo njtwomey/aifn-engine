@@ -155,8 +155,13 @@ describe('proportions, complementary labels and multiple instances', () => {
     let no = 0
     bags.forEach((b, i) => {
       if (lab[b] !== 1) return
-      if (inst[i] === 1) ((w += r.attention[i]), nw++)
-      else ((o += r.attention[i]), no++)
+      if (inst[i] === 1) {
+        w += r.attention[i]
+        nw++
+      } else {
+        o += r.attention[i]
+        no++
+      }
     })
     expect(w / nw).toBeGreaterThan(2 * (o / no))
   })

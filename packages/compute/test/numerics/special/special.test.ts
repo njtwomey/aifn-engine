@@ -852,14 +852,14 @@ describe('special: log tails and inverses of the incomplete gamma function', () 
 describe('special: review regressions (relative accuracy near 0, underflowing inverses)', () => {
   // References from mpmath at 50 digits.
   it('logErfc keeps its relative accuracy near 0 (was log(1 − erf x), 5e-5 relative error at 1e-12)', () => {
-    expect(Math.abs(S.logErfc(1e-12) / -1.1283791670961492e-12 - 1)).toBeLessThan(1e-13)
+    expect(Math.abs(S.logErfc(1e-12) / -1.1283791670961491e-12 - 1)).toBeLessThan(1e-13)
     // log erfc(−x) = log(1 + erf x) = 2x/√π − (2x/√π)²/2 + …
     expect(Math.abs(S.logErfc(-1e-12) / 1.128379167094876e-12 - 1)).toBeLessThan(1e-13)
   })
 
   it('logBesselI0 keeps its relative accuracy near 0 (was x + log of the scaled value, 1e-6 relative at 1e-5)', () => {
     expect(Math.abs(S.logBesselI0(1e-5) / 2.499999999984375e-11 - 1)).toBeLessThan(1e-13)
-    expect(Math.abs(S.logBesselI0(0.5) / 0.061549719185481304 - 1)).toBeLessThan(1e-13)
+    expect(Math.abs(S.logBesselI0(0.5) / 0.06154971918548131 - 1)).toBeLessThan(1e-13)
   })
 
   it('normalLogIntervalProbability is accurate on a narrow interval about 0 (was 1.5e-9 relative)', () => {

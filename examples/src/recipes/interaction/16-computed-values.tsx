@@ -16,7 +16,10 @@ function orbit([q, p]: Vec2) {
   for (let i = 0; i < 200_000; i++) {
     p -= 0.0005 * Math.sin(q)
     q += 0.0005 * p
-    if (i % 200 === 0) (xs.push(q), ys.push(p))
+    if (i % 200 === 0) {
+      xs.push(q)
+      ys.push(p)
+    }
   }
   return { xs, ys }
 }

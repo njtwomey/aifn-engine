@@ -47,7 +47,10 @@ function setup(x: MatrixLike, options: OneClassOptions, where: string) {
   if (gamma === undefined) {
     let s = 0
     let s2 = 0
-    for (const v of m.data) ((s += v), (s2 += v * v))
+    for (const v of m.data) {
+      s += v
+      s2 += v * v
+    }
     const variance = s2 / m.data.length - (s / m.data.length) ** 2
     gamma = 1 / (m.n * (variance > 0 ? variance : 1))
   }
@@ -116,8 +119,13 @@ function polish(Q: Float64Array, c: Float64Array, alpha: Float64Array, n: Size, 
     let changed = false
     // A free weight outside the box goes to the bound it crossed.
     free.forEach((i) => {
-      if (out[i] < 0) ((fixed[i] = 0), (changed = true))
-      else if (out[i] > C) ((fixed[i] = C), (changed = true))
+      if (out[i] < 0) {
+        fixed[i] = 0
+        changed = true
+      } else if (out[i] > C) {
+        fixed[i] = C
+        changed = true
+      }
     })
     if (changed) continue
     // A bound weight whose gradient says it should move inward is freed.
