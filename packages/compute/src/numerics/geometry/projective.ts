@@ -1,10 +1,10 @@
 /**
  * Projective geometry of one and two views (Hartley & Zisserman, 2004, "Multiple View Geometry in Computer Vision",
- * 2nd ed.): pinhole cameras P = K[R | t], the plane-to-plane homography by the normalised direct linear transform
+ * 2nd ed.): pinhole cameras $\mathbf{P} = \mathbf{K}[\mathbf{R} \mid \mathbf{t}]$, the plane-to-plane homography by the normalised direct linear transform
  * (§4.4), the fundamental matrix by the normalised eight-point algorithm (Hartley, 1997, "In defense of the eight-point
  * algorithm", IEEE TPAMI 19(6)), epipolar lines, the Sampson distance, and linear triangulation (§12.2).
  *
- * Image points are rows (x, y) of an n × 2 matrix; scene points rows (X, Y, Z) of an n × 3 matrix.
+ * Image points are rows $(x, y)$ of an $n \times 2$ matrix; scene points rows $(X, Y, Z)$ of an $n \times 3$ matrix.
  */
 
 import { dense, fromData, type Matrix, type Vector } from 'aifn-compute/foundation/tensor'
@@ -14,6 +14,14 @@ import { svd } from 'aifn-compute/numerics/linalg'
 
 type F64 = dense.F64
 
+/**
+ * Extract and validate 2D or 3D point data from a matrix-like container.
+ *
+ * @param x - Input coordinate matrix.
+ * @param d - Expected dimensionality ($2$ or $3$).
+ * @param where - Calling function name for errors.
+ * @returns Flat coordinate buffer and number of points $n$.
+ */
 function points(x: MatrixLike, d: number, where: string): { p: F64; n: number } {
   const m = dense.toMatrixF64(x, where)
   if (m.n !== d) throw new ShapeError(where, `${where}: points need ${d} columns, got ${m.n}`)
@@ -21,8 +29,13 @@ function points(x: MatrixLike, d: number, where: string): { p: F64; n: number } 
 }
 
 /**
- * The unit vector minimising ‖Av‖ for A (m × k): the right singular vector of the smallest singular value (A is padded
- * with zero rows to at least k rows, so a wide system still yields all k right singular vectors).
+ * The unit vector minimising $\|\mathbf{A}\mathbf{v}\|$ for $\mathbf{A}$ ($m \times k$): the right singular vector of the smallest singular value ($\mathbf{A}$ is padded
+ * with zero rows to at least $k$ rows, so a wide system still yields all $k$ right singular vectors).
+ *
+ * @param A - Flat matrix buffer of size $m \times k$.
+ * @param m - Number of rows.
+ * @param k - Number of columns.
+ * @returns Unit right singular vector of length $k$.
  */
 function nullVector(A: F64, m: number, k: number): F64 {
   const rows = Math.max(m, k)
@@ -33,9 +46,23 @@ function nullVector(A: F64, m: number, k: number): F64 {
 }
 
 /**
- * Hartley's normalisation of 2-D points: the similarity T that moves their centroid to the origin and scales their
- * root-mean-square distance from it to √2 (as scikit-image; Hartley, 1997, scales the mean distance, which is nearly the
- * same). Returns the normalised points and T (3 × 3).
+ * Hartley's normalisation of 2-D points: the similarity $\mathbf{T}$ that moves their centroid to the origin and scales their
+ * root-mean-square distance from it to $\sqrt{2}$ (as scikit-image; Hartley, 1997, scales the mean distance, which is nearly the
+ * same). Returns the normalised points and $\mathbf{T}$ ($3 \times 3$).
+ *
+ * @param x - Input 2D coordinates as an $n \times 2$ matrix.
+ * @returns Object containing normalised points and the $3 \times 3$ transformation matrix $\mathbf{T}$.
+ *
+ * @example Hartley point normalisation
+ * const pts = [
+ *   [10, 20],
+ *   [12, 22],
+ *   [8, 18],
+ *   [14, 24],
+ * ]
+ * const { points, T } = normalisePoints(pts)
+ * print('Normalised points:\n' + points)
+ * print('Transform T:\n' + T)
  */
 export function normalisePoints(x: MatrixLike): { points: Matrix; T: Matrix } {
   const { p, n } = points(x, 2, 'normalisePoints')
@@ -53,6 +80,12 @@ export function normalisePoints(x: MatrixLike): { points: Matrix; T: Matrix } {
   return { points: fromData(out, [n, 2]), T: fromData(Float64Array.of(s, 0, -s * cx, 0, s, -s * cy, 0, 0, 1), [3, 3]) }
 }
 
+/**
+ * Invert a $3 \times 3$ matrix stored in a flat array.
+ *
+ * @param m - 9-element flat array representing a $3 \times 3$ matrix.
+ * @returns Inverted $3 \times 3$ matrix as a 9-element array.
+ */
 const inv3 = (m: F64): F64 => {
   const [a, b, c, d, e, f, g, h, i] = m
   const A = e * i - f * h
@@ -72,13 +105,41 @@ const inv3 = (m: F64): F64 => {
     (a * e - b * d) / det,
   )
 }
+
+/**
+ * Multiply two $3 \times 3$ matrices stored in flat arrays.
+ *
+ * @param a - First $3 \times 3$ matrix.
+ * @param b - Second $3 \times 3$ matrix.
+ * @returns Product matrix $\mathbf{A}\mathbf{B}$.
+ */
 const mul3 = (a: F64, b: F64): F64 => dense.matMul(a, b, 3, 3, 3)
 
 /**
- * The homography H (3 × 3, H[2][2] = 1) with x′ ∝ Hx from n ≥ 4 correspondences, by the normalised direct linear
+ * The homography $\mathbf{H}$ ($3 \times 3$, $\mathbf{H}_{33} = 1$) with $\mathbf{x}' \propto \mathbf{H}\mathbf{x}$ from $n \ge 4$ correspondences, by the normalised direct linear
  * transform (Hartley & Zisserman, 2004, Alg. 4.2): normalise both point sets, stack the two equations
- * x′ × Hx = 0 contributes per correspondence into A (2n × 9), take the null vector of A (the smallest singular vector),
- * and undo the normalisations, H = T′⁻¹ H̃ T. With exactly four points in general position the fit is exact.
+ * $\mathbf{x}' \times \mathbf{H}\mathbf{x} = \mathbf{0}$ contributed per correspondence into $\mathbf{A}$ ($2n \times 9$), take the null vector of $\mathbf{A}$ (the smallest singular vector),
+ * and undo the normalisations, $\mathbf{H} = \mathbf{T}'^{-1} \mathbf{\tilde{H}} \mathbf{T}$. With exactly four points in general position the fit is exact.
+ *
+ * @param src - Source 2D points as an $n \times 2$ matrix.
+ * @param dst - Destination 2D points as an $n \times 2$ matrix.
+ * @returns The estimated $3 \times 3$ homography matrix.
+ *
+ * @example Estimate homography between planar points
+ * const src = [
+ *   [0, 0],
+ *   [1, 0],
+ *   [1, 1],
+ *   [0, 1],
+ * ]
+ * const dst = [
+ *   [1, 1],
+ *   [3, 1],
+ *   [2.5, 3],
+ *   [0.5, 2.5],
+ * ]
+ * const H = homography(src, dst)
+ * print('Homography matrix:\n' + H)
  */
 export function homography(src: MatrixLike, dst: MatrixLike): Matrix {
   const a = normalisePoints(src)
@@ -104,7 +165,26 @@ export function homography(src: MatrixLike, dst: MatrixLike): Matrix {
   )
 }
 
-/** Points mapped by a homography: x′ = Hx in homogeneous coordinates, returned dehomogenised (n × 2). */
+/**
+ * Points mapped by a homography: $\mathbf{x}' = \mathbf{H}\mathbf{x}$ in homogeneous coordinates, returned dehomogenised ($n \times 2$).
+ *
+ * @param H - $3 \times 3$ homography matrix.
+ * @param x - Input 2D points as an $n \times 2$ matrix.
+ * @returns Transformed 2D points as an $n \times 2$ matrix.
+ *
+ * @example Apply homography to 2D coordinates
+ * const H = [
+ *   [2, 0, 1],
+ *   [0, 2, 3],
+ *   [0, 0, 1],
+ * ]
+ * const pts = [
+ *   [0, 0],
+ *   [1, 1],
+ * ]
+ * const mapped = applyHomography(H, pts)
+ * print('Mapped points:\n' + mapped)
+ */
 export function applyHomography(H: MatrixLike, x: MatrixLike): Matrix {
   const h = dense.toMatrixF64(H, 'applyHomography H', 3, 3).data
   const { p, n } = points(x, 2, 'applyHomography')
@@ -118,7 +198,25 @@ export function applyHomography(H: MatrixLike, x: MatrixLike): Matrix {
   return fromData(out, [n, 2])
 }
 
-/** The transfer error ‖x′ − Hx‖ of each correspondence (pixels), n values. */
+/**
+ * The transfer error $\|\mathbf{x}' - \mathbf{H}\mathbf{x}\|$ of each correspondence (pixels), $n$ values.
+ *
+ * @param H - $3 \times 3$ homography matrix.
+ * @param src - Source 2D points as an $n \times 2$ matrix.
+ * @param dst - Target 2D points as an $n \times 2$ matrix.
+ * @returns Vector of Euclidean transfer errors for each correspondence.
+ *
+ * @example Compute transfer error of homography
+ * const pts = [
+ *   [0, 0],
+ *   [1, 0],
+ *   [1, 1],
+ *   [0, 1],
+ * ]
+ * const H = homography(pts, pts)
+ * const err = transferError(H, pts, pts)
+ * print('Errors:', err)
+ */
 export function transferError(H: MatrixLike, src: MatrixLike, dst: MatrixLike): Vector {
   const m = dense.data(applyHomography(H, src))
   const { p, n } = points(dst, 2, 'transferError')
@@ -129,9 +227,25 @@ export function transferError(H: MatrixLike, src: MatrixLike, dst: MatrixLike): 
 }
 
 /**
- * The fundamental matrix F (3 × 3, rank 2, ‖F‖_F = 1) with x₂ᵀFx₁ = 0, from n ≥ 8 correspondences by the normalised
+ * The fundamental matrix $\mathbf{F}$ ($3 \times 3$, rank 2, $\|\mathbf{F}\|_F = 1$) with $\mathbf{x}_2^\top \mathbf{F}\mathbf{x}_1 = 0$, from $n \ge 8$ correspondences by the normalised
  * eight-point algorithm (Hartley, 1997): normalise each image's points, solve the linear system for the null vector,
- * enforce rank 2 by zeroing the smallest singular value, and denormalise, F = T₂ᵀ F̃ T₁.
+ * enforce rank 2 by zeroing the smallest singular value, and denormalise, $\mathbf{F} = \mathbf{T}_2^\top \mathbf{\tilde{F}} \mathbf{T}_1$.
+ *
+ * @param x1 - Points in first image as an $n \times 2$ matrix ($n \ge 8$).
+ * @param x2 - Corresponding points in second image as an $n \times 2$ matrix.
+ * @returns Estimated $3 \times 3$ rank-2 fundamental matrix.
+ *
+ * @example Fundamental matrix estimation
+ * const x1 = [
+ *   [0, 0], [10, 0], [10, 10], [0, 10],
+ *   [5, 5], [2, 8], [8, 2], [7, 3],
+ * ]
+ * const x2 = [
+ *   [1, 2], [11, 2], [11, 12], [1, 12],
+ *   [6, 7], [3, 10], [9, 4], [8, 5],
+ * ]
+ * const F = fundamentalMatrix(x1, x2)
+ * print('Fundamental matrix:\n' + F)
  */
 export function fundamentalMatrix(x1: MatrixLike, x2: MatrixLike): Matrix {
   const a = normalisePoints(x1)
@@ -171,8 +285,24 @@ export function fundamentalMatrix(x1: MatrixLike, x2: MatrixLike): Matrix {
 }
 
 /**
- * Epipolar lines (a, b, c) with ax + by + c = 0, scaled so a² + b² = 1: in image 2 for points of image 1 (l₂ = Fx₁),
- * or in image 1 for points of image 2 (`image: 1`, l₁ = Fᵀx₂). n × 3.
+ * Epipolar lines $(a, b, c)$ with $ax + by + c = 0$, scaled so $a^2 + b^2 = 1$: in image 2 for points of image 1 ($\mathbf{l}_2 = \mathbf{F}\mathbf{x}_1$),
+ * or in image 1 for points of image 2 (`image: 1`, $\mathbf{l}_1 = \mathbf{F}^\top \mathbf{x}_2$). $n \times 3$.
+ *
+ * @param F - $3 \times 3$ fundamental matrix.
+ * @param x - Input 2D points as an $n \times 2$ matrix.
+ * @param options - Configuration options.
+ * @param options.image - Target image for lines ($1$ or $2$, default $2$).
+ * @returns Epipolar line coefficients as an $n \times 3$ matrix.
+ *
+ * @example Epipolar lines
+ * const F = [
+ *   [0, 0, 0],
+ *   [0, 0, -1],
+ *   [0, 1, 0],
+ * ]
+ * const pts = [[10, 20]]
+ * const lines = epipolarLines(F, pts)
+ * print('Epipolar line:', lines)
  */
 export function epipolarLines(F: MatrixLike, x: MatrixLike, { image = 2 }: { image?: 1 | 2 } = {}): Matrix {
   const f = dense.toMatrixF64(F, 'epipolarLines F', 3, 3).data
@@ -192,8 +322,24 @@ export function epipolarLines(F: MatrixLike, x: MatrixLike, { image = 2 }: { ima
 }
 
 /**
- * The Sampson distance of each correspondence to F, the first-order geometric error
- * (x₂ᵀFx₁)² / ((Fx₁)₁² + (Fx₁)₂² + (Fᵀx₂)₁² + (Fᵀx₂)₂²) (Hartley & Zisserman, 2004, §11.4.3), in squared pixels.
+ * The Sampson distance of each correspondence to $\mathbf{F}$, the first-order geometric error
+ * $(\mathbf{x}_2^\top \mathbf{F}\mathbf{x}_1)^2 / ((\mathbf{F}\mathbf{x}_1)_1^2 + (\mathbf{F}\mathbf{x}_1)_2^2 + (\mathbf{F}^\top \mathbf{x}_2)_1^2 + (\mathbf{F}^\top \mathbf{x}_2)_2^2)$ (Hartley & Zisserman, 2004, §11.4.3), in squared pixels.
+ *
+ * @param F - $3 \times 3$ fundamental matrix.
+ * @param x1 - Points in first view as an $n \times 2$ matrix.
+ * @param x2 - Corresponding points in second view as an $n \times 2$ matrix.
+ * @returns Vector of Sampson distances (squared geometric error) for each correspondence.
+ *
+ * @example Sampson distance for correspondences
+ * const F = [
+ *   [0, 0, 0],
+ *   [0, 0, -1],
+ *   [0, 1, 0],
+ * ]
+ * const x1 = [[10, 20]]
+ * const x2 = [[10, 20]]
+ * const d = sampsonDistance(F, x1, x2)
+ * print('Sampson distance:', d)
  */
 export function sampsonDistance(F: MatrixLike, x1: MatrixLike, x2: MatrixLike): Vector {
   const f = dense.toMatrixF64(F, 'sampsonDistance F', 3, 3).data
@@ -212,7 +358,29 @@ export function sampsonDistance(F: MatrixLike, x1: MatrixLike, x2: MatrixLike): 
   return fromData(out, [a.n])
 }
 
-/** The pinhole camera matrix P = K[R | t] (3 × 4) from intrinsics K (3 × 3), rotation R and translation t. */
+/**
+ * The pinhole camera matrix $\mathbf{P} = \mathbf{K}[\mathbf{R} \mid \mathbf{t}]$ ($3 \times 4$) from intrinsics $\mathbf{K}$ ($3 \times 3$), rotation $\mathbf{R}$ and translation $\mathbf{t}$.
+ *
+ * @param K - $3 \times 3$ camera intrinsics calibration matrix.
+ * @param R - $3 \times 3$ camera rotation matrix.
+ * @param t - 3-element translation vector.
+ * @returns $3 \times 4$ projection camera matrix $\mathbf{P}$.
+ *
+ * @example Compose pinhole camera matrix
+ * const K = [
+ *   [1000, 0, 320],
+ *   [0, 1000, 240],
+ *   [0, 0, 1],
+ * ]
+ * const R = [
+ *   [1, 0, 0],
+ *   [0, 1, 0],
+ *   [0, 0, 1],
+ * ]
+ * const t = [0, 0, 10]
+ * const P = cameraMatrix(K, R, t)
+ * print('Camera matrix shape:', P.shape)
+ */
 export function cameraMatrix(K: MatrixLike, R: MatrixLike, t: ArrayLike<number>): Matrix {
   const k = dense.toMatrixF64(K, 'cameraMatrix K', 3, 3).data
   const r = dense.toMatrixF64(R, 'cameraMatrix R', 3, 3).data
@@ -224,7 +392,24 @@ export function cameraMatrix(K: MatrixLike, R: MatrixLike, t: ArrayLike<number>)
   return fromData(dense.matMul(k, Rt, 3, 3, 4), [3, 4])
 }
 
-/** Scene points (n × 3) projected by a camera P (3 × 4) to image points (n × 2); also their depths w. */
+/**
+ * Scene points ($n \times 3$) projected by a camera $\mathbf{P}$ ($3 \times 4$) to image points ($n \times 2$); also their depths $w$.
+ *
+ * @param P - $3 \times 4$ camera projection matrix.
+ * @param X - 3D scene coordinates as an $n \times 3$ matrix.
+ * @returns Object with projected 2D coordinates `points` ($n \times 2$) and projective `depth` vector ($n$).
+ *
+ * @example Project 3D points to 2D
+ * const P = [
+ *   [100, 0, 50, 0],
+ *   [0, 100, 50, 0],
+ *   [0, 0, 1, 0],
+ * ]
+ * const X = [[0, 0, 5]]
+ * const { points, depth } = projectPoints(P, X)
+ * print('Projected:', points)
+ * print('Depth:', depth)
+ */
 export function projectPoints(P: MatrixLike, X: MatrixLike): { points: Matrix; depth: Vector } {
   const p = dense.toMatrixF64(P, 'projectPoints P', 3, 4).data
   const { p: x, n } = points(X, 3, 'projectPoints')
@@ -241,8 +426,30 @@ export function projectPoints(P: MatrixLike, X: MatrixLike): { points: Matrix; d
 }
 
 /**
- * Linear triangulation (Hartley & Zisserman, 2004, §12.2): for each correspondence the scene point X with x₁ × P₁X = 0
- * and x₂ × P₂X = 0, the null vector of the 4 × 4 system, dehomogenised. Exact for noiseless data. n × 3.
+ * Linear triangulation (Hartley & Zisserman, 2004, §12.2): for each correspondence the scene point $\mathbf{X}$ with $\mathbf{x}_1 \times \mathbf{P}_1 \mathbf{X} = \mathbf{0}$
+ * and $\mathbf{x}_2 \times \mathbf{P}_2 \mathbf{X} = \mathbf{0}$, the null vector of the $4 \times 4$ system, dehomogenised. Exact for noiseless data. $n \times 3$.
+ *
+ * @param P1 - $3 \times 4$ camera matrix for the first view.
+ * @param P2 - $3 \times 4$ camera matrix for the second view.
+ * @param x1 - Points in first view as an $n \times 2$ matrix.
+ * @param x2 - Points in second view as an $n \times 2$ matrix.
+ * @returns Triangulated 3D points as an $n \times 3$ matrix.
+ *
+ * @example Linear triangulation of stereo points
+ * const P1 = [
+ *   [100, 0, 0, 0],
+ *   [0, 100, 0, 0],
+ *   [0, 0, 1, 0],
+ * ]
+ * const P2 = [
+ *   [100, 0, 0, -100],
+ *   [0, 100, 0, 0],
+ *   [0, 0, 1, 0],
+ * ]
+ * const x1 = [[0, 0]]
+ * const x2 = [[-10, 0]]
+ * const X = triangulate(P1, P2, x1, x2)
+ * print('Triangulated 3D point:\n' + X)
  */
 export function triangulate(P1: MatrixLike, P2: MatrixLike, x1: MatrixLike, x2: MatrixLike): Matrix {
   const a = dense.toMatrixF64(P1, 'triangulate P1', 3, 4).data
@@ -274,7 +481,17 @@ export function triangulate(P1: MatrixLike, P2: MatrixLike, x1: MatrixLike, x2: 
   return fromData(out, [u.n, 3])
 }
 
-/** The rotation by angle θ (radians) about a unit axis (Rodrigues' formula), 3 × 3. */
+/**
+ * The rotation by angle $\theta$ (radians) about a unit axis (Rodrigues' formula), $3 \times 3$.
+ *
+ * @param axis - 3-element rotation axis vector $[x, y, z]$.
+ * @param angle - Rotation angle $\theta$ in radians.
+ * @returns $3 \times 3$ orthogonal rotation matrix.
+ *
+ * @example Compute 3D rotation matrix
+ * const R = rotationMatrix([0, 0, 1], Math.PI / 2)
+ * print('Rotation by 90 deg around Z:\n' + R)
+ */
 export function rotationMatrix(axis: ArrayLike<number>, angle: Scalar): Matrix {
   const n = Math.hypot(axis[0], axis[1], axis[2])
   if (!(n > 0)) throw new DomainError('rotationMatrix', 'rotationMatrix: the axis must be nonzero')

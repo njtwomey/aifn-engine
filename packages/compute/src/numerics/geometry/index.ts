@@ -3,10 +3,10 @@
  * lines by marching squares, grids for evaluating fields, and the probability
  * simplex in barycentric coordinates.
  *
- * - Ellipses: `covarianceEllipse`, `precisionEllipse` (at k standard deviations or a probability mass), `massToRadius`.
+ * - Ellipses: `covarianceEllipse`, `precisionEllipse` (at $k$ standard deviations or a probability mass), `massToRadius`.
  * - Polygons: `convexHull` (Andrew's monotone chain), `polygonArea` (signed), `polygonCentroid`, `pointInPolygon`.
  * - Contours: `contourSegments`, `contourLines` (joined polylines), `contourLevels`.
- * - Grids: `meshgrid`, `grid2d`, `evaluateGrid` (z[i][j] = f(x[j], y[i])), `logspace`; `linspace` is in `aifn-compute/foundation/tensor`.
+ * - Grids: `meshgrid`, `grid2d`, `evaluateGrid` ($z_{ij} = f(x_j, y_i)$), `logspace`; `linspace` is in `aifn-compute/foundation/tensor`.
  * - Simplex: `simplexVertices`, `barycentricToCartesian`, `cartesianToBarycentric`, `simplexGrid`.
  * - Projective geometry: `normalisePoints` (Hartley), `homography` (normalised DLT), `applyHomography`,
  *   `transferError`, `fundamentalMatrix` (normalised eight-point), `epipolarLines`, `sampsonDistance`, `cameraMatrix`,

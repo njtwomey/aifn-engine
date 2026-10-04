@@ -7,17 +7,48 @@
 import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import type { MatrixLike, VectorLike } from 'aifn-compute/foundation/contracts'
 
-/** A grid of values [ny, nx] (a matrix or rows), with `z[i][j]` the value at (x[j], y[i]), checked against the axes. */
+/** A grid of values [ny, nx] (a matrix or rows), with `z[i][j]` the value at (x[j], y[i]), checked against the axes.
+ *
+ * @param z - 2D matrix-like data of function values.
+ * @param nx - Expected number of grid columns along the x-axis.
+ * @param ny - Expected number of grid rows along the y-axis.
+ * @returns Flattened 64-bit float array of shape $[ny \cdot nx]$.
+ */
 function readGrid(z: MatrixLike, nx: number, ny: number): Float64Array {
   return dense.toMatrixF64(z, 'contours', ny, nx).data
 }
 
+/**
+ * Convert a vector-like axis representation to a JavaScript array of 64-bit floats.
+ *
+ * @param v - Vector-like axis coordinates.
+ * @returns Array of numbers representing grid coordinates.
+ */
 const axis = (v: VectorLike) => Array.from(dense.toF64(v, 'contours'))
 
 /**
- * The segments where a field crosses `level`, as an s × 2 × 2 tensor (segment, end, coordinate). Each grid square whose
- * corners straddle the level contributes one segment, or two at a saddle; ends are placed by linear interpolation
- * along the square's edges. A corner exactly at the level counts as below it.
+ * Compute the line segments where a scalar field crosses `level`, represented as an $s \times 2 \times 2$ tensor
+ * (segment, endpoint, $(x, y)$ coordinate).
+ *
+ * Each grid square whose corners straddle `level` contributes one segment, or two segments in the case of a saddle;
+ * endpoints are placed by linear interpolation along the square's edges. A corner value exactly at `level` is treated
+ * as strictly below it.
+ *
+ * @param x - Grid coordinates along the horizontal axis, length $nx$.
+ * @param y - Grid coordinates along the vertical axis, length $ny$.
+ * @param z - 2D field values on the grid, shape $[ny, nx]$.
+ * @param level - Iso-contour threshold value to extract.
+ * @returns Tensor of line segments of shape $[s, 2, 2]$.
+ * @example Extracting contour segments
+ * const x = [0, 1, 2]
+ * const y = [0, 1, 2]
+ * const z = [
+ *   [0, 1, 2],
+ *   [1, 2, 3],
+ *   [2, 3, 4],
+ * ]
+ * const segs = contourSegments(x, y, z, 1.5)
+ * print('segments shape =', segs.shape)
  */
 export function contourSegments(x: VectorLike, y: VectorLike, z: MatrixLike, level: number): Tensor {
   const xs = axis(x)
@@ -93,8 +124,26 @@ export function contourSegments(x: VectorLike, y: VectorLike, z: MatrixLike, lev
 }
 
 /**
- * The contour at `level` as polylines: segments that share an end point (to within a relative 1e-9 of the grid's
- * extent) are joined. Each line is an m × 2 tensor; a closed line repeats its first point at the end.
+ * Trace the iso-contour at `level` as a sequence of connected polylines.
+ *
+ * Segments that share an endpoint (within a relative tolerance of $10^{-9}$ times the grid span) are joined into
+ * continuous paths. Each line is an $m \times 2$ tensor; a closed loop repeats its initial point at the end.
+ *
+ * @param x - Grid coordinates along the horizontal axis, length $nx$.
+ * @param y - Grid coordinates along the vertical axis, length $ny$.
+ * @param z - 2D field values on the grid, shape $[ny, nx]$.
+ * @param level - Iso-contour threshold value to trace.
+ * @returns Array of polyline tensors, each of shape $[m, 2]$.
+ * @example Tracing contour polylines
+ * const x = [0, 1, 2]
+ * const y = [0, 1, 2]
+ * const z = [
+ *   [0, 1, 2],
+ *   [1, 2, 3],
+ *   [2, 3, 4],
+ * ]
+ * const lines = contourLines(x, y, z, 1.5)
+ * print('number of lines =', lines.length)
  */
 export function contourLines(x: VectorLike, y: VectorLike, z: MatrixLike, level: number): Tensor[] {
   const segs = contourSegments(x, y, z, level).data as Float64Array
@@ -144,8 +193,20 @@ export function contourLines(x: VectorLike, y: VectorLike, z: MatrixLike, level:
 }
 
 /**
- * `count` evenly spaced levels strictly inside the range of the finite values of z (the ends are excluded, since a
- * contour at the minimum or maximum is empty or a point).
+ * Generate `count` evenly spaced iso-contour levels strictly inside the range of finite values of `z`.
+ * The minimum and maximum bounds are excluded because contours at the extrema are either empty or degenerate points.
+ *
+ * @param z - 2D matrix-like grid of scalar values.
+ * @param count - Number of interior iso-levels to generate (default 8).
+ * @returns 1D tensor of contour levels of length `count`.
+ * @example Generating contour levels
+ * const z = [
+ *   [0, 1, 2],
+ *   [1, 2, 3],
+ *   [2, 3, 4],
+ * ]
+ * const levels = contourLevels(z, 3)
+ * print('levels =', levels)
  */
 export function contourLevels(z: MatrixLike, count = 8): Tensor {
   const v = dense.toMatrixF64(z, 'contourLevels').data

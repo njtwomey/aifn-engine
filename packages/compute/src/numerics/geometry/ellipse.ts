@@ -1,7 +1,7 @@
 /**
- * Covariance and precision ellipses of 2-D Gaussians: the level set (x − μ)ᵀ Σ⁻¹ (x − μ) = k², drawn at k standard
- * deviations or at the radius that encloses a chosen probability mass (Johnson & Wichern, 2007, "Applied Multivariate
- * Statistical Analysis", 6th ed., §4.2: the contours of constant density and the χ²₂ mass they enclose).
+ * Covariance and precision ellipses of 2-D Gaussians: the level set $(\xvec - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\xvec - \boldsymbol{\mu}) = k^2$,
+ * drawn at $k$ standard deviations or at the radius that encloses a chosen probability mass
+ * (Johnson & Wichern, 2007, §4.2: the contours of constant density and the $\chi^2_2$ mass they enclose).
  */
 
 import { eigh2, type Mat2 } from 'aifn-compute/numerics/linalg'
@@ -21,32 +21,39 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** An ellipse: its outline, centre, semi-axes and orientation. */
 export interface Ellipse {
-  /** Closed outline, (points + 1) × 2 (the last point repeats the first). */
+  /** Closed outline coordinates tensor of shape $[(\text{points} + 1), 2]$ (the last point repeats the first). */
   points: Tensor
+  /** Centre point coordinates $(c_x, c_y)$. */
   center: [number, number]
-  /** Semi-axis lengths, major first. */
+  /** Semi-axis lengths $[a, b]$, major axis first. */
   radii: [number, number]
-  /** Angle of the major axis from the x-axis, radians in (−π/2, π/2]. */
+  /** Angle of the major axis from the x-axis in radians, within $(-\pi/2, \pi/2]$. */
   angle: number
-  /** The Mahalanobis radius k of the level set. */
+  /** The Mahalanobis radius $k$ of the level set. */
   k: number
-  /** Probability mass of a 2-D Gaussian inside the ellipse, 1 − exp(−k²/2). */
+  /** Probability mass of a 2-D Gaussian enclosed by the ellipse, $1 - \exp(-k^2/2)$. */
   mass: number
-  /** True when the matrix was not positive definite (a radius is then NaN or infinite). */
+  /** Whether the underlying matrix was not positive definite (leading to NaN or infinite radii). */
   degenerate: boolean
 }
 
-/** Options for the ellipse functions: the level as k (standard deviations) or as a probability mass. */
+/** Options for ellipse extraction: specifies the contour scale as $k$ (Mahalanobis radius) or probability `mass`. */
 export interface EllipseOptions {
-  /** Mahalanobis radius. Default 1 (one standard deviation) unless `mass` is given. */
+  /** Mahalanobis radius $k$. Default 1 (one standard deviation) unless `mass` is given. */
   k?: number
-  /** Probability mass enclosed, in (0, 1); sets k = √(−2 ln(1 − mass)), the χ²₂ quantile. */
+  /** Probability mass enclosed in $(0, 1)$; sets $k = \sqrt{-2 \ln(1 - \text{mass})}$, the $\chi^2_2$ quantile. */
   mass?: number
-  /** Points on the outline. Default 100. */
+  /** Number of discretization points on the outline (default 100). */
   points?: number
 }
 
-/** A 2 × 2 matrix argument as a `Mat2` tuple (checks the shape). */
+/**
+ * Parse a $2 \times 2$ matrix-like argument into a `Mat2` tuple and validate dimensions.
+ *
+ * @param m - Matrix-like data of shape $[2, 2]$.
+ * @param what - Function or context name for error messages.
+ * @returns 2x2 matrix tuple `Mat2`.
+ */
 export function readMatrix2(m: MatrixLike, what: string): Mat2 {
   const v = dense.toMatrixF64(m, what, 2, 2).data
   return [
@@ -55,7 +62,13 @@ export function readMatrix2(m: MatrixLike, what: string): Mat2 {
   ]
 }
 
-/** A 2-vector argument as a pair (checks the length). */
+/**
+ * Parse a 2-element vector-like argument into an $[x, y]$ coordinate pair and validate length.
+ *
+ * @param p - Vector-like data of length 2.
+ * @param what - Function or context name for error messages.
+ * @returns 2-element number array $[x, y]$.
+ */
 export function readPoint2(p: VectorLike, what: string): [number, number] {
   const v = dense.toF64(p, what)
   if (v.length !== 2) throw new ShapeError(what, `${what}: expected a point of length 2`)
@@ -63,8 +76,15 @@ export function readPoint2(p: VectorLike, what: string): [number, number] {
 }
 
 /**
- * The Mahalanobis radius that encloses probability `mass` of a 2-D Gaussian: √(−2 ln(1 − mass)), elementwise (the χ²₂
- * quantile, square-rooted). A number outside (0, 1) throws `DomainError`; tensor entries outside it give NaN or ∞.
+ * Compute the Mahalanobis radius that encloses a given probability `mass` for a 2-D Gaussian:
+ * $k = \sqrt{-2 \ln(1 - \text{mass})}$ (the square-rooted $\chi^2_2$ quantile).
+ * A number outside $(0, 1)$ throws `DomainError`; tensor entries outside it yield NaN or $\infty$.
+ *
+ * @param mass - Enclosed probability mass in $(0, 1)$.
+ * @returns Mahalanobis radius $k$.
+ * @example Mahalanobis radius from mass
+ * const r = massToRadius(0.95)
+ * print('95% radius =', r)
  */
 export function massToRadius(mass: Scalar): Scalar
 export function massToRadius(mass: Tensor): Tensor
@@ -76,12 +96,28 @@ export function massToRadius(mass: Value): Value {
   return sqrt(mul(-2, log1p(neg(mass))))
 }
 
+/**
+ * Determine the Mahalanobis radius $k$ from options.
+ *
+ * @param options - Ellipse configuration options.
+ * @returns Mahalanobis radius $k$.
+ */
 function level(options: EllipseOptions): number {
   if (options.mass !== undefined) return massToRadius(options.mass)
   return options.k ?? 1
 }
 
-/** Ellipse with semi-axes along the eigenvectors of a symmetric matrix with eigenvalues `axisScale(λ)`. */
+/**
+ * Construct an ellipse with semi-axes aligned with the eigenvectors of a symmetric $2 \times 2$ matrix,
+ * with semi-axis lengths scaled by `axisScale(lambda)`.
+ *
+ * @param mean - Ellipse centre coordinates $[c_x, c_y]$.
+ * @param m - Symmetric $2 \times 2$ matrix.
+ * @param axisScale - Function mapping each eigenvalue $\lambda$ to its corresponding semi-axis scale.
+ * @param options - Ellipse options controlling $k$ or mass and outline resolution.
+ * @param what - Calling function name for diagnostics.
+ * @returns Fitted `Ellipse` geometry object.
+ */
 function ellipseOf(
   mean: VectorLike,
   m: MatrixLike,
@@ -125,16 +161,44 @@ function ellipseOf(
 }
 
 /**
- * The covariance ellipse {x : (x − μ)ᵀ Σ⁻¹ (x − μ) = k²} of a 2-D Gaussian with mean μ and covariance Σ: semi-axes
- * k√λᵢ along the eigenvectors of Σ.
+ * Construct the covariance ellipse $\{\xvec : (\xvec - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\xvec - \boldsymbol{\mu}) = k^2\}$
+ * of a 2-D Gaussian distribution with mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$,
+ * having semi-axes $k \sqrt{\lambda_i}$ aligned with the eigenvectors of $\boldsymbol{\Sigma}$.
+ *
+ * @param mean - 2D mean vector $\boldsymbol{\mu} = [\mu_x, \mu_y]$.
+ * @param covariance - $2 \times 2$ covariance matrix $\boldsymbol{\Sigma}$.
+ * @param options - Ellipse scaling and resolution options.
+ * @returns Geometric `Ellipse` object.
+ * @example Covariance ellipse
+ * const mean = [0, 0]
+ * const cov = [
+ *   [2, 0.5],
+ *   [0.5, 1],
+ * ]
+ * const ell = covarianceEllipse(mean, cov, { mass: 0.95 })
+ * print('radii =', ell.radii)
  */
 export function covarianceEllipse(mean: VectorLike, covariance: MatrixLike, options: EllipseOptions = {}): Ellipse {
   return ellipseOf(mean, covariance, (l) => Math.sqrt(l), options, 'covarianceEllipse')
 }
 
 /**
- * The same level set given the precision Λ = Σ⁻¹ (e.g. a Hessian or an information matrix): semi-axes k/√λᵢ along the
- * eigenvectors of Λ.
+ * Construct the confidence ellipse from a precision matrix $\boldsymbol{\Lambda} = \boldsymbol{\Sigma}^{-1}$ (e.g. a Hessian or Fisher information matrix):
+ * $\{\xvec : (\xvec - \boldsymbol{\mu})^\top \boldsymbol{\Lambda} (\xvec - \boldsymbol{\mu}) = k^2\}$,
+ * having semi-axes $k / \sqrt{\lambda_i}$ aligned with the eigenvectors of $\boldsymbol{\Lambda}$.
+ *
+ * @param mean - 2D mean vector $\boldsymbol{\mu} = [\mu_x, \mu_y]$.
+ * @param precision - $2 \times 2$ precision matrix $\boldsymbol{\Lambda}$.
+ * @param options - Ellipse scaling and resolution options.
+ * @returns Geometric `Ellipse` object.
+ * @example Precision ellipse
+ * const mean = [0, 0]
+ * const prec = [
+ *   [2, 0],
+ *   [0, 1],
+ * ]
+ * const ell = precisionEllipse(mean, prec, { k: 2 })
+ * print('radii =', ell.radii)
  */
 export function precisionEllipse(mean: VectorLike, precision: MatrixLike, options: EllipseOptions = {}): Ellipse {
   return ellipseOf(mean, precision, (l) => 1 / Math.sqrt(l), options, 'precisionEllipse')
