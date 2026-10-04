@@ -1,6 +1,6 @@
 /**
  * `aifn-compute/numerics/roots`: roots of nonlinear equations, every iterative method a traceable `Algorithm`: bisection,
- * regula falsi, secant, Newton and Brent for scalar equations; Newton and Broyden for systems; fixed-point iteration;
+ * regula falsi, secant, Newton and Brent for scalar equations $f(x) = 0$; Newton and Broyden for systems $\mathbf{f}(\mathbf{x}) = \mathbf{0}$; fixed-point iteration;
  * continuation (Newton homotopy); the drivers `findRoot` and `solveSystem`; and `minimizeScalar`, Brent's and
  * golden-section minimisation of a function of one variable (the bracketing methods of root finding turned to minima).
  */

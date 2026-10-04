@@ -1,5 +1,5 @@
 /**
- * Polynomials with coefficients in descending powers, p(x) = c₀xⁿ + c₁xⁿ⁻¹ + … + cₙ, as numpy's `poly*` functions and
+ * Polynomials with coefficients in descending powers, $p(x) = c_0 x^n + c_1 x^{n-1} + \dots + c_n$, as NumPy's `poly*` functions and
  * `scipy.signal` read them. Real or complex (complex128) coefficients and arguments.
  *
  * - `polyval` (Horner's rule), `polyDerivative` and `polyMul` are compositions of primitives, so they accept traced
@@ -38,12 +38,28 @@ import * as cx from './scalar'
  */
 export type ComplexLike = Tensor | readonly (ComplexNumber | number)[] | VectorLike
 
-/** A `ComplexLike` as a rank-1 complex128 tensor (a copy). */
+/**
+ * Convert a `ComplexLike` input into a rank-1 complex128 tensor (a copy).
+ *
+ * @param x The complex vector input: a tensor, array of numbers, or array of complex numbers.
+ * @param where The caller name for error messages (default `'complexVector'`).
+ * @returns A rank-1 complex128 tensor.
+ *
+ * @example Convert complex number representations to a tensor
+ * const v = complexVector([{ re: 1, im: 2 }, { re: 3, im: 4 }])
+ * print('shape =', v.shape)
+ */
 export function complexVector(x: ComplexLike, where = 'complexVector'): Tensor {
   return cx.toTensor(cx.readList(x as Value | VectorLike, where).list, true)
 }
 
-/** Coefficients as a rank-1 value: tensors and traced values as given, plain arrays as float64 tensors. */
+/**
+ * Standardise coefficients as a rank-1 value: tensors and traced values as given, plain arrays as float64 tensors.
+ *
+ * @param p The polynomial coefficients as a vector, tensor, or scalar.
+ * @param where The caller name for error messages.
+ * @returns A rank-1 tensor or traced value holding the coefficients.
+ */
 function coefficientValue(p: Value | VectorLike, where: string): Value {
   const v: Value =
     isTraced(p) || isTensor(p)
@@ -58,11 +74,17 @@ function coefficientValue(p: Value | VectorLike, where: string): Value {
 // ── Values and calculus (differentiable compositions) ──────────────────────────────────────────────────────────────
 
 /**
- * p(x) by Horner's rule, elementwise in x, coefficients highest power first (numpy's `polyval`). Real coefficients
- * (a plain array) at a number give a number; a tensor x (real or complex) gives a tensor of x's shape; traced
- * coefficients or x give a traced value, differentiable in both.
+ * Evaluate polynomial $p(x)$ by Horner's rule, elementwise in $x$, coefficients highest power first (numpy's `polyval`).
+ * Real coefficients (a plain array) at a number give a number; a tensor $x$ (real or complex) gives a tensor of
+ * $x$'s shape; traced coefficients or $x$ give a traced value, differentiable in both.
  *
- * @example polyval([1, 0, -1], complex(0, 1)) // i² − 1 = −2
+ * @param p The polynomial coefficients in descending degree order, $[c_d, \dots, c_0]$ representing
+ *   $\sum_{k=0}^d c_{d-k} x^k$.
+ * @param x The evaluation point or tensor of points.
+ * @returns The evaluated polynomial value or tensor matching $x$'s shape.
+ *
+ * @example Evaluate a quadratic polynomial
+ * print('p(2) =', polyval([1, 0, -1], 2))
  */
 export function polyval(p: VectorLike, x: Scalar): Scalar
 export function polyval(p: Value | VectorLike, x: Tensor): Tensor
@@ -81,7 +103,17 @@ export function polyval(p: Value | VectorLike, x: Value): Value {
   return v
 }
 
-/** The m-th derivative of p (default m = 1), coefficients highest power first ([0] when the degree is below m). */
+/**
+ * Compute the $m$-th derivative of polynomial $p$, with coefficients in descending powers (default $m = 1$). Returns
+ * `[0]` when the polynomial degree is below $m$. Differentiable.
+ *
+ * @param p The polynomial coefficients in descending degree order.
+ * @param m The order of derivative to compute (default 1).
+ * @returns The derivative polynomial's coefficients in descending degree order.
+ *
+ * @example Differentiate a polynomial
+ * print("p'(x) =", polyDerivative([3, 2, 1]))
+ */
 export function polyDerivative(p: Value | VectorLike, m = 1): Value {
   let v = coefficientValue(p, 'polyDerivative')
   for (let j = 0; j < m; j++) {
@@ -92,7 +124,17 @@ export function polyDerivative(p: Value | VectorLike, m = 1): Value {
   return v
 }
 
-/** The product of two polynomials: the full convolution of their coefficients (the FIR `linearFilter` of a padded). */
+/**
+ * Compute the polynomial product $a(x) \cdot b(x)$ via full linear convolution of their coefficients (the FIR
+ * `linearFilter` of $a$ padded). Differentiable.
+ *
+ * @param a The first polynomial coefficients in descending degree order.
+ * @param b The second polynomial coefficients in descending degree order.
+ * @returns The product polynomial's coefficients in descending degree order.
+ *
+ * @example Multiply two polynomials
+ * print('(x + 1)(x - 1) =', polyMul([1, 1], [1, -1]))
+ */
 export function polyMul(a: Value | VectorLike, b: Value | VectorLike): Value {
   const av = coefficientValue(a, 'polyMul')
   const bv = coefficientValue(b, 'polyMul')
@@ -103,7 +145,16 @@ export function polyMul(a: Value | VectorLike, b: Value | VectorLike): Value {
 
 // ── Roots and products of linear factors ──────────────────────────────────────────────────────────────────────────────
 
-/** The companion matrix of p (first row −cₖ/c₀, ones on the subdiagonal), leading zeros stripped; real p only. */
+/**
+ * The companion matrix of polynomial $p$ (first row $-c_k/c_0$, ones on the subdiagonal), leading zeros stripped;
+ * real $p$ only.
+ *
+ * @param p The real polynomial coefficients in descending degree order.
+ * @returns An $n \times n$ matrix whose eigenvalues are the roots of $p$.
+ *
+ * @example Form the companion matrix of a polynomial
+ * print('C =', companionMatrix([1, -3, 2]))
+ */
 export function companionMatrix(p: VectorLike): Tensor {
   const { list, complex } = cx.readList(p, 'companionMatrix')
   if (complex) throw new DTypeError('companionMatrix', 'companionMatrix: real coefficients only', ['complex128'])
@@ -125,11 +176,18 @@ export type PolynomialRoots = {
 }
 
 /**
- * The roots of p (real coefficients, highest power first) and a convergence flag: the eigenvalues of the companion
+ * The roots of $p$ (real coefficients, highest power first) and a convergence flag: the eigenvalues of the companion
  * matrix, as numpy's `roots`. Leading zeros are stripped; trailing zeros give roots at 0. Sorted by real part, then
  * imaginary part, both descending (conjugate pairs adjacent). Accuracy degrades for clustered or multiple roots (a
- * double root is found to about √ε). A QR iteration that does not converge is reported in `converged`, with the
+ * double root is found to about $\sqrt{\varepsilon}$). A QR iteration that does not converge is reported in `converged`, with the
  * eigenvalues it reached, so a figure can show the failure (Wilkinson's polynomial); `roots` throws instead.
+ *
+ * @param p The real polynomial coefficients in descending degree order.
+ * @returns An object containing the complex roots as a tensor and a `converged` boolean flag.
+ *
+ * @example Find roots of a polynomial with convergence reporting
+ * const res = polynomialRoots([1, -3, 2])
+ * print('converged =', res.converged)
  */
 export function polynomialRoots(p: VectorLike): PolynomialRoots {
   const { list, complex } = cx.readList(p, 'roots')
@@ -156,8 +214,14 @@ export function polynomialRoots(p: VectorLike): PolynomialRoots {
 }
 
 /**
- * The roots of p (real coefficients, highest power first) as a complex128 vector: `polynomialRoots` without the flag.
+ * The roots of $p$ (real coefficients, highest power first) as a complex128 vector: `polynomialRoots` without the flag.
  * Throws `NumericalError('not-converged')` when the QR iteration does not converge.
+ *
+ * @param p The real polynomial coefficients in descending degree order.
+ * @returns A complex128 tensor holding the roots of the polynomial.
+ *
+ * @example Find the roots of a polynomial
+ * print('roots =', roots([1, 0, -4]))
  */
 export function roots(p: VectorLike): Tensor {
   const r = polynomialRoots(p)
@@ -166,9 +230,18 @@ export function roots(p: VectorLike): Tensor {
 }
 
 /**
- * The coefficients (highest power first, leading 1) of Π (x − rₖ), as numpy's `poly`. Real roots give float64. Complex
- * roots give complex128, unless they are closed under conjugation (to 1e-9 relative), when the imaginary parts of the
- * coefficients are rounding and float64 is returned. `{ real: true }` requires the real result and throws otherwise.
+ * The coefficients (highest power first, leading 1) of $\prod (x - r_k)$, as numpy's `poly`. Real roots give float64.
+ * Complex roots give complex128, unless they are closed under conjugation (to 1e-9 relative), when the imaginary parts
+ * of the coefficients are rounding and float64 is returned. `{ real: true }` requires the real result and throws
+ * otherwise.
+ *
+ * @param r The roots of the polynomial: a complex tensor or list of numbers/complex numbers.
+ * @param options Options controlling output representation.
+ * @param options.real Require real coefficients and throw if complex roots are not conjugate pairs (default false).
+ * @returns A rank-1 tensor holding the monic polynomial coefficients.
+ *
+ * @example Reconstruct polynomial coefficients from roots
+ * print('coeffs =', polyFromRoots([2, -2]))
  */
 export function polyFromRoots(r: ComplexLike, { real = false }: { real?: boolean } = {}): Tensor {
   const { list, complex } = cx.readList(r as Value | VectorLike, 'polyFromRoots')
@@ -186,9 +259,17 @@ export function polyFromRoots(r: ComplexLike, { real = false }: { real?: boolean
 }
 
 /**
- * Polynomial division u = q·v + r with deg r < deg v (numpy's `polydiv`; deconvolution of coefficient sequences). The
- * remainder's leading zeros (relative 1e-14) are dropped, leaving at least one coefficient. Complex when either input
- * is. Not differentiable (element by element).
+ * Polynomial division $u = q \cdot v + r$ with $\deg r < \deg v$ (numpy's `polydiv`; deconvolution of coefficient
+ * sequences). The remainder's leading zeros (relative 1e-14) are dropped, leaving at least one coefficient. Complex
+ * when either input is. Not differentiable (element by element).
+ *
+ * @param u The dividend polynomial coefficients in descending degree order.
+ * @param v The divisor polynomial coefficients in descending degree order.
+ * @returns An object containing quotient tensor `quotient` and remainder tensor `remainder`.
+ *
+ * @example Divide polynomials with remainder
+ * const { quotient, remainder } = polyDivide([1, 0, -1], [1, -1])
+ * print('quotient =', quotient)
  */
 export function polyDivide(u: ComplexLike, v: ComplexLike): { quotient: Tensor; remainder: Tensor } {
   const a = cx.readList(u as Value | VectorLike, 'polyDivide')
@@ -202,11 +283,11 @@ export function polyDivide(u: ComplexLike, v: ComplexLike): { quotient: Tensor; 
 
 /** A partial-fraction expansion. */
 export type PartialFractions = {
-  /** Residues, complex128, grouped by pole; a pole of multiplicity m has m residues, for powers 1 … m. */
+  /** Residues, complex128, grouped by pole; a pole of multiplicity $m$ has $m$ residues, for powers $1 \dots m$. */
   residues: Tensor
   /** Poles, complex128, each repeated by its multiplicity, groups ordered by modulus. */
   poles: Tensor
-  /** The direct (polynomial) term: descending powers of s for `residue`, ascending powers of z⁻¹ for `residuez`. */
+  /** The direct (polynomial) term: descending powers of $s$ for `residue`, ascending powers of $z^{-1}$ for `residuez`. */
   direct: Tensor
 }
 
@@ -214,13 +295,20 @@ export type PartialFractions = {
 export type ResidueOptions = {
   /**
    * Poles closer than this (absolute distance) are one repeated pole, replaced by their mean (scipy's `tol`, default
-   * 1e-3). Computed roots of a pole of multiplicity m scatter by about ε^{1/m} relative, so the tolerance must exceed
+   * 1e-3). Computed roots of a pole of multiplicity $m$ scatter by about $\varepsilon^{1/m}$ relative, so the tolerance must exceed
    * that scatter and stay below the gap between distinct poles.
    */
   tolerance?: number
 }
 
-/** Groups of roots within `tol` of each other (scipy's `unique_roots`, `rtype='avg'`), then sorted by modulus. */
+/**
+ * Group roots within distance `tol` of each other into repeated poles (scipy's `unique_roots`, `rtype='avg'`),
+ * ordered by modulus.
+ *
+ * @param ps The list of pole locations.
+ * @param tol The distance threshold below which roots are merged into a repeated pole.
+ * @returns An array of grouped poles with their multiplicities.
+ */
 function groupRoots(ps: readonly cx.C[], tol: number): { pole: cx.C; mult: number }[] {
   const used = ps.map(() => false)
   const groups: { pole: cx.C; mult: number }[] = []
@@ -239,8 +327,12 @@ function groupRoots(ps: readonly cx.C[], tol: number): { pole: cx.C; mult: numbe
 }
 
 /**
- * The residues of numerator/Π(x − pᵢ)^{mᵢ} over grouped poles, powers 1 … m for each pole (scipy's
- * `_compute_residues`): simple poles by the cover-up rule, repeated ones by repeated division by (x − p).
+ * Compute the residues of $\text{numerator}/\prod (x - p_i)^{m_i}$ over grouped poles, powers $1, \dots, m$ for each
+ * pole (scipy's `_compute_residues`): simple poles by the cover-up rule, repeated ones by repeated division by $(x - p)$.
+ *
+ * @param groups The grouped poles with their multiplicities.
+ * @param numerator The numerator polynomial coefficients in descending degree order.
+ * @returns The computed complex residues.
  */
 function computeResidues(groups: readonly { pole: cx.C; mult: number }[], numerator: readonly cx.C[]): cx.C[] {
   const linear = (p: cx.C) => [cx.of(1), cx.of(-p.re, -p.im)]
@@ -277,6 +369,12 @@ function computeResidues(groups: readonly { pole: cx.C; mult: number }[], numera
   return residues
 }
 
+/**
+ * Strip leading zero coefficients from a complex coefficient list.
+ *
+ * @param c The complex coefficient list in descending degree order.
+ * @returns The slice of coefficients starting from the first nonzero entry, or empty.
+ */
 const trimFront = (c: cx.C[]) => {
   let k = 0
   while (k < c.length && c[k].re === 0 && c[k].im === 0) k++
@@ -284,8 +382,19 @@ const trimFront = (c: cx.C[]) => {
 }
 
 /**
- * The partial-fraction expansion of b(s)/a(s), coefficients in descending powers (scipy.signal's `residue`):
- * b(s)/a(s) = Σᵢ Σⱼ rᵢⱼ/(s − pᵢ)ʲ + k(s). Poles within `tolerance` (default 1e-3) are merged into one repeated pole.
+ * The partial-fraction expansion of $b(s)/a(s)$, coefficients in descending powers (scipy.signal's `residue`):
+ * $b(s)/a(s) = \sum_i \sum_j r_{ij}/(s - p_i)^j + k(s)$. Poles within `tolerance` (default 1e-3) are merged into one
+ * repeated pole.
+ *
+ * @param b Numerator polynomial coefficients in descending degree order.
+ * @param a Denominator polynomial coefficients in descending degree order.
+ * @param options Options controlling pole clustering tolerance.
+ * @param options.tolerance Distance threshold below which poles are merged into a repeated pole (default 1e-3).
+ * @returns The partial-fraction expansion containing residues, poles, and direct polynomial term.
+ *
+ * @example Partial-fraction expansion of a transfer function in s
+ * const pf = residue([1], [1, 3, 2])
+ * print('poles =', pf.poles)
  */
 export function residue(b: ComplexLike, a: ComplexLike, { tolerance = 1e-3 }: ResidueOptions = {}): PartialFractions {
   const bl = cx.readList(b as Value | VectorLike, 'residue')
@@ -324,8 +433,19 @@ export function residue(b: ComplexLike, a: ComplexLike, { tolerance = 1e-3 }: Re
 }
 
 /**
- * The partial-fraction expansion of b(z)/a(z) in ascending powers of z⁻¹ (scipy.signal's `residuez`):
- * b(z)/a(z) = Σᵢ Σⱼ rᵢⱼ/(1 − pᵢz⁻¹)ʲ + Σₖ kₖ z⁻ᵏ. Poles within `tolerance` (default 1e-3) are merged.
+ * The partial-fraction expansion of $b(z)/a(z)$ in ascending powers of $z^{-1}$ (scipy.signal's `residuez`):
+ * $b(z)/a(z) = \sum_i \sum_j r_{ij}/(1 - p_i z^{-1})^j + \sum_k k_k z^{-k}$. Poles within `tolerance` (default 1e-3)
+ * are merged.
+ *
+ * @param b Numerator polynomial coefficients in descending powers of $z^{-1}$.
+ * @param a Denominator polynomial coefficients in descending powers of $z^{-1}$.
+ * @param options Options controlling pole clustering tolerance.
+ * @param options.tolerance Distance threshold below which poles are merged into a repeated pole (default 1e-3).
+ * @returns The partial-fraction expansion containing residues, poles, and direct polynomial term.
+ *
+ * @example Partial-fraction expansion of a discrete-time filter in z^-1
+ * const pf = residuez([1], [1, -0.5])
+ * print('poles =', pf.poles)
  */
 export function residuez(b: ComplexLike, a: ComplexLike, { tolerance = 1e-3 }: ResidueOptions = {}): PartialFractions {
   const bl = cx.readList(b as Value | VectorLike, 'residuez')

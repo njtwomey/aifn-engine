@@ -7,37 +7,39 @@
 
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** Options of `minimizeScalar`. */
+/** Options configuring scalar function minimisation in `minimizeScalar`. */
 export type MinimizeScalarOptions = {
   /**
-   * `brent` (default): parabolic steps with golden-section fallback, superlinear near a smooth minimum. `golden`:
-   * golden-section search only, linear convergence by the factor 0.618 per step, robust to non-smooth functions.
+   * Minimisation algorithm: `'brent'` (default) using parabolic interpolation with golden-section safeguards,
+   * or `'golden'` for pure golden-section search.
    */
   method?: 'brent' | 'golden'
   /**
-   * Two starting points (a, b): a bracket a < b < c with f(b) below f(a) and f(c) is found by expanding downhill from
-   * them, so the minimum found may lie outside [a, b]. Default (0, 1). Ignored when `bounds` is given.
+   * Two initial search points $[a, b]$ for downhill bracket expansion (default $[0, 1]$).
+   * Ignored when `bounds` is provided.
    */
   bracket?: readonly [number, number]
-  /** Search only within [lo, hi] (no expansion); the result may be an endpoint when f is monotone there. */
+  /** Constrained interval $[lo, hi]$ to search within without bracket expansion. */
   bounds?: readonly [number, number]
-  /** Relative tolerance on x: stop when the interval is within about tolerance·|x| + 1e-11 of x. Default 1.48e-8. */
+  /** Relative stopping tolerance on $x$: stops when interval width is within $\text{tolerance} \cdot |x| + 10^{-11}$. */
   tolerance?: number
-  /** Largest number of Brent or golden-section steps (after bracketing). Default 500. */
+  /** Maximum number of minimisation iterations allowed (default 500). */
   maxSteps?: number
 }
 
-/** The result of `minimizeScalar`. */
+/** Result returned by `minimizeScalar`. */
 export type MinimizeScalarResult = {
-  /** The point found and f there. */
+  /** Location of the estimated local minimum $x$. */
   x: number
+  /** Function value $f(x)$ at the estimated minimiser. */
   value: number
-  /** Brent or golden-section steps taken, and calls of f in total (bracketing included). */
+  /** Number of minimisation steps taken after initial bracketing. */
   steps: number
+  /** Total number of objective function calls performed (including bracketing). */
   evaluations: number
-  /** True when the tolerance was met within `maxSteps` (and, without `bounds`, a bracket was found). */
+  /** True when convergence tolerance was achieved within the step budget. */
   converged: boolean
-  /** False when downhill expansion found no bracket in 100 expansions (f may decrease without bound). */
+  /** False if downhill bracket expansion failed to find a local minimum bracket. */
   bracketed: boolean
 }
 
@@ -47,8 +49,15 @@ const CGOLD = 0.381966
 type Bracket = { a: number; b: number; c: number; fb: number; found: boolean }
 
 /**
- * Expand downhill from (a, b) until f(b) < f(c): golden-ratio steps with parabolic extrapolation limited to 100 times
- * the step (Press et al., 2007, `mnbrak`; as scipy's `bracket`).
+ * Expand downhill from initial points $(a_0, b_0)$ until a local minimum is bracketed.
+ *
+ * Uses golden-ratio extrapolation and parabolic steps limited to 100 times the step length
+ * (Press et al., 2007, `mnbrak`).
+ *
+ * @param f Univariate scalar objective function.
+ * @param a0 First initial point.
+ * @param b0 Second initial point defining search direction.
+ * @returns Bracket structure containing endpoints $a, b, c$ where $f(b) < \min(f(a), f(c))$.
  */
 function bracketMinimum(f: (x: number) => number, a0: number, b0: number): Bracket {
   let [a, b] = [a0, b0]
@@ -90,7 +99,18 @@ function bracketMinimum(f: (x: number) => number, a0: number, b0: number): Brack
 
 type Search = { x: number; value: number; steps: number; converged: boolean }
 
-/** Brent's method on [lo, hi] from the point x (with f(x) = fx) inside it. */
+/**
+ * Brent's 1D minimisation method combining parabolic interpolation with golden-section steps.
+ *
+ * @param f Univariate scalar objective function.
+ * @param lo Lower bracket interval endpoint.
+ * @param hi Upper bracket interval endpoint.
+ * @param x0 Initial interior evaluation point.
+ * @param fx0 Precomputed objective value $f(x_0)$.
+ * @param tol Relative convergence tolerance.
+ * @param maxSteps Maximum iteration budget.
+ * @returns Search outcome with minimiser location, objective value, and convergence flag.
+ */
 function brent(
   f: (x: number) => number,
   lo: number,
@@ -153,7 +173,16 @@ function brent(
   return { x, value: fx, steps: maxSteps, converged: false }
 }
 
-/** Golden-section search on [lo, hi]: each step keeps the part holding the lower of two interior points. */
+/**
+ * Golden-section search for finding a local minimum on $[lo, hi]$.
+ *
+ * @param f Univariate scalar objective function.
+ * @param lo Lower bracket interval endpoint.
+ * @param hi Upper bracket interval endpoint.
+ * @param tol Relative convergence tolerance.
+ * @param maxSteps Maximum iteration budget.
+ * @returns Search outcome with minimiser location, objective value, and convergence flag.
+ */
 function golden(f: (x: number) => number, lo: number, hi: number, tol: number, maxSteps: number): Search {
   const g = (Math.sqrt(5) - 1) / 2
   let c = hi - g * (hi - lo)
@@ -179,11 +208,21 @@ function golden(f: (x: number) => number, lo: number, hi: number, tol: number, m
 }
 
 /**
- * A local minimum of f: ℝ → ℝ without derivatives. With `bounds`, the search stays in [lo, hi]; otherwise a bracket is
- * first found by expanding downhill from `bracket` (default (0, 1)), as `scipy.optimize.minimize_scalar`. NaN values of
- * f compare as larger than any number, so they steer the search away.
+ * Find a local minimum of a scalar function $f: \mathbb{R} \to \mathbb{R}$ without derivatives.
  *
- * @example minimizeScalar((x) => (x - 2) ** 2).x // 2
+ * When `bounds` is supplied, searches strictly within $[lo, hi]$. Otherwise, an initial bracket
+ * is discovered by expanding downhill from `bracket` (default $[0, 1]$), matching SciPy's
+ * `scipy.optimize.minimize_scalar`. Objective evaluations returning NaN are treated as $+\infty$
+ * to steer the search towards feasible regions.
+ *
+ * @param f Univariate scalar objective function.
+ * @param options Configuration for method, bracketing, bounds, and tolerances.
+ * @returns Minimisation result with estimated minimiser, function value, and diagnostics.
+ *
+ * @example Minimize quadratic function
+ * const res = minimizeScalar(x => (x - 2) ** 2)
+ * print('minimum at =', res.x)
+ * print('value =', res.value)
  */
 export function minimizeScalar(f: (x: number) => number, options: MinimizeScalarOptions = {}): MinimizeScalarResult {
   const method = options.method ?? 'brent'

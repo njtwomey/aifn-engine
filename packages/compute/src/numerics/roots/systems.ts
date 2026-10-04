@@ -1,7 +1,7 @@
 /**
- * Systems of nonlinear equations F(x) = 0 with F: ℝⁿ → ℝⁿ: Newton's method (optionally damped by a backtracking line
- * search on ½‖F‖²), Broyden's quasi-Newton method, fixed-point iteration with convergence diagnostics, and natural-
- * parameter continuation along a homotopy.
+ * Systems of nonlinear equations $F(\xvec) = \mathbf{0}$ with $F: \mathbb{R}^n \to \mathbb{R}^n$: Newton's method
+ * (optionally damped by a backtracking line search on $\frac{1}{2}\|F\|_2^2$), Broyden's quasi-Newton method,
+ * fixed-point iteration with convergence diagnostics, and natural-parameter continuation along a homotopy.
  */
 
 import { ShapeError } from 'aifn-compute/foundation/errors'
@@ -14,47 +14,69 @@ import { flagged } from './status'
 type F64 = dense.F64
 const { allFinite, axpy, data, dot, mat, matVec, norm, scale, sub, toF64, toMatrixF64, vec } = dense
 
-/** A system with its Jacobian: F(x) (length n) and J(x) (n×n, J_ij = ∂F_i/∂x_j). */
+/** A system with its Jacobian: $F(\xvec)$ (length $n$) and $J(\xvec)$ ($n \times n$, $J_{ij} = \partial F_i / \partial x_j$). */
 export type SystemWithJacobian = (x: Vector) => { value: VectorLike; jacobian: MatrixLike }
 
-/** A system without derivatives: F(x) (length n). */
+/** A system without derivatives: $\mathbf{F}(\mathbf{x})$ of length $n$. */
 export type SystemFunction = (x: Vector) => VectorLike
 
-/** Fields every system-solver state carries: the runner's `Status` (set from `failure`) and the iterate. */
+/** Fields carried by every multidimensional root-finder state. */
 export type SystemState = Status & {
+  /** Iteration step counter ($0$ in the initial state). */
   t: Size
+  /** Current iterate vector $\xvec_t$. */
   x: Vector
-  /** F(x). */
+  /** Residual vector $F(\xvec_t)$. */
   residual: Vector
-  /** ‖F(x)‖₂. */
+  /** Euclidean norm of the residual $\|F(\xvec_t)\|_2$. */
   residualNorm: number
-  /** The step taken last, x_t − x_{t−1} (zeros at t = 0). */
+  /** Step displacement vector $\xvec_t - \xvec_{t-1}$ (zeros at $t = 0$). */
   step: Vector
+  /** Total number of system evaluations performed so far. */
   evaluations: number
+  /** True once convergence criteria are satisfied. */
   converged: boolean
-  /**
-   * Why the method cannot continue, or null: `'singular jacobian'`, `'line search failed'` (both set `terminated`),
-   * `'not finite'` or `'diverging'` (both set `diverged`).
-   */
+  /** Failure diagnosis string, or `null` if the solver is healthy. */
   failure: string | null
 }
 
-/** Stopping test for systems. */
+/** Stopping test tolerances for multidimensional systems. */
 export type SystemTolerance = {
-  /** Stop when ‖F(x)‖₂ ≤ ftol. Default 1e-12. */
+  /** Residual tolerance stopping when $\|F(\xvec)\|_2 \le \text{ftol}$ (default $10^{-12}$). */
   ftol?: number
-  /** Or when the step satisfies ‖Δx‖ ≤ xtol·(1 + ‖x‖). Default 1e-14. */
+  /** Step tolerance stopping when $\|\Delta\xvec\| \le \text{xtol} \cdot (1 + \|\xvec\|)$ (default $10^{-14}$). */
   xtol?: number
 }
 
+/**
+ * Fill omitted system-solving tolerances with default thresholds.
+ *
+ * @param o User-specified tolerance options.
+ * @returns Complete tolerances with `ftol` and `xtol`.
+ */
 const tolerances = (o: SystemTolerance) => ({ ftol: o.ftol ?? 1e-12, xtol: o.xtol ?? 1e-14 })
 
-/** Solves A p = b by LU with partial pivoting; null when A is singular. */
+/**
+ * Solve dense linear system $\mathbf{A} \mathbf{p} = \mathbf{b}$ using LU factorisation with partial pivoting.
+ *
+ * @param A Flattened $n \times n$ coefficient matrix in row-major order.
+ * @param b Right-hand side vector of length $n$.
+ * @param n Dimension of the square system.
+ * @returns Solution vector $\mathbf{p}$, or `null` if $\mathbf{A}$ is singular or $\mathbf{b}$ contains non-finite entries.
+ */
 function linearSolve(A: F64, b: F64, n: number): F64 | null {
   if (!allFinite(b)) return null
   return solveDense(A, b, n).x as F64 | null
 }
 
+/**
+ * Evaluate system residual and Jacobian at $x$, validating output dimensions.
+ *
+ * @param F Nonlinear system mapping vector $x$ to residual and Jacobian.
+ * @param x Input coordinate vector as a Float64Array.
+ * @param where Calling function name for descriptive error reporting.
+ * @returns Object containing evaluated residual Float64Array `r` and flattened Jacobian `J`.
+ */
 function evaluateSystem(F: SystemWithJacobian, x: F64, where: string) {
   const out = F(vec(x))
   const r = toF64(out.value, where)
@@ -65,21 +87,37 @@ function evaluateSystem(F: SystemWithJacobian, x: F64, where: string) {
 
 /** The state of `newtonSystem`. */
 export type NewtonSystemState = SystemState & {
-  /** J(x). */
+  /** Jacobian matrix $J(\xvec)$ at the current iterate. */
   jacobian: Matrix
-  /** The full Newton step −J⁻¹F computed on the last step. */
+  /** Full undamped Newton step direction $\pvec = -J^{-1}F$. */
   newtonStep: Vector
-  /** The fraction α of the Newton step taken (1 unless damped). */
+  /** Damping fraction $\alpha \in (0, 1]$ applied to the Newton step. */
   damping: number
-  /** The step lengths tried by the backtracking search on the last step (damped only). */
+  /** Step length fractions evaluated by backtracking line search on the last step. */
   trials: number[]
 }
 
 /**
- * Newton's method for F(x) = 0: solve J(x)p = −F(x) and set x ← x + αp. Without damping α = 1 (quadratic convergence
- * near a root with nonsingular Jacobian); with `damped`, α is halved until the merit ½‖F‖² satisfies
- * ½‖F(x + αp)‖² ≤ (1 − 2cα)·½‖F(x)‖² with c = 1e-4 (Nocedal & Wright, 2006, §11.2, Algorithm 11.4 with a backtracking
- * line search). `init` takes `{ x0 }`.
+ * Newton's method for solving multivariate systems $F(\xvec) = \mathbf{0}$ with $F: \mathbb{R}^n \to \mathbb{R}^n$.
+ *
+ * Computes the search direction by solving $J(\xvec) \pvec = -F(\xvec)$ and updates $\xvec \leftarrow \xvec + \alpha \pvec$.
+ * Without damping, $\alpha = 1$, yielding quadratic local convergence. When `damped` is enabled, $\alpha$ is
+ * backtracked until the merit function $\frac{1}{2}\|F(\xvec)\|_2^2$ achieves sufficient decrease
+ * (Nocedal & Wright, 2006, Algorithm 11.4).
+ *
+ * @param F System function returning residual vector and Jacobian matrix at $\xvec$.
+ * @param options Convergence tolerances and damping toggle.
+ * @returns A traceable `Algorithm` executing multidimensional Newton iterations.
+ *
+ * @example Solve 2D nonlinear system
+ * const F = x => ({
+ *   value: [x.data[0] + x.data[1] - 3, x.data[0] ** 2 + x.data[1] ** 2 - 5],
+ *   jacobian: [[1, 1], [2 * x.data[0], 2 * x.data[1]]],
+ * })
+ * const alg = newtonSystem(F)
+ * const state = run(alg, { x0: [2, 0] }, 20)
+ * print('converged =', state.converged)
+ * print('solution =', state.x)
  */
 export function newtonSystem(
   F: SystemWithJacobian,
@@ -151,13 +189,23 @@ export function newtonSystem(
 
 /** The state of `broyden`. */
 export type BroydenState = SystemState & {
-  /** The Jacobian approximation B (n×n), updated by rank one each step. */
+  /** Approximate Jacobian matrix $B$ updated by rank-one corrections. */
   jacobian: Matrix
-  /** The last change in F, y = F(x_t) − F(x_{t−1}). */
+  /** Change in residual vector $\yvec = F(\xvec_t) - F(\xvec_{t-1})$. */
   residualChange: Vector
 }
 
-/** Forward-difference Jacobian, column j ≈ (F(x + h e_j) − F(x)) / h with h = √ε·max(1, |x_j|). */
+/**
+ * Approximate the $n \times n$ Jacobian matrix using forward finite differences.
+ *
+ * Computes column $j$ as $(F(x + h e_j) - F(x)) / h$ with step $h = \sqrt{\varepsilon}\max(1, |x_j|)$.
+ *
+ * @param F Nonlinear vector function without analytic derivatives.
+ * @param x Current evaluation point.
+ * @param r Pre-computed residual vector $F(x)$.
+ * @param where Caller context string for error attribution.
+ * @returns Flattened $n \times n$ column-assembled Jacobian matrix.
+ */
 function finiteDifferenceJacobian(F: SystemFunction, x: F64, r: F64, where: string): F64 {
   const n = x.length
   const J = new Float64Array(n * n)
@@ -172,10 +220,24 @@ function finiteDifferenceJacobian(F: SystemFunction, x: F64, r: F64, where: stri
 }
 
 /**
- * Broyden's ("good") method (Broyden, 1965, "A class of methods for solving nonlinear simultaneous equations", Math.
- * Comp. 19): solve Bp = −F, x ← x + p, then B ← B + (y − Bs)sᵀ/(sᵀs) with s = Δx and y = ΔF, the smallest change to
- * B (in the Frobenius norm) that satisfies the secant condition Bs = y. `F` returns F(x) only; the initial B is
- * `jacobian0` or a forward-difference Jacobian (n extra evaluations). Converges superlinearly. `init` takes `{ x0 }`.
+ * Broyden's "good" quasi-Newton method for solving systems $F(\xvec) = \mathbf{0}$ without analytic Jacobians.
+ *
+ * Solves $B \pvec = -F(\xvec)$, updates $\xvec \leftarrow \xvec + \pvec$, and performs a rank-one update:
+ * $B \leftarrow B + (\yvec - B\svec)\svec^\top / (\svec^\top \svec)$,
+ * where $\svec = \Delta\xvec$ and $\yvec = \Delta F$. This produces the minimal Frobenius-norm change
+ * satisfying the secant condition $B\svec = \yvec$ (Broyden, 1965).
+ * Converges superlinearly without evaluating Jacobians on each step.
+ *
+ * @param F Nonlinear vector function mapping $\xvec \in \mathbb{R}^n$ to $F(\xvec) \in \mathbb{R}^n$.
+ * @param options Convergence tolerances and optional initial Jacobian approximation.
+ * @returns A traceable `Algorithm` executing Broyden quasi-Newton steps.
+ *
+ * @example Solve nonlinear system without derivatives
+ * const F = x => [x.data[0] + x.data[1] - 3, x.data[0] ** 2 + x.data[1] ** 2 - 5]
+ * const alg = broyden(F)
+ * const state = run(alg, { x0: [2, 0] }, 30)
+ * print('converged =', state.converged)
+ * print('solution =', state.x)
  */
 export function broyden(
   F: SystemFunction,
@@ -237,29 +299,35 @@ export function broyden(
   })
 }
 
-/** The state of `fixedPoint`. `residual` is g(x) − x, zero at a fixed point. */
+/** The state of `fixedPoint`. The `residual` is $g(\xvec) - \xvec$, zero at a fixed point. */
 export type FixedPointState = SystemState & {
-  /** g(x). */
+  /** Function value $g(\xvec)$ at the current iterate. */
   image: Vector
-  /**
-   * The observed contraction factor ‖x_{t+1} − x_t‖ / ‖x_t − x_{t−1}‖ on the last step (NaN until two steps exist):
-   * an estimate of the Lipschitz constant L of g near the fixed point. Below 1 means linear convergence at rate L.
-   */
+  /** Observed contraction factor $\|\Delta\xvec_t\| / \|\Delta\xvec_{t-1}\|$ (NaN before two steps). */
   contraction: number
-  /**
-   * The a-posteriori error bound ‖x_t − x*‖ ≤ L/(1 − L)·‖x_t − x_{t−1}‖ with L the observed contraction (Infinity when
-   * L ≥ 1 or unknown). A bound only if g really contracts with constant L.
-   */
+  /** A posteriori error bound $\frac{L}{1 - L}\|\Delta\xvec_t\|$ based on observed contraction $L$. */
   errorBound: number
-  /** Consecutive steps whose contraction factor was ≥ 1: a run of them suggests the iteration is not converging. */
+  /** Count of consecutive iterations where contraction factor was $\ge 1$. */
   expandingSteps: number
 }
 
 /**
- * Fixed-point iteration x ← (1 − ω)x + ω·g(x) (ω = `relaxation`, default 1): converges linearly to the fixed point of a
- * contraction (Banach). The state reports the residual ‖g(x) − x‖, the observed contraction factor and an a-posteriori
- * error bound. Stops when ‖g(x) − x‖ ≤ ftol; flags `'diverging'` as a failure after `patience` (default 20)
- * consecutive expanding steps. `g` maps a vector of length n to one of length n; `init` takes `{ x0 }`.
+ * Traceable multivariate fixed-point iteration $\xvec_{t+1} = (1 - \omega)\xvec_t + \omega g(\xvec_t)$.
+ *
+ * Converges linearly to the fixed point $g(\xvec^*) = \xvec^*$ for contractive mappings under the Banach
+ * fixed-point theorem. Tracks the empirical contraction factor $L \approx \|\Delta\xvec_{t+1}\| / \|\Delta\xvec_t\|$
+ * and provides an a posteriori error bound $\|\xvec_t - \xvec^*\| \le \frac{L}{1 - L}\|\Delta\xvec_t\|$.
+ *
+ * @param g Vector-valued mapping $g: \mathbb{R}^n \to \mathbb{R}^n$.
+ * @param options Convergence tolerances, relaxation parameter $\omega$, and divergence patience.
+ * @returns A traceable `Algorithm` stepping through fixed-point updates.
+ *
+ * @example Solve fixed point equation
+ * const g = x => [Math.cos(x.data[1]), Math.sin(x.data[0])]
+ * const alg = fixedPoint(g)
+ * const state = run(alg, { x0: [0.5, 0.5] }, 50)
+ * print('converged =', state.converged)
+ * print('fixed point =', state.x)
  */
 export function fixedPoint(
   g: SystemFunction,
@@ -330,12 +398,27 @@ export function fixedPoint(
 // ---------------------------------------------------------------------------------------------------------------------
 // Continuation.
 
-/** A homotopy H(x, λ) with its Jacobian in x, for λ from 0 (easy) to 1 (the target). */
+/** A homotopy $H(\xvec, \lambda)$ with its Jacobian in $\xvec$, for $\lambda$ from 0 to 1. */
 export type Homotopy = (x: Vector, lambda: number) => { value: VectorLike; jacobian: MatrixLike }
 
 /**
- * The Newton homotopy H(x, λ) = F(x) − (1 − λ)F(x₀), which x₀ solves at λ = 0 and whose λ = 1 solutions are the roots
- * of F. Its Jacobian in x is J_F(x).
+ * Construct the standard Newton homotopy $H(\xvec, \lambda) = F(\xvec) - (1 - \lambda)F(\xvec_0)$.
+ *
+ * At $\lambda = 0$, $\xvec_0$ is an exact solution $H(\xvec_0, 0) = \mathbf{0}$. At $\lambda = 1$,
+ * solutions of $H(\xvec, 1) = \mathbf{0}$ coincide with roots of $F(\xvec) = \mathbf{0}$.
+ * The Jacobian with respect to $\xvec$ equals $J_F(\xvec)$ for all $\lambda \in [0, 1]$.
+ *
+ * @param F Nonlinear system with Jacobian evaluations.
+ * @param x0 Starting point satisfying $H(\xvec_0, 0) = \mathbf{0}$.
+ * @returns A `Homotopy` function mapping $(\xvec, \lambda)$ to residual and Jacobian.
+ *
+ * @example Form Newton homotopy
+ * const F = x => ({
+ *   value: [x.data[0] ** 2 - 2],
+ *   jacobian: [[2 * x.data[0]]],
+ * })
+ * const H = newtonHomotopy(F, [1])
+ * print('H at lambda=0 residual =', H(tensor([1]), 0).value)
  */
 export function newtonHomotopy(F: SystemWithJacobian, x0: VectorLike): Homotopy {
   const start = toF64(F(vec(toF64(x0, 'newtonHomotopy'))).value, 'newtonHomotopy')
@@ -347,48 +430,68 @@ export function newtonHomotopy(F: SystemWithJacobian, x0: VectorLike): Homotopy 
 
 /** The state of `continuation`. */
 export type ContinuationState = Status & {
+  /** Continuation iteration step counter. */
   t: Size
-  /** The continuation parameter reached, in [0, 1]. */
+  /** Current continuation parameter value $\lambda \in [0, 1]$. */
   lambda: number
-  /** The solution of H(x, λ) = 0 at `lambda`. */
+  /** Solution vector $\xvec(\lambda)$ at the current continuation parameter. */
   x: Vector
-  /** The next increment Δλ to try. */
+  /** Parameter increment $\Delta\lambda$ to attempt on the subsequent step. */
   dLambda: number
-  /** The previous accepted point, used by the secant predictor (null before the first step). */
+  /** Previously accepted path point $(\lambda_{t-1}, \xvec_{t-1})$ for secant extrapolation. */
   previous: { lambda: number; x: Vector } | null
-  /** The predictor's guess on the last step. */
+  /** Predicted solution vector before Newton correction. */
   predicted: Vector
-  /** Newton corrector iterations and final ‖H‖ on the last step. */
+  /** Number of Newton corrector iterations executed on the last step. */
   correctorSteps: number
+  /** Final residual norm $\|H(\xvec, \lambda)\|_2$ after corrector iterations. */
   correctorResidual: number
-  /** Whether the last step's corrector converged (λ advanced) or the step was halved. */
+  /** Whether the last corrector step converged and advanced $\lambda$. */
   accepted: boolean
+  /** Total number of homotopy evaluations performed so far. */
   evaluations: number
-  /** True once λ = 1 is reached. */
+  /** True once $\lambda = 1$ is successfully reached. */
   converged: boolean
-  /** `'step too small'` when Δλ falls below `minStep` (e.g. at a turning point of the solution path), or null. */
+  /** Failure diagnosis string, or `null` if continuation is healthy. */
   failure: string | null
 }
 
-/** Options for `continuation`. */
+/** Options configuring natural-parameter homotopy continuation. */
 export type ContinuationOptions = {
-  /** First Δλ. Default 0.1. */
+  /** Initial continuation parameter step size $\Delta\lambda$ (default 0.1). */
   dLambda?: number
-  /** Largest Δλ. Default 0.25. */
+  /** Maximum allowable continuation step size (default 0.25). */
   maxStep?: number
-  /** Give up when Δλ falls below this. Default 1e-8. */
+  /** Minimum allowable continuation step size before terminating (default $10^{-8}$). */
   minStep?: number
-  /** Newton corrector iterations per step. Default 8. */
+  /** Maximum Newton corrector iterations per step (default 8). */
   correctorIterations?: number
-  /** Corrector tolerance on ‖H(x, λ)‖. Default 1e-10. */
+  /** Residual tolerance on $\|H(\xvec, \lambda)\|_2$ for corrector acceptance (default $10^{-10}$). */
   tolerance?: number
 }
 
 /**
- * Natural-parameter continuation (Allgower & Georg, 2003, "Introduction to Numerical Continuation Methods", ch. 1–2):
- * follow the solution x(λ) of H(x, λ) = 0 from λ = 0, where x₀ solves it, to λ = 1. Each step predicts x at λ + Δλ by
- * secant extrapolation of the last two points, corrects with Newton's method on H(·, λ + Δλ), grows Δλ by 1.5 after a
- * fast success and halves it after a failed correction. `init` takes `{ x0 }`.
+ * Natural-parameter homotopy continuation for solving $H(\xvec, \lambda) = \mathbf{0}$ from $\lambda = 0$ to $\lambda = 1$.
+ *
+ * Follows the solution path $\xvec(\lambda)$ starting from known solution $\xvec_0$ at $\lambda = 0$ up to the
+ * target solution at $\lambda = 1$ (Allgower & Georg, 2003). At each step, a secant predictor estimates $\xvec$
+ * at $\lambda + \Delta\lambda$, followed by a Newton corrector on $H(\cdot, \lambda + \Delta\lambda)$. The step size
+ * $\Delta\lambda$ adapts dynamically based on corrector convergence speed.
+ *
+ * @param H Homotopy function mapping $(\xvec, \lambda)$ to residual and Jacobian.
+ * @param options Continuation step size bounds, corrector iterations, and tolerance.
+ * @returns A traceable `Algorithm` tracking the continuation solution curve.
+ *
+ * @example Natural-parameter continuation along Newton homotopy
+ * const F = x => ({
+ *   value: [x.data[0] ** 2 - 2],
+ *   jacobian: [[2 * x.data[0]]],
+ * })
+ * const H = newtonHomotopy(F, [1])
+ * const alg = continuation(H, { dLambda: 0.5 })
+ * const state = run(alg, { x0: [1] }, 20)
+ * print('converged =', state.converged)
+ * print('root =', state.x)
  */
 export function continuation(
   H: Homotopy,

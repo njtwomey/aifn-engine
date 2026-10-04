@@ -1,7 +1,7 @@
 /**
- * Gaussian quadrature rules: nodes and weights of Gauss–Legendre (weight 1 on [−1, 1]), Gauss–Hermite (weight e^{−x²},
- * or e^{−x²/2} in the probabilists' form) and generalised Gauss–Laguerre (weight x^α e^{−x} on [0, ∞)). An n-point rule
- * integrates polynomials of degree up to 2n − 1 exactly against its weight.
+ * Gaussian quadrature rules: nodes and weights of Gauss–Legendre (weight 1 on $[-1, 1]$), Gauss–Hermite (weight $e^{-x^2}$,
+ * or $e^{-x^2/2}$ in the probabilists' form) and generalised Gauss–Laguerre (weight $x^\alpha e^{-x}$ on $[0, \infty)$). An $n$-point rule
+ * integrates polynomials of degree up to $2n - 1$ exactly against its weight.
  *
  * Nodes are the roots of the orthogonal polynomial, found by Newton's method on its three-term recurrence from
  * asymptotic initial guesses (Press et al., 2007, "Numerical Recipes", 3rd ed., §4.6, `gauleg`, `gauher`, `gaulag`);
@@ -14,10 +14,23 @@ import type { Scalar, Size } from 'aifn-compute/foundation/contracts'
 import { logGamma } from 'aifn-compute/numerics/special'
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 
-/** A quadrature rule: ∫ w(x) f(x) dx ≈ Σ weights[i]·f(nodes[i]). */
-export type QuadratureRule = { nodes: Tensor; weights: Tensor }
+/** A quadrature rule: $\int w(x) f(x)\,dx \approx \sum \text{weights}[i] \cdot f(\text{nodes}[i])$. */
+export type QuadratureRule = {
+  /** The quadrature evaluation nodes as a rank-1 tensor in ascending order. */
+  nodes: Tensor
+  /** The corresponding quadrature weights as a rank-1 tensor. */
+  weights: Tensor
+}
 
 const MAX_NEWTON = 100
+
+/**
+ * Sort quadrature nodes in ascending order and construct a `QuadratureRule`.
+ *
+ * @param nodes Array of quadrature node locations.
+ * @param weights Array of corresponding quadrature weights.
+ * @returns A `QuadratureRule` holding nodes and weights as sorted 1D tensors.
+ */
 const rule = (nodes: number[], weights: number[]): QuadratureRule => {
   const order = nodes.map((_, i) => i).sort((a, b) => nodes[a] - nodes[b])
   return {
@@ -32,13 +45,28 @@ const rule = (nodes: number[], weights: number[]): QuadratureRule => {
   }
 }
 
+/**
+ * Check that the quadrature rule order $n$ is a positive integer, throwing `DomainError` if not.
+ *
+ * @param n Order or number of points.
+ * @param where Caller name for error messages.
+ */
 function checkOrder(n: number, where: string) {
   if (!Number.isInteger(n) || n < 1) throw new DomainError(where, `${where}: n must be a positive integer, got ${n}`)
 }
 
 /**
- * The n-point Gauss–Legendre rule on [a, b] (default [−1, 1]): ∫ₐᵇ f(x) dx ≈ Σ wᵢ f(xᵢ), exact for polynomials of
- * degree ≤ 2n − 1. On [a, b] the nodes are mapped linearly and the weights scaled by (b − a)/2.
+ * The $n$-point Gauss–Legendre rule on $[a, b]$ (default $[-1, 1]$):
+ * $\int_a^b f(x)\,dx \approx \sum w_i f(x_i)$, exact for polynomials of degree $\le 2n - 1$.
+ * On $[a, b]$ the nodes are mapped linearly and the weights scaled by $(b - a)/2$.
+ *
+ * @param n Number of quadrature nodes ($n \ge 1$).
+ * @param interval The integration interval $[a, b]$ (default $[-1, 1]$).
+ * @returns A `QuadratureRule` with sorted nodes and weights.
+ *
+ * @example Compute nodes and weights of 3-point Gauss-Legendre rule
+ * const { nodes, weights } = gaussLegendre(3)
+ * print('nodes =', nodes)
  */
 export function gaussLegendre(n: Size, interval: readonly [Scalar, Scalar] = [-1, 1]): QuadratureRule {
   checkOrder(n, 'gaussLegendre')
@@ -78,8 +106,18 @@ export function gaussLegendre(n: Size, interval: readonly [Scalar, Scalar] = [-1
 }
 
 /**
- * The n-point Gauss–Hermite rule. Physicists' form (default): ∫ e^{−x²} f(x) dx ≈ Σ wᵢ f(xᵢ), as numpy's `hermgauss`.
- * With `probabilists: true`: ∫ e^{−x²/2} f(x) dx, as `hermegauss` (the weights then sum to √(2π)).
+ * The $n$-point Gauss–Hermite rule. Physicists' form (default):
+ * $\int_{-\infty}^\infty e^{-x^2} f(x)\,dx \approx \sum w_i f(x_i)$, as numpy's `hermgauss`.
+ * With `probabilists: true`: $\int_{-\infty}^\infty e^{-x^2/2} f(x)\,dx$, as `hermegauss` (weights sum to $\sqrt{2\pi}$).
+ *
+ * @param n Number of quadrature nodes ($n \ge 1$).
+ * @param options Options controlling rule formulation.
+ * @param options.probabilists Use probabilists' weight $e^{-x^2/2}$ instead of physicists' $e^{-x^2}$ (default false).
+ * @returns A `QuadratureRule` with sorted nodes and weights.
+ *
+ * @example Compute 3-point Gauss-Hermite rule
+ * const { nodes, weights } = gaussHermite(3)
+ * print('nodes =', nodes)
  */
 export function gaussHermite(n: Size, { probabilists = false }: { probabilists?: boolean } = {}): QuadratureRule {
   checkOrder(n, 'gaussHermite')
@@ -123,8 +161,18 @@ export function gaussHermite(n: Size, { probabilists = false }: { probabilists?:
 }
 
 /**
- * The n-point generalised Gauss–Laguerre rule: ∫₀^∞ x^α e^{−x} f(x) dx ≈ Σ wᵢ f(xᵢ), α > −1 (default 0, as numpy's
- * `laggauss`; scipy's `roots_genlaguerre` for α ≠ 0).
+ * The $n$-point generalised Gauss–Laguerre rule:
+ * $\int_0^\infty x^\alpha e^{-x} f(x)\,dx \approx \sum w_i f(x_i)$, $\alpha > -1$ (default 0, as numpy's
+ * `laggauss`; scipy's `roots_genlaguerre` for $\alpha \neq 0$).
+ *
+ * @param n Number of quadrature nodes ($n \ge 1$).
+ * @param options Options controlling polynomial exponent.
+ * @param options.alpha Exponent $\alpha > -1$ in weight $x^\alpha e^{-x}$ (default 0).
+ * @returns A `QuadratureRule` with sorted nodes and weights.
+ *
+ * @example Compute 3-point Gauss-Laguerre rule
+ * const { nodes, weights } = gaussLaguerre(3)
+ * print('nodes =', nodes)
  */
 export function gaussLaguerre(n: Size, { alpha = 0 }: { alpha?: Scalar } = {}): QuadratureRule {
   checkOrder(n, 'gaussLaguerre')
@@ -161,8 +209,19 @@ export function gaussLaguerre(n: Size, { alpha = 0 }: { alpha?: Scalar } = {}): 
 }
 
 /**
- * E[f(X)] for X ~ N(mean, sd²) by n-point Gauss–Hermite quadrature (default n = 32): with X = mean + √2·sd·z,
- * E f(X) = π^{−1/2} ∫ e^{−z²} f(mean + √2·sd·z) dz. Exact for polynomials of degree ≤ 2n − 1.
+ * $\expect[f(X)]$ for $X \sim \mathcal{N}(\mu, \sigma^2)$ by $n$-point Gauss–Hermite quadrature (default $n = 32$):
+ * with $X = \mu + \sqrt{2}\sigma z$, $\expect f(X) = \pi^{-1/2} \int_{-\infty}^\infty e^{-z^2} f(\mu + \sqrt{2}\sigma z)\,dz$.
+ * Exact for polynomials of degree $\le 2n - 1$.
+ *
+ * @param f Function to take expectation of.
+ * @param mean Distribution mean $\mu$.
+ * @param sd Standard deviation $\sigma$.
+ * @param options Options specifying quadrature order.
+ * @param options.n Number of Gauss-Hermite quadrature points (default 32).
+ * @returns The expected value $\expect[f(X)]$.
+ *
+ * @example Expectation of X^2 for standard normal
+ * print('E[X^2] =', normalExpectation((x) => x * x, 0, 1))
  */
 export function normalExpectation(
   f: (x: number) => number,
@@ -176,7 +235,19 @@ export function normalExpectation(
   return total / Math.sqrt(Math.PI)
 }
 
-/** ∫ₐᵇ f(x) dx by the n-point Gauss–Legendre rule (default n = 20). */
+/**
+ * $\int_a^b f(x)\,dx$ by the $n$-point Gauss–Legendre rule (default $n = 20$).
+ *
+ * @param f Integrand function.
+ * @param a Lower integration bound.
+ * @param b Upper integration bound.
+ * @param options Options specifying node count.
+ * @param options.n Number of quadrature points (default 20).
+ * @returns The approximated integral value.
+ *
+ * @example Integrate x^3 over [0, 2]
+ * print('integral =', integrateGauss((x) => x * x * x, 0, 2))
+ */
 export function integrateGauss(
   f: (x: number) => number,
   a: number,

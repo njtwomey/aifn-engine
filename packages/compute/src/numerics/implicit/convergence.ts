@@ -22,14 +22,31 @@ export type AtConvergenceOptions<Start, S, X> = ImplicitOptions &
   }
 
 /**
- * The converged solution of the algorithm `make(p)` as a function of p, differentiable in p by the implicit function
- * theorem (`implicitRoot`) given the equation it solves, `residual(p, x) = 0` (a gradient for a minimiser, x − F(p, x) for a
- * fixed-point iteration). The algorithm runs on raw values and may be written with anything (EM, IRLS, Sinkhorn, an
- * `optim` solver); it must converge (`converged` or `done`), or `NumericalError('not-converged')` is raised.
+ * The converged solution of the algorithm `make(p)` as a function of $p$, differentiable in $p$ by the implicit
+ * function theorem (`implicitRoot`) given the equation it solves, $\text{residual}(p, x) = 0$ (a gradient for a
+ * minimiser, $x - F(p, x)$ for a fixed-point iteration). The algorithm runs on raw values and may be written with
+ * anything (EM, IRLS, Sinkhorn, an `optim` solver); it must converge (`converged` or `done`), or
+ * `NumericalError('not-converged')` is raised.
  *
- * @example
- * const xStar = atConvergence((p) => newton(p), (p, x) => sub(mul(x, x), p), { start: 1, select: (s) => s.x })
- * grad(xStar)(2) // 1/(2√2)
+ * @param make A factory returning the step-through `Algorithm` for parameter $p$.
+ * @param residual The stationarity condition or root residual $\text{residual}(p, x) = 0$ satisfied at the solution.
+ * @param options Convergence options including initial start, selection function, and step budget.
+ * @returns A differentiable function computing the converged solution for parameter $p$.
+ *
+ * @example Differentiate through a converged square root iteration
+ * const stepSqrt = (p) => ({
+ *   name: 'stepSqrt',
+ *   init: (start) => ({ x: start, converged: false }),
+ *   step: (s) => {
+ *     const next = 0.5 * (s.x + p / s.x)
+ *     return { x: next, converged: Math.abs(next - s.x) < 1e-10 }
+ *   },
+ * })
+ * const sqrtFn = atConvergence(stepSqrt, (p, x) => sub(mul(x, x), p), {
+ *   start: 1,
+ *   select: (s) => s.x,
+ * })
+ * print('d(sqrt(4))/dp =', grad(sqrtFn)(4))
  */
 export function atConvergence<P, Start, S extends Status, X>(
   make: (p: P) => Algorithm<Start, S>,

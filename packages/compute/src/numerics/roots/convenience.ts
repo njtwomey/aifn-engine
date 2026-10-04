@@ -15,17 +15,35 @@ import type { MatrixLike, VectorLike } from 'aifn-compute/foundation/contracts'
 
 /** The result of `findRoot`. */
 export type RootResult = {
+  /** Root estimate $x$. */
   x: number
+  /** Function value $f(x)$ at the root estimate. */
   fx: number
+  /** Number of algorithm steps taken. */
   steps: number
+  /** Total number of objective function calls performed. */
   evaluations: number
+  /** True once convergence criteria are satisfied. */
   converged: boolean
+  /** Failure diagnosis string, or `null` on successful convergence. */
   failure: string | null
 }
 
 /**
- * A root of f in the bracket [lo, hi] (f(lo) and f(hi) of opposite signs) by Brent's method (default) or bisection,
- * for at most `maxSteps` steps (default 200). Failure (no sign change, non-finite f) is reported, not thrown.
+ * Find a root of scalar function $f(x) = 0$ within a sign-changing bracket $[lo, hi]$.
+ *
+ * Uses Brent's method by default (or bisection) to locate a root where $f(lo)$ and $f(hi)$ have
+ * opposite signs. Iterates up to `maxSteps` (default 200). Returns diagnostics in `RootResult` without throwing.
+ *
+ * @param f Continuous scalar objective function $f(x)$.
+ * @param bracket Initial bracket interval boundaries $[lo, hi]$.
+ * @param options Solver method choice, step budget, and tolerances.
+ * @returns Root result containing the estimated location, residual, and convergence status.
+ *
+ * @example Find root of cosine minus x
+ * const res = findRoot(x => Math.cos(x) - x, [0, 1])
+ * print('converged =', res.converged)
+ * print('root =', res.x)
  */
 export function findRoot(
   f: ScalarFunction,
@@ -40,18 +58,42 @@ export function findRoot(
 
 /** The result of `solveSystem`. */
 export type SystemResult = {
+  /** Solution coordinate vector $\xvec$. */
   x: Vector
+  /** Residual vector $F(\xvec)$ at the solution estimate. */
   residual: Vector
+  /** Euclidean norm of the residual $\|F(\xvec)\|_2$. */
   residualNorm: number
+  /** Number of algorithm steps taken. */
   steps: number
+  /** Total number of system evaluations performed. */
   evaluations: number
+  /** True once convergence criteria are satisfied. */
   converged: boolean
+  /** Failure diagnosis string, or `null` on successful convergence. */
   failure: string | null
 }
 
 /**
- * Solves F(x) = 0 from `x0` by damped Newton (default; `F` returns `{ value, jacobian }`), Newton, or Broyden (`F`
- * returns the values only), for at most `maxSteps` steps (default 100).
+ * Solve a multivariate nonlinear system $F(\xvec) = \mathbf{0}$ from initial guess $\xvec_0$.
+ *
+ * Solves using damped Newton (default), undamped Newton, or Broyden quasi-Newton methods.
+ * Newton methods require $F$ to return both `{ value, jacobian }`, while Broyden accepts functions
+ * returning residual vectors only.
+ *
+ * @param F Nonlinear system returning residual vector (and optional Jacobian matrix).
+ * @param x0 Initial estimate vector $\xvec_0$.
+ * @param options Method selection, maximum step count, and convergence tolerances.
+ * @returns System result containing the solution vector, final residual norm, and status.
+ *
+ * @example Solve 2D system of equations
+ * const F = x => ({
+ *   value: [x.data[0] + x.data[1] - 3, x.data[0] ** 2 + x.data[1] ** 2 - 5],
+ *   jacobian: [[1, 1], [2 * x.data[0], 2 * x.data[1]]],
+ * })
+ * const res = solveSystem(F, [2, 0])
+ * print('converged =', res.converged)
+ * print('solution =', res.x)
  */
 export function solveSystem(
   F: SystemWithJacobian | SystemFunction,

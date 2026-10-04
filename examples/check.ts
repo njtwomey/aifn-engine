@@ -129,6 +129,7 @@ try {
       doc: string
       file: string
       visibility: string
+      signature: string
       returns: string
       params: { name: string; doc: string }[]
       examples: Example[]
@@ -136,6 +137,23 @@ try {
   }
   // Every `$…$` of a doc comment sets in KaTeX with the shared notation macros.
   const { defaultMathMacros } = await server.ssrLoadModule('aifn-render')
+  // Maths written as plain text (Unicode superscripts, subscripts, operators, Greek, accents) instead of TeX: every
+  // character of it outside `code` and `$…$` is reported under --missing.
+  const PLAIN_MATHS =
+    /[\u2070-\u209f\u1d40-\u1d6a\u00b2\u00b3\u00b9\u00d7\u00b7\u2212\u2200-\u22ff\u2190-\u21ff\u27f5-\u27ff\u2016\u0370-\u03ff]|\p{M}/u
+  const plainMaths = (at: string, what: string, text: string) => {
+    if (missingFor === null || !at.startsWith(missingFor)) return
+    // Code, formulas and quoted titles (a cited paper keeps its own characters) are not prose.
+    const prose = text
+      .replace(/`[^`]*`/g, '')
+      .replace(/\$[^$\n]+\$/g, '')
+      .replace(/"[^"]*"/g, '')
+    const m = PLAIN_MATHS.exec(prose)
+    if (m) {
+      const from = Math.max(0, m.index - 25)
+      missing.push(`${at} · ${what}: maths not in TeX: …${prose.slice(from, m.index + 25).replace(/\s+/g, ' ')}…`)
+    }
+  }
   const checkMaths = (where: string, text: string) => {
     for (const m of text.replace(/`[^`]*`/g, '').matchAll(/\$([^$\n]+)\$/g)) {
       try {
@@ -149,15 +167,22 @@ try {
   for (const node of nodes) {
     const c = (content as Record<string, Content>)[`${node.pkg}/${node.path}`]
     checkMaths(`${node.pkg}/${node.path}`, c.doc)
+    plainMaths(`${node.pkg}/${node.path}`, 'the module comment (index.ts)', c.doc)
     for (const [file, doc] of Object.entries(c.fileDocs)) {
       const at = `${node.pkg}/${node.path}/${file}`
       checkMaths(at, doc)
+      plainMaths(at, 'the file comment', doc)
       if (!doc && missingFor !== null && at.startsWith(missingFor))
         missing.push(`${at}: the file has no opening comment`)
     }
     for (const x of c.exports) {
       const where = `${node.pkg}/${node.path} · ${x.name}`
-      checkMaths(where, [x.doc, x.returns, ...x.params.map((p) => p.doc)].join('\n').replace(/\s+/g, ' '))
+      const said = [x.doc, x.returns, ...x.params.map((p) => p.doc)].join('\n').replace(/\s+/g, ' ')
+      checkMaths(where, said)
+      const fileAt = `${node.pkg}/${node.path}/${x.file.replace(/^.*\//, '').replace(/\.ts$/, '')}`
+      // A type's field comments are part of its definition.
+      const fields = x.kind === 'type' ? (x.signature.match(/\/\*\*[\s\S]*?\*\//g) ?? []).join(' ') : ''
+      plainMaths(fileAt, x.name, `${said} ${fields}`)
     }
     // The pattern: every function has a descriptive comment, and a key (public) one has a runnable example too.
     for (const x of c.exports) {
@@ -186,9 +211,11 @@ try {
     for (const { at, e } of all) {
       examples++
       const r = runExample(e.code, scope)
-      if (!r.ok) {
+      const silent = r.ok && r.output.length === 0 && r.value === ''
+      if (!r.ok || silent) {
         exampleFailures++
-        console.error(`FAIL  ${node.pkg}/${node.path} · ${at}: ${r.error}`)
+        const why = silent ? 'the example shows nothing: print at least one value' : r.error
+        console.error(`FAIL  ${node.pkg}/${node.path} · ${at}: ${why}`)
       } else if (process.argv.includes('--show'))
         console.log(`ok    ${node.pkg}/${node.path} · ${at}\n${[...r.output, r.value].join('\n')}\n`)
     }

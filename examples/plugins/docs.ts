@@ -103,13 +103,21 @@ function splitDoc(text: string): Tags {
     if (param) params.set(param[1], param[2])
     else returns = flat.replace(/^@returns? ?/, '')
   }
+  // The code of an example may be fenced (``` or ```js, ```ts, …) and may open with its imports: the fence lines and
+  // the import lines are dropped (the names are in scope when it runs, and the page shows the imports it works out).
+  const unfenced = (code: string) =>
+    code
+      .split('\n')
+      .filter((line) => !/^\s*```[\w-]*\s*$/.test(line) && !/^\s*import\s.*\sfrom\s+['"][^'"]+['"];?\s*$/.test(line))
+      .join('\n')
+      .trim()
   const examples = blocks.map((block) => {
     const [first, ...rest] = block.split('\n')
     // `@example code…` on one line has no title; otherwise the tag's line is the title.
     const titled = rest.some((l) => l.trim() !== '')
     return titled
-      ? { title: first.trim(), code: rest.join('\n').trim() }
-      : { title: '', code: [first, ...rest].join('\n').trim() }
+      ? { title: first.trim(), code: unfenced(rest.join('\n')) }
+      : { title: '', code: unfenced([first, ...rest].join('\n')) }
   })
   return { doc: doc.trim(), params, returns, examples: examples.filter((e) => e.code !== '') }
 }

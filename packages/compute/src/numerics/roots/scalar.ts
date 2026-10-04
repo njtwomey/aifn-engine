@@ -1,5 +1,5 @@
 /**
- * Roots of scalar equations f(x) = 0: bracketing methods (bisection, regula falsi with the Illinois modification,
+ * Roots of scalar equations $f(x) = 0$: bracketing methods (bisection, regula falsi with the Illinois modification,
  * Brent's method) and open methods (secant, Newton). Every method is a traceable `Algorithm` whose state records the
  * current estimate, the bracket where there is one, and which kind of step was taken.
  */
@@ -16,47 +16,68 @@ export type ScalarFunction = (x: Scalar) => Scalar
 export type RootState = Status & {
   /** Steps taken (0 in the initial state). */
   t: Size
-  /** The current estimate of the root and f there. */
+  /** Current root estimate $x$. */
   x: number
+  /** Function value evaluated at the current estimate $f(x)$. */
   fx: number
-  /** Calls of f so far. */
+  /** Total number of objective function calls performed so far. */
   evaluations: number
-  /** True once the stopping test passed; the runners stop. */
+  /** True once the stopping criterion is met. */
   converged: boolean
-  /**
-   * Why the method cannot continue, or null: `'no sign change'` (a bracketing method given a bracket where f does not
-   * change sign), `'zero derivative'`, `'flat secant'` or `'not finite'`. `'not finite'` sets `diverged`, the others
-   * `terminated`.
-   */
+  /** Failure diagnosis string, or `null` if the method is healthy. */
   failure: string | null
 }
 
-/** Tolerances for the scalar methods: stop when the step (or half-bracket) is at most xtol + rtol·|x|, or f(x) = 0. */
+/** Tolerances for scalar methods: stop when the step or half-bracket is at most $\text{xtol} + \text{rtol} \cdot |x|$, or $f(x) = 0$. */
 export type RootTolerance = {
-  /** Absolute tolerance on x. Default 2e-12 (as scipy's brentq). */
+  /** Absolute tolerance on $x$ (default $2 \cdot 10^{-12}$). */
   xtol?: number
-  /** Relative tolerance on x. Default 4ε ≈ 8.9e-16. */
+  /** Relative tolerance on $x$ (default $4\varepsilon \approx 8.9 \cdot 10^{-16}$). */
   rtol?: number
-  /** Also stop when |f(x)| ≤ ftol. Default 0. */
+  /** Residual tolerance stopping when $|f(x)| \le \text{ftol}$ (default 0). */
   ftol?: number
 }
 
+/**
+ * Fill omitted root-finding tolerances with default thresholds.
+ *
+ * @param o User-specified tolerance options.
+ * @returns Complete tolerances with `xtol`, `rtol`, and `ftol`.
+ */
 const tolerances = (o: RootTolerance) => ({ xtol: o.xtol ?? 2e-12, rtol: o.rtol ?? 4 * EPS, ftol: o.ftol ?? 0 })
 
-/** The bracket [a, b] as passed to a bracketing method's `init`. */
-export type BracketOptions = { lo: number; hi: number }
+/** The bracket $[a, b]$ as passed to a bracketing method's `init`. */
+export type BracketOptions = {
+  /** Lower endpoint of the bracket interval. */
+  lo: number
+  /** Upper endpoint of the bracket interval. */
+  hi: number
+}
 
 /** The state of `bisection` and `regulaFalsi`. */
 export type BracketState = RootState & {
-  /** The bracket [lo, hi] with f(lo) and f(hi) of opposite signs. */
+  /** Current lower bracket endpoint where $f(\text{lo})$ and $f(\text{hi})$ have opposite signs. */
   lo: number
+  /** Current upper bracket endpoint where $f(\text{lo})$ and $f(\text{hi})$ have opposite signs. */
   hi: number
+  /** Function value $f(\text{lo})$. */
   flo: number
+  /** Function value $f(\text{hi})$. */
   fhi: number
-  /** hi − lo. */
+  /** Bracket width $\text{hi} - \text{lo}$. */
   width: number
 }
 
+/**
+ * Initialise bracket state and verify opposite sign condition.
+ *
+ * @param f Scalar objective function.
+ * @param options Bracket interval boundaries.
+ * @param options.lo Lower bracket boundary.
+ * @param options.hi Upper bracket boundary.
+ * @param x Selection function computing initial iterate $x_0$ from bracket endpoints.
+ * @returns Initial bracket state with evaluated endpoints.
+ */
 function bracketInit(f: ScalarFunction, { lo, hi }: BracketOptions, x: (s: Omit<BracketState, 'x' | 'fx'>) => number) {
   const flo = f(lo)
   const fhi = f(hi)
@@ -72,9 +93,21 @@ function bracketInit(f: ScalarFunction, { lo, hi }: BracketOptions, x: (s: Omit<
 }
 
 /**
- * Bisection: halve the bracket [lo, hi] at its midpoint, keeping the half where f changes sign. The bracket width
- * halves each step, so reaching width w from w₀ takes ⌈log₂(w₀/w)⌉ steps. `init` takes `{ lo, hi }` with f(lo) and
- * f(hi) of opposite signs. `x` is the latest midpoint.
+ * Bisection method for scalar root finding: halving the bracket $[a, b]$ at its midpoint.
+ *
+ * Keeps the half-interval across which $f$ changes sign. The bracket width halves each step,
+ * guaranteeing convergence to a root within $\lceil \log_2(w_0 / w) \rceil$ steps.
+ * The iterate $x$ is the latest midpoint.
+ *
+ * @param f Continuous scalar function $f(x)$ whose root is sought.
+ * @param options Convergence tolerances on step size and residual.
+ * @returns A traceable `Algorithm` stepping through bisection brackets.
+ *
+ * @example Find root of cubic polynomial
+ * const alg = bisection(x => x ** 3 - x - 2)
+ * const state = run(alg, { lo: 1, hi: 2 }, 50)
+ * print('converged =', state.converged)
+ * print('root =', state.x)
  */
 export function bisection(f: ScalarFunction, options: RootTolerance = {}): Algorithm<BracketOptions, BracketState> {
   const { xtol, rtol, ftol } = tolerances(options)
@@ -106,18 +139,29 @@ export function bisection(f: ScalarFunction, options: RootTolerance = {}): Algor
 
 /** The state of `regulaFalsi`: a bracket and whether the Illinois halving was applied on the last step. */
 export type RegulaFalsiState = BracketState & {
-  /** Which end the last step replaced, or null at t = 0. */
+  /** Which endpoint the previous step replaced (`'lo'`, `'hi'`, or `null` at $t = 0$). */
   replaced: 'lo' | 'hi' | null
-  /** True when the retained end's value was halved (Illinois modification). */
+  /** Whether Illinois reduction halved the opposite endpoint's value on this step. */
   halved: boolean
 }
 
 /**
- * Regula falsi (false position): the next point is where the secant through (lo, f(lo)) and (hi, f(hi)) crosses zero,
- * and it replaces the end with the same sign. Plain regula falsi can keep one end fixed and converge slowly; with
- * `illinois` (default true) the retained end's f is halved when the same end is kept twice (Dowell & Jarratt, 1971,
- * "A modified regula falsi method for computing the root of an equation", BIT 11), giving superlinear convergence.
- * Stops when the step moves x by at most xtol + rtol·|x| or f(x) = 0.
+ * Regula falsi (false position) root finding with optional Illinois modification.
+ *
+ * Computes the next iterate where the secant line between bracket endpoints crosses zero.
+ * Plain regula falsi can retain one endpoint indefinitely; with `illinois` enabled (default true),
+ * the retained endpoint's function value is halved whenever the same endpoint is kept twice
+ * (Dowell & Jarratt, 1971), restoring superlinear convergence.
+ *
+ * @param f Continuous scalar function $f(x)$.
+ * @param options Convergence tolerances and Illinois adjustment toggle.
+ * @returns A traceable `Algorithm` stepping through false position iterates.
+ *
+ * @example Find root via false position
+ * const alg = regulaFalsi(x => x ** 3 - x - 2)
+ * const state = run(alg, { lo: 1, hi: 2 }, 50)
+ * print('converged =', state.converged)
+ * print('root =', state.x)
  */
 export function regulaFalsi(
   f: ScalarFunction,
@@ -172,27 +216,42 @@ export function regulaFalsi(
 
 /** The state of `brent`. */
 export type BrentState = RootState & {
-  /** The bracket [lo, hi] (the current estimate and the contrapoint, sorted); f changes sign across it. */
+  /** Lower bound of the current bracket. */
   lo: number
+  /** Upper bound of the current bracket. */
   hi: number
-  /** The previous estimate and f there. */
+  /** Previous iterate estimate. */
   previous: number
+  /** Function value at the previous iterate. */
   fprevious: number
-  /** The contrapoint: f has the opposite sign there to f(x), and |f(x)| ≤ |f(contrapoint)|. */
+  /** Contrapoint where $f$ has opposite sign to $f(x)$ with $|f(x)| \le |f(\text{contrapoint})|$. */
   contrapoint: number
+  /** Function value at the contrapoint. */
   fcontrapoint: number
-  /** The last two step lengths, used to decide whether interpolation is converging fast enough. */
+  /** Step displacement taken two iterations prior. */
   stepPrevious: number
+  /** Step displacement taken in the previous iteration. */
   stepCurrent: number
-  /** The kind of step taken last. */
+  /** Interpolation or bisection step strategy applied on the last step. */
   method: 'init' | 'bisection' | 'secant' | 'inverse-quadratic'
 }
 
 /**
- * Brent's method (Brent, 1973, "Algorithms for Minimization without Derivatives", ch. 4), as in scipy's `brentq`:
- * inverse quadratic interpolation or the secant step when they are converging, bisection otherwise, so it keeps the
- * bracket's guarantee while usually converging superlinearly. `init` takes `{ lo, hi }` with f(lo), f(hi) of opposite
- * signs.
+ * Brent's root-finding method combining bisection, secant, and inverse quadratic interpolation.
+ *
+ * Combines the robustness of bisection with the superlinear convergence of inverse quadratic
+ * interpolation (Brent, 1973), as implemented in SciPy's `scipy.optimize.brentq`.
+ * Guaranteed to converge while interpolating rapidly when smooth.
+ *
+ * @param f Continuous scalar function $f(x)$ with opposite signs on $[lo, hi]$.
+ * @param options Convergence tolerances on step length and residual.
+ * @returns A traceable `Algorithm` executing Brent root finding.
+ *
+ * @example Find root with Brent method
+ * const alg = brent(x => Math.cos(x) - x)
+ * const state = run(alg, { lo: 0, hi: 1 }, 50)
+ * print('converged =', state.converged)
+ * print('root =', state.x)
  */
 export function brent(f: ScalarFunction, options: RootTolerance = {}): Algorithm<BracketOptions, BrentState> {
   const { xtol, rtol, ftol } = tolerances(options)
@@ -307,16 +366,30 @@ export function brent(f: ScalarFunction, options: RootTolerance = {}): Algorithm
 
 /** The state of `secant`. */
 export type SecantState = RootState & {
-  /** The previous estimate and f there. */
+  /** Previous iterate estimate. */
   previous: number
+  /** Function value at the previous iterate. */
   fprevious: number
-  /** The last step x − previous. */
+  /** Last step displacement $x - \text{previous}$. */
   step: number
 }
 
 /**
- * The secant method: x_{k+1} = x_k − f(x_k)(x_k − x_{k−1}) / (f(x_k) − f(x_{k−1})). Converges with order
- * (1 + √5)/2 ≈ 1.618 near a simple root, but is not bracketed. `init` takes `{ x0, x1 }`.
+ * Secant method for scalar root finding.
+ *
+ * Replaces derivatives with finite differences across consecutive iterates:
+ * $x_{k+1} = x_k - f(x_k)\frac{x_k - x_{k-1}}{f(x_k) - f(x_{k-1})}$.
+ * Converges with order $(1 + \sqrt{5})/2 \approx 1.618$ near a simple root without requiring derivatives.
+ *
+ * @param f Scalar function $f(x)$.
+ * @param options Convergence tolerances on step length and residual.
+ * @returns A traceable `Algorithm` executing secant iterations.
+ *
+ * @example Find root with secant method
+ * const alg = secant(x => x ** 2 - 2)
+ * const state = run(alg, { x0: 1, x1: 2 }, 50)
+ * print('converged =', state.converged)
+ * print('root =', state.x)
  */
 export function secant(
   f: ScalarFunction,
@@ -366,18 +439,30 @@ export type ScalarWithDerivative = (x: number) => { value: number; derivative: n
 
 /** The state of `newtonRoot`. */
 export type NewtonRootState = RootState & {
-  /** f′(x). */
+  /** First derivative $f'(x)$ evaluated at current estimate. */
   derivative: number
-  /** The full Newton step −f(x)/f′(x) computed on the last step (NaN at t = 0). */
+  /** Full undamped Newton displacement $-f(x) / f'(x)$ on the last step. */
   newtonStep: number
-  /** The fraction of it taken (1 unless damped). */
+  /** Damping fraction applied to the Newton displacement ($1$ unless damped). */
   damping: number
 }
 
 /**
- * Newton's method for f(x) = 0: x ← x − f(x)/f′(x), converging quadratically near a simple root. With `damped`, the
- * step is halved until |f| decreases (at most 30 halvings), which widens the region of convergence. `init` takes
- * `{ x0 }`; a zero derivative is reported as a failure.
+ * Newton-Raphson root finding for $f(x) = 0$ with optional backtracking damping.
+ *
+ * Updates $x_{k+1} = x_k - f(x_k) / f'(x_k)$, converging quadratically near a simple root.
+ * When `damped` is enabled, the step is halved until $|f(x)|$ decreases (up to 30 halvings),
+ * significantly widening the basin of attraction.
+ *
+ * @param f Objective returning function value and first derivative at $x$.
+ * @param options Convergence tolerances and damping toggle.
+ * @returns A traceable `Algorithm` executing Newton iterations.
+ *
+ * @example Find root with Newton-Raphson
+ * const alg = newtonRoot(x => ({ value: x ** 2 - 2, derivative: 2 * x }))
+ * const state = run(alg, { x0: 1.5 }, 20)
+ * print('converged =', state.converged)
+ * print('root =', state.x)
  */
 export function newtonRoot(
   f: ScalarWithDerivative,

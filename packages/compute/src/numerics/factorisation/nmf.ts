@@ -1,13 +1,13 @@
 /**
- * Non-negative matrix factorisation X ≈ WH with W, H ≥ 0 (Paatero and Tapper, 1994; Lee and Seung, 1999) as a
+ * Non-negative matrix factorisation $\mathbf{X} \approx \mathbf{W}\mathbf{H}$ with $\mathbf{W}, \mathbf{H} \ge 0$ (Paatero and Tapper, 1994; Lee and Seung, 1999) as a
  * step-through algorithm, by one of two solvers:
  *
  * - `multiplicative`: the updates of Lee and Seung (2001), for the squared Frobenius error and the generalised
- *   Kullback–Leibler divergence, as scikit-learn's `NMF(solver='mu')`: W first, then H, each a gradient step whose step
+ *   Kullback–Leibler divergence, as scikit-learn's `NMF(solver='mu')`: $\mathbf{W}$ first, then $\mathbf{H}$, each a gradient step whose step
  *   size makes it a ratio of the gradient's negative and positive parts, so entries stay non-negative and the
  *   objective never increases.
- * - `hals`: hierarchical alternating least squares (Cichocki and Phan, 2009) for the Frobenius error: each column of W,
- *   then each row of H, is the exact non-negative minimiser with the others fixed, as scikit-learn's
+ * - `hals`: hierarchical alternating least squares (Cichocki and Phan, 2009) for the Frobenius error: each column of $\mathbf{W}$,
+ *   then each row of $\mathbf{H}$, is the exact non-negative minimiser with the others fixed, as scikit-learn's
  *   `NMF(solver='cd')` without shuffling. Each update is exact, so the objective never increases either.
  */
 
@@ -18,7 +18,7 @@ import type { Algorithm } from 'aifn-compute/foundation/trace'
 import { run } from 'aifn-compute/foundation/trace'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** The objective: the squared Frobenius error ½‖X − WH‖² or the generalised KL divergence Σ X log(X/WH) − X + WH. */
+/** The objective: the squared Frobenius error $\frac{1}{2}\|\mathbf{X} - \mathbf{W}\mathbf{H}\|_F^2$ or the generalised KL divergence $\sum (\mathbf{X} \log(\mathbf{X}/\mathbf{W}\mathbf{H}) - \mathbf{X} + \mathbf{W}\mathbf{H})$. */
 export type NmfLoss = 'frobenius' | 'kullback-leibler'
 
 /** The update rule: Lee–Seung multiplicative updates, or HALS coordinate descent (Frobenius error only). */
@@ -26,36 +26,57 @@ export type NmfSolver = 'multiplicative' | 'hals'
 
 /** Options of `nmfSteps` and `nmf`. */
 export type NmfOptions = {
-  /** The inner dimension k (the number of parts or topics). */
+  /** The inner rank dimension $k$ (the number of components or topics). */
   rank: Size
-  /** The objective (default `frobenius`). */
+  /** The objective loss function (default `'frobenius'`). */
   loss?: NmfLoss
-  /** The solver (default `multiplicative`); `hals` requires the Frobenius loss. */
+  /** The solver algorithm (default `'multiplicative'`); `hals` requires the Frobenius loss. */
   solver?: NmfSolver
-  /** Initial factors W [m, k] and H [k, n]; default random, |N(0, 1)|·√(mean X / k) as scikit-learn's `random` init. */
+  /** Initial factors $\mathbf{W}$ of shape $[m, k]$ and $\mathbf{H}$ of shape $[k, n]$; default random, $|\mathcal{N}(0, 1)| \sqrt{\bar{X} / k}$ matching scikit-learn's `random` init. */
   init?: { W: MatrixLike; H: MatrixLike }
-  /** Stop when the relative decrease of the objective in one step falls below this (default 1e-4). */
+  /** Stop when the relative decrease of the objective in one step falls below this (default $10^{-4}$). */
   tolerance?: number
 }
 
 /** The state of `nmfSteps`. */
 export interface NmfState extends Status {
+  /** Current step index $t$. */
   t: Size
-  /** W [m, k] and H [k, n]. */
+  /** Basis factor $\Wmat$ ($m \times k$). */
   W: Tensor
+  /** Coefficient factor $\Hmat$ ($k \times n$). */
   H: Tensor
-  /** The objective at (W, H). */
+  /** The objective loss value at $(\Wmat, \Hmat)$. */
   objective: number
+  /** Set to true when relative objective decrease drops below tolerance. */
   converged: boolean
 }
 
 /** The smallest denominator used (scikit-learn's float32 epsilon), so a zero column does not divide by zero. */
 const EPSILON = 1.1920929e-7
 
+/**
+ * Compute the dense matrix product $\Wmat\Hmat$ ($m \times n$).
+ *
+ * @param W Left factor of size $m \times k$ in row-major order.
+ * @param H Right factor of size $k \times n$ in row-major order.
+ * @param m Number of rows in $\Wmat$.
+ * @param k Inner rank dimension.
+ * @param n Number of columns in $\Hmat$.
+ * @returns The matrix product $\Wmat\Hmat$ as a row-major array of length $m \times n$.
+ */
 function product(W: Float64Array, H: Float64Array, m: Size, k: Size, n: Size): Float64Array {
   return dense.matMul(W, H, m, k, n)
 }
 
+/**
+ * Compute the NMF loss between target $\Xmat$ and approximation $\Wmat\Hmat$.
+ *
+ * @param X Target non-negative matrix values.
+ * @param WH Product matrix values.
+ * @param loss Objective loss type: `'frobenius'` or `'kullback-leibler'`.
+ * @returns The scalar objective value.
+ */
 function objectiveOf(X: Float64Array, WH: Float64Array, loss: NmfLoss): number {
   let total = 0
   if (loss === 'frobenius') {
@@ -70,7 +91,19 @@ function objectiveOf(X: Float64Array, WH: Float64Array, loss: NmfLoss): number {
   return total
 }
 
-/** One multiplicative update of W (m × k) given H (k × n): W ← W ∘ (negative part)/(positive part) of the gradient. */
+/**
+ * One multiplicative update of $\Wmat$ ($m \times k$) given $\Hmat$ ($k \times n$):
+ * $\Wmat \leftarrow \Wmat \circ (\text{negative part})/(\text{positive part})$ of the gradient.
+ *
+ * @param X Target matrix of size $m \times n$.
+ * @param W Current basis matrix of size $m \times k$.
+ * @param H Current coefficient matrix of size $k \times n$.
+ * @param m Number of rows in $\Xmat$ and $\Wmat$.
+ * @param k Inner rank dimension.
+ * @param n Number of columns in $\Xmat$ and $\Hmat$.
+ * @param loss Loss objective: `'frobenius'` or `'kullback-leibler'`.
+ * @returns The updated $\Wmat$ values of length $m \times k$.
+ */
 function updateW(X: Float64Array, W: Float64Array, H: Float64Array, m: Size, k: Size, n: Size, loss: NmfLoss) {
   const out = new Float64Array(m * k)
   if (loss === 'frobenius') {
@@ -106,8 +139,16 @@ function updateW(X: Float64Array, W: Float64Array, H: Float64Array, m: Size, k: 
 }
 
 /**
- * One HALS sweep over the columns of W (m × k) given H (k × n): column a is set to max(0, w_a − ∇_a / (HHᵀ)_aa), its
- * exact minimiser with the other columns fixed, where ∇_a = W (HHᵀ)_{:,a} − (XHᵀ)_{:,a} uses the columns already updated.
+ * One HALS sweep over the columns of $\Wmat$ ($m \times k$) given $\Hmat$ ($k \times n$): column $a$ is set to
+ * $\max(0, w_a - \nabla_a / (\Hmat\Hmat^\top)_{aa})$, its exact minimiser with other columns fixed.
+ *
+ * @param X Target matrix of size $m \times n$.
+ * @param W0 Current basis matrix of size $m \times k$.
+ * @param H Coefficient matrix of size $k \times n$.
+ * @param m Number of rows in $\Xmat$ and $\Wmat$.
+ * @param k Inner rank dimension.
+ * @param n Number of columns in $\Xmat$ and $\Hmat$.
+ * @returns The updated $\Wmat$ values of length $m \times k$.
  */
 function halsW(X: Float64Array, W0: Float64Array, H: Float64Array, m: Size, k: Size, n: Size) {
   const W = Float64Array.from(W0)
@@ -137,13 +178,33 @@ function halsW(X: Float64Array, W0: Float64Array, H: Float64Array, m: Size, k: S
   return W
 }
 
+/**
+ * Transpose a row-major matrix of shape $r \times c$ to $c \times r$.
+ *
+ * @param a The source matrix in row-major order.
+ * @param r Number of rows in source.
+ * @param c Number of columns in source.
+ * @returns Transposed matrix of shape $c \times r$.
+ */
 const transposed = (a: Float64Array, r: Size, c: Size) => {
   const o = new Float64Array(r * c)
   for (let i = 0; i < r; i++) for (let j = 0; j < c; j++) o[j * r + i] = a[i * c + j]
   return o
 }
 
-/** The update of H given W, by the same rule applied to Xᵀ ≈ HᵀWᵀ: Hᵀ (n × k) is updated as the "W" of Xᵀ (n × m). */
+/**
+ * Update $\Hmat$ given $\Wmat$ by applying the update rule to $\Xmat^\top \approx \Hmat^\top\Wmat^\top$.
+ *
+ * @param X Target matrix of size $m \times n$.
+ * @param W Current basis matrix of size $m \times k$.
+ * @param H Current coefficient matrix of size $k \times n$.
+ * @param m Number of rows in $\Xmat$ and $\Wmat$.
+ * @param k Inner rank dimension.
+ * @param n Number of columns in $\Xmat$ and $\Hmat$.
+ * @param loss Loss objective: `'frobenius'` or `'kullback-leibler'`.
+ * @param solver Solver type: `'multiplicative'` or `'hals'`.
+ * @returns The updated $\Hmat$ values of length $k \times n$.
+ */
 function updateH(
   X: Float64Array,
   W: Float64Array,
@@ -161,15 +222,31 @@ function updateH(
   return transposed(next, n, k)
 }
 
+/**
+ * Parse an input matrix-like object into a 64-bit float array with dimensions.
+ *
+ * @param a The matrix input.
+ * @param where Caller name for error messages.
+ * @returns An object with row-major array `data`, row count `m`, and column count `n`.
+ */
 function readMatrix(a: MatrixLike, where: string): { data: Float64Array; m: Size; n: Size } {
   const r = dense.toMatrixF64(a, where)
   return { data: Float64Array.from(r.data), m: r.m, n: r.n }
 }
 
 /**
- * Non-negative matrix factorisation by multiplicative updates or HALS, one sweep (W then H) per step. `init` takes a stream
- * for the random initial factors (unused when `options.init` gives them). The objective is non-increasing (Lee and
- * Seung, 2001); `converged` is set when its relative decrease falls below the tolerance.
+ * Non-negative matrix factorisation by multiplicative updates or HALS, one sweep ($\Wmat$ then $\Hmat$) per step.
+ * `init` takes a stream for the random initial factors (unused when `options.init` gives them). The objective is
+ * non-increasing (Lee and Seung, 2001); `converged` is set when its relative decrease falls below the tolerance.
+ *
+ * @param X Non-negative data matrix of shape $[m, n]$.
+ * @param options NMF options specifying rank, loss function, solver, and stopping criteria.
+ * @returns A step-through `Algorithm` producing `NmfState` states.
+ *
+ * @example Step through non-negative matrix factorisation
+ * const X = [[1, 2], [3, 4], [5, 6]]
+ * const state = run(nmfSteps(X, { rank: 2 }), undefined, 10)
+ * print('converged =', state.t >= 1)
  */
 export function nmfSteps(X: MatrixLike, options: NmfOptions): Algorithm<void, NmfState> {
   const { rank: k, loss = 'frobenius', solver = 'multiplicative', tolerance = 1e-4 } = options
@@ -224,7 +301,18 @@ export function nmfSteps(X: MatrixLike, options: NmfOptions): Algorithm<void, Nm
   }
 }
 
-/** Run `nmfSteps` to convergence or `maxSteps` sweeps (default 200) and return W, H and the objective. */
+/**
+ * Run `nmfSteps` to convergence or `maxSteps` sweeps (default 200) and return $\Wmat$, $\Hmat$ and the objective.
+ *
+ * @param X Non-negative data matrix of shape $[m, n]$.
+ * @param options NMF options with optional `maxSteps` budget and random `stream`.
+ * @returns The final factors $\Wmat$, $\Hmat$, final objective value, and steps completed.
+ *
+ * @example Factorise a non-negative matrix
+ * const X = [[1, 2], [3, 4], [5, 6]]
+ * const res = nmf(X, { rank: 2, maxSteps: 20 })
+ * print('steps =', res.steps > 0)
+ */
 export function nmf(
   X: MatrixLike,
   options: NmfOptions & { maxSteps?: Size; stream?: Stream },

@@ -10,12 +10,66 @@ import { DomainError, NotDifferentiableError } from 'aifn-compute/foundation/err
 
 export type C = ComplexNumber
 
+/**
+ * Construct a complex number $z = \text{re} + i\,\text{im}$.
+ *
+ * @param re The real part of the complex number.
+ * @param im The imaginary part (default 0).
+ * @returns The complex number representation `{ re, im }`.
+ */
 export const of = (re: number, im = 0): C => ({ re, im })
+
+/**
+ * Add two complex numbers $a + b$.
+ *
+ * @param a The first complex term.
+ * @param b The second complex term.
+ * @returns The sum $a + b$.
+ */
 export const add = (a: C, b: C): C => of(a.re + b.re, a.im + b.im)
+
+/**
+ * Subtract two complex numbers $a - b$.
+ *
+ * @param a The minuend.
+ * @param b The subtrahend.
+ * @returns The difference $a - b$.
+ */
 export const sub = (a: C, b: C): C => of(a.re - b.re, a.im - b.im)
+
+/**
+ * Multiply two complex numbers $a \cdot b$.
+ *
+ * @param a The first complex factor.
+ * @param b The second complex factor.
+ * @returns The complex product $a \cdot b$.
+ */
 export const mul = (a: C, b: C): C => of(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re)
+
+/**
+ * Scale a complex number by a real scalar $k \cdot a$.
+ *
+ * @param a The complex number to scale.
+ * @param k The real scaling factor.
+ * @returns The scaled complex number.
+ */
 export const scale = (a: C, k: number): C => of(a.re * k, a.im * k)
+
+/**
+ * Compute the absolute value (modulus) $|a| = \sqrt{a_{\text{re}}^2 + a_{\text{im}}^2}$.
+ *
+ * @param a The complex number.
+ * @returns The Euclidean modulus $|a|$.
+ */
 export const abs = (a: C): number => Math.hypot(a.re, a.im)
+
+/**
+ * Divide two complex numbers $a / b$ using Smith's (1962) scaled algorithm to avoid intermediate overflow.
+ *
+ * @param a The complex numerator.
+ * @param b The complex denominator.
+ * @returns The quotient $a / b$.
+ */
 export function div(a: C, b: C): C {
   if (Math.abs(b.re) >= Math.abs(b.im)) {
     const r = b.im / b.re
@@ -27,21 +81,40 @@ export function div(a: C, b: C): C {
   return of((a.re * r + a.im) / d, (a.im * r - a.re) / d)
 }
 
-/** p(x) by Horner's rule, coefficients highest power first. */
+/**
+ * Evaluate a polynomial $p(x)$ by Horner's rule, given coefficients in descending degree order.
+ *
+ * @param p The polynomial coefficients $[c_d, \dots, c_0]$ representing $\sum_{k=0}^d c_{d-k} x^k$.
+ * @param x The complex evaluation point.
+ * @returns The value of $p(x)$.
+ */
 export function horner(p: readonly C[], x: C): C {
   let v = of(0)
   for (const c of p) v = add(mul(v, x), c)
   return v
 }
 
-/** Polynomial product (coefficient convolution). */
+/**
+ * Compute the polynomial product $a(x) \cdot b(x)$ via discrete coefficient convolution.
+ *
+ * @param a The first polynomial's coefficients in descending degree order.
+ * @param b The second polynomial's coefficients in descending degree order.
+ * @returns The product polynomial's coefficients in descending degree order.
+ */
 export function product(a: readonly C[], b: readonly C[]): C[] {
   const out = Array.from({ length: a.length + b.length - 1 }, () => of(0))
   a.forEach((x, i) => b.forEach((y, j) => (out[i + j] = add(out[i + j], mul(x, y)))))
   return out
 }
 
-/** numpy's `polydiv`: quotient and remainder, the remainder's leading (relative) zeros trimmed to one coefficient. */
+/**
+ * Polynomial synthetic division (numpy `polydiv`): computes quotient $q(x)$ and remainder $r(x)$ such that
+ * $u(x) = q(x) v(x) + r(x)$, trimming relative leading zeros of the remainder.
+ *
+ * @param u The dividend polynomial's coefficients in descending degree order.
+ * @param v The divisor polynomial's coefficients in descending degree order.
+ * @returns An object containing quotient coefficients `q` and remainder coefficients `r`.
+ */
 export function divide(u: readonly C[], v: readonly C[]): { q: C[]; r: C[] } {
   const m = u.length - 1
   const n = v.length - 1
@@ -60,8 +133,12 @@ export function divide(u: readonly C[], v: readonly C[]): { q: C[]; r: C[] } {
 }
 
 /**
- * Coefficients of an untraced input as complex scalars, and whether any was complex. Traced input throws: the caller
- * runs element by element.
+ * Parse an untraced input into a list of complex scalar coefficients and indicate whether any entry was complex.
+ * Throws `NotDifferentiableError` if given traced values.
+ *
+ * @param x The input coefficient values: a number, tensor, or array of numbers or complex objects.
+ * @param where The caller name for error messages.
+ * @returns The parsed list of coefficients and a boolean flag indicating if any coefficient was complex.
  */
 export function readList(x: Value | VectorLike | readonly C[], where: string): { list: C[]; complex: boolean } {
   if (isTraced(x as unknown))
@@ -80,7 +157,14 @@ export function readList(x: Value | VectorLike | readonly C[], where: string): {
   return { list: arr.map((v) => (typeof v === 'number' ? of(v) : of(v.re, v.im))), complex }
 }
 
-/** A list as a rank-1 tensor: complex128 when `complex`, else float64 of the real parts. */
+/**
+ * Convert a list of complex numbers to a 1D tensor: `complex128` when `complex` is true, otherwise `float64` of the
+ * real parts.
+ *
+ * @param xs The list of complex numbers.
+ * @param complex Whether to construct a complex tensor (`complex128`) or real tensor (`float64`).
+ * @returns A rank-1 tensor holding the coefficient values.
+ */
 export function toTensor(xs: readonly C[], complex: boolean): Tensor {
   if (!complex)
     return tensor(

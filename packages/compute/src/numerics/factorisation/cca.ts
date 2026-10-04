@@ -1,12 +1,12 @@
 /**
- * Canonical correlation analysis (Hotelling, 1936): pairs of directions a_c, b_c whose projections Xa_c and Yb_c are
- * maximally correlated, each pair uncorrelated with the earlier ones. With the sample covariances C_xx, C_yy, C_xy, the
- * pairs are the singular vectors of the whitened cross-covariance M = C_xx^{−1/2} C_xy C_yy^{−1/2} = U S Vᵀ, mapped
- * back: a_c = C_xx^{−1/2} u_c, b_c = C_yy^{−1/2} v_c, and the canonical correlations are the singular values. Scores
+ * Canonical correlation analysis (Hotelling, 1936): pairs of directions $\mathbf{a}_c, \mathbf{b}_c$ whose projections $\mathbf{X}\mathbf{a}_c$ and $\mathbf{Y}\mathbf{b}_c$ are
+ * maximally correlated, each pair uncorrelated with the earlier ones. With the sample covariances $\mathbf{C}_{xx}, \mathbf{C}_{yy}, \mathbf{C}_{xy}$, the
+ * pairs are the singular vectors of the whitened cross-covariance $\mathbf{M} = \mathbf{C}_{xx}^{-1/2} \mathbf{C}_{xy} \mathbf{C}_{yy}^{-1/2} = \mathbf{U} \mathbf{S} \mathbf{V}^\top$, mapped
+ * back: $\mathbf{a}_c = \mathbf{C}_{xx}^{-1/2} \mathbf{u}_c$, $\mathbf{b}_c = \mathbf{C}_{yy}^{-1/2} \mathbf{v}_c$, and the canonical correlations are the singular values. Scores
  * have unit sample variance.
  *
- * Regularised CCA (Vinod, 1976; Hardoon, Szedmak and Shawe-Taylor, 2004) adds ridge terms, C_xx + r_x I and
- * C_yy + r_y I, which makes the problem well posed when a block has more columns than rows or near-collinear columns;
+ * Regularised CCA (Vinod, 1976; Hardoon, Szedmak and Shawe-Taylor, 2004) adds ridge terms, $\mathbf{C}_{xx} + r_x \mathbf{I}$ and
+ * $\mathbf{C}_{yy} + r_y \mathbf{I}$, which makes the problem well posed when a block has more columns than rows or near-collinear columns;
  * the reported correlations are then the regularised ones (shrunk towards 0).
  */
 
@@ -15,37 +15,64 @@ import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { DomainError, NumericalError, ShapeError } from 'aifn-compute/foundation/errors'
 import { svd, symmetricInverseSqrt } from 'aifn-compute/numerics/linalg'
 
-/** Options of `canonicalCorrelation`. */
+/** Options for configuring `canonicalCorrelation`. */
 export type CcaOptions = {
-  /** Number of canonical pairs r (default min(p, q)). */
+  /** Number of canonical pairs $r$ (default $\min(p, q)$). */
   components?: Size
-  /** Ridge added to C_xx and C_yy: one value for both, or [r_x, r_y] (default 0, classical CCA). */
+  /** Ridge added to $\mathbf{C}_{xx}$ and $\mathbf{C}_{yy}$: one value for both, or $[r_x, r_y]$ (default 0, classical CCA). */
   regularisation?: number | readonly [number, number]
 }
 
-/** A fitted CCA. */
+/** A fitted CCA model containing canonical directions, correlations, and projection transforms. */
 export type Cca = {
-  /** Canonical directions for X as columns [p, r]; each pair signed so the largest-magnitude entry of a_c is positive. */
+  /** Canonical directions for $\mathbf{X}$ as columns of shape $[p, r]$; each pair signed so the largest-magnitude entry of $\mathbf{a}_c$ is positive. */
   xWeights: Tensor
-  /** Canonical directions for Y as columns [q, r]. */
+  /** Canonical directions for $\mathbf{Y}$ as columns of shape $[q, r]$. */
   yWeights: Tensor
-  /** Canonical correlations [r], descending. */
+  /** Canonical correlations of length $r$, sorted in descending order. */
   correlations: Tensor
+  /** Column means of $\mathbf{X}$ ($p$ values). */
   xMean: Tensor
+  /** Column means of $\mathbf{Y}$ ($q$ values). */
   yMean: Tensor
-  /** Canonical scores (X − x̄) A [m, r]. */
+  /**
+   * Project new data $\mathbf{X}$ onto canonical variates: $(\mathbf{X} - \bar{\mathbf{x}}) \mathbf{A}$ of shape $[m, r]$.
+   *
+   * @param X Data matrix of shape $[m, p]$.
+   * @returns Canonical scores tensor of shape $[m, r]$.
+   */
   transformX(X: MatrixLike): Tensor
-  /** Canonical scores (Y − ȳ) B [m, r]. */
+  /**
+   * Project new data $\mathbf{Y}$ onto canonical variates: $(\mathbf{Y} - \bar{\mathbf{y}}) \mathbf{B}$ of shape $[m, r]$.
+   *
+   * @param Y Data matrix of shape $[m, q]$.
+   * @returns Canonical scores tensor of shape $[m, r]$.
+   */
   transformY(Y: MatrixLike): Tensor
 }
 
+/**
+ * Compute the column means and zero-centred copy of a row-major matrix.
+ *
+ * @param data Row-major matrix elements of length $n \times d$.
+ * @param n Number of rows.
+ * @param d Number of columns.
+ * @returns An object containing column means array `mean` and zero-centred array `Xc`.
+ */
 function centred(data: Float64Array, n: Size, d: Size) {
   const mean = new Float64Array(d)
   for (let i = 0; i < n; i++) for (let j = 0; j < d; j++) mean[j] += data[i * d + j] / n
   return { mean, Xc: Float64Array.from(data, (v, t) => v - mean[t % d]) }
 }
 
-/** S^{−1/2} of a covariance block S [d, d]; a singular block is refused with the remedy. */
+/**
+ * Compute $S^{-1/2}$ of a covariance block $S$ ($d \times d$); throws a `NumericalError` with code `'singular'` if
+ * $S$ is not positive definite.
+ *
+ * @param S The $d \times d$ covariance matrix as a row-major array.
+ * @param d The dimension $d$ of the covariance matrix.
+ * @returns The inverse square root matrix $S^{-1/2}$ as a row-major array.
+ */
 function inverseSqrt(S: Float64Array, d: Size): Float64Array {
   try {
     return dense.data(symmetricInverseSqrt(fromData(S, [d, d])))
@@ -59,7 +86,20 @@ function inverseSqrt(S: Float64Array, d: Size): Float64Array {
   }
 }
 
-/** Fit CCA (or regularised CCA) to paired rows X [n, p] and Y [n, q]. */
+/**
+ * Fit CCA (or regularised CCA) to paired rows $X$ ($n \times p$) and $Y$ ($n \times q$).
+ *
+ * @param X First data matrix of shape $[n, p]$ with rows as observations.
+ * @param Y Second data matrix of shape $[n, q]$ with rows as observations.
+ * @param options Configuration for components count and ridge regularisation.
+ * @returns A fitted `Cca` object containing weights, canonical correlations, means, and projection methods.
+ *
+ * @example Fit canonical correlation analysis
+ * const X = [[1, 0], [0, 1], [-1, 0], [0, -1]]
+ * const Y = [[1, 1], [-1, 1], [-1, -1], [1, -1]]
+ * const res = canonicalCorrelation(X, Y, { components: 1 })
+ * print('correlation =', res.correlations)
+ */
 export function canonicalCorrelation(X: MatrixLike, Y: MatrixLike, options: CcaOptions = {}): Cca {
   const x = dense.toMatrixF64(X, 'canonicalCorrelation')
   const y = dense.toMatrixF64(Y, 'canonicalCorrelation')

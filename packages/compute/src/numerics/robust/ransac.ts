@@ -37,23 +37,42 @@ export interface RansacOptions {
 
 /** The state of `ransac`. */
 export interface RansacState<M> extends Status {
-  /** Samples drawn. */
+  /** Samples drawn so far. */
   t: Size
-  /** The sample drawn at this step, its model (null if degenerate) and that model's inlier count. */
+  /** The sample of indices drawn at this step. */
   sample: number[]
+  /** The candidate model fitted to `sample`, or null if degenerate. */
   candidate: M | null
+  /** The number of inliers for `candidate`. */
   candidateInliers: Size
-  /** The best model so far, its inliers (0/1 per datum) and their count. */
+  /** The best model found across all steps so far, or null if none succeeded. */
   best: M | null
+  /** Binary mask where entry $i$ is 1 if datum $i$ is an inlier to `best`, 0 otherwise. */
   inliers: number[]
+  /** Total number of inliers for `best`. */
   inlierCount: Size
-  /** The adaptive number of samples needed: ⌈log(1 − p)/log(1 − wˢ)⌉ with w the best inlier fraction so far. */
+  /**
+   * The adaptive number of samples needed: $\lceil\log(1 - p)/\log(1 - w^s)\rceil$ with $w$ the best inlier fraction
+   * so far.
+   */
   required: Scalar
-  /** Set once t ≥ required. */
+  /** Set once $t \ge \text{required}$. */
   terminated: boolean
 }
 
-/** The adaptive sample count for inlier fraction w, sample size s and confidence p. */
+/**
+ * The adaptive sample count $N = \left\lceil \frac{\log(1 - p)}{\log(1 - w^s)} \right\rceil$ (Fischler & Bolles, 1981;
+ * Hartley & Zisserman, 2004, §4.7.1) needed to draw at least one all-inlier sample of size $s$ with probability $p$,
+ * given inlier fraction $w$.
+ *
+ * @param w The fraction of inliers in the dataset, $w \in [0, 1]$.
+ * @param s The sample size: number of data points needed to fit a minimal model (e.g. 2 for a line).
+ * @param p The desired probability of having drawn at least one outlier-free sample (e.g. 0.99).
+ * @returns The integer number of trials $\lceil N \rceil$, or $\infty$ when $w \le 0$.
+ *
+ * @example Sample count for a line model
+ * print('trials =', ransacTrials(0.6, 2, 0.99))
+ */
 export function ransacTrials(w: Scalar, s: Size, p: Scalar): Scalar {
   if (w >= 1) return 1
   if (w <= 0) return Infinity
@@ -63,10 +82,25 @@ export function ransacTrials(w: Scalar, s: Size, p: Scalar): Scalar {
 }
 
 /**
- * RANSAC as a traceable algorithm (Fischler & Bolles, 1981). Each step draws s distinct indices from the step's
- * stream, fits a candidate, and counts the data with residual ≤ threshold; the best candidate is kept. The run
- * terminates when the number of samples reaches the adaptive count ⌈log(1 − p)/log(1 − wˢ)⌉, w being the best inlier
- * fraction so far (Hartley & Zisserman, 2004, §4.7.1).
+ * RANSAC as a traceable algorithm (Fischler & Bolles, 1981). Each step draws $s$ distinct indices from the step's
+ * stream, fits a candidate, and counts the data with residual $\le \text{threshold}$; the best candidate is kept. The
+ * run terminates when the number of samples reaches the adaptive count $\lceil\log(1 - p)/\log(1 - w^s)\rceil$, $w$
+ * being the best inlier fraction so far (Hartley & Zisserman, 2004, §4.7.1).
+ *
+ * @param problem The model fitting problem: count of data, minimal sample size, and callbacks to fit and score.
+ * @param options Configuration: error `threshold` for inliers and optional `confidence` (default 0.99).
+ * @returns A step-through `Algorithm` whose state tracks the candidate, current best model, and inlier mask.
+ *
+ * @example Step through RANSAC fitting a 1D centre
+ * const pts = [1.0, 1.0, 1.1, 0.9, 10.0]
+ * const problem = {
+ *   count: 5,
+ *   sampleSize: 1,
+ *   fit: ([i]) => pts[i],
+ *   residuals: (m) => pts.map((p) => Math.abs(p - m)),
+ * }
+ * const state = run(ransac(problem, { threshold: 0.2 }), undefined, 10)
+ * print('inliers =', state.inlierCount)
  */
 export function ransac<M>(problem: RansacProblem<M>, options: RansacOptions): Algorithm<undefined, RansacState<M>> {
   const { count: n, sampleSize: s } = problem
@@ -109,15 +143,35 @@ export function ransac<M>(problem: RansacProblem<M>, options: RansacOptions): Al
 
 /** A finished RANSAC fit: the model refitted on the inliers, the inlier mask and the number of samples drawn. */
 export interface RansacFit<M> {
+  /** The model refitted on the consensus set (or best candidate if refit failed or none found). */
   model: M | null
+  /** Binary mask where entry $i$ is 1 if datum $i$ is an inlier, 0 if an outlier. */
   inliers: number[]
+  /** Number of inliers found. */
   inlierCount: Size
+  /** Total number of samples drawn. */
   samples: Size
 }
 
 /**
  * Run `ransac` to termination (at most `maxSamples`, default 1000), then refit the model on the consensus set with
  * `problem.refit` (or `fit`) and recount its inliers.
+ *
+ * @param problem The model fitting problem: count of data, minimal sample size, and callbacks to fit and score.
+ * @param options Configuration: error `threshold`, optional `confidence`, `maxSamples` budget, and PRNG `stream`.
+ * @returns The final `RansacFit` containing the refitted model, inlier mask, count, and sample count.
+ *
+ * @example Fit a 1D centre robust to outliers
+ * const pts = [1.0, 1.0, 1.1, 0.9, 10.0]
+ * const problem = {
+ *   count: 5,
+ *   sampleSize: 1,
+ *   fit: ([i]) => pts[i],
+ *   residuals: (m) => pts.map((p) => Math.abs(p - m)),
+ * }
+ * const fit = ransacFit(problem, { threshold: 0.2 })
+ * print('fitted centre =', fit.model)
+ * print('inliers =', fit.inlierCount)
  */
 export function ransacFit<M>(
   problem: RansacProblem<M>,

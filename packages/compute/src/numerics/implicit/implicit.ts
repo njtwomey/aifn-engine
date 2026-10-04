@@ -2,16 +2,16 @@
  * Implicit differentiation: the derivative of a solution with respect to the parameters of the equation it solves,
  * without differentiating the solver (design K §4.3).
  *
- * If x⋆ solves r(p, x⋆) = 0 and ∂r/∂x is invertible there, the implicit function theorem gives
- * ∂x⋆/∂p = −(∂r/∂x)⁻¹ ∂r/∂p (Krantz and Parks, 2002). The vjp of the solution map is therefore
- * p̄ = −(∂r/∂p)ᵀ w, where w solves (∂r/∂x)ᵀ w = x̄. For a fixed point x⋆ = F(p, x⋆), r = x − F gives
- * p̄ = (∂F/∂p)ᵀ w with (I − ∂F/∂x)ᵀ w = x̄ (Christianson, 1994; Blondel et al., 2022).
+ * If $x^\star$ solves $r(p, x^\star) = 0$ and $\partial r/\partial x$ is invertible there, the implicit function theorem gives
+ * $\partial x^\star/\partial p = -(\partial r/\partial x)^{-1} \partial r/\partial p$ (Krantz and Parks, 2002). The vjp of the solution map is therefore
+ * $\bar{p} = -(\partial r/\partial p)^\top w$, where $w$ solves $(\partial r/\partial x)^\top w = \bar{x}$. For a fixed point $x^\star = F(p, x^\star)$, $r = x - F$ gives
+ * $\bar{p} = (\partial F/\partial p)^\top w$ with $(I - \partial F/\partial x)^\top w = \bar{x}$ (Christianson, 1994; Blondel et al., 2022).
  *
  * The solver runs on raw values only and is never traced, so any solver works (Newton, L-BFGS, a `dense` loop). The
  * adjoint system is solved densely for small problems (the Jacobian from `jacobian`, then `aifn-compute/numerics/linalg`'s
  * `solve`, LU with partial pivoting, which raises `LinAlgError('singular')` for a singular system) and
  * otherwise iteratively with vjp calls only (jvp calls in forward mode): the fixed-point iteration
- * w ← (∂F/∂x)ᵀ w + x̄ for `implicitFixedPoint`, BiCGSTAB for `implicitRoot`. Both iterations are written with
+ * $w \leftarrow (\partial F/\partial x)^\top w + \bar{x}$ for `implicitFixedPoint`, BiCGSTAB for `implicitRoot`. Both iterations are written with
  * primitives and batch under `vmap`: the examples iterate together, each stopping on its own values. A solution that does not satisfy its
  * equation, or an adjoint solve that does not converge, raises `NumericalError('not-converged')`: never a gradient of
  * the wrong point.
@@ -55,11 +55,23 @@ import { solve as linearSolve } from 'aifn-compute/numerics/linalg'
 
 // ── Trees as vectors ─────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Compute the total number of elements in a tensor shape.
+ *
+ * @param shape The shape array of dimensions.
+ * @returns The total number of elements (product of dimensions).
+ */
 const count = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1)
 
 /** A tree's leaves as one vector, and the way back; written with primitives, so traced values pass through. */
 type Vectorised = { n: number; toVec: (tree: unknown) => Value; fromVec: (v: Value) => unknown }
 
+/**
+ * Flatten a pytree of tensor leaves into a single 1D vector and provide the inverse unflattening.
+ *
+ * @param like A representative instance of the pytree.
+ * @returns An object with total dimension $n$, `toVec` flattener, and `fromVec` unflattening function.
+ */
 function vectorise(like: unknown): Vectorised {
   const flat = treeFlatten(like)
   const avals: Aval[] = flat.leaves.map(avalOf)
@@ -84,7 +96,12 @@ function vectorise(like: unknown): Vectorised {
   }
 }
 
-/** ‖v‖ as a plain number (the values themselves, through every transform level). */
+/**
+ * Compute the Euclidean norm $\|v\|_2$ of a value as a raw scalar number.
+ *
+ * @param v The tensor or scalar value.
+ * @returns The Euclidean norm as a JavaScript number.
+ */
 const size = (v: Value): number => unwrap(norm(v)) as number
 
 // ── Options ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -98,18 +115,27 @@ export type ImplicitOptions = {
   solve?: 'auto' | 'dense' | 'iterative'
   /** The largest x solved densely under `auto` (default 64). */
   denseMax?: number
-  /** Tolerances of the iterative adjoint solve: ‖Δ‖ ≤ atol + rtol·‖x̄‖ (defaults 1e-12, 1e-10). */
+  /** Absolute tolerance of the iterative adjoint solve: $\|\Delta\| \le \text{atol} + \text{rtol} \cdot \|\bar{x}\|$ (default 1e-12). */
   atol?: number
+  /** Relative tolerance of the iterative adjoint solve (default 1e-10). */
   rtol?: number
   /** Iterations of the iterative adjoint solve before `NumericalError('not-converged')` (default 1000). */
   maxIter?: number
   /**
-   * Check that the solver's answer satisfies its equation, ‖r‖ ≤ atol + rtol·‖x‖, before differentiating at it
-   * (default { atol: 1e-6, rtol: 1e-6 }); `false` skips the check.
+   * Check that the solver's answer satisfies its equation, $\|r\| \le \text{atol} + \text{rtol} \cdot \|x\|$, before differentiating at it
+   * (default `{ atol: 1e-6, rtol: 1e-6 }`); `false` skips the check.
    */
   check?: { atol: number; rtol: number } | false
 }
 
+/**
+ * Verify that a proposed solution satisfies its residual equation, throwing `NumericalError` if not.
+ *
+ * @param where The caller function name for error messages.
+ * @param r The residual value $r(p, x)$.
+ * @param x The candidate solution value $x$.
+ * @param check The tolerance settings or `false` to disable the check.
+ */
 function checkSolution(where: string, r: Value, x: Value, check: ImplicitOptions['check']): void {
   if (check === false) return
   const { atol, rtol } = check ?? { atol: 1e-6, rtol: 1e-6 }
@@ -122,15 +148,36 @@ function checkSolution(where: string, r: Value, x: Value, check: ImplicitOptions
     )
 }
 
+/**
+ * Determine whether an adjoint system of size $n$ should be solved densely or iteratively.
+ *
+ * @param n The total number of variables in the solution vector.
+ * @param o The implicit differentiation options.
+ * @returns True if a dense linear solve should be used, false for iterative.
+ */
 const solvesDensely = (n: number, o: ImplicitOptions) =>
   o.solve === 'dense' || (o.solve !== 'iterative' && n <= (o.denseMax ?? 64))
 
-/** The Jacobian of the vector map v ↦ toVec(h(fromVec(v))) at x, as a tensor [n, n]. */
+/**
+ * The Jacobian of the vector map $v \mapsto \text{toVec}(h(\text{fromVec}(v)))$ at $x$, as an $n \times n$ tensor.
+ *
+ * @param h The mapping function.
+ * @param x The point at which to evaluate the Jacobian.
+ * @param vec The vectorisation helper holding dimensions and tree converters.
+ * @returns An $n \times n$ tensor representing the Jacobian matrix.
+ */
 function denseJacobian<X>(h: (x: X) => unknown, x: X, vec: Vectorised): Value {
   const J = jacobian((v: Value) => vec.toVec(h(vec.fromVec(v) as X)), { mode: 'reverse' })(vec.toVec(x)) as Value
   return reshape(J, [vec.n, vec.n])
 }
 
+/**
+ * Construct a `NumericalError` indicating non-convergence of an adjoint iterative solve.
+ *
+ * @param where The caller name for error messages.
+ * @param iterations The number of iterations completed before termination.
+ * @returns A `NumericalError` configured with the `'not-converged'` code.
+ */
 function notConverged(where: string, iterations: number): NumericalError {
   return new NumericalError(
     where,
@@ -142,15 +189,25 @@ function notConverged(where: string, iterations: number): NumericalError {
 // ── implicitFixedPoint ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The fixed point x⋆ = F(p, x⋆) found by `solver(p, x0)`, differentiable in p by the implicit function theorem (the
- * derivative in x0 is zero). The solver runs on raw values and is never differentiated; F must be written with
- * primitives. The adjoint (I − ∂F/∂x)ᵀ w = x̄ is solved densely for small x, otherwise by w ← (∂F/∂x)ᵀ w + x̄, which
- * converges whenever the fixed-point iteration itself contracts.
+ * The fixed point $x^\star = F(p, x^\star)$ found by `solver(p, x0)`, differentiable in $p$ by the implicit function
+ * theorem (the derivative in $x_0$ is zero). The solver runs on raw values and is never differentiated; $F$ must be
+ * written with primitives. The adjoint $(\Imat - \partial F/\partial x)^\top w = \bar{x}$ is solved densely for small
+ * $x$, otherwise by $w \leftarrow (\partial F/\partial x)^\top w + \bar{x}$, which converges whenever the fixed-point
+ * iteration itself contracts.
  *
- * @example
- * // x = cos(p·x): the derivative in p without differentiating the iteration.
- * const x = implicitFixedPoint(iterate, (p: Value, x: Value) => cos(mul(p, x)))
- * grad((p: number) => x(p, 0))(0.5)
+ * @param solver A function computing the fixed point $x^\star$ from parameters $p$ and initial state $x_0$.
+ * @param F The fixed-point map $F(p, x)$ satisfying $x^\star = F(p, x^\star)$.
+ * @param options Options controlling adjoint solve strategy, tolerances, and solution checks.
+ * @returns A differentiable function computing the fixed point for parameters $p$ and initial guess $x_0$.
+ *
+ * @example Differentiate through a contracting fixed point iteration
+ * const solve = (p, x0) => {
+ *   let x = Number(x0)
+ *   for (let k = 0; k < 30; k++) x = 0.5 * x + Number(p)
+ *   return x
+ * }
+ * const fp = implicitFixedPoint(solve, (p, x) => add(mul(0.5, x), p))
+ * print('d(x*)/dp =', grad((p) => fp(p, 0))(3))
  */
 export function implicitFixedPoint<P, X>(
   solver: (p: P, x0: X) => X,
@@ -204,8 +261,15 @@ export function implicitFixedPoint<P, X>(
 }
 
 /**
- * Solve (I − K) w = b for a contraction K given as products, by the iteration w ← b + K w. Inside `vmap` the examples
- * iterate together until every one has converged (iterating past convergence is harmless for a contraction).
+ * Solve $(\Imat - \Kmat) w = b$ for a contraction $\Kmat$ given as products, by the iteration $w \leftarrow b + \Kmat w$.
+ * Inside `vmap` the examples iterate together until every one has converged (iterating past convergence is harmless for
+ * a contraction).
+ *
+ * @param K The linear contraction operator.
+ * @param b The right-hand side vector.
+ * @param o Options specifying tolerances and maximum iterations.
+ * @param where Caller name for error messages.
+ * @returns The converged solution vector $w$.
  */
 function neumann(K: (v: Value) => Value, b: Value, o: ImplicitOptions, where: string): Value {
   const { atol = 1e-12, rtol = 1e-10, maxIter = 1000 } = o
@@ -223,15 +287,25 @@ function neumann(K: (v: Value) => Value, b: Value, o: ImplicitOptions, where: st
 // ── implicitRoot ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The root x⋆ of residual(p, x) = 0 found by `solver(p)`, differentiable in p by the implicit function theorem:
- * p̄ = −(∂r/∂p)ᵀ w with (∂r/∂x)ᵀ w = x̄. The solver runs on raw values and is never differentiated; the residual must
- * be written with primitives. For a minimiser, the residual is the gradient of the objective (a hyperparameter gradient
- * through `optim.minimize`). The adjoint is solved densely for small x, otherwise by BiCGSTAB with vjp calls.
+ * The root $x^\star$ of $\text{residual}(p, x) = 0$ found by `solver(p)`, differentiable in $p$ by the implicit
+ * function theorem: $\bar{p} = -(\partial r/\partial p)^\top w$ with $(\partial r/\partial x)^\top w = \bar{x}$.
+ * The solver runs on raw values and is never differentiated; the residual must be written with primitives. For a
+ * minimiser, the residual is the gradient of the objective (a hyperparameter gradient through `optim.minimize`).
+ * The adjoint is solved densely for small $x$, otherwise by BiCGSTAB with vjp calls.
  *
- * @example
- * // √p by Newton's method; its derivative 1/(2√p) by the implicit function theorem.
- * const root = implicitRoot(newtonSqrt, (p: Value, x: Value) => sub(mul(x, x), p))
- * grad(root)(2) // 0.35355…
+ * @param solver A function computing the root $x^\star$ from parameter $p$.
+ * @param residual The residual function $r(p, x)$ satisfying $r(p, x^\star) = 0$.
+ * @param options Options controlling adjoint solve strategy, tolerances, and solution checks.
+ * @returns A differentiable function computing the root for parameter $p$.
+ *
+ * @example Differentiate through an untraced square root solver
+ * const newtonSqrt = (p) => {
+ *   let x = 1
+ *   for (let k = 0; k < 20; k++) x = 0.5 * (x + Number(p) / x)
+ *   return x
+ * }
+ * const root = implicitRoot(newtonSqrt, (p, x) => sub(mul(x, x), p))
+ * print('d(sqrt(4))/dp =', grad(root)(4))
  */
 export function implicitRoot<P, X>(
   solver: (p: P) => X,
@@ -291,10 +365,17 @@ export function implicitRoot<P, X>(
 }
 
 /**
- * Solve A w = b for a linear map A given only as products v ↦ Av, by BiCGSTAB (van der Vorst, 1992). Written with
- * primitives, so inside `vmap` every example runs its own iteration in lockstep: the scalars are per example, an example
- * that has converged keeps its answer (`where` on a per-example mask) and has its search state reset so that it stays
- * finite, and the loop stops when every example has converged. Convergence is read from the values of each example.
+ * Solve $\Amat w = b$ for a linear map $\Amat$ given only as products $v \mapsto \Amat v$, by BiCGSTAB (van der Vorst,
+ * 1992). Written with primitives, so inside `vmap` every example runs its own iteration in lockstep: the scalars are
+ * per example, an example that has converged keeps its answer (`where` on a per-example mask) and has its search state
+ * reset so that it stays finite, and the loop stops when every example has converged. Convergence is read from the
+ * values of each example.
+ *
+ * @param A The linear operator as a function $v \mapsto \Amat v$.
+ * @param b The right-hand side vector.
+ * @param o Options specifying convergence tolerances and maximum iterations.
+ * @param where Caller name for error messages.
+ * @returns The converged solution vector $w$.
  */
 function bicgstab(A: (v: Value) => Value, b: Value, o: ImplicitOptions, where: string): Value {
   const { atol = 1e-12, rtol = 1e-10, maxIter = 1000 } = o
@@ -345,6 +426,10 @@ function bicgstab(A: (v: Value) => Value, b: Value, o: ImplicitOptions, where: s
 /**
  * True when the per-example flag `flag` (a comparison of values) holds for every example: one example outside `vmap`,
  * each batch element inside it. The flags are read from the values, which every level of tracing carries.
+ *
+ * @param flag The boolean or numeric predicate value to evaluate.
+ * @param where Caller name for error messages.
+ * @returns True if all examples evaluate to nonzero, false otherwise.
  */
 function everyExample(flag: Value, where: string): boolean {
   const examples = batchExamples(flag)

@@ -13,8 +13,18 @@ import type { Algorithm } from 'aifn-compute/foundation/trace'
 export type Integrand = (x: Scalar) => Scalar
 
 /**
- * ∫ₐᵇ f(x) dx by the composite trapezoid rule on n equal panels (default 100): h[f(a)/2 + f(x₁) + … + f(b)/2],
- * error −(b − a)h²f″(ξ)/12.
+ * $\int_a^b f(x)\,dx$ by the composite trapezoid rule on $n$ equal panels (default 100):
+ * $h[f(a)/2 + f(x_1) + \dots + f(b)/2]$, error $-(b - a)h^2 f''(\xi)/12$.
+ *
+ * @param f The univariate real integrand function.
+ * @param a The lower integration bound.
+ * @param b The upper integration bound.
+ * @param options Options specifying panel count.
+ * @param options.n Number of equal panels (default 100).
+ * @returns The approximated integral value.
+ *
+ * @example Integrate x^2 from 0 to 1
+ * print('integral =', trapezoid((x) => x * x, 0, 1, { n: 100 }))
  */
 export function trapezoid(f: Integrand, a: Scalar, b: Scalar, { n = 100 }: { n?: Size } = {}): Scalar {
   if (!(n >= 1)) throw new DomainError('trapezoid', 'trapezoid: n must be at least 1')
@@ -25,8 +35,18 @@ export function trapezoid(f: Integrand, a: Scalar, b: Scalar, { n = 100 }: { n?:
 }
 
 /**
- * ∫ₐᵇ f(x) dx by the composite Simpson rule on n equal panels (n even, default 100): (h/3)[f₀ + 4f₁ + 2f₂ + … + fₙ],
- * error −(b − a)h⁴f⁽⁴⁾(ξ)/180, exact for cubics.
+ * $\int_a^b f(x)\,dx$ by the composite Simpson rule on $n$ equal panels ($n$ even, default 100):
+ * $(h/3)[f_0 + 4f_1 + 2f_2 + \dots + f_n]$, error $-(b - a)h^4 f^{(4)}(\xi)/180$, exact for cubics.
+ *
+ * @param f The univariate real integrand function.
+ * @param a The lower integration bound.
+ * @param b The upper integration bound.
+ * @param options Options specifying panel count.
+ * @param options.n Number of equal panels (must be even, default 100).
+ * @returns The approximated integral value.
+ *
+ * @example Integrate a cubic polynomial exactly
+ * print('integral =', simpson((x) => x * x * x, 0, 1, { n: 2 }))
  */
 export function simpson(f: Integrand, a: Scalar, b: Scalar, { n = 100 }: { n?: Size } = {}): Scalar {
   if (!(n >= 2) || n % 2 !== 0) throw new DomainError('simpson', `simpson: n must be even and at least 2, got ${n}`)
@@ -37,8 +57,19 @@ export function simpson(f: Integrand, a: Scalar, b: Scalar, { n = 100 }: { n?: S
 }
 
 /**
- * The trapezoid rule on samples y at points x (a tensor or array of the same length; default spacing `dx` = 1), as
- * numpy's `trapezoid(y, x)`: Σ (x_{i+1} − x_i)(y_i + y_{i+1})/2.
+ * The trapezoid rule on samples $y$ at points $x$ (a tensor or array of the same length; default spacing `dx` = 1), as
+ * numpy's `trapezoid(y, x)`: $\sum (x_{i+1} - x_i)(y_i + y_{i+1})/2$.
+ *
+ * @param y Sampled function values along the integration interval.
+ * @param x Optional sample evaluation points matching the length of `y`.
+ * @param options Options specifying constant grid spacing when `x` is omitted.
+ * @param options.dx Uniform sample step size (default 1).
+ * @returns The approximated integral value.
+ *
+ * @example Integrate sampled function values
+ * const y = [0, 1, 4, 9]
+ * const x = [0, 1, 2, 3]
+ * print('integral =', trapezoidSamples(y, x))
  */
 export function trapezoidSamples(
   y: Tensor | ArrayLike<number>,
@@ -57,18 +88,20 @@ export function trapezoidSamples(
 
 /** The state of `romberg`. */
 export type RombergState = Status & {
-  /** Rows added after the first (the level k: the trapezoid rule on 2ᵏ panels). */
+  /** Rows added after the first (the level $k$: the trapezoid rule on $2^k$ panels). */
   t: Size
   /**
-   * The Romberg tableau R (k + 1)×(k + 1), lower triangular (NaN above the diagonal): R[i][0] is the trapezoid rule on
-   * 2ⁱ panels and R[i][j] = R[i][j−1] + (R[i][j−1] − R[i−1][j−1])/(4ʲ − 1).
+   * The Romberg tableau $R$ ($k + 1) \times (k + 1)$, lower triangular (NaN above the diagonal): $R[i][0]$ is the
+   * trapezoid rule on $2^i$ panels and $R[i][j] = R[i][j-1] + (R[i][j-1] - R[i-1][j-1])/(4^j - 1)$.
    */
   tableau: Tensor
-  /** The current estimate R[k][k]. */
+  /** The current estimate $R[k][k]$. */
   value: number
-  /** |R[k][k] − R[k−1][k−1]| (Infinity at t = 0). */
+  /** $|R[k][k] - R[k-1][k-1]|$ ($\infty$ at $t = 0$). */
   error: number
+  /** Cumulative count of integrand function evaluations. */
   evaluations: number
+  /** Set to true when error falls within tolerance. */
   converged: boolean
   /** True once the estimate is not finite. */
   diverged: boolean
@@ -76,8 +109,20 @@ export type RombergState = Status & {
 
 /**
  * Romberg integration (Romberg, 1955): halve the trapezoid panels each step, reusing earlier evaluations, and
- * extrapolate the h² error expansion away (Richardson). For smooth f the diagonal converges very fast. Stops when
- * |R[k][k] − R[k−1][k−1]| ≤ max(atol, rtol·|R[k][k]|) (defaults 1e-12, 1e-12). `init` takes `{ a, b }`.
+ * extrapolate the $h^2$ error expansion away (Richardson). For smooth $f$ the diagonal converges very fast. Stops when
+ * $|R[k][k] - R[k-1][k-1]| \le \max(\text{atol}, \text{rtol} \cdot |R[k][k]|)$ (defaults 1e-12, 1e-12). `init` takes
+ * `{ a, b }`.
+ *
+ * @param f The univariate real integrand function.
+ * @param options Convergence options specifying absolute and relative tolerances.
+ * @param options.atol Absolute tolerance on successive diagonal differences (default 1e-12).
+ * @param options.rtol Relative tolerance on successive diagonal differences (default 1e-12).
+ * @returns An `Algorithm` stepping through Romberg tableau extrapolation.
+ *
+ * @example Integrate e^x using Romberg extrapolation
+ * const alg = romberg(Math.exp)
+ * const state = run(alg, { a: 0, b: 1 }, 10)
+ * print('integral =', state.value)
  */
 export function romberg(
   f: Integrand,

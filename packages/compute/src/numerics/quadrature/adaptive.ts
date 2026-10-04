@@ -11,7 +11,16 @@ import type { Size, Status } from 'aifn-compute/foundation/contracts'
 import { romberg, type Integrand } from './rules'
 
 /** One piece of the subdivision: the interval, its estimate and its error estimate. */
-export type Interval = { a: number; b: number; value: number; error: number }
+export type Interval = {
+  /** Left endpoint of interval. */
+  a: number
+  /** Right endpoint of interval. */
+  b: number
+  /** Estimated integral value over $[a, b]$. */
+  value: number
+  /** Estimated absolute error over $[a, b]$. */
+  error: number
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Adaptive Simpson.
@@ -29,6 +38,7 @@ type Pending = {
 
 /** The state of `adaptiveSimpson`. */
 export type AdaptiveSimpsonState = Status & {
+  /** Current step count. */
   t: Size
   /** Intervals accepted so far, in the order they were accepted. */
   accepted: Interval[]
@@ -40,6 +50,7 @@ export type AdaptiveSimpsonState = Status & {
   error: number
   /** The interval examined on the last step and whether it was split. */
   examined: { a: number; b: number; split: boolean } | null
+  /** Cumulative count of integrand evaluations. */
   evaluations: number
   /** True once every interval met its tolerance (none was accepted only because of the depth limit). */
   converged: boolean
@@ -50,10 +61,21 @@ export type AdaptiveSimpsonState = Status & {
 }
 
 /**
- * Adaptive Simpson quadrature (Kuncir, 1962; Lyness, 1969): on each interval compare Simpson's rule S with the sum of
- * Simpson's rule on its halves S₂; if |S₂ − S| ≤ 15·tol accept S₂ + (S₂ − S)/15 (Richardson) with error estimate
- * |S₂ − S|/15, else split with tol halved. Each step examines one interval (depth first). `init` takes `{ a, b }`;
- * options `tolerance` (default 1e-10) and `maxDepth` (default 50).
+ * Adaptive Simpson quadrature (Kuncir, 1962; Lyness, 1969): on each interval compare Simpson's rule $S$ with the sum
+ * of Simpson's rule on its halves $S_2$; if $|S_2 - S| \le 15 \cdot \text{tol}$ accept $S_2 + (S_2 - S)/15$ (Richardson)
+ * with error estimate $|S_2 - S|/15$, else split with $\text{tol}$ halved. Each step examines one interval (depth
+ * first). `init` takes `{ a, b }`.
+ *
+ * @param f The univariate real integrand function.
+ * @param options Options controlling error tolerance and maximum recursion depth.
+ * @param options.tolerance Error tolerance target (default 1e-10).
+ * @param options.maxDepth Maximum recursion subdivision depth (default 50).
+ * @returns An `Algorithm` stepping through adaptive Simpson subdivision.
+ *
+ * @example Adaptively integrate a function with a sharp feature
+ * const alg = adaptiveSimpson((x) => 1 / (1 + 100 * x * x))
+ * const state = run(alg, { a: -1, b: 1 }, 50)
+ * print('integral =', state.value)
  */
 export function adaptiveSimpson(
   f: Integrand,
@@ -138,8 +160,17 @@ const EPMACH = EPS
 const UFLOW = TINY
 
 /**
- * The 15-point Kronrod estimate on [a, b] and QUADPACK's error estimate from its difference with the embedded 7-point
- * Gauss estimate, scaled as in `qk15` (the (200·|K − G|/resasc)^1.5 heuristic).
+ * The 15-point Kronrod estimate on $[a, b]$ and QUADPACK's error estimate from its difference with the embedded 7-point
+ * Gauss estimate, scaled as in `qk15` (the $(200 \cdot |K - G|/\text{resasc})^{1.5}$ heuristic).
+ *
+ * @param f The univariate real integrand function.
+ * @param a The lower bound of the subinterval.
+ * @param b The upper bound of the subinterval.
+ * @returns An `Interval` holding endpoints, 15-point Kronrod estimate, and estimated error.
+ *
+ * @example Evaluate 15-point Gauss-Kronrod estimate on [0, 1]
+ * const res = kronrod15((x) => x * x, 0, 1)
+ * print('value =', res.value)
  */
 export function kronrod15(f: Integrand, a: number, b: number): Interval {
   const centre = 0.5 * (a + b)
@@ -175,27 +206,43 @@ export function kronrod15(f: Integrand, a: number, b: number): Interval {
 
 /** The state of `gaussKronrod`. */
 export type GaussKronrodState = Status & {
+  /** The step index $t$. */
   t: Size
-  /** The current subdivision, in order of a. */
+  /** The current subdivision, in order of $a$. */
   intervals: Interval[]
-  /** The sum of the interval estimates, and of their error estimates. */
+  /** The sum of the interval estimates. */
   value: number
+  /** The sum of the interval error estimates. */
   error: number
-  /** The interval bisected on the last step (null at t = 0). */
+  /** The interval bisected on the last step (null at $t = 0$). */
   split: { a: number; b: number } | null
+  /** Cumulative count of integrand evaluations. */
   evaluations: number
+  /** True when total error is at or below tolerance. */
   converged: boolean
   /** True once the estimate is not finite. */
   diverged: boolean
-  /** True when the worst interval can no longer be bisected in floating point (the tolerance is out of reach). */
+  /** True when the worst interval can no longer be bisected in floating point. */
   stalled: boolean
 }
 
 /**
  * Globally adaptive Gauss–Kronrod 7–15 quadrature (QUADPACK's QAG with key 1; Piessens et al., 1983): start with
- * [a, b] (split at `points` and into `panels` equal pieces when given) and, each step, bisect the interval with the
- * largest error estimate, until the total error is at most max(atol, rtol·|value|) (defaults 1.49e-8, as scipy's
- * `quad`). `init` takes finite `{ a, b, points?, panels? }`; use `integrate` for infinite limits.
+ * $[a, b]$ (split at `points` and into `panels` equal pieces when given) and, each step, bisect the interval with the
+ * largest error estimate, until the total error is at most $\max(\text{atol}, \text{rtol} \cdot |\text{value}|)$
+ * (defaults 1.49e-8, as scipy's `quad`). `init` takes finite `{ a, b, points?, panels? }`; use `integrate` for
+ * infinite limits.
+ *
+ * @param f The univariate real integrand function.
+ * @param options Convergence options controlling absolute and relative tolerances.
+ * @param options.atol Absolute error tolerance (default 1.49e-8).
+ * @param options.rtol Relative error tolerance (default 1.49e-8).
+ * @returns An `Algorithm` stepping through globally adaptive Gauss-Kronrod subdivision.
+ *
+ * @example Globally adaptive Gauss-Kronrod integration of a smooth curve
+ * const alg = gaussKronrod(Math.sin)
+ * const state = run(alg, { a: 0, b: Math.PI }, 20)
+ * print('integral =', state.value)
  */
 export function gaussKronrod(
   f: Integrand,
@@ -241,8 +288,14 @@ export function gaussKronrod(
 }
 
 /**
- * The ends of the starting intervals of [a, b]: each of `panels` equal pieces, further split at the `points` that lie
+ * The ends of the starting intervals of $[a, b]$: each of `panels` equal pieces, further split at the `points` that lie
  * strictly inside, sorted and without duplicates.
+ *
+ * @param a Start of integration interval.
+ * @param b End of integration interval.
+ * @param points Array of predefined internal split points.
+ * @param panels Number of initial equal subintervals ($panels \ge 1$).
+ * @returns Sorted array of interval cut points.
  */
 function startingCuts(a: number, b: number, points: readonly number[], panels: Size): number[] {
   if (!(Number.isInteger(panels) && panels >= 1))
@@ -259,12 +312,15 @@ function startingCuts(a: number, b: number, points: readonly number[], panels: S
 
 /** The result of `integrate`. */
 export type IntegrationResult = {
+  /** Approximated integral value. */
   value: number
   /** The estimated absolute error. */
   error: number
+  /** Total number of integrand evaluations performed. */
   evaluations: number
-  /** Subintervals used (in the transformed variable for infinite limits; 2ᵏ panels for Romberg). */
+  /** Subintervals used (in the transformed variable for infinite limits; $2^k$ panels for Romberg). */
   intervals: Size
+  /** Whether the error target was satisfied. */
   converged: boolean
 }
 
@@ -290,15 +346,25 @@ export type IntegrateOptions = {
 }
 
 /**
- * ∫ₐᵇ f(x) dx by globally adaptive Gauss–Kronrod 7–15 (QUADPACK's QAG, as scipy's `quad` without its extrapolation),
+ * $\int_a^b f(x)\,dx$ by globally adaptive Gauss–Kronrod 7–15 (QUADPACK's QAG, as scipy's `quad` without its extrapolation),
  * at most `maxIntervals` subintervals (default 200), or by Romberg integration (`method: 'romberg'`, at most
- * `maxLevels` halvings). Infinite limits are mapped to (0, 1] as in QUADPACK's QAGI: x = a + (1 − t)/t for [a, ∞),
- * x = b − (1 − t)/t for (−∞, b], and f(x) + f(−x) on [0, ∞) for (−∞, ∞). The Kronrod nodes never touch t = 0.
- * Pass `points` for a narrow peak far from the first rule's nodes (see `IntegrateOptions`).
+ * `maxLevels` halvings). Infinite limits are mapped to $(0, 1]$ as in QUADPACK's QAGI: $x = a + (1 - t)/t$ for $[a, \infty)$,
+ * $x = b - (1 - t)/t$ for $(-\infty, b]$, and $f(x) + f(-x)$ on $[0, \infty)$ for $(-\infty, \infty)$. The Kronrod nodes
+ * never touch $t = 0$. Pass `points` for a narrow peak far from the first rule's nodes (see `IntegrateOptions`).
  *
- * There is no Wynn ε extrapolation (QAGS), so an integrable endpoint singularity converges slowly: ∫₀¹ x^−0.9 dx
+ * There is no Wynn $\varepsilon$ extrapolation (QAGS), so an integrable endpoint singularity converges slowly: $\int_0^1 x^{-0.9}\,dx$
  * stops at 200 intervals with `converged: false` where `quad` needs a few dozen. Remove the singularity by a
- * substitution first (x = u^k with k large enough that the integrand is bounded), or raise `maxIntervals`.
+ * substitution first ($x = u^k$ with $k$ large enough that the integrand is bounded), or raise `maxIntervals`.
+ *
+ * @param f Univariate real integrand function.
+ * @param a Lower integration limit (may be $-\infty$).
+ * @param b Upper integration limit (may be $\infty$).
+ * @param options Integration options controlling algorithm method, tolerances, and interval caps.
+ * @returns An `IntegrationResult` holding the computed value, error estimate, evaluations, intervals, and convergence status.
+ *
+ * @example Integrate Gaussian density from -infinity to infinity
+ * const res = integrate((x) => Math.exp(-x * x), -Infinity, Infinity)
+ * print('integral =', res.value)
  */
 export function integrate(f: Integrand, a: number, b: number, options: IntegrateOptions = {}): IntegrationResult {
   if (a === b) return { value: 0, error: 0, evaluations: 0, intervals: 0, converged: true }

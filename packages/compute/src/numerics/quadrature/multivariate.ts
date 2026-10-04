@@ -12,9 +12,16 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import type { Algorithm } from 'aifn-compute/foundation/trace'
 import { gaussLegendre, type QuadratureRule } from './gauss'
 
-/** A function on ℝᵈ, given the point as a vector of length d. */
+/** A function on $\mathbb{R}^d$, given the point as a vector of length $d$. */
 export type MultivariateIntegrand = (x: Vector) => Scalar
 
+/**
+ * Convert a vector-like corner representation into a flat array of numbers.
+ *
+ * @param v The vector-like corner input.
+ * @param where Caller name for error messages.
+ * @returns Array of finite coordinates.
+ */
 const flat = (v: VectorLike, where: string): number[] => {
   const out = Array.from(isTensor(v) ? toFlat(v) : (v as ArrayLike<number>))
   if (!out.every(Number.isFinite)) throw new ShapeError(where, `${where}: the box corners must be finite`)
@@ -22,8 +29,17 @@ const flat = (v: VectorLike, where: string): number[] => {
 }
 
 /**
- * The tensor-product rule of two 1-D rules: points (xᵢ, yⱼ) as rows of an (nx·ny)×2 matrix, x varying slowest, with
- * weights wᵢvⱼ. Exact for products of polynomials each rule integrates exactly.
+ * The tensor-product rule of two 1-D rules: points $(x_i, y_j)$ as rows of an $(n_x \cdot n_y) \times 2$ matrix, $x$
+ * varying slowest, with weights $w_i v_j$. Exact for products of polynomials each rule integrates exactly.
+ *
+ * @param ruleX 1D quadrature rule for the $x$ axis.
+ * @param ruleY 1D quadrature rule for the $y$ axis.
+ * @returns An object containing grid evaluation points tensor `points` of shape $[n_x \cdot n_y, 2]$ and `weights` tensor.
+ *
+ * @example Form a 2D Gauss-Legendre product rule
+ * const rule1d = gaussLegendre(3)
+ * const rule2d = productRule(rule1d, rule1d)
+ * print('points shape =', rule2d.points.shape)
  */
 export function productRule(ruleX: QuadratureRule, ruleY: QuadratureRule): { points: Tensor; weights: Tensor } {
   const xs = toFlat(ruleX.nodes)
@@ -42,7 +58,15 @@ export function productRule(ruleX: QuadratureRule, ruleY: QuadratureRule): { poi
   return { points: fromData(points, [k, 2]), weights: fromData(weights, [k]) }
 }
 
-/** Equal-panel Newton–Cotes rules as nodes and weights, for product rules. */
+/**
+ * Equal-panel Newton–Cotes rules as nodes and weights, for product rules.
+ *
+ * @param kind The rule type: `'trapezoid'` or `'simpson'`.
+ * @param n Number of panels.
+ * @param a Left interval endpoint.
+ * @param b Right interval endpoint.
+ * @returns A `QuadratureRule` on $[a, b]$.
+ */
 function newtonCotesRule(kind: 'trapezoid' | 'simpson', n: number, a: number, b: number): QuadratureRule {
   if (kind === 'simpson' && n % 2 !== 0)
     throw new DomainError('integrate2d', 'integrate2d: Simpson needs an even number of panels')
@@ -56,8 +80,19 @@ function newtonCotesRule(kind: 'trapezoid' | 'simpson', n: number, a: number, b:
 }
 
 /**
- * ∬ f(x, y) dx dy over the rectangle [ax, bx]×[ay, by] by a tensor-product rule: `'gauss-legendre'` (default, n points
- * per axis, default 20), `'simpson'` or `'trapezoid'` (n panels per axis).
+ * $\iint f(x, y)\,dx\,dy$ over the rectangle $[a_x, b_x] \times [a_y, b_y]$ by a tensor-product rule:
+ * `'gauss-legendre'` (default, $n$ points per axis, default 20), `'simpson'` or `'trapezoid'` ($n$ panels per axis).
+ *
+ * @param f Bivariate integrand function taking scalars $(x, y)$.
+ * @param boundsX Integration limits along $x$ axis $[a_x, b_x]$.
+ * @param boundsY Integration limits along $y$ axis $[a_y, b_y]$.
+ * @param options Options specifying panel count and 1D rule kind.
+ * @param options.n Number of points or panels per axis (default 20).
+ * @param options.rule Underlying 1D rule: `'gauss-legendre'`, `'simpson'`, or `'trapezoid'` (default `'gauss-legendre'`).
+ * @returns Approximated 2D integral value.
+ *
+ * @example Integrate x * y over [0, 1] x [0, 2]
+ * print('integral =', integrate2d((x, y) => x * y, [0, 1], [0, 2]))
  */
 export function integrate2d(
   f: (x: number, y: number) => number,
@@ -76,40 +111,54 @@ export function integrate2d(
 // ---------------------------------------------------------------------------------------------------------------------
 // Monte Carlo.
 
-/** The state of `monteCarlo` (plain data: the draws of step t come from the runner's `ctx.stream`). */
+/** State of the traceable `monteCarlo` integration algorithm. */
 export type MonteCarloState = Status & {
-  /** Points drawn so far. */
+  /** Number of points drawn so far. */
   n: Size
-  /** The running mean of f and the sum of squared deviations (Welford, 1962). */
+  /** Running mean of the integrand evaluations. */
   mean: number
+  /** Sum of squared deviations from the mean (Welford, 1962). */
   sumSquares: number
-  /** The estimate volume·mean of the integral over the box. */
+  /** Integral estimate over the box: $\text{volume} \cdot \bar{f}$. */
   value: number
-  /** Its standard error volume·√(s²/n), with s² the sample variance of f (NaN below two points). */
+  /** Standard error of the estimate: $\text{volume} \cdot \sqrt{s^2 / n}$. */
   standardError: number
-  /** The volume of the box. */
+  /** Total volume of the integration bounding box. */
   volume: number
-  /** The last batch of points (rows) and f at each, for drawing. */
+  /** Most recent batch of sampled points, shape $[B, d]$. */
   batch: Tensor
+  /** Integrand values evaluated at points in the most recent batch, shape $[B]$. */
   batchValues: Tensor
-  /** True once the running mean is not finite (f returned ±∞ or NaN). */
+  /** True once the running mean is not finite (integrand returned $\pm\infty$ or NaN). */
   diverged: boolean
 }
 
-/** Options for `monteCarlo`. */
+/** Options configuring the `monteCarlo` algorithm. */
 export type MonteCarloOptions = {
-  /** Lower and upper corners of the box (length d each). */
+  /** Lower coordinate bounds of the integration box, length $d$. */
   lo: VectorLike
+  /** Upper coordinate bounds of the integration box, length $d$. */
   hi: VectorLike
-  /** Points per step. Default 100. */
+  /** Points drawn per algorithm step (default 100). */
   batch?: Size
 }
 
 /**
- * Plain Monte Carlo integration over the box [lo, hi] ⊂ ℝᵈ: draw points uniformly, estimate the integral by the
- * volume times the mean of f, with standard error volume·s/√n, so the error falls as n^{−1/2} in any dimension. Each
- * step adds a batch drawn from the step's stream. `init` takes no start. It never converges: run it for a budget of
- * steps and read `standardError`.
+ * Plain Monte Carlo integration over the box $[\text{lo}, \text{hi}] \subset \mathbb{R}^d$.
+ *
+ * Draws points uniformly at random and estimates the integral by the box volume multiplied
+ * by the sample mean of $f$. The standard error falls as $\mathcal{O}(n^{-1/2})$ regardless of dimension $d$.
+ * Each algorithm step adds a batch drawn from the step's PRNG stream.
+ *
+ * @param f Multivariate integrand taking a vector $\xvec \in \mathbb{R}^d$.
+ * @param options Bounding box limits and batch size per step.
+ * @returns A traceable `Algorithm` stepping through Monte Carlo batches.
+ *
+ * @example Trace Monte Carlo steps
+ * const alg = monteCarlo(x => x.data[0] * x.data[1], { lo: [0, 0], hi: [1, 1], batch: 100 })
+ * const state = run(alg, undefined, 5)
+ * print('steps =', state.t)
+ * print('points =', state.n)
  */
 export function monteCarlo(f: MultivariateIntegrand, options: MonteCarloOptions): Algorithm<unknown, MonteCarloState> {
   const lo = flat(options.lo, 'monteCarlo')
@@ -164,12 +213,34 @@ export function monteCarlo(f: MultivariateIntegrand, options: MonteCarloOptions)
   }
 }
 
-/** The result of `integrateMonteCarlo` and `quasiMonteCarlo`. */
-export type MonteCarloResult = { value: number; standardError: number; n: Size }
+/** Result returned by `integrateMonteCarlo` and `quasiMonteCarlo`. */
+export type MonteCarloResult = {
+  /** Estimated integral value over the hyper-rectangle. */
+  value: number
+  /** Estimated standard error of the integral estimate. */
+  standardError: number
+  /** Total number of integrand evaluations used. */
+  n: Size
+}
 
 /**
- * ∫ over [lo, hi] of f by plain Monte Carlo with n points (default 10 000), drawn from stream `s` (first, as every
- * random function). See `monteCarlo`; the points are the draws of its step 0 under root `s`.
+ * Integrate $f$ over $[\text{lo}, \text{hi}]$ by plain Monte Carlo with $n$ sample points.
+ *
+ * Points are drawn from PRNG stream `s`. Computes the integral estimate as the box volume
+ * multiplied by the sample mean, along with the empirical standard error.
+ *
+ * @param s PRNG stream used to generate random samples.
+ * @param f Multivariate integrand evaluating $f(\xvec)$.
+ * @param lo Lower coordinate bounds of the integration box.
+ * @param hi Upper coordinate bounds of the integration box.
+ * @param options Optional configuration specifying the number of points.
+ * @param options.n Number of sample points to draw (default 10 000).
+ * @returns Estimated integral value, standard error, and point count.
+ *
+ * @example Integrate bivariate function
+ * const s = stream(42)
+ * const res = integrateMonteCarlo(s, x => x.data[0] + x.data[1], [0, 0], [1, 1], { n: 1000 })
+ * print('integral estimate =', res.value)
  */
 export function integrateMonteCarlo(
   s: Stream,
@@ -188,7 +259,16 @@ export function integrateMonteCarlo(
 
 const PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
 
-/** The radical inverse of i in base b: the digits of i mirrored about the radix point. */
+/**
+ * The radical inverse of integer $i$ in base $b$.
+ *
+ * Reflects the base-$b$ digits of $i$ about the radix point:
+ * $i = \sum_{k=0}^m a_k b^k \mapsto \sum_{k=0}^m a_k b^{-(k+1)}$.
+ *
+ * @param i Non-negative integer index.
+ * @param b Base for radical inversion.
+ * @returns Radical inverse value in $[0, 1)$.
+ */
 function radicalInverse(i: number, b: number): number {
   let result = 0
   let f = 1 / b
@@ -201,9 +281,21 @@ function radicalInverse(i: number, b: number): number {
 }
 
 /**
- * The first n points of the d-dimensional Halton sequence (Halton, 1960), coordinate j the radical inverse in the j-th
- * prime base, starting at index `skip` (default 0, whose point is the origin), as an n×d matrix. d ≤ 25. Unscrambled,
- * so it matches scipy's `qmc.Halton(d, scramble=False)`.
+ * First $n$ points of the $d$-dimensional Halton low-discrepancy sequence (Halton, 1960).
+ *
+ * Coordinate $j$ is the radical inverse in the $(j+1)$-th prime base, starting at index
+ * `skip` (default 0). Output is an $n \times d$ matrix. Dimensions $d \le 25$.
+ *
+ * @param n Number of points to generate.
+ * @param d Dimensionality ($d \le 25$).
+ * @param options Sequence generation options.
+ * @param options.skip Starting index offset in the sequence (default 0).
+ * @returns Matrix tensor of shape $[n, d]$ containing sequence coordinates in $[0, 1)^d$.
+ *
+ * @example Generate 2D Halton points
+ * const pts = halton(5, 2)
+ * print('shape =', pts.shape)
+ * print('first point =', pts.data.slice(0, 2))
  */
 export function halton(n: Size, d: Size, { skip = 0 }: { skip?: Size } = {}): Tensor {
   if (d > PRIMES.length) throw new ShapeError('halton', `halton: at most ${PRIMES.length} dimensions`)
@@ -240,7 +332,12 @@ const SOBOL_M = [
 ]
 const SOBOL_BITS = 32
 
-/** Direction numbers V[1..32] (1-based, left-aligned in 32 bits) for one dimension (0-based). */
+/**
+ * Direction numbers $V[1 \dots 32]$ for dimension `dim` (0-based).
+ *
+ * @param dim Zero-based dimension index ($0 \le \text{dim} \le 20$).
+ * @returns Array of length 33 with direction numbers left-aligned in 32 bits.
+ */
 function directions(dim: number): Uint32Array {
   const V = new Uint32Array(SOBOL_BITS + 1)
   if (dim === 0) {
@@ -262,9 +359,22 @@ function directions(dim: number): Uint32Array {
 }
 
 /**
- * The first n points of the d-dimensional Sobol sequence (Sobol', 1967) in Gray-code order (Antonov & Saleev, 1979),
- * starting at index `skip` (default 0, the origin), as an n×d matrix; d ≤ 21. Unscrambled, so it matches scipy's
- * `qmc.Sobol(d, scramble=False)`. Balance properties hold for n a power of 2.
+ * First $n$ points of the $d$-dimensional Sobol low-discrepancy sequence (Sobol', 1967).
+ *
+ * Generated in Gray-code order (Antonov & Saleev, 1979) using Joe & Kuo (2008) direction numbers.
+ * Starting at index `skip` (default 0), as an $n \times d$ matrix; $d \le 21$.
+ * Balance properties hold when $n$ is a power of 2.
+ *
+ * @param n Number of points to generate.
+ * @param d Dimensionality ($d \le 21$).
+ * @param options Sequence generation options.
+ * @param options.skip Starting index offset in the sequence (default 0).
+ * @returns Matrix tensor of shape $[n, d]$ containing sequence coordinates in $[0, 1)^d$.
+ *
+ * @example Generate 2D Sobol points
+ * const pts = sobol(4, 2)
+ * print('shape =', pts.shape)
+ * print('first point =', pts.data.slice(0, 2))
  */
 export function sobol(n: Size, d: Size, { skip = 0 }: { skip?: Size } = {}): Tensor {
   if (d > SOBOL_POLY.length + 1) throw new ShapeError('sobol', `sobol: at most ${SOBOL_POLY.length + 1} dimensions`)
@@ -289,11 +399,28 @@ export function sobol(n: Size, d: Size, { skip = 0 }: { skip?: Size } = {}): Ten
 }
 
 /**
- * Randomised quasi–Monte Carlo over the box [lo, hi]: `replicates` (default 8) copies of the first n points of a
- * Halton or Sobol sequence (default Sobol), each shifted by an independent uniform vector modulo 1 (Cranley &
- * Patterson, 1976). Each shifted copy gives an unbiased estimate; their mean is the estimate and their standard
- * deviation / √replicates its standard error. For smooth f the error falls nearly as n^{−1}. Shift r comes from
- * `child(s, 'shift', r)`.
+ * Randomised quasi–Monte Carlo over the box $[\text{lo}, \text{hi}]$.
+ *
+ * Generates `replicates` independent copies of the first $n$ points of a Halton or Sobol sequence,
+ * each shifted by an independent uniform vector modulo 1 (Cranley & Patterson, 1976).
+ * Each shifted copy yields an unbiased estimate; their sample mean is the estimate and their
+ * sample standard deviation divided by $\sqrt{\text{replicates}}$ is the standard error.
+ *
+ * @param s PRNG stream used to generate independent shift vectors.
+ * @param f Multivariate integrand evaluating $f(\xvec)$.
+ * @param lo Lower coordinate bounds of the integration box.
+ * @param hi Upper coordinate bounds of the integration box.
+ * @param options Configuration for point count, sequence family, and replicates.
+ * @param options.n Number of sequence points per replicate (default 1024).
+ * @param options.sequence Low-discrepancy sequence family: `'sobol'` (default) or `'halton'`.
+ * @param options.replicates Number of independent randomised shift replicates (default 8).
+ * @returns Estimated integral value, standard error, and total point count $n \cdot \text{replicates}$.
+ *
+ * @example Quasi-Monte Carlo integration
+ * const s = stream(123)
+ * const res = quasiMonteCarlo(s, x => x.data[0] * x.data[1], [0, 0], [1, 1], { n: 128, replicates: 4 })
+ * print('value =', res.value)
+ * print('total points =', res.n)
  */
 export function quasiMonteCarlo(
   s: Stream,

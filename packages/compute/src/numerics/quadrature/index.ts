@@ -4,7 +4,7 @@
  * - Fixed rules: `trapezoid`, `simpson` (composite, equal panels), `trapezoidSamples` (numpy's `trapezoid`),
  *   `integrateGauss`.
  * - Gaussian rules (nodes and weights, ascending): `gaussLegendre`, `gaussHermite` (physicists' or probabilists'),
- *   `gaussLaguerre` (generalised); `normalExpectation` for E f(X), X ~ N(mean, sd²).
+ *   `gaussLaguerre` (generalised); `normalExpectation` for $\mathbb{E}[f(X)]$, $X \sim \mathcal{N}(\mu, \sigma^2)$.
  * - Traceable adaptive methods: `romberg`, `adaptiveSimpson`, `gaussKronrod` (7–15, globally adaptive, as QUADPACK's
  *   QAG); `kronrod15` for one interval; `integrate` (like scipy's `quad`, infinite limits allowed; Gauss–Kronrod or
  *   Romberg).
