@@ -8,21 +8,48 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import type { Scalar, Size } from 'aifn-compute/foundation/contracts'
 import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 
+/**
+ * Extract a flat Float64Array view from a tensor.
+ *
+ * @param t Input tensor.
+ * @returns Flattened 64-bit float array.
+ */
 const f64 = (t: Tensor) => Float64Array.from(toFlat(t))
 
-/** An interpolating polynomial through n points (degree ≤ n − 1). */
+/** An interpolating polynomial through $n$ points (degree $\le n - 1$). */
 export type InterpolatingPolynomial = {
-  /** The nodes xⱼ. */
+  /** The interpolation nodes $x_j$. */
   readonly nodes: Tensor
-  /** Newton coefficients aₖ = f[x₀, …, xₖ] (divided differences). */
+  /** Newton divided difference coefficients $a_k = f[x_0, \dots, x_k]$. */
   readonly newton: Tensor
-  /** Barycentric weights wⱼ = 1/Πₖ≠ⱼ(xⱼ − xₖ). */
+  /** Barycentric weights $w_j = 1 / \prod_{k \ne j}(x_j - x_k)$. */
   readonly weights: Tensor
-  /** p(t) at t [m] (barycentric formula, exact at the nodes), or its first or second derivative (Newton form). */
+  /**
+   * Evaluate $p(t)$ at coordinates $t$, or its first or second derivative.
+   *
+   * @param t Target evaluation points tensor.
+   * @param derivative Derivative order: 0 for function value, 1 for $p'(t)$, 2 for $p''(t)$.
+   * @returns Evaluated polynomial or derivative tensor matching the shape of $t$.
+   */
   evaluate(t: Tensor, derivative?: 0 | 1 | 2): Tensor
 }
 
-/** The polynomial of degree ≤ n − 1 through (xⱼ, yⱼ), distinct nodes. */
+/**
+ * Construct the unique interpolating polynomial of degree $\le n - 1$ through distinct points $(x_j, y_j)$.
+ *
+ * Evaluates in $\mathcal{O}(n)$ time per query point via the second barycentric formula
+ * (Berrut & Trefethen, 2004), which is numerically stable and exact at the interpolation nodes.
+ * First and second derivatives are evaluated via the Newton divided difference form.
+ *
+ * @param x Distinct interpolation node coordinates vector of length $n$.
+ * @param y Function values vector of length $n$ at the corresponding nodes.
+ * @returns An `InterpolatingPolynomial` object supporting evaluation and differentiation.
+ *
+ * @example Interpolate quadratic polynomial
+ * const poly = interpolatingPolynomial(tensor([0, 1, 2]), tensor([0, 1, 4]))
+ * const val = poly.evaluate(tensor([1.5]))
+ * print('p(1.5) =', val)
+ */
 export function interpolatingPolynomial(x: Tensor, y: Tensor): InterpolatingPolynomial {
   const X = f64(x)
   const Y = f64(y)
@@ -72,7 +99,22 @@ export function interpolatingPolynomial(x: Tensor, y: Tensor): InterpolatingPoly
   return { nodes: fromData(X, [n]), newton: fromData(a, [n]), weights: fromData(w, [n]), evaluate }
 }
 
-/** n Chebyshev points of the first kind on [a, b], xⱼ = (a + b)/2 + (b − a)/2 · cos((2j + 1)π/(2n)), ascending. */
+/**
+ * Generate $n$ Chebyshev points of the first kind on interval $[a, b]$ in ascending order.
+ *
+ * Coordinates are defined by $x_j = \frac{a + b}{2} - \frac{b - a}{2} \cos\left(\frac{(2j + 1)\pi}{2n}\right)$
+ * for $j = 0, \dots, n - 1$. Chebyshev nodes minimise Runge's phenomenon and keep the Lebesgue
+ * constant growing only logarithmically $\mathcal{O}(\log n)$.
+ *
+ * @param n Number of Chebyshev nodes to generate ($n \ge 1$).
+ * @param a Left interval endpoint (default -1).
+ * @param b Right interval endpoint (default 1).
+ * @returns 1D tensor of length $n$ containing Chebyshev nodes in $[a, b]$.
+ *
+ * @example Generate Chebyshev nodes on interval
+ * const nodes = chebyshevNodes(5, -1, 1)
+ * print('nodes count =', nodes.shape[0])
+ */
 export function chebyshevNodes(n: Size, a: Scalar = -1, b: Scalar = 1): Tensor {
   const out = Float64Array.from(
     { length: n },
@@ -82,8 +124,19 @@ export function chebyshevNodes(n: Size, a: Scalar = -1, b: Scalar = 1): Tensor {
 }
 
 /**
- * The Lebesgue function Λ(t) = Σⱼ |ℓⱼ(t)| of a node set at t [m]; its maximum, the Lebesgue constant, bounds how much
- * worse interpolation is than the best polynomial approximation of the same degree.
+ * Evaluate the Lebesgue function $\Lambda(t) = \sum_j |\ell_j(t)|$ for a given node set at points $t$.
+ *
+ * The maximum of $\Lambda(t)$ is the Lebesgue constant $\Lambda_n$, which bounds the interpolation error
+ * relative to the best polynomial approximation: $\|f - p_n\|_\infty \le (1 + \Lambda_n)\|f - p_n^*\|_\infty$.
+ *
+ * @param nodes 1D tensor of interpolation node coordinates.
+ * @param t Target evaluation points tensor.
+ * @returns Tensor of Lebesgue function values matching the shape of $t$.
+ *
+ * @example Evaluate Lebesgue function
+ * const nodes = chebyshevNodes(4, -1, 1)
+ * const lambda = lebesgueFunction(nodes, tensor([0]))
+ * print('lebesgue at 0 =', lambda)
  */
 export function lebesgueFunction(nodes: Tensor, t: Tensor): Tensor {
   const X = f64(nodes)

@@ -12,12 +12,12 @@
  * - Interpolants: `linearInterpolant`, `cubicSpline` (not-a-knot, natural, clamped, periodic, given end slopes or
  *   curvatures), `naturalCubicSpline`, `hermiteSpline`, `pchip`, `akima` (and `makima`); polynomial interpolation
  *   `interpolatingPolynomial` (Newton and barycentric forms), `chebyshevNodes`, `lebesgueFunction`.
- * - Smoothing: `smoothingSpline` (Reinsch), `pspline` (λ given or by GCV) and `psplineGcvPath`, `leastSquaresSpline`,
- *   `thinPlateSpline`, `thinPlateRegressionBasis` (Wood, 2003).
+ * - Smoothing: `smoothingSpline` (Reinsch), `pspline` ($\lambda$ given or by GCV) and `psplineGcvPath`,
+ *   `leastSquaresSpline`, `thinPlateSpline`, `thinPlateRegressionBasis` (Wood, 2003).
  * - B-splines: `bsplineBasis` (Cox–de Boor, derivatives, extrapolation), `bsplineCount`, `bspline`, `uniformKnots`,
  *   `clampedKnots`, `cyclicBsplineBasis`, `tensorProductBasis`.
  * - Penalties: `differenceMatrix`, `differencePenalty`, `cyclicDifferenceMatrix`, `cyclicDifferencePenalty`,
- *   `derivativePenalty` (∫f⁽ᵐ⁾², exact), `tensorProductPenalties`.
+ *   `derivativePenalty` ($\int [f^{(m)}]^2$, exact), `tensorProductPenalties`.
  */
 
 export {

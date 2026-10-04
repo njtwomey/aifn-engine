@@ -1,7 +1,7 @@
 /**
  * Piecewise polynomials and the one-dimensional interpolants built on them: piecewise linear, cubic splines with four
  * end conditions, cubic Hermite, PCHIP, Akima, and the cubic smoothing spline. Pieces are stored in the local power
- * basis, as scipy's `PPoly`: on [bᵢ, bᵢ₊₁], f(x) = Σₖ cᵢₖ (x − bᵢ)ᵏ.
+ * basis, as SciPy's `PPoly`: on $[b_i, b_{i+1}]$, $f(x) = \sum_k c_{ik} (x - b_i)^k$.
  *
  * References: de Boor (1978), "A Practical Guide to Splines", ch. IV; Fritsch and Carlson (1980) and Fritsch and
  * Butland (1984) for PCHIP; Akima (1970); Reinsch (1967) and Green and Silverman (1994), §2.3, for smoothing splines.
@@ -13,22 +13,46 @@ import type { Scalar } from 'aifn-compute/foundation/contracts'
 import { solve } from 'aifn-compute/numerics/linalg'
 import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 
-/** A piecewise polynomial in the local power basis. */
+/** A piecewise polynomial representation in the local power basis. */
 export type PiecewisePolynomial = {
+  /** Discriminator kind tag. */
   readonly kind: 'piecewise-polynomial'
-  /** Breakpoints b₀ < b₁ < … < b_m, [m + 1]. */
+  /** Breakpoints $b_0 < b_1 < \dots < b_m$, shape $[m + 1]$. */
   readonly breaks: Tensor
-  /** Coefficients [m, order]: row i holds cᵢ₀, cᵢ₁, … (ascending powers of x − bᵢ). */
+  /** Coefficients of shape $[m, \text{order}]$: row $i$ holds $c_{i0}, c_{i1}, \dots$ (ascending powers of $x - b_i$). */
   readonly coefficients: Tensor
 }
 
 type F64 = Float64Array
 
+/**
+ * Wrap numeric array data as a 1D tensor.
+ *
+ * @param a Input numeric array.
+ * @returns 1D tensor wrapping the data.
+ */
 const vec = (a: ArrayLike<number>) => fromData(Float64Array.from(a), [a.length])
+
+/**
+ * Extract flat Float64Array view from tensor or array-like input.
+ *
+ * @param t Input tensor or numeric array.
+ * @returns Flattened 64-bit float array.
+ */
 const f64 = (t: Tensor | ArrayLike<number>): F64 =>
   Float64Array.from('shape' in (t as Tensor) ? toFlat(t as Tensor) : (t as ArrayLike<number>))
 
-/** A piecewise polynomial from breaks and rows of ascending coefficients. */
+/**
+ * Construct a piecewise polynomial from breakpoint coordinates and coefficient rows.
+ *
+ * @param breaks Monotonically increasing breakpoint coordinates $[b_0, \dots, b_m]$ of length $m + 1$.
+ * @param rows Array of $m$ rows, each containing ascending power polynomial coefficients for piece $i$.
+ * @returns A `PiecewisePolynomial` object in local power basis.
+ *
+ * @example Construct piecewise linear polynomial
+ * const pp = piecewisePolynomial([0, 1, 2], [[0, 1], [1, 2]])
+ * print('breaks =', pp.breaks.shape)
+ */
 export function piecewisePolynomial(
   breaks: ArrayLike<number>,
   rows: readonly ArrayLike<number>[],
@@ -41,7 +65,13 @@ export function piecewisePolynomial(
   return { kind: 'piecewise-polynomial', breaks: vec(breaks), coefficients: fromData(c, [rows.length, order]) }
 }
 
-/** The index of the piece holding x; outside the breaks, the end pieces (extrapolation). */
+/**
+ * Binary search for the interval piece index $[b_i, b_{i+1}]$ containing coordinate $x$.
+ *
+ * @param b Breakpoints array.
+ * @param x Evaluation coordinate.
+ * @returns Piece index $i \in \{0, \dots, m - 1\}$.
+ */
 function pieceOf(b: F64, x: number): number {
   const last = b.length - 2
   if (!(x > b[0])) return 0
@@ -57,8 +87,22 @@ function pieceOf(b: F64, x: number): number {
 }
 
 /**
- * The piecewise polynomial (or its `derivative`-th derivative) at x [n] → [n]. Outside the breaks the end pieces are
- * continued (scipy's `extrapolate=True`); with `extrapolate: false` those values are NaN.
+ * Evaluate the piecewise polynomial (or its $r$-th derivative) at coordinates $x$.
+ *
+ * Outside the breakpoints, end pieces are continued when `extrapolate` is true (matching SciPy's
+ * `PPoly(..., extrapolate=True)`). If `extrapolate` is false, values outside $[b_0, b_m]$ evaluate to NaN.
+ *
+ * @param pp Piecewise polynomial representation.
+ * @param x Query coordinates tensor.
+ * @param options Evaluation options specifying derivative order and extrapolation behaviour.
+ * @param options.derivative Derivative order to evaluate (default 0).
+ * @param options.extrapolate Whether to extrapolate outside the breakpoint range (default true).
+ * @returns Evaluated polynomial or derivative tensor matching the shape of $x$.
+ *
+ * @example Evaluate piecewise polynomial
+ * const pp = piecewisePolynomial([0, 1, 2], [[0, 1], [1, 2]])
+ * const y = evaluatePiecewise(pp, tensor([0.5, 1.5]))
+ * print('evaluated =', y)
  */
 export function evaluatePiecewise(
   pp: PiecewisePolynomial,
@@ -90,7 +134,21 @@ export function evaluatePiecewise(
   return fromData(out, x.shape)
 }
 
-/** ∫ₐᵇ f(x) dx of a piecewise polynomial (end pieces continued outside the breaks). */
+/**
+ * Definite integral $\int_a^b f(x)\,dx$ of a piecewise polynomial.
+ *
+ * Outside the breakpoints, the end polynomial pieces are integrated analytically.
+ *
+ * @param pp Piecewise polynomial to integrate.
+ * @param a Lower integration limit.
+ * @param b Upper integration limit.
+ * @returns Exact integral value over $[a, b]$.
+ *
+ * @example Integrate piecewise polynomial
+ * const pp = piecewisePolynomial([0, 1, 2], [[0, 1], [1, 1]])
+ * const area = integratePiecewise(pp, 0, 2)
+ * print('integral =', area)
+ */
 export function integratePiecewise(pp: PiecewisePolynomial, a: Scalar, b: Scalar): Scalar {
   if (a > b) return -integratePiecewise(pp, b, a)
   const br = f64(pp.breaks)
@@ -115,6 +173,13 @@ export function integratePiecewise(pp: PiecewisePolynomial, a: Scalar, b: Scalar
   return total
 }
 
+/**
+ * Validate that interpolation nodes are strictly increasing and match response array length.
+ *
+ * @param x Abscissa coordinates array.
+ * @param y Function values array.
+ * @param where Calling function name for descriptive error reporting.
+ */
 function checkData(x: F64, y: F64, where: string) {
   if (x.length !== y.length) throw new ShapeError(where, `${where}: ${x.length} x values but ${y.length} y values`)
   if (x.length < 2) throw new DomainError(where, `${where}: needs at least two points`)
@@ -122,7 +187,18 @@ function checkData(x: F64, y: F64, where: string) {
     if (!(x[i] > x[i - 1])) throw new DomainError(where, `${where}: x must be strictly increasing`)
 }
 
-/** The piecewise linear interpolant through (xᵢ, yᵢ), x strictly increasing. */
+/**
+ * Construct the piecewise linear interpolant through distinct points $(x_i, y_i)$.
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n \ge 2$.
+ * @param y Observed values tensor of length $n$.
+ * @returns Piecewise polynomial of order 2 (degree 1).
+ *
+ * @example Linear interpolation
+ * const interp = linearInterpolant(tensor([0, 1, 2]), tensor([0, 1, 0]))
+ * const y = evaluatePiecewise(interp, tensor([0.5, 1.5]))
+ * print('y =', y)
+ */
 export function linearInterpolant(x: Tensor, y: Tensor): PiecewisePolynomial {
   const X = f64(x)
   const Y = f64(y)
@@ -133,7 +209,14 @@ export function linearInterpolant(x: Tensor, y: Tensor): PiecewisePolynomial {
   )
 }
 
-/** Cubic Hermite pieces from values and slopes at the breaks. */
+/**
+ * Compute cubic Hermite polynomial pieces from data values and specified slopes.
+ *
+ * @param X Breakpoint coordinates array.
+ * @param Y Response values array.
+ * @param M First derivative slope values at each breakpoint.
+ * @returns Piecewise cubic polynomial.
+ */
 function hermite(X: F64, Y: F64, M: ArrayLike<number>): PiecewisePolynomial {
   const rows = Array.from({ length: X.length - 1 }, (_, i) => {
     const h = X[i + 1] - X[i]
@@ -143,7 +226,23 @@ function hermite(X: F64, Y: F64, M: ArrayLike<number>): PiecewisePolynomial {
   return piecewisePolynomial(X, rows)
 }
 
-/** The cubic Hermite interpolant with given slopes at the data (scipy's `CubicHermiteSpline`). */
+/**
+ * Construct the cubic Hermite interpolant with prescribed first derivative slopes at the data points.
+ *
+ * Matches SciPy's `CubicHermiteSpline(x, y, dydx)`.
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n$.
+ * @param y Observed function values tensor of length $n$.
+ * @param slopes Prescribed first derivative values $y'_i$ at the nodes, length $n$.
+ * @returns Piecewise cubic polynomial interpolant.
+ *
+ * @example Cubic Hermite interpolation
+ * const x = tensor([0, 1, 2])
+ * const y = tensor([0, 1, 0])
+ * const slopes = tensor([1, 0, -1])
+ * const spline = hermiteSpline(x, y, slopes)
+ * print('evaluated =', evaluatePiecewise(spline, tensor([0.5])))
+ */
 export function hermiteSpline(x: Tensor, y: Tensor, slopes: Tensor): PiecewisePolynomial {
   const X = f64(x)
   const Y = f64(y)
@@ -151,7 +250,14 @@ export function hermiteSpline(x: Tensor, y: Tensor, slopes: Tensor): PiecewisePo
   return hermite(X, Y, f64(slopes))
 }
 
-/** Cubic pieces from values and second derivatives M at the breaks. */
+/**
+ * Construct piecewise cubic polynomial from data values and second derivatives (moments) $M_i$.
+ *
+ * @param X Node coordinates array.
+ * @param Y Response values array.
+ * @param M Second derivative moments $M_i = f''(x_i)$ at each breakpoint.
+ * @returns Piecewise cubic polynomial.
+ */
 function fromMoments(X: F64, Y: ArrayLike<number>, M: ArrayLike<number>): PiecewisePolynomial {
   const rows = Array.from({ length: X.length - 1 }, (_, i) => {
     const h = X[i + 1] - X[i]
@@ -161,20 +267,42 @@ function fromMoments(X: F64, Y: ArrayLike<number>, M: ArrayLike<number>): Piecew
   return piecewisePolynomial(X, rows)
 }
 
-/** End conditions of an interpolating cubic spline (scipy's `bc_type`). */
+/** End conditions configuring boundary constraints of a cubic spline (SciPy's `bc_type`). */
 export type EndCondition =
   'not-a-knot' | 'natural' | 'clamped' | 'periodic' | { first: [number, number] } | { second: [number, number] }
 
-/** Solve a small dense system through `aifn-compute/numerics/linalg`. */
+/**
+ * Solve a small dense linear system $A x = r$ of dimension $n \times n$.
+ *
+ * @param A Coefficient matrix in row-major order.
+ * @param r Right-hand side vector.
+ * @param n Dimension of the square system.
+ * @returns Solution vector as a Float64Array.
+ */
 function denseSolve(A: F64, r: F64, n: number): F64 {
   return f64(solve(fromData(A, [n, n]), fromData(r, [n])) as Tensor)
 }
 
 /**
- * The interpolating cubic spline through (xᵢ, yᵢ), C² at the interior breaks, solved for the second derivatives Mᵢ
- * from hᵢ₋₁Mᵢ₋₁ + 2(hᵢ₋₁ + hᵢ)Mᵢ + hᵢMᵢ₊₁ = 6(δᵢ − δᵢ₋₁) (de Boor, 1978, ch. IV). End conditions as scipy's
- * `CubicSpline`: `not-a-knot` (default), `natural` (M = 0), `clamped` (zero end slopes), `periodic` (y₀ = yₙ
- * required), or given end slopes `{ first }` or second derivatives `{ second }`.
+ * Construct the $C^2$ interpolating cubic spline through $(x_i, y_i)$.
+ *
+ * Solves the tridiagonal system for second derivatives $M_i$:
+ * $h_{i-1} M_{i-1} + 2(h_{i-1} + h_i) M_i + h_i M_{i+1} = 6(\delta_i - \delta_{i-1})$
+ * (de Boor, 1978, ch. IV). Supports standard boundary conditions: `'not-a-knot'` (default),
+ * `'natural'` ($M_0 = M_n = 0$), `'clamped'` ($f'(x_0) = f'(x_n) = 0$), `'periodic'` ($y_0 = y_n$),
+ * or specified boundary first derivatives `{ first }` or second derivatives `{ second }`.
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n$.
+ * @param y Observed values tensor of length $n$.
+ * @param options Configuration options specifying the boundary condition `bc`.
+ * @param options.bc End boundary condition type (default `'not-a-knot'`).
+ * @returns $C^2$ continuous piecewise cubic polynomial interpolant.
+ *
+ * @example Natural cubic spline
+ * const x = tensor([0, 1, 2, 3])
+ * const y = tensor([0, 1, 0, 1])
+ * const spline = cubicSpline(x, y, { bc: 'natural' })
+ * print('spline at 1.5 =', evaluatePiecewise(spline, tensor([1.5])))
  */
 export function cubicSpline(
   x: Tensor,
@@ -242,15 +370,33 @@ export function cubicSpline(
   return fromMoments(X, Y, denseSolve(A, r, size))
 }
 
-/** The natural cubic spline (M₀ = Mₙ = 0): the interpolant minimising ∫f″² (Holladay, 1957). */
+/**
+ * Construct the natural cubic spline ($M_0 = M_n = 0$) through points $(x_i, y_i)$.
+ *
+ * The natural cubic spline is the unique interpolant minimising total curvature $\int_a^b (f''(x))^2\,dx$
+ * (Holladay's theorem, 1957).
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n$.
+ * @param y Observed values tensor of length $n$.
+ * @returns Piecewise cubic polynomial with zero second derivatives at both endpoints.
+ *
+ * @example Natural cubic spline interpolation
+ * const spline = naturalCubicSpline(tensor([0, 1, 2, 3]), tensor([0, 1, 0, 1]))
+ * print('value at 0.5 =', evaluatePiecewise(spline, tensor([0.5])))
+ */
 export function naturalCubicSpline(x: Tensor, y: Tensor): PiecewisePolynomial {
   return cubicSpline(x, y, { bc: 'natural' })
 }
 
 /**
- * Slopes of the monotone piecewise cubic interpolant (PCHIP) as scipy's `PchipInterpolator`: weighted harmonic means
- * of neighbouring secants (Fritsch and Butland, 1984), zero where the data turn, and a shape-preserving three-point
- * formula at the ends.
+ * Compute slopes for piecewise cubic Hermite interpolating polynomial (PCHIP).
+ *
+ * Uses weighted harmonic means of adjacent secants (Fritsch & Butland, 1984), setting slopes to zero
+ * wherever the data change monotonicity direction.
+ *
+ * @param X Node coordinates array.
+ * @param Y Response values array.
+ * @returns Slopes array of length $n$.
  */
 function pchipSlopes(X: F64, Y: F64): F64 {
   const n = X.length
@@ -275,7 +421,20 @@ function pchipSlopes(X: F64, Y: F64): F64 {
   return d
 }
 
-/** The monotone piecewise cubic Hermite interpolant (PCHIP): no overshoot, monotone where the data are. */
+/**
+ * Construct the shape-preserving piecewise cubic Hermite interpolating polynomial (PCHIP).
+ *
+ * Guarantees monotonicity preservation without overshoot (Fritsch & Carlson, 1980; Fritsch & Butland, 1984).
+ * Matches SciPy's `PchipInterpolator`.
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n$.
+ * @param y Observed values tensor of length $n$.
+ * @returns Shape-preserving $C^1$ piecewise cubic polynomial.
+ *
+ * @example Monotone PCHIP interpolation
+ * const spline = pchip(tensor([0, 1, 2, 3]), tensor([0, 1, 1, 0]))
+ * print('value at 1.5 =', evaluatePiecewise(spline, tensor([1.5])))
+ */
 export function pchip(x: Tensor, y: Tensor): PiecewisePolynomial {
   const X = f64(x)
   const Y = f64(y)
@@ -284,9 +443,15 @@ export function pchip(x: Tensor, y: Tensor): PiecewisePolynomial {
 }
 
 /**
- * Akima's slopes (Akima, 1970; scipy's `Akima1DInterpolator`): tᵢ = (|mᵢ₊₁ − mᵢ| mᵢ₋₁ + |mᵢ₋₁ − mᵢ₋₂| mᵢ) /
- * (|mᵢ₊₁ − mᵢ| + |mᵢ₋₁ − mᵢ₋₂|) with two secants extrapolated linearly at each end; `makima` (modified Akima) adds
- * |mᵢ₊₁ + mᵢ|/2 and |mᵢ₋₁ + mᵢ₋₂|/2 to the weights, which removes overshoot on flat stretches.
+ * Compute local slopes for Akima or modified Akima (makima) interpolation.
+ *
+ * Under Akima (1970), $t_i = \frac{|m_{i+1} - m_i| m_{i-1} + |m_{i-1} - m_{i-2}| m_i}{|m_{i+1} - m_i| + |m_{i-1} - m_{i-2}|}$.
+ * Under `makima`, an additional average secant term is added to prevent overshoot along flat regions.
+ *
+ * @param X Node coordinates array.
+ * @param Y Response values array.
+ * @param method Slope estimation formula: `'akima'` or `'makima'`.
+ * @returns Slopes array of length $n$.
  */
 function akimaSlopes(X: F64, Y: F64, method: 'akima' | 'makima'): F64 {
   const n = X.length
@@ -319,7 +484,22 @@ function akimaSlopes(X: F64, Y: F64, method: 'akima' | 'makima'): F64 {
   return out
 }
 
-/** Akima's interpolant (or the modified `makima`): local, with less wiggle than a cubic spline near outliers. */
+/**
+ * Construct the Akima sub-spline interpolant through points $(x_i, y_i)$.
+ *
+ * Avoids the oscillations and wiggles of standard cubic splines near outliers and sharp transitions
+ * (Akima, 1970). With `method: 'makima'` (modified Akima), adds a safeguard against overshoot on flat stretches.
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n$.
+ * @param y Observed values tensor of length $n$.
+ * @param options Interpolation options specifying the slope method.
+ * @param options.method Slope formula: `'akima'` (default) or `'makima'`.
+ * @returns Locally determined $C^1$ piecewise cubic polynomial.
+ *
+ * @example Akima spline interpolation
+ * const spline = akima(tensor([0, 1, 2, 3, 4]), tensor([0, 0, 1, 1, 1]))
+ * print('value at 2.5 =', evaluatePiecewise(spline, tensor([2.5])))
+ */
 export function akima(x: Tensor, y: Tensor, { method = 'akima' }: { method?: 'akima' | 'makima' } = {}) {
   const X = f64(x)
   const Y = f64(y)
@@ -327,20 +507,34 @@ export function akima(x: Tensor, y: Tensor, { method = 'akima' }: { method?: 'ak
   return hermite(X, Y, akimaSlopes(X, Y, method))
 }
 
-/** The result of `smoothingSpline`. */
+/** Result returned by the cubic smoothing spline estimator `smoothingSpline`. */
 export type SmoothingSpline = {
-  /** The natural cubic spline with knots at the data. */
+  /** The fitted natural cubic spline with knots at the observed data points. */
   spline: PiecewisePolynomial
-  /** Fitted values g(xᵢ), [n]. */
+  /** Fitted values $g(x_i)$ evaluated at the data points, shape $[n]$. */
   fitted: Tensor
+  /** Regularisation parameter $\lambda \ge 0$. */
   lambda: number
 }
 
 /**
- * The cubic smoothing spline minimising Σ wᵢ(yᵢ − f(xᵢ))² + λ∫f″² (Reinsch, 1967; Green and Silverman, 1994,
- * §2.3.3): a natural cubic spline with knots at the data, found from (R + λQᵀW⁻¹Q)γ = Qᵀy with Q the n × (n − 2)
- * second-difference matrix and R the tridiagonal Gram matrix; γ holds the interior second derivatives and
- * g = y − λW⁻¹Qγ the fitted values. Matches scipy's `make_smoothing_spline(x, y, w, lam)`.
+ * Fit a cubic smoothing spline minimising $\sum_i w_i (y_i - f(x_i))^2 + \lambda \int (f''(x))^2\,dx$.
+ *
+ * Solves the Reinsch algorithm (Reinsch, 1967; Green & Silverman, 1994, §2.3.3) for a natural cubic spline
+ * with knots at the data points. Matches SciPy's `make_smoothing_spline(x, y, w, lam)`.
+ *
+ * @param x Strictly increasing node coordinates tensor of length $n$.
+ * @param y Observed values tensor of length $n$.
+ * @param options Smoothing configuration including penalty weight $\lambda$ and point weights.
+ * @param options.lambda Non-negative smoothing parameter $\lambda \ge 0$.
+ * @param options.weights Optional positive observation weights tensor of length $n$.
+ * @returns A `SmoothingSpline` containing the fitted spline, predicted values, and $\lambda$.
+ *
+ * @example Cubic smoothing spline
+ * const x = tensor([0, 1, 2, 3, 4])
+ * const y = tensor([0, 0.9, 2.1, 2.9, 4.2])
+ * const fit = smoothingSpline(x, y, { lambda: 1.0 })
+ * print('fitted =', fit.fitted)
  */
 export function smoothingSpline(
   x: Tensor,
