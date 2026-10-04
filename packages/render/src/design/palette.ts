@@ -158,6 +158,14 @@ export function interpolateColors(stops: readonly string[], t: number): string {
   return `rgb(${a.map((c, j) => Math.round(c + (b[j] - c) * (u - i))).join(', ')})`
 }
 
+/**
+ * A two-stop scale from the strong blue (low) to the strong red (high) of the diverging palette, with no pale
+ * midpoint: for thin marks drawn on the surface (the arrows of a vector field), where a pale stop would vanish.
+ */
+export function coolWarm(mode: Mode): readonly string[] {
+  return [palette.diverging.negative[mode][2], palette.diverging.positive[mode][2]]
+}
+
 /** The stops of a continuous scale in a theme. */
 export function scaleStops(scale: 'sequential' | 'diverging', mode: Mode): readonly string[] {
   return scale === 'diverging' ? diverging(mode) : sequential(mode)

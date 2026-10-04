@@ -15,6 +15,7 @@ export {
   Rug,
   Segments,
   SignedArea,
+  VectorField,
   Vectors,
   type AnnotationProps,
   type AreaProps,
@@ -25,6 +26,7 @@ export {
   type Segment,
   type SegmentsProps,
   type SignedAreaProps,
+  type VectorFieldProps,
   type VectorsProps,
 } from './layers/marks'
 export {

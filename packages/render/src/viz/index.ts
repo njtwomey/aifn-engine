@@ -12,7 +12,7 @@ export {
   type HoverRow,
 } from './frame'
 export { Handle, type Vec2 } from './handles'
-export type { Vector } from './vectors'
+export { fieldArrows, type ArrowStyle, type FieldArrow, type FieldArrowOptions, type Vector } from './vectors'
 export { useScaleColor } from './useScaleColor'
 export { formatNumber, formatPower, niceStep, stepDecimals } from './format'
 export * from './plot'

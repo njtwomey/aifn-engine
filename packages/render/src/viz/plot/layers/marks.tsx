@@ -1,9 +1,20 @@
-/** The basic layers: curves, points, bars, areas, a signed area, segments, vectors, a rug, annotations and handles. */
-import { chrome, MARKER_SHAPES, scaleStops, seriesColor } from '@render/design/palette'
+/**
+ * The basic layers: curves, points, bars, areas, a signed area, segments, vectors, a vector field, a rug, annotations
+ * and handles.
+ */
+import { chrome, coolWarm, interpolateColors, MARKER_SHAPES, scaleStops, seriesColor } from '@render/design/palette'
 import { formatNumber } from '../../format'
 import type { Handle as HandleSpec } from '../../handles'
 import { LINE_WIDTH, MARKER_SIZE } from '../../theme'
-import { vectorEnds, vectorLines, vectorMidLabels, type Vector } from '../../vectors'
+import {
+  fieldArrows,
+  vectorEnds,
+  vectorLines,
+  vectorMidLabels,
+  type ArrowStyle,
+  type FieldArrowOptions,
+  type Vector,
+} from '../../vectors'
 import {
   defineLayer,
   extentOf,
@@ -640,6 +651,85 @@ export const Vectors = defineLayer<VectorsProps>({
       },
     ],
   }),
+})
+
+// ── Vector field ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export type VectorFieldProps = CommonProps &
+  FieldArrowOptions & {
+    /** The field: the vector at the point (x, y). */
+    field: (x: number, y: number) => readonly [number, number]
+    /**
+     * The magnitudes at the two ends of the colour scale (default: the smallest and largest on the grid). Fix it when
+     * the field changes (a slider, an animation), so a colour keeps its meaning.
+     */
+    range?: readonly [number, number]
+    /** Arrowhead size in pixels (default 5). */
+    head?: number
+    /** How each arrow is drawn (default `'arrow'`): `'arrow'`, `'triangle'`, `'line'` (no head) or `'dot'` (a dot at the base). */
+    arrow?: ArrowStyle
+  }
+
+/**
+ * A vector field on a grid. By default every arrow has the same length, thin and with a small head, and its colour
+ * shows the field's magnitude there, from blue at the smallest to red at the largest, so direction stays readable
+ * where the field is weak and the picture is not dominated by its largest values. `length="magnitude"` draws lengths in proportion
+ * instead, in ink (or in `color`, or muted).
+ */
+export const VectorField = defineLayer<VectorFieldProps>({
+  kind: 'VectorField',
+  legend: () => [],
+  slotted: () => false,
+  needsBox: true,
+  extent: (p) => {
+    // Arrows are centred on the grid points, so those on the boundary reach half a length beyond it.
+    const [nx, ny] = typeof p.n === 'number' ? [p.n, p.n] : (p.n ?? [15, 15])
+    const reach = (p.scale ?? 0.8) / 2
+    const px = (reach * (p.x[1] - p.x[0])) / (nx - 1)
+    const py = (reach * (p.y[1] - p.y[0])) / (ny - 1)
+    return { x: [p.x[0] - px, p.x[1] + px], y: [p.y[0] - py, p.y[1] + py] }
+  },
+  build: (p, ctx) => {
+    const arrows = fieldArrows(p.field, p)
+    const magnitudes = arrows.map((a) => a.magnitude)
+    const [lo, hi] = p.range ?? [Math.min(...magnitudes), Math.max(...magnitudes)]
+    const stops = coolWarm(ctx.mode)
+    const coloured = (p.length ?? 'unit') === 'unit' && !p.color && !p.muted
+    const vectors = arrows.map(({ from, to, magnitude }): Vector => {
+      const t = hi > lo ? (magnitude - lo) / (hi - lo) : 1
+      return {
+        from,
+        to,
+        width: 1,
+        head: p.head ?? 5,
+        style: p.arrow,
+        muted: p.muted,
+        color: coloured ? interpolateColors(stops, t) : p.color,
+      }
+    })
+    return {
+      series: [
+        {
+          id: ctx.id,
+          name: '__vector-field',
+          type: 'line',
+          data: [],
+          silent: true,
+          tooltip: { show: false },
+          markLine: {
+            silent: true,
+            symbol: ['none', 'arrow'],
+            symbolSize: p.head ?? 5,
+            label: { show: false },
+            lineStyle: { color: chrome(ctx.mode).ink, width: 1, type: 'solid' },
+            animation: false,
+            data: vectorLines(vectors, ctx.mode, ctx.box),
+          },
+          z: 5,
+        },
+      ],
+    }
+  },
 })
 
 // ── Rug ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
