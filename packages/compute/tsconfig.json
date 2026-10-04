@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "../../node_modules/.tmp/tsconfig.compute.tsbuildinfo"
+  },
+  "include": ["src", "test", "bench", "vitest.config.ts"]
+}

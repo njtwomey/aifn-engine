@@ -1,0 +1,421 @@
+/**
+ * Piecewise series with known changepoints, for changepoint detection: shifts in the mean, in the variance, in a
+ * Poisson rate, and switches between autoregressive regimes. Each is a `Dataset` with the values in `x` [n, 1], the
+ * segment index of every step in `y` (int32), the time index in `t`, and the segments in `meta.truth` (a
+ * `ChangepointTruth`).
+ *
+ * Segment boundaries are given (`changepoints`), or drawn with geometric gaps of mean `meanGap` (a constant hazard
+ * 1/meanGap, the memoryless prior of Adams and MacKay, 2007), never shorter than `minGap`. Segment parameters are
+ * given, or drawn independently from a prior, as the model of BOCPD assumes. Every draw has its own substream:
+ * `child(s, 'gaps')`, `child(s, 'params')`, `child(s, 'values')`.
+ */
+
+import { child, normal, uniform, type Stream } from 'aifn-compute/foundation/random'
+import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
+import { Gamma, Geometric, Poisson } from 'aifn-compute/probability/distributions'
+import { changepointTruth, type ChangepointFamily, type Segment } from '../truth'
+import { checkCount, generatorRecipe, labels, matrix, type Dataset } from '../types'
+import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
+import { definer } from 'aifn-compute/foundation/registry'
+import { int, real, space } from 'aifn-compute/foundation/space'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
+
+/** Where the segments start: given changepoints, or geometric gaps. */
+export interface SegmentOptions {
+  /** Length of the series. Default 300. */
+  n?: number
+  /** Indices where new segments begin (0 < c < n, ascending). Drawn when omitted. */
+  changepoints?: readonly number[]
+  /** Mean gap between drawn changepoints (hazard 1/meanGap). Default 60. */
+  meanGap?: number
+  /** Shortest drawn segment. Default 5. */
+  minGap?: number
+}
+
+function drawnBoundaries(s: Stream, n: number, meanGap: number, minGap: number): number[] {
+  if (!(meanGap >= 1)) throw new DomainError('changepoints', `changepoints: meanGap must be at least 1, got ${meanGap}`)
+  const gap = Geometric(1 / meanGap)
+  const out: number[] = []
+  let at = 0
+  for (let i = 0; ; i++) {
+    at += Math.max(minGap, gap.sample(child(s, 'gap', i)) as number)
+    if (at >= n) return out
+    out.push(at)
+  }
+}
+
+function boundaries(s: Stream, options: SegmentOptions): { n: number; starts: number[] } {
+  const { n = 300, meanGap = 60, minGap = 5 } = options
+  checkCount(n, 'changepoints')
+  const cps = options.changepoints ? [...options.changepoints] : drawnBoundaries(child(s, 'gaps'), n, meanGap, minGap)
+  cps.forEach((c, i) => {
+    if (!Number.isInteger(c) || c <= 0 || c >= n || (i > 0 && c <= cps[i - 1]))
+      throw new DomainError('changepoints', `changepoints: ${c} is not an ascending index in (0, ${n})`)
+  })
+  return { n, starts: [0, ...cps] }
+}
+
+function build(
+  s: Stream,
+  base: string,
+  family: ChangepointFamily,
+  n: number,
+  segments: Segment[],
+  values: Float64Array,
+  description: string,
+  knobs: Record<string, unknown>,
+): Dataset {
+  const y = new Int32Array(n)
+  segments.forEach((g, j) => y.fill(j, g.start, g.end))
+  const t: Tensor = fromData(Float64Array.from({ length: n }, (_, i) => i))
+  return {
+    kind: 'dataset',
+    x: matrix(values, n, 1),
+    y: labels(y),
+    t,
+    meta: {
+      name: base,
+      description,
+      task: 'sequence',
+      featureNames: ['value'],
+      labelNames: segments.map((_, j) => `segment ${j}`),
+      source: 'Piecewise model of Adams and MacKay (2007), "Bayesian Online Changepoint Detection", arXiv:0710.3742',
+      key: s.key,
+      truth: changepointTruth(base, family, segments),
+      recipe: generatorRecipe(
+        base,
+        s.key,
+        Object.fromEntries(Object.entries(knobs).filter(([, v]) => v !== undefined && typeof v !== 'function')),
+      ),
+    },
+  }
+}
+
+function pick<T>(given: readonly T[] | undefined, j: number, draw: () => T, what: string): T {
+  if (!given) return draw()
+  if (j >= given.length) throw new ShapeError(what, `${what}: ${given.length} values given for more segments`)
+  return given[j]
+}
+
+/**
+ * Draw until the value differs enough from the previous segment's (at most 100 tries, then the last draw), so that
+ * drawn neighbours are distinguishable.
+ */
+function apart(draw: () => number, previous: number | undefined, farEnough: (a: number, b: number) => boolean): number {
+  let v = draw()
+  for (let i = 0; i < 100 && previous !== undefined && !farEnough(v, previous); i++) v = draw()
+  return v
+}
+
+const plural = (k: number, word: string) => `${k} ${word}${k === 1 ? '' : 's'}`
+
+// ── Mean shifts ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Options for `meanShifts`. */
+export interface MeanShiftOptions extends SegmentOptions {
+  /** Segment means, one per segment. Drawn from N(0, jump²) when omitted. */
+  means?: readonly number[]
+  /** Spread of drawn segment means. Default 3. */
+  jump?: number
+  /** Least difference between drawn neighbouring means. Default 1 (one noise sd at the default sd). */
+  minJump?: number
+  /** Noise sd within every segment. Default 1. */
+  sd?: number
+}
+
+/** Gaussian noise around a mean that jumps at each changepoint (the setting of the well-log data). */
+export function meanShifts(s: Stream, options: MeanShiftOptions = {}): Dataset {
+  const { jump = 3, sd = 1, minJump = 1 } = options
+  const { n, starts } = boundaries(s, options)
+  const ps = child(s, 'params')
+  const vs = child(s, 'values')
+  const values = new Float64Array(n)
+  let previous: number | undefined
+  const segments = starts.map((start, j): Segment => {
+    const end = starts[j + 1] ?? n
+    const draw = () =>
+      apart(
+        () => jump * normal(ps),
+        previous,
+        (a, b) => Math.abs(a - b) >= minJump,
+      )
+    const mean = pick(options.means, j, draw, 'meanShifts means')
+    previous = mean
+    for (let i = start; i < end; i++) values[i] = mean + sd * normal(vs)
+    return { start, end, params: { mean, sd }, mean, variance: sd * sd, risk: sd * sd }
+  })
+  return build(
+    s,
+    'meanShifts',
+    'mean',
+    n,
+    segments,
+    values,
+    `${n} values in ${plural(segments.length, 'segment')}; the mean changes at each changepoint, the noise sd is ${sd}.`,
+    { ...options },
+  )
+}
+
+// ── Variance shifts ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Options for `varianceShifts`. */
+export interface VarianceShiftOptions extends SegmentOptions {
+  /** Segment standard deviations. Drawn log-uniformly in [sdRange[0], sdRange[1]] when omitted. */
+  sds?: readonly number[]
+  /** Range of drawn sds. Default [0.3, 3]. */
+  sdRange?: readonly [number, number]
+  /** Least ratio between drawn neighbouring sds. Default 1.5. */
+  minRatio?: number
+  /** The mean, shared by every segment. Default 0. */
+  mean?: number
+}
+
+/** Zero-mean noise whose standard deviation changes at each changepoint (the setting of the Dow Jones returns). */
+export function varianceShifts(s: Stream, options: VarianceShiftOptions = {}): Dataset {
+  const { sdRange = [0.3, 3], mean = 0, minRatio = 1.5 } = options
+  const { n, starts } = boundaries(s, options)
+  const ps = child(s, 'params')
+  const vs = child(s, 'values')
+  const values = new Float64Array(n)
+  const [lo, hi] = [Math.log(sdRange[0]), Math.log(sdRange[1])]
+  let previous: number | undefined
+  const segments = starts.map((start, j): Segment => {
+    const end = starts[j + 1] ?? n
+    const draw = () =>
+      apart(
+        () => Math.exp(uniform(ps, lo, hi)),
+        previous,
+        (a, b) => Math.max(a / b, b / a) >= minRatio,
+      )
+    const sd = pick(options.sds, j, draw, 'varianceShifts sds')
+    previous = sd
+    for (let i = start; i < end; i++) values[i] = mean + sd * normal(vs)
+    return { start, end, params: { mean, sd }, mean, variance: sd * sd, risk: sd * sd }
+  })
+  return build(
+    s,
+    'varianceShifts',
+    'variance',
+    n,
+    segments,
+    values,
+    `${n} values with mean ${mean} in ${plural(segments.length, 'segment')}; the noise sd changes at each changepoint.`,
+    { ...options },
+  )
+}
+
+// ── Poisson rate shifts ──────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Options for `poissonShifts`. */
+export interface PoissonShiftOptions extends SegmentOptions {
+  /** Segment rates. Drawn from Gamma(shape, rate) when omitted. */
+  rates?: readonly number[]
+  /** Gamma prior of drawn rates: shape and rate (mean shape/rate). Defaults 2 and 0.5. */
+  shape?: number
+  rate?: number
+  /** Least ratio between drawn neighbouring rates. Default 1.5. */
+  minRatio?: number
+}
+
+/** Counts per step from a Poisson rate that changes at each changepoint (the setting of the coal-mining disasters). */
+export function poissonShifts(s: Stream, options: PoissonShiftOptions = {}): Dataset {
+  const { shape = 2, rate = 0.5, minRatio = 1.5 } = options
+  const { n, starts } = boundaries(s, options)
+  const prior = Gamma(shape, rate)
+  const ps = child(s, 'params')
+  const vs = child(s, 'values')
+  const values = new Float64Array(n)
+  let previous: number | undefined
+  const segments = starts.map((start, j): Segment => {
+    const end = starts[j + 1] ?? n
+    let tries = 0
+    const draw = () =>
+      apart(
+        () => prior.sample(child(ps, j, tries++)) as number,
+        previous,
+        (a, b) => Math.max(a / b, b / a) >= minRatio,
+      )
+    const lambda = pick(options.rates, j, draw, 'poissonShifts rates')
+    previous = lambda
+    const law = Poisson(lambda)
+    for (let i = start; i < end; i++) values[i] = law.sample(child(vs, i)) as number
+    return { start, end, params: { rate: lambda }, mean: lambda, variance: lambda, risk: lambda }
+  })
+  return build(
+    s,
+    'poissonShifts',
+    'poisson',
+    n,
+    segments,
+    values,
+    `${n} Poisson counts in ${plural(segments.length, 'segment')}; the rate changes at each changepoint.`,
+    { ...options },
+  )
+}
+
+// ── Autoregressive regimes ───────────────────────────────────────────────────────────────────────────────────────────
+
+/** Options for `arRegimes`. */
+export interface ArRegimeOptions extends SegmentOptions {
+  /**
+   * The regimes' AR coefficients a₁ … a_p (all of one order p). Segments cycle through them in order, so neighbours
+   * differ. Default [[0.9], [-0.7]]: a slowly wandering regime and a rapidly alternating one.
+   */
+  regimes?: readonly (readonly number[])[]
+  /** Innovation sd. Default 1. */
+  sd?: number
+}
+
+/**
+ * The stationary variance of an AR(p) process with innovation sd σ: σ² Σⱼ ψⱼ², with the MA(∞) weights ψ₀ = 1,
+ * ψⱼ = Σₖ aₖ ψⱼ₋ₖ. Infinite when the weights do not die out (a non-stationary regime).
+ */
+function stationaryVariance(a: readonly number[], sd: number): number {
+  const psi = [1]
+  let total = 1
+  for (let j = 1; j < 100000; j++) {
+    let v = 0
+    for (let k = 0; k < a.length; k++) if (j - k - 1 >= 0) v += a[k] * psi[j - k - 1]
+    psi.push(v)
+    total += v * v
+    if (!Number.isFinite(total) || total > 1e12) return Infinity
+    if (j > a.length && psi.slice(-a.length - 1).every((u) => u * u < 1e-20)) break
+  }
+  return sd * sd * total
+}
+
+/**
+ * An autoregression x_t = Σ_k a_k x_{t−k} + e_t, e_t ~ N(0, sd²), whose coefficients switch between regimes at each
+ * changepoint. The recursion runs straight across boundaries (the lags carry over), from zeros with a burn-in of 200
+ * steps in the first regime. The truth's per-segment mean and variance are the regime's stationary ones.
+ */
+export function arRegimes(s: Stream, options: ArRegimeOptions = {}): Dataset {
+  const { regimes = [[0.9], [-0.7]], sd = 1 } = options
+  if (regimes.length === 0) throw new DomainError('arRegimes', 'arRegimes: give at least one regime')
+  const p = regimes[0].length
+  if (regimes.some((a) => a.length !== p))
+    throw new DomainError('arRegimes', 'arRegimes: every regime must have the same order')
+  const { n, starts } = boundaries(s, options)
+  const vs = child(s, 'values')
+  const burn = 200
+  const x = new Float64Array(n + burn)
+  const regimeAt = new Int32Array(n + burn)
+  starts.forEach((start, j) => regimeAt.fill(j % regimes.length, start + burn, (starts[j + 1] ?? n) + burn))
+  for (let t = 0; t < n + burn; t++) {
+    const a = regimes[regimeAt[t]]
+    let v = sd * normal(vs)
+    for (let k = 0; k < p; k++) if (t - k - 1 >= 0) v += a[k] * x[t - k - 1]
+    x[t] = v
+  }
+  const variances = regimes.map((a) => stationaryVariance(a, sd))
+  const segments = starts.map((start, j): Segment => {
+    const r = j % regimes.length
+    return {
+      start,
+      end: starts[j + 1] ?? n,
+      params: { coefficients: regimes[r], sd, regime: r },
+      mean: 0,
+      variance: variances[r],
+      risk: sd * sd,
+    }
+  })
+  return build(
+    s,
+    'arRegimes',
+    'autoregressive',
+    n,
+    segments,
+    x.slice(burn),
+    `${n} steps of an AR(${p}) process that switches between ${plural(regimes.length, 'regime')} at each changepoint.`,
+    { ...options },
+  )
+}
+
+// ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const dataset = definer<DatasetInfo>('dataset', 'data/synthetic')
+
+dataset(
+  {
+    key: 'meanShifts',
+    name: 'Mean shifts',
+    summary: 'A piecewise-constant mean in Gaussian noise, with changepoints drawn at a constant hazard.',
+    task: 'sequence',
+    output: 'dataset',
+    knobs: space({
+      n: int(10, 5000, { default: 300 }),
+      meanGap: real(5, 1000, { default: 60 }),
+      minGap: int(1, 100, { default: 5 }),
+      jump: real(0, 10, { default: 3 }),
+      minJump: real(0, 10, { default: 1 }),
+      sd: real(0.01, 10, { default: 1 }),
+    }),
+    truth: true,
+    random: true,
+    notes: ['bayesian-online-changepoint-detection'],
+  },
+  meanShifts,
+)
+
+dataset(
+  {
+    key: 'varianceShifts',
+    name: 'Variance shifts',
+    summary: 'Gaussian noise whose standard deviation changes between segments.',
+    task: 'sequence',
+    output: 'dataset',
+    knobs: space({
+      n: int(10, 5000, { default: 300 }),
+      meanGap: real(5, 1000, { default: 60 }),
+      minGap: int(1, 100, { default: 5 }),
+      minRatio: real(1, 10, { default: 1.5 }),
+      mean: real(-10, 10, { default: 0 }),
+    }),
+    truth: true,
+    random: true,
+    notes: ['bayesian-online-changepoint-detection'],
+  },
+  varianceShifts,
+)
+
+dataset(
+  {
+    key: 'poissonShifts',
+    name: 'Poisson rate shifts',
+    summary: 'Counts whose Poisson rate changes between segments.',
+    task: 'sequence',
+    output: 'dataset',
+    knobs: space({
+      n: int(10, 5000, { default: 300 }),
+      meanGap: real(5, 1000, { default: 60 }),
+      minGap: int(1, 100, { default: 5 }),
+      shape: real(0.1, 20, { default: 2 }),
+      rate: real(0.01, 10, { default: 0.5 }),
+      minRatio: real(1, 10, { default: 1.5 }),
+    }),
+    truth: true,
+    random: true,
+    notes: ['bayesian-online-changepoint-detection'],
+  },
+  poissonShifts,
+)
+
+dataset(
+  {
+    key: 'arRegimes',
+    name: 'AR regimes',
+    summary: 'A series that switches between autoregressive regimes at changepoints.',
+    task: 'sequence',
+    output: 'dataset',
+    knobs: space({
+      n: int(10, 5000, { default: 300 }),
+      meanGap: real(5, 1000, { default: 60 }),
+      minGap: int(1, 100, { default: 5 }),
+      sd: real(0.01, 10, { default: 1 }),
+    }),
+    truth: true,
+    random: true,
+    notes: ['autoregressive-model'],
+  },
+  arRegimes,
+)

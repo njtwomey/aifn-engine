@@ -1,0 +1,11 @@
+{
+  "name": "aifn-compute",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "AI Field Notes compute: tested, traceable, tensor-native numerics, generic engines and the protocols that aifn-methods implements.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*/index.ts"
+  }
+}

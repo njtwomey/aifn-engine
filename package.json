@@ -1,0 +1,32 @@
+{
+  "name": "aifn-engine",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The AI Field Notes engine: tensor-native numerics (aifn-compute), named models and methods (aifn-methods) and figure rendering (aifn-render).",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/njtwomey/aifn-engine.git"
+  },
+  "workspaces": [
+    "packages/*",
+    "examples"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b",
+    "lint": "oxlint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --config packages/compute/vitest.config.ts && vitest run --config packages/methods/vitest.config.ts && vitest run --config packages/render/vitest.config.ts",
+    "examples": "vite --config examples/vite.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "oxlint": "^1.81.0",
+    "prettier": "^3.9.9",
+    "prettier-plugin-tailwindcss": "^0.8.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.2"
+  }
+}

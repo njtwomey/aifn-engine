@@ -1,0 +1,130 @@
+/** The encoder–decoder transformer of Vaswani et al. (2017), shared by the diagram lab and the transformer note. */
+import { op } from '../components'
+import type { DiagramSpec } from '../types'
+
+const block = (id: string, x: number, y: number, label: string, tone: number | 'neutral', h = 0.7) => ({
+  id,
+  x,
+  y,
+  label,
+  tone,
+  w: 2.8,
+  h,
+})
+
+export const transformer: DiagramSpec = {
+  unit: 38,
+  nodes: [
+    { id: 'ein', x: 3, y: 10.5, shape: 'text', label: 'inputs' },
+    block('eemb', 3, 9.7, 'input embedding', 'neutral'),
+    op('epe', 3, 8.8, '$\\oplus$'),
+    { id: 'epel', x: 1, y: 8.8, shape: 'text', small: true, label: 'positional\nencoding' },
+    { id: 'd1', x: 3, y: 8.25, shape: 'dot' },
+    block('emha', 3, 7.4, 'multi-head attention', 0, 0.9),
+    block('ean1', 3, 6.4, 'add & norm', 2, 0.5),
+    { id: 'd2', x: 3, y: 5.9, shape: 'dot' },
+    block('effn', 3, 5.2, 'feed-forward', 1),
+    block('ean2', 3, 4.3, 'add & norm', 2, 0.5),
+    { id: 'din', x: 8, y: 10.5, shape: 'text', label: 'outputs, shifted right' },
+    block('demb', 8, 9.7, 'output embedding', 'neutral'),
+    op('dpe', 8, 8.8, '$\\oplus$'),
+    { id: 'dpel', x: 10, y: 8.8, shape: 'text', small: true, label: 'positional\nencoding' },
+    { id: 'd3', x: 8, y: 8.25, shape: 'dot' },
+    block('dmmha', 8, 7.4, 'masked multi-head\nattention', 0, 0.9),
+    block('dan1', 8, 6.4, 'add & norm', 2, 0.5),
+    { id: 'd4', x: 8, y: 5.9, shape: 'dot' },
+    block('dxa', 8, 5.2, 'cross-attention', 3),
+    block('dan2', 8, 4.3, 'add & norm', 2, 0.5),
+    { id: 'd5', x: 8, y: 3.8, shape: 'dot' },
+    block('dffn', 8, 3.1, 'feed-forward', 1),
+    block('dan3', 8, 2.2, 'add & norm', 2, 0.5),
+    block('lin', 8, 0.7, 'linear', 'neutral', 0.55),
+    block('sm', 8, -0.15, 'softmax', 'neutral', 0.55),
+    { id: 'dout', x: 8, y: -1, shape: 'text', label: 'output probabilities' },
+  ],
+  edges: [
+    { from: 'ein', to: 'eemb' },
+    { from: 'eemb', to: 'epe' },
+    { from: 'epel', to: 'epe' },
+    { from: 'epe', to: 'd1', arrow: 'none' },
+    { from: 'd1', to: 'emha' },
+    {
+      from: 'd1:w',
+      to: 'ean1:w',
+      via: [
+        [1.3, 8.25],
+        [1.3, 6.4],
+      ],
+    },
+    { from: 'emha', to: 'ean1' },
+    { from: 'ean1', to: 'd2', arrow: 'none' },
+    { from: 'd2', to: 'effn' },
+    {
+      from: 'd2:w',
+      to: 'ean2:w',
+      via: [
+        [1.3, 5.9],
+        [1.3, 4.3],
+      ],
+    },
+    { from: 'effn', to: 'ean2' },
+    {
+      from: 'ean2:n',
+      to: 'dxa:w',
+      via: [
+        [3, 3.5],
+        [5.5, 3.5],
+        [5.5, 5.2],
+      ],
+    },
+    { from: 'din', to: 'demb' },
+    { from: 'demb', to: 'dpe' },
+    { from: 'dpel', to: 'dpe' },
+    { from: 'dpe', to: 'd3', arrow: 'none' },
+    { from: 'd3', to: 'dmmha' },
+    {
+      from: 'd3:e',
+      to: 'dan1:e',
+      via: [
+        [9.7, 8.25],
+        [9.7, 6.4],
+      ],
+    },
+    { from: 'dmmha', to: 'dan1' },
+    { from: 'dan1', to: 'd4', arrow: 'none' },
+    { from: 'd4', to: 'dxa' },
+    {
+      from: 'd4:e',
+      to: 'dan2:e',
+      via: [
+        [9.7, 5.9],
+        [9.7, 4.3],
+      ],
+    },
+    { from: 'dxa', to: 'dan2' },
+    { from: 'dan2', to: 'd5', arrow: 'none' },
+    { from: 'd5', to: 'dffn' },
+    {
+      from: 'd5:e',
+      to: 'dan3:e',
+      via: [
+        [9.7, 3.8],
+        [9.7, 2.2],
+      ],
+    },
+    { from: 'dffn', to: 'dan3' },
+    { from: 'dan3', to: 'lin' },
+    { from: 'lin', to: 'sm' },
+    { from: 'sm', to: 'dout' },
+  ],
+  groups: [
+    { id: 'enc', label: 'encoder × $N$', tone: 0, around: ['emha', 'ean1', 'effn', 'ean2', 'd1', 'd2'], pad: 0.5 },
+    {
+      id: 'dec',
+      label: 'decoder × $N$',
+      tone: 1,
+      around: ['dmmha', 'dan1', 'dxa', 'dan2', 'dffn', 'dan3', 'd3'],
+      pad: 0.5,
+    },
+  ],
+}

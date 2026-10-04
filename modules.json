@@ -1,0 +1,956 @@
+{
+  "$comment": "The module tree of aifn-engine. Compute (package aifn-compute): families in tiers, each with modules in local tiers and optional shared files at the family root; a module imports lower families, lower-tier modules of its own family, and its family's shared files. Applications (package aifn-methods): areas with nested groups and modules; a group's shared files serve its children; siblings share only through the parent; areas import others only down dependsOn. status \"gap\" marks a planned node with no code. aliases list old paths kept as re-export barrels during a move. Read by scripts/layers.ts (the lint and the README tables), scripts/package.ts and the tests.",
+  "compute": {
+    "package": "aifn-compute",
+    "families": [
+      {
+        "family": "foundation",
+        "tier": 0,
+        "shared": [],
+        "modules": [
+          {
+            "module": "contracts",
+            "tier": 0
+          },
+          {
+            "module": "errors",
+            "tier": 0
+          },
+          {
+            "module": "space",
+            "tier": 6
+          },
+          {
+            "module": "registry",
+            "tier": 2
+          },
+          {
+            "module": "tensor",
+            "tier": 3
+          },
+          {
+            "module": "pytree",
+            "tier": 4
+          },
+          {
+            "module": "fourier",
+            "tier": 4
+          },
+          {
+            "module": "convolution",
+            "tier": 5
+          },
+          {
+            "module": "autodiff",
+            "tier": 5
+          },
+          {
+            "module": "random",
+            "tier": 5
+          },
+          {
+            "module": "trace",
+            "tier": 6
+          }
+        ]
+      },
+      {
+        "family": "numerics",
+        "tier": 1,
+        "shared": [],
+        "modules": [
+          {
+            "module": "special",
+            "tier": 0
+          },
+          {
+            "module": "linalg",
+            "tier": 1
+          },
+          {
+            "module": "polynomial",
+            "tier": 2
+          },
+          {
+            "module": "quadrature",
+            "tier": 2
+          },
+          {
+            "module": "roots",
+            "tier": 2
+          },
+          {
+            "module": "implicit",
+            "tier": 2
+          },
+          {
+            "module": "geometry",
+            "tier": 2
+          },
+          {
+            "module": "interpolate",
+            "tier": 3
+          },
+          {
+            "module": "neighbours",
+            "tier": 2
+          },
+          {
+            "module": "robust",
+            "tier": 2
+          },
+          {
+            "module": "factorisation",
+            "tier": 2
+          }
+        ]
+      },
+      {
+        "family": "graph",
+        "tier": 2,
+        "shared": ["graph", "tree", "heap"],
+        "modules": [
+          {
+            "module": "traversal",
+            "tier": 0
+          },
+          {
+            "module": "shortest-paths",
+            "tier": 0
+          },
+          {
+            "module": "spanning-trees",
+            "tier": 0
+          },
+          {
+            "module": "flows",
+            "tier": 1
+          },
+          {
+            "module": "structured",
+            "tier": 1
+          },
+          {
+            "module": "structures",
+            "tier": 0
+          },
+          {
+            "module": "matrices",
+            "tier": 0
+          },
+          {
+            "module": "propagation",
+            "tier": 1
+          }
+        ]
+      },
+      {
+        "family": "probability",
+        "tier": 3,
+        "shared": [],
+        "modules": [
+          {
+            "module": "stats",
+            "tier": 0
+          },
+          {
+            "module": "bijectors",
+            "tier": 0
+          },
+          {
+            "module": "samplers",
+            "tier": 0
+          },
+          {
+            "module": "distributions",
+            "tier": 1
+          },
+          {
+            "module": "likelihoods",
+            "tier": 2
+          },
+          {
+            "module": "information",
+            "tier": 2
+          },
+          {
+            "module": "tests",
+            "tier": 2
+          },
+          {
+            "module": "extremes",
+            "tier": 2
+          },
+          {
+            "module": "markov",
+            "tier": 3
+          },
+          {
+            "module": "privacy",
+            "tier": 2
+          }
+        ]
+      },
+      {
+        "family": "optim",
+        "tier": 3,
+        "shared": ["options", "schedules"],
+        "modules": [
+          {
+            "module": "line-search",
+            "tier": 0
+          },
+          {
+            "module": "first-order",
+            "tier": 1
+          },
+          {
+            "module": "second-order",
+            "tier": 1
+          },
+          {
+            "module": "proximal",
+            "tier": 1
+          },
+          {
+            "module": "derivative-free",
+            "tier": 1
+          },
+          {
+            "module": "programming",
+            "tier": 1
+          },
+          {
+            "module": "minimize",
+            "tier": 2
+          },
+          {
+            "module": "search",
+            "tier": 0
+          },
+          {
+            "module": "online",
+            "tier": 1
+          }
+        ]
+      },
+      {
+        "family": "systems",
+        "tier": 3,
+        "shared": [],
+        "modules": []
+      },
+      {
+        "family": "inference",
+        "tier": 4,
+        "shared": [],
+        "modules": [
+          {
+            "module": "model",
+            "tier": 0
+          },
+          {
+            "module": "exact",
+            "tier": 1
+          },
+          {
+            "module": "message-passing",
+            "tier": 1
+          },
+          {
+            "module": "expectation-propagation",
+            "tier": 1
+          },
+          {
+            "module": "variational",
+            "tier": 1
+          },
+          {
+            "module": "stochastic",
+            "tier": 1
+          },
+          {
+            "module": "filtering",
+            "tier": 1
+          },
+          {
+            "module": "engines",
+            "tier": 2
+          }
+        ]
+      },
+      {
+        "family": "dynamics",
+        "tier": 4,
+        "shared": [],
+        "modules": [
+          {
+            "module": "ode",
+            "tier": 0
+          },
+          {
+            "module": "sde",
+            "tier": 0
+          },
+          {
+            "module": "fields",
+            "tier": 1
+          },
+          {
+            "module": "control",
+            "tier": 1
+          }
+        ]
+      },
+      {
+        "family": "signal",
+        "tier": 4,
+        "shared": ["signal"],
+        "modules": [
+          {
+            "module": "windows",
+            "tier": 0
+          },
+          {
+            "module": "filters",
+            "tier": 1
+          },
+          {
+            "module": "spectral",
+            "tier": 1
+          },
+          {
+            "module": "time-frequency",
+            "tier": 1
+          },
+          {
+            "module": "wavelets",
+            "tier": 1
+          },
+          {
+            "module": "statistical",
+            "tier": 1
+          },
+          {
+            "module": "cepstrum",
+            "tier": 1
+          },
+          {
+            "module": "multirate",
+            "tier": 2
+          },
+          {
+            "module": "audio",
+            "tier": 2
+          },
+          {
+            "module": "decompositions",
+            "tier": 2
+          },
+          {
+            "module": "similarity",
+            "tier": 1
+          },
+          {
+            "module": "image",
+            "tier": 1
+          }
+        ]
+      },
+      {
+        "family": "transport",
+        "tier": 4,
+        "shared": [],
+        "modules": []
+      },
+      {
+        "family": "text",
+        "tier": 4,
+        "shared": ["aligned"],
+        "modules": [
+          {
+            "module": "normalise",
+            "tier": 0
+          },
+          {
+            "module": "tokenise",
+            "tier": 0
+          },
+          {
+            "module": "stem",
+            "tier": 0
+          },
+          {
+            "module": "vocabulary",
+            "tier": 1
+          },
+          {
+            "module": "subword",
+            "tier": 2
+          },
+          {
+            "module": "pipeline",
+            "tier": 3
+          },
+          {
+            "module": "statistics",
+            "tier": 4
+          },
+          {
+            "module": "features",
+            "tier": 2
+          },
+          {
+            "module": "cooccurrence",
+            "tier": 2
+          },
+          {
+            "module": "representations",
+            "tier": 3
+          },
+          {
+            "module": "hyphenation",
+            "tier": 0
+          }
+        ]
+      },
+      {
+        "family": "logic",
+        "tier": 4,
+        "shared": [],
+        "modules": [
+          {
+            "module": "terms",
+            "tier": 0
+          },
+          {
+            "module": "resolution",
+            "tier": 1
+          },
+          {
+            "module": "induction",
+            "tier": 1
+          }
+        ]
+      },
+      {
+        "family": "learning",
+        "tier": 5,
+        "shared": [],
+        "modules": [
+          {
+            "module": "estimators",
+            "tier": 0
+          },
+          {
+            "module": "kernels",
+            "tier": 0
+          },
+          {
+            "module": "losses",
+            "tier": 1
+          },
+          {
+            "module": "metrics",
+            "tier": 1
+          },
+          {
+            "module": "compose",
+            "tier": 1
+          },
+          {
+            "module": "validate",
+            "tier": 1
+          },
+          {
+            "module": "calibration",
+            "tier": 2
+          },
+          {
+            "module": "conformal",
+            "tier": 0
+          },
+          {
+            "module": "off-policy",
+            "tier": 2
+          },
+          {
+            "module": "explain",
+            "tier": 2
+          },
+          {
+            "module": "subgroups",
+            "tier": 0
+          }
+        ]
+      },
+      {
+        "family": "nn",
+        "tier": 6,
+        "shared": [],
+        "modules": [
+          {
+            "module": "functional",
+            "tier": 0
+          },
+          {
+            "module": "init",
+            "tier": 0
+          },
+          {
+            "module": "layers",
+            "tier": 1
+          },
+          {
+            "module": "attention",
+            "tier": 2
+          },
+          {
+            "module": "sequence",
+            "tier": 3
+          },
+          {
+            "module": "decoding",
+            "tier": 0
+          },
+          {
+            "module": "training",
+            "tier": 2
+          },
+          {
+            "module": "experts",
+            "tier": 2
+          },
+          {
+            "module": "quantise",
+            "tier": 1
+          },
+          {
+            "module": "graph",
+            "tier": 2
+          }
+        ]
+      },
+      {
+        "family": "interpreter",
+        "tier": 7,
+        "shared": [],
+        "modules": []
+      }
+    ]
+  },
+  "applications": {
+    "package": "aifn-methods",
+    "areas": [
+      {
+        "area": "learning",
+        "dependsOn": ["unsupervised"],
+        "shared": ["util", "isotonic"],
+        "children": [
+          {
+            "group": "generalised",
+            "shared": ["irls", "residuals", "backfitting", "smoothing", "registry"],
+            "children": [
+              {
+                "module": "glm"
+              },
+              {
+                "module": "gam"
+              },
+              {
+                "module": "ordinal"
+              }
+            ]
+          },
+          {
+            "module": "linear"
+          },
+          {
+            "module": "generative-classifiers"
+          },
+          {
+            "module": "kernel-methods"
+          },
+          {
+            "module": "gaussian-processes"
+          },
+          {
+            "group": "trees-and-ensembles",
+            "shared": ["tree", "registry"],
+            "children": [
+              {
+                "module": "bagging"
+              },
+              {
+                "module": "boosting"
+              }
+            ]
+          },
+          {
+            "module": "neighbours"
+          },
+          {
+            "module": "reductions"
+          },
+          {
+            "module": "preprocessing"
+          },
+          {
+            "module": "mixture-of-experts"
+          },
+          {
+            "module": "mixture-density"
+          },
+          {
+            "module": "weak-supervision"
+          },
+          {
+            "module": "survival"
+          },
+          {
+            "module": "explanation"
+          },
+          {
+            "module": "transfer"
+          }
+        ]
+      },
+      {
+        "area": "unsupervised",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "clustering"
+          },
+          {
+            "module": "anomaly"
+          },
+          {
+            "group": "embedding",
+            "shared": ["neighbourhoods", "centring", "util"],
+            "children": [
+              {
+                "module": "linear"
+              },
+              {
+                "module": "manifold"
+              },
+              {
+                "module": "neighbour"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "area": "inference",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "sequence-models"
+          },
+          {
+            "module": "topic-models"
+          },
+          {
+            "module": "rating-models"
+          },
+          {
+            "module": "learner-models"
+          },
+          {
+            "module": "lattice-models"
+          },
+          {
+            "module": "mixture-models"
+          },
+          {
+            "module": "conjugate-models"
+          },
+          {
+            "module": "classifier-models"
+          }
+        ]
+      },
+      {
+        "area": "timeseries",
+        "dependsOn": [],
+        "shared": [],
+        "children": []
+      },
+      {
+        "area": "text",
+        "dependsOn": ["inference"],
+        "shared": [],
+        "children": [
+          {
+            "module": "corpora"
+          },
+          {
+            "module": "tokenisers"
+          },
+          {
+            "module": "hyphenation"
+          }
+        ]
+      },
+      {
+        "area": "vision",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "two-view"
+          }
+        ]
+      },
+      {
+        "area": "dynamics",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "maps"
+          },
+          {
+            "module": "pde"
+          },
+          {
+            "module": "nonlinear"
+          },
+          {
+            "module": "control"
+          }
+        ]
+      },
+      {
+        "area": "gym",
+        "dependsOn": [],
+        "shared": ["rollout", "mdp", "train", "registry"],
+        "children": [
+          {
+            "group": "environments",
+            "shared": ["bandits", "gridworlds", "registry"],
+            "children": [
+              {
+                "module": "control"
+              }
+            ]
+          },
+          {
+            "group": "agents",
+            "shared": ["random", "bandits", "tabular", "planning", "dqn", "registry"],
+            "children": [
+              {
+                "module": "control"
+              },
+              {
+                "module": "policy"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "area": "generative",
+        "dependsOn": ["neural"],
+        "shared": ["densities"],
+        "children": [
+          {
+            "module": "diffusion"
+          },
+          {
+            "module": "gan"
+          },
+          {
+            "module": "energy"
+          },
+          {
+            "module": "autoencoders"
+          },
+          {
+            "module": "flows"
+          },
+          {
+            "module": "boltzmann"
+          }
+        ]
+      },
+      {
+        "area": "neural",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "language-models"
+          },
+          {
+            "module": "contrastive"
+          },
+          {
+            "module": "grokking"
+          },
+          {
+            "module": "ode"
+          },
+          {
+            "module": "ode-mixtures"
+          },
+          {
+            "module": "full-batch"
+          },
+          {
+            "module": "quantisation"
+          },
+          {
+            "module": "privacy"
+          },
+          {
+            "module": "graph"
+          }
+        ]
+      },
+      {
+        "area": "retrieval",
+        "dependsOn": ["evaluation"],
+        "shared": [],
+        "children": [
+          {
+            "module": "losses"
+          },
+          {
+            "module": "ann"
+          },
+          {
+            "module": "recommenders"
+          }
+        ]
+      },
+      {
+        "area": "evaluation",
+        "dependsOn": ["algorithms"],
+        "shared": [],
+        "children": [
+          {
+            "module": "text"
+          },
+          {
+            "module": "detection"
+          },
+          {
+            "module": "quality"
+          },
+          {
+            "module": "generative"
+          },
+          {
+            "module": "fairness"
+          },
+          {
+            "module": "beyond-accuracy"
+          }
+        ]
+      },
+      {
+        "area": "information",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "channels"
+          },
+          {
+            "module": "coding"
+          },
+          {
+            "module": "projection"
+          }
+        ]
+      },
+      {
+        "area": "algorithms",
+        "dependsOn": [],
+        "shared": [],
+        "children": [
+          {
+            "module": "dynamic-programming"
+          }
+        ]
+      },
+      {
+        "area": "theory",
+        "dependsOn": [],
+        "shared": ["regression"],
+        "children": [
+          {
+            "module": "bias-variance"
+          },
+          {
+            "module": "double-descent"
+          },
+          {
+            "module": "capacity"
+          },
+          {
+            "module": "concentration"
+          }
+        ]
+      },
+      {
+        "area": "data",
+        "dependsOn": [
+          "learning",
+          "unsupervised",
+          "inference",
+          "timeseries",
+          "vision",
+          "dynamics",
+          "generative",
+          "neural",
+          "retrieval",
+          "evaluation",
+          "information",
+          "algorithms",
+          "text"
+        ],
+        "shared": ["truth", "sizes", "types", "rows", "define", "recipe"],
+        "children": [
+          {
+            "module": "synthetic"
+          },
+          {
+            "group": "real",
+            "shared": ["embedded", "real", "titanic"],
+            "children": [
+              {
+                "module": "fonts"
+              },
+              {
+                "module": "hyphenation"
+              }
+            ]
+          },
+          {
+            "module": "objectives"
+          },
+          {
+            "module": "targets"
+          },
+          {
+            "module": "signals"
+          }
+        ]
+      },
+      {
+        "area": "interpreter",
+        "dependsOn": ["learning"],
+        "shared": [],
+        "children": []
+      }
+    ]
+  },
+  "aliases": [],
+  "transitional": []
+}

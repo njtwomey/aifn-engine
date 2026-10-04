@@ -1,0 +1,2124 @@
+{
+ "treebank": [
+  {
+   "text": "Good muffins cost $3.88\nin New York.  Please buy me\ntwo of them.\nThanks.",
+   "tokens": [
+    "Good",
+    "muffins",
+    "cost",
+    "$",
+    "3.88",
+    "in",
+    "New",
+    "York.",
+    "Please",
+    "buy",
+    "me",
+    "two",
+    "of",
+    "them.",
+    "Thanks",
+    "."
+   ],
+   "parens": [
+    "Good",
+    "muffins",
+    "cost",
+    "$",
+    "3.88",
+    "in",
+    "New",
+    "York.",
+    "Please",
+    "buy",
+    "me",
+    "two",
+    "of",
+    "them.",
+    "Thanks",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     4
+    ],
+    [
+     5,
+     12
+    ],
+    [
+     13,
+     17
+    ],
+    [
+     18,
+     19
+    ],
+    [
+     19,
+     23
+    ],
+    [
+     24,
+     26
+    ],
+    [
+     27,
+     30
+    ],
+    [
+     31,
+     36
+    ],
+    [
+     38,
+     44
+    ],
+    [
+     45,
+     48
+    ],
+    [
+     49,
+     51
+    ],
+    [
+     52,
+     55
+    ],
+    [
+     56,
+     58
+    ],
+    [
+     59,
+     64
+    ],
+    [
+     65,
+     71
+    ],
+    [
+     71,
+     72
+    ]
+   ]
+  },
+  {
+   "text": "They'll save and invest more.",
+   "tokens": [
+    "They",
+    "'ll",
+    "save",
+    "and",
+    "invest",
+    "more",
+    "."
+   ],
+   "parens": [
+    "They",
+    "'ll",
+    "save",
+    "and",
+    "invest",
+    "more",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     4
+    ],
+    [
+     4,
+     7
+    ],
+    [
+     8,
+     12
+    ],
+    [
+     13,
+     16
+    ],
+    [
+     17,
+     23
+    ],
+    [
+     24,
+     28
+    ],
+    [
+     28,
+     29
+    ]
+   ]
+  },
+  {
+   "text": "hi, my name can't hello,",
+   "tokens": [
+    "hi",
+    ",",
+    "my",
+    "name",
+    "ca",
+    "n't",
+    "hello",
+    ","
+   ],
+   "parens": [
+    "hi",
+    ",",
+    "my",
+    "name",
+    "ca",
+    "n't",
+    "hello",
+    ","
+   ],
+   "spans": [
+    [
+     0,
+     2
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     4,
+     6
+    ],
+    [
+     7,
+     11
+    ],
+    [
+     12,
+     14
+    ],
+    [
+     14,
+     17
+    ],
+    [
+     18,
+     23
+    ],
+    [
+     23,
+     24
+    ]
+   ]
+  },
+  {
+   "text": "She said, \"I don't know -- maybe (or not) [sic] {x} <y>?\"",
+   "tokens": [
+    "She",
+    "said",
+    ",",
+    "``",
+    "I",
+    "do",
+    "n't",
+    "know",
+    "--",
+    "maybe",
+    "(",
+    "or",
+    "not",
+    ")",
+    "[",
+    "sic",
+    "]",
+    "{",
+    "x",
+    "}",
+    "<",
+    "y",
+    ">",
+    "?",
+    "''"
+   ],
+   "parens": [
+    "She",
+    "said",
+    ",",
+    "``",
+    "I",
+    "do",
+    "n't",
+    "know",
+    "--",
+    "maybe",
+    "-LRB-",
+    "or",
+    "not",
+    "-RRB-",
+    "-LSB-",
+    "sic",
+    "-RSB-",
+    "-LCB-",
+    "x",
+    "-RCB-",
+    "<",
+    "y",
+    ">",
+    "?",
+    "''"
+   ],
+   "spans": [
+    [
+     0,
+     3
+    ],
+    [
+     4,
+     8
+    ],
+    [
+     8,
+     9
+    ],
+    [
+     10,
+     11
+    ],
+    [
+     11,
+     12
+    ],
+    [
+     13,
+     15
+    ],
+    [
+     15,
+     18
+    ],
+    [
+     19,
+     23
+    ],
+    [
+     24,
+     26
+    ],
+    [
+     27,
+     32
+    ],
+    [
+     33,
+     34
+    ],
+    [
+     34,
+     36
+    ],
+    [
+     37,
+     40
+    ],
+    [
+     40,
+     41
+    ],
+    [
+     42,
+     43
+    ],
+    [
+     43,
+     46
+    ],
+    [
+     46,
+     47
+    ],
+    [
+     48,
+     49
+    ],
+    [
+     49,
+     50
+    ],
+    [
+     50,
+     51
+    ],
+    [
+     52,
+     53
+    ],
+    [
+     53,
+     54
+    ],
+    [
+     54,
+     55
+    ],
+    [
+     55,
+     56
+    ],
+    [
+     56,
+     57
+    ]
+   ]
+  },
+  {
+   "text": "I cannot believe it's gonna rain; we're wanna go! 'Tis true.",
+   "tokens": [
+    "I",
+    "can",
+    "not",
+    "believe",
+    "it",
+    "'s",
+    "gon",
+    "na",
+    "rain",
+    ";",
+    "we",
+    "'re",
+    "wan",
+    "na",
+    "go",
+    "!",
+    "'T",
+    "is",
+    "true",
+    "."
+   ],
+   "parens": [
+    "I",
+    "can",
+    "not",
+    "believe",
+    "it",
+    "'s",
+    "gon",
+    "na",
+    "rain",
+    ";",
+    "we",
+    "'re",
+    "wan",
+    "na",
+    "go",
+    "!",
+    "'T",
+    "is",
+    "true",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     1
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     5,
+     8
+    ],
+    [
+     9,
+     16
+    ],
+    [
+     17,
+     19
+    ],
+    [
+     19,
+     21
+    ],
+    [
+     22,
+     25
+    ],
+    [
+     25,
+     27
+    ],
+    [
+     28,
+     32
+    ],
+    [
+     32,
+     33
+    ],
+    [
+     34,
+     36
+    ],
+    [
+     36,
+     39
+    ],
+    [
+     40,
+     43
+    ],
+    [
+     43,
+     45
+    ],
+    [
+     46,
+     48
+    ],
+    [
+     48,
+     49
+    ],
+    [
+     50,
+     52
+    ],
+    [
+     52,
+     54
+    ],
+    [
+     55,
+     59
+    ],
+    [
+     59,
+     60
+    ]
+   ]
+  },
+  {
+   "text": "The U.S.A. isn't O'Neill's... is it? 3,000 people: 50% @home #1 & more.",
+   "tokens": [
+    "The",
+    "U.S.A.",
+    "is",
+    "n't",
+    "O'Neill",
+    "'s",
+    "...",
+    "is",
+    "it",
+    "?",
+    "3,000",
+    "people",
+    ":",
+    "50",
+    "%",
+    "@",
+    "home",
+    "#",
+    "1",
+    "&",
+    "more",
+    "."
+   ],
+   "parens": [
+    "The",
+    "U.S.A.",
+    "is",
+    "n't",
+    "O'Neill",
+    "'s",
+    "...",
+    "is",
+    "it",
+    "?",
+    "3,000",
+    "people",
+    ":",
+    "50",
+    "%",
+    "@",
+    "home",
+    "#",
+    "1",
+    "&",
+    "more",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     3
+    ],
+    [
+     4,
+     10
+    ],
+    [
+     11,
+     13
+    ],
+    [
+     13,
+     16
+    ],
+    [
+     17,
+     24
+    ],
+    [
+     24,
+     26
+    ],
+    [
+     26,
+     29
+    ],
+    [
+     30,
+     32
+    ],
+    [
+     33,
+     35
+    ],
+    [
+     35,
+     36
+    ],
+    [
+     37,
+     42
+    ],
+    [
+     43,
+     49
+    ],
+    [
+     49,
+     50
+    ],
+    [
+     51,
+     53
+    ],
+    [
+     53,
+     54
+    ],
+    [
+     55,
+     56
+    ],
+    [
+     56,
+     60
+    ],
+    [
+     61,
+     62
+    ],
+    [
+     62,
+     63
+    ],
+    [
+     64,
+     65
+    ],
+    [
+     66,
+     70
+    ],
+    [
+     70,
+     71
+    ]
+   ]
+  },
+  {
+   "text": "''Quoted'' and ``quoted'' text, 'single' quotes'",
+   "tokens": [
+    "''",
+    "Quoted",
+    "''",
+    "and",
+    "``",
+    "quoted",
+    "''",
+    "text",
+    ",",
+    "'single",
+    "'",
+    "quotes",
+    "'"
+   ],
+   "parens": [
+    "''",
+    "Quoted",
+    "''",
+    "and",
+    "``",
+    "quoted",
+    "''",
+    "text",
+    ",",
+    "'single",
+    "'",
+    "quotes",
+    "'"
+   ],
+   "spans": [
+    [
+     0,
+     2
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     8,
+     10
+    ],
+    [
+     11,
+     14
+    ],
+    [
+     15,
+     17
+    ],
+    [
+     17,
+     23
+    ],
+    [
+     23,
+     25
+    ],
+    [
+     26,
+     30
+    ],
+    [
+     30,
+     31
+    ],
+    [
+     32,
+     39
+    ],
+    [
+     39,
+     40
+    ],
+    [
+     41,
+     47
+    ],
+    [
+     47,
+     48
+    ]
+   ]
+  },
+  {
+   "text": "\u00dcn\u00efc\u00f6d\u00e9 caf\u00e9's na\u00efvet\u00e9 isn't r\u00e9sum\u00e9-ready, \u00bd done.",
+   "tokens": [
+    "\u00dcn\u00efc\u00f6d\u00e9",
+    "caf\u00e9",
+    "'s",
+    "na\u00efvet\u00e9",
+    "is",
+    "n't",
+    "r\u00e9sum\u00e9-ready",
+    ",",
+    "\u00bd",
+    "done",
+    "."
+   ],
+   "parens": [
+    "\u00dcn\u00efc\u00f6d\u00e9",
+    "caf\u00e9",
+    "'s",
+    "na\u00efvet\u00e9",
+    "is",
+    "n't",
+    "r\u00e9sum\u00e9-ready",
+    ",",
+    "\u00bd",
+    "done",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     7
+    ],
+    [
+     8,
+     12
+    ],
+    [
+     12,
+     14
+    ],
+    [
+     15,
+     22
+    ],
+    [
+     23,
+     25
+    ],
+    [
+     25,
+     28
+    ],
+    [
+     29,
+     41
+    ],
+    [
+     41,
+     42
+    ],
+    [
+     43,
+     44
+    ],
+    [
+     45,
+     49
+    ],
+    [
+     49,
+     50
+    ]
+   ]
+  },
+  {
+   "text": "Lemme gimme d'ye more'n gotta Whaddya",
+   "tokens": [
+    "Lem",
+    "me",
+    "gim",
+    "me",
+    "d",
+    "'ye",
+    "more",
+    "'n",
+    "got",
+    "ta",
+    "Whaddya"
+   ],
+   "parens": [
+    "Lem",
+    "me",
+    "gim",
+    "me",
+    "d",
+    "'ye",
+    "more",
+    "'n",
+    "got",
+    "ta",
+    "Whaddya"
+   ],
+   "spans": [
+    [
+     0,
+     3
+    ],
+    [
+     3,
+     5
+    ],
+    [
+     6,
+     9
+    ],
+    [
+     9,
+     11
+    ],
+    [
+     12,
+     13
+    ],
+    [
+     13,
+     16
+    ],
+    [
+     17,
+     21
+    ],
+    [
+     21,
+     23
+    ],
+    [
+     24,
+     27
+    ],
+    [
+     27,
+     29
+    ],
+    [
+     30,
+     37
+    ]
+   ]
+  },
+  {
+   "text": "Hello.\n",
+   "tokens": [
+    "Hello",
+    "."
+   ],
+   "parens": [
+    "Hello",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     5
+    ],
+    [
+     5,
+     6
+    ]
+   ]
+  },
+  {
+   "text": "End with colon:\n",
+   "tokens": [
+    "End",
+    "with",
+    "colon",
+    ":"
+   ],
+   "parens": [
+    "End",
+    "with",
+    "colon",
+    ":"
+   ],
+   "spans": [
+    [
+     0,
+     3
+    ],
+    [
+     4,
+     8
+    ],
+    [
+     9,
+     14
+    ],
+    [
+     14,
+     15
+    ]
+   ]
+  },
+  {
+   "text": "\"Start quote\" and DON'T SHOUT, YOU'LL see.",
+   "tokens": [
+    "``",
+    "Start",
+    "quote",
+    "''",
+    "and",
+    "DO",
+    "N'T",
+    "SHOUT",
+    ",",
+    "YOU",
+    "'LL",
+    "see",
+    "."
+   ],
+   "parens": [
+    "``",
+    "Start",
+    "quote",
+    "''",
+    "and",
+    "DO",
+    "N'T",
+    "SHOUT",
+    ",",
+    "YOU",
+    "'LL",
+    "see",
+    "."
+   ],
+   "spans": [
+    [
+     0,
+     1
+    ],
+    [
+     1,
+     6
+    ],
+    [
+     7,
+     12
+    ],
+    [
+     12,
+     13
+    ],
+    [
+     14,
+     17
+    ],
+    [
+     18,
+     20
+    ],
+    [
+     20,
+     23
+    ],
+    [
+     24,
+     29
+    ],
+    [
+     29,
+     30
+    ],
+    [
+     31,
+     34
+    ],
+    [
+     34,
+     37
+    ],
+    [
+     38,
+     41
+    ],
+    [
+     41,
+     42
+    ]
+   ]
+  }
+ ],
+ "casual": [
+  {
+   "text": "This is a cooool #dummysmiley: :-) :-P <3 and some arrows < > -> <--",
+   "options": {},
+   "tokens": [
+    "This",
+    "is",
+    "a",
+    "cooool",
+    "#dummysmiley",
+    ":",
+    ":-)",
+    ":-P",
+    "<3",
+    "and",
+    "some",
+    "arrows",
+    "<",
+    ">",
+    "->",
+    "<--"
+   ]
+  },
+  {
+   "text": "This is a cooool #dummysmiley: :-) :-P <3 and some arrows < > -> <--",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "this",
+    "is",
+    "a",
+    "cooool",
+    "#dummysmiley",
+    ":",
+    ":-)",
+    ":-P",
+    "<3",
+    "and",
+    "some",
+    "arrows",
+    "<",
+    ">",
+    "->",
+    "<--"
+   ]
+  },
+  {
+   "text": "This is a cooool #dummysmiley: :-) :-P <3 and some arrows < > -> <--",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "This",
+    "is",
+    "a",
+    "coool",
+    "#dummysmiley",
+    ":",
+    ":-)",
+    ":-P",
+    "<3",
+    "and",
+    "some",
+    "arrows",
+    "<",
+    ">",
+    "->",
+    "<--"
+   ]
+  },
+  {
+   "text": "This is a cooool #dummysmiley: :-) :-P <3 and some arrows < > -> <--",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "This",
+    "is",
+    "a",
+    "cooool",
+    "#dummysmiley",
+    ":",
+    ":-)",
+    ":-P",
+    "<3",
+    "and",
+    "some",
+    "arrows",
+    "<",
+    ">",
+    "->",
+    "<--"
+   ]
+  },
+  {
+   "text": "@remy: This is waaaaayyyy too much for you!!!!!!",
+   "options": {},
+   "tokens": [
+    "@remy",
+    ":",
+    "This",
+    "is",
+    "waaaaayyyy",
+    "too",
+    "much",
+    "for",
+    "you",
+    "!",
+    "!",
+    "!"
+   ]
+  },
+  {
+   "text": "@remy: This is waaaaayyyy too much for you!!!!!!",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "@remy",
+    ":",
+    "this",
+    "is",
+    "waaaaayyyy",
+    "too",
+    "much",
+    "for",
+    "you",
+    "!",
+    "!",
+    "!"
+   ]
+  },
+  {
+   "text": "@remy: This is waaaaayyyy too much for you!!!!!!",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    ":",
+    "This",
+    "is",
+    "waaayyy",
+    "too",
+    "much",
+    "for",
+    "you",
+    "!",
+    "!",
+    "!"
+   ]
+  },
+  {
+   "text": "@remy: This is waaaaayyyy too much for you!!!!!!",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "@remy",
+    ":",
+    "This",
+    "is",
+    "waaaaayyyy",
+    "too",
+    "much",
+    "for",
+    "you",
+    "!",
+    "!",
+    "!"
+   ]
+  },
+  {
+   "text": "Check https://example.com/path?q=1 and www.foo.org or foo.co.uk/bar, mail me@x.com",
+   "options": {},
+   "tokens": [
+    "Check",
+    "https://example.com/path?q=1",
+    "and",
+    "www.foo.org",
+    "or",
+    "foo.co.uk/bar",
+    ",",
+    "mail",
+    "me@x.com"
+   ]
+  },
+  {
+   "text": "Check https://example.com/path?q=1 and www.foo.org or foo.co.uk/bar, mail me@x.com",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "check",
+    "https://example.com/path?q=1",
+    "and",
+    "www.foo.org",
+    "or",
+    "foo.co.uk/bar",
+    ",",
+    "mail",
+    "me@x.com"
+   ]
+  },
+  {
+   "text": "Check https://example.com/path?q=1 and www.foo.org or foo.co.uk/bar, mail me@x.com",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "Check",
+    "https://example.com/path?q=1",
+    "and",
+    "www.foo.org",
+    "or",
+    "foo.co.uk/bar",
+    ",",
+    "mail",
+    "me@x.com"
+   ]
+  },
+  {
+   "text": "Check https://example.com/path?q=1 and www.foo.org or foo.co.uk/bar, mail me@x.com",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "Check",
+    "https://example.com/path?q=1",
+    "and",
+    "www.foo.org",
+    "or",
+    "foo.co.uk/bar",
+    ",",
+    "mail",
+    "me@x.com"
+   ]
+  },
+  {
+   "text": "Call +1 (800) 555-1234 now :D ;) 8-) </3 x-D",
+   "options": {},
+   "tokens": [
+    "Call",
+    "+1 (800) 555-1234",
+    "now",
+    ":D",
+    ";)",
+    "8-)",
+    "</3",
+    "x-D"
+   ]
+  },
+  {
+   "text": "Call +1 (800) 555-1234 now :D ;) 8-) </3 x-D",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "call",
+    "+1 (800) 555-1234",
+    "now",
+    ":D",
+    ";)",
+    "8-)",
+    "</3",
+    "x-d"
+   ]
+  },
+  {
+   "text": "Call +1 (800) 555-1234 now :D ;) 8-) </3 x-D",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "Call",
+    "+1 (800) 555-1234",
+    "now",
+    ":D",
+    ";)",
+    "8-)",
+    "</3",
+    "x-D"
+   ]
+  },
+  {
+   "text": "Call +1 (800) 555-1234 now :D ;) 8-) </3 x-D",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "Call",
+    "+",
+    "1",
+    "(8",
+    "00",
+    ")",
+    "555-1234",
+    "now",
+    ":D",
+    ";)",
+    "8-)",
+    "</3",
+    "x-D"
+   ]
+  },
+  {
+   "text": "Emoji \ud83d\udc4d\ud83c\udffd family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 flag \ud83c\uddee\ud83c\uddea heart \u2764\ufe0f and #hash_tag-ok @user_name123",
+   "options": {},
+   "tokens": [
+    "Emoji",
+    "\ud83d\udc4d\ud83c\udffd",
+    "family",
+    "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    "flag",
+    "\ud83c\uddee\ud83c\uddea",
+    "heart",
+    "\u2764",
+    "\ufe0f",
+    "and",
+    "#hash_tag-ok",
+    "@user_name123"
+   ]
+  },
+  {
+   "text": "Emoji \ud83d\udc4d\ud83c\udffd family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 flag \ud83c\uddee\ud83c\uddea heart \u2764\ufe0f and #hash_tag-ok @user_name123",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "emoji",
+    "\ud83d\udc4d\ud83c\udffd",
+    "family",
+    "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    "flag",
+    "\ud83c\uddee\ud83c\uddea",
+    "heart",
+    "\u2764",
+    "\ufe0f",
+    "and",
+    "#hash_tag-ok",
+    "@user_name123"
+   ]
+  },
+  {
+   "text": "Emoji \ud83d\udc4d\ud83c\udffd family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 flag \ud83c\uddee\ud83c\uddea heart \u2764\ufe0f and #hash_tag-ok @user_name123",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "Emoji",
+    "\ud83d\udc4d\ud83c\udffd",
+    "family",
+    "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    "flag",
+    "\ud83c\uddee\ud83c\uddea",
+    "heart",
+    "\u2764",
+    "\ufe0f",
+    "and",
+    "#hash_tag-ok"
+   ]
+  },
+  {
+   "text": "Emoji \ud83d\udc4d\ud83c\udffd family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 flag \ud83c\uddee\ud83c\uddea heart \u2764\ufe0f and #hash_tag-ok @user_name123",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "Emoji",
+    "\ud83d\udc4d\ud83c\udffd",
+    "family",
+    "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    "flag",
+    "\ud83c\uddee\ud83c\uddea",
+    "heart",
+    "\u2764",
+    "\ufe0f",
+    "and",
+    "#hash_tag-ok",
+    "@user_name123"
+   ]
+  },
+  {
+   "text": "Price: &pound;100 &amp; 5&#37; off &bogus; &#x263A;",
+   "options": {},
+   "tokens": [
+    "Price",
+    ":",
+    "\u00a3",
+    "100",
+    "&",
+    "5",
+    "%",
+    "off",
+    "\u263a"
+   ]
+  },
+  {
+   "text": "Price: &pound;100 &amp; 5&#37; off &bogus; &#x263A;",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "price",
+    ":",
+    "\u00a3",
+    "100",
+    "&",
+    "5",
+    "%",
+    "off",
+    "\u263a"
+   ]
+  },
+  {
+   "text": "Price: &pound;100 &amp; 5&#37; off &bogus; &#x263A;",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "Price",
+    ":",
+    "\u00a3",
+    "100",
+    "&",
+    "5",
+    "%",
+    "off",
+    "\u263a"
+   ]
+  },
+  {
+   "text": "Price: &pound;100 &amp; 5&#37; off &bogus; &#x263A;",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "Price",
+    ":",
+    "\u00a3",
+    "100",
+    "&",
+    "5",
+    "%",
+    "off",
+    "\u263a"
+   ]
+  },
+  {
+   "text": "Numbers 3.14 -2,5 1/2 12:30 and ... dots . . . end",
+   "options": {},
+   "tokens": [
+    "Numbers",
+    "3.14",
+    "-2,5",
+    "1/2",
+    "12:30",
+    "and",
+    "...",
+    "dots",
+    ". . .",
+    "end"
+   ]
+  },
+  {
+   "text": "Numbers 3.14 -2,5 1/2 12:30 and ... dots . . . end",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "numbers",
+    "3.14",
+    "-2,5",
+    "1/2",
+    "12:30",
+    "and",
+    "...",
+    "dots",
+    ". . .",
+    "end"
+   ]
+  },
+  {
+   "text": "Numbers 3.14 -2,5 1/2 12:30 and ... dots . . . end",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "Numbers",
+    "3.14",
+    "-2,5",
+    "1/2",
+    "12:30",
+    "and",
+    "...",
+    "dots",
+    ". . .",
+    "end"
+   ]
+  },
+  {
+   "text": "Numbers 3.14 -2,5 1/2 12:30 and ... dots . . . end",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "Numbers",
+    "3.14",
+    "-2,5",
+    "1/2",
+    "12:30",
+    "and",
+    "...",
+    "dots",
+    ". . .",
+    "end"
+   ]
+  },
+  {
+   "text": "<b>bold</b> it's state-of-the-art O'Reilly's",
+   "options": {},
+   "tokens": [
+    "<b>",
+    "bold",
+    "</b>",
+    "it's",
+    "state-of-the-art",
+    "O'Reilly's"
+   ]
+  },
+  {
+   "text": "<b>bold</b> it's state-of-the-art O'Reilly's",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "<b>",
+    "bold",
+    "</b>",
+    "it's",
+    "state-of-the-art",
+    "o'reilly's"
+   ]
+  },
+  {
+   "text": "<b>bold</b> it's state-of-the-art O'Reilly's",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "<b>",
+    "bold",
+    "</b>",
+    "it's",
+    "state-of-the-art",
+    "O'Reilly's"
+   ]
+  },
+  {
+   "text": "<b>bold</b> it's state-of-the-art O'Reilly's",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "<b>",
+    "bold",
+    "</b>",
+    "it's",
+    "state-of-the-art",
+    "O'Reilly's"
+   ]
+  },
+  {
+   "text": "@abcdefghijklmnopqrstuvwxyz is long, @ok_handle fine",
+   "options": {},
+   "tokens": [
+    "@abcdefghijklmnopqrstuvwxyz",
+    "is",
+    "long",
+    ",",
+    "@ok_handle",
+    "fine"
+   ]
+  },
+  {
+   "text": "@abcdefghijklmnopqrstuvwxyz is long, @ok_handle fine",
+   "options": {
+    "preserve_case": false
+   },
+   "tokens": [
+    "@abcdefghijklmnopqrstuvwxyz",
+    "is",
+    "long",
+    ",",
+    "@ok_handle",
+    "fine"
+   ]
+  },
+  {
+   "text": "@abcdefghijklmnopqrstuvwxyz is long, @ok_handle fine",
+   "options": {
+    "reduce_len": true,
+    "strip_handles": true
+   },
+   "tokens": [
+    "pqrstuvwxyz",
+    "is",
+    "long",
+    ",",
+    "fine"
+   ]
+  },
+  {
+   "text": "@abcdefghijklmnopqrstuvwxyz is long, @ok_handle fine",
+   "options": {
+    "match_phone_numbers": false
+   },
+   "tokens": [
+    "@abcdefghijklmnopqrstuvwxyz",
+    "is",
+    "long",
+    ",",
+    "@ok_handle",
+    "fine"
+   ]
+  }
+ ],
+ "sentences": [
+  {
+   "text": "Mr. Smith went to Washington. He arrived at 3 p.m. on Jan. 5. Then he left!",
+   "sentences": [
+    "Mr. Smith went to Washington.",
+    "He arrived at 3 p.m. on Jan. 5.",
+    "Then he left!"
+   ]
+  },
+  {
+   "text": "\"Really?\" she asked. The U.S. economy grew 3.5 percent. Dr. Who? Yes.",
+   "sentences": [
+    "\"Really?\"",
+    "she asked.",
+    "The U.S. economy grew 3.5 percent.",
+    "Dr. Who?",
+    "Yes."
+   ]
+  },
+  {
+   "text": "This is one. This is two... And three? Four! Five.",
+   "sentences": [
+    "This is one.",
+    "This is two... And three?",
+    "Four!",
+    "Five."
+   ]
+  },
+  {
+   "text": "J. R. R. Tolkien wrote books. They sold well. Prof. Brown agrees.",
+   "sentences": [
+    "J. R. R. Tolkien wrote books.",
+    "They sold well.",
+    "Prof. Brown agrees."
+   ]
+  },
+  {
+   "text": "Prices rose 5 percent in Oct. The board met in Washington. It voted no.",
+   "sentences": [
+    "Prices rose 5 percent in Oct.",
+    "The board met in Washington.",
+    "It voted no."
+   ]
+  },
+  {
+   "text": "I saw Mt. Everest. It was tall. (It really was.) We went home.",
+   "sentences": [
+    "I saw Mt.",
+    "Everest.",
+    "It was tall.",
+    "(It really was.)",
+    "We went home."
+   ]
+  },
+  {
+   "text": "The meeting ended at 5 p.m. The next one is tomorrow.",
+   "sentences": [
+    "The meeting ended at 5 p.m.",
+    "The next one is tomorrow."
+   ]
+  },
+  {
+   "text": "Version 2. is out. Download it now.",
+   "sentences": [
+    "Version 2. is out.",
+    "Download it now."
+   ]
+  }
+ ],
+ "patterns": [
+  {
+   "text": "Hello world! It's 2024: we'll ship 1234567 items, don't we?",
+   "gpt2": [
+    "Hello",
+    " world",
+    "!",
+    " It",
+    "'s",
+    " 2024",
+    ":",
+    " we",
+    "'ll",
+    " ship",
+    " 1234567",
+    " items",
+    ",",
+    " don",
+    "'t",
+    " we",
+    "?"
+   ],
+   "cl100k": [
+    "Hello",
+    " world",
+    "!",
+    " It",
+    "'s",
+    " ",
+    "202",
+    "4",
+    ":",
+    " we",
+    "'ll",
+    " ship",
+    " ",
+    "123",
+    "456",
+    "7",
+    " items",
+    ",",
+    " don",
+    "'t",
+    " we",
+    "?"
+   ],
+   "o200k": [
+    "Hello",
+    " world",
+    "!",
+    " It's",
+    " ",
+    "202",
+    "4",
+    ":",
+    " we'll",
+    " ship",
+    " ",
+    "123",
+    "456",
+    "7",
+    " items",
+    ",",
+    " don't",
+    " we",
+    "?"
+   ]
+  },
+  {
+   "text": "I'M SHOUTING 'S 'T 'Re camelCaseWords and HTTPServer2Go",
+   "gpt2": [
+    "I",
+    "'",
+    "M",
+    " SHOUTING",
+    " '",
+    "S",
+    " '",
+    "T",
+    " '",
+    "Re",
+    " camelCaseWords",
+    " and",
+    " HTTPServer",
+    "2",
+    "Go"
+   ],
+   "cl100k": [
+    "I",
+    "'M",
+    " SHOUTING",
+    " '",
+    "S",
+    " '",
+    "T",
+    " '",
+    "Re",
+    " camelCaseWords",
+    " and",
+    " HTTPServer",
+    "2",
+    "Go"
+   ],
+   "o200k": [
+    "I'M",
+    " SHOUTING",
+    " '",
+    "S",
+    " '",
+    "T",
+    " '",
+    "Re",
+    " camel",
+    "Case",
+    "Words",
+    " and",
+    " HTTPServer",
+    "2",
+    "Go"
+   ]
+  },
+  {
+   "text": "  leading spaces\tand tabs\n\nnewlines   \n  trailing  ",
+   "gpt2": [
+    " ",
+    " leading",
+    " spaces",
+    "\t",
+    "and",
+    " tabs",
+    "\n",
+    "\n",
+    "newlines",
+    "   \n ",
+    " trailing",
+    "  "
+   ],
+   "cl100k": [
+    " ",
+    " leading",
+    " spaces",
+    "\tand",
+    " tabs",
+    "\n\n",
+    "newlines",
+    "   \n",
+    " ",
+    " trailing",
+    "  "
+   ],
+   "o200k": [
+    " ",
+    " leading",
+    " spaces",
+    "\tand",
+    " tabs",
+    "\n\n",
+    "newlines",
+    "   \n",
+    " ",
+    " trailing",
+    "  "
+   ]
+  },
+  {
+   "text": "na\u00efve caf\u00e9 \u2014 \u6771\u4eac\u30bf\u30ef\u30fc, \u043f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440! \ud83d\udc4d\ud83c\udffd\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 \u00bd x\u00b2 \u2460",
+   "gpt2": [
+    "na\u00efve",
+    " caf\u00e9",
+    " \u2014",
+    " \u6771\u4eac\u30bf\u30ef\u30fc",
+    ",",
+    " \u043f\u0440\u0438\u0432\u0435\u0442",
+    " \u043c\u0438\u0440",
+    "!",
+    " \ud83d\udc4d\ud83c\udffd\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    " \u00bd",
+    " x",
+    "\u00b2",
+    " \u2460"
+   ],
+   "cl100k": [
+    "na\u00efve",
+    " caf\u00e9",
+    " \u2014",
+    " \u6771\u4eac\u30bf\u30ef\u30fc",
+    ",",
+    " \u043f\u0440\u0438\u0432\u0435\u0442",
+    " \u043c\u0438\u0440",
+    "!",
+    " \ud83d\udc4d\ud83c\udffd\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    " ",
+    "\u00bd",
+    " x",
+    "\u00b2",
+    " ",
+    "\u2460"
+   ],
+   "o200k": [
+    "na\u00efve",
+    " caf\u00e9",
+    " \u2014",
+    " \u6771\u4eac\u30bf\u30ef\u30fc",
+    ",",
+    " \u043f\u0440\u0438\u0432\u0435\u0442",
+    " \u043c\u0438\u0440",
+    "!",
+    " \ud83d\udc4d\ud83c\udffd\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+    " ",
+    "\u00bd",
+    " x",
+    "\u00b2",
+    " ",
+    "\u2460"
+   ]
+  },
+  {
+   "text": "price: $3.50/kg, 99.9% off!!!   ...  ok\r\nnext line",
+   "gpt2": [
+    "price",
+    ":",
+    " $",
+    "3",
+    ".",
+    "50",
+    "/",
+    "kg",
+    ",",
+    " 99",
+    ".",
+    "9",
+    "%",
+    " off",
+    "!!!",
+    "  ",
+    " ...",
+    " ",
+    " ok",
+    "\r",
+    "\n",
+    "next",
+    " line"
+   ],
+   "cl100k": [
+    "price",
+    ":",
+    " $",
+    "3",
+    ".",
+    "50",
+    "/kg",
+    ",",
+    " ",
+    "99",
+    ".",
+    "9",
+    "%",
+    " off",
+    "!!!",
+    "  ",
+    " ...",
+    " ",
+    " ok",
+    "\r\n",
+    "next",
+    " line"
+   ],
+   "o200k": [
+    "price",
+    ":",
+    " $",
+    "3",
+    ".",
+    "50",
+    "/kg",
+    ",",
+    " ",
+    "99",
+    ".",
+    "9",
+    "%",
+    " off",
+    "!!!",
+    "  ",
+    " ...",
+    " ",
+    " ok",
+    "\r\n",
+    "next",
+    " line"
+   ]
+  },
+  {
+   "text": "e\u0301 combining and \u0915\u094d\u0937 Devanagari",
+   "gpt2": [
+    "e",
+    "\u0301",
+    " combining",
+    " and",
+    " \u0915",
+    "\u094d",
+    "\u0937",
+    " Devanagari"
+   ],
+   "cl100k": [
+    "e",
+    "\u0301",
+    " combining",
+    " and",
+    " \u0915",
+    "\u094d\u0937",
+    " Devanagari"
+   ],
+   "o200k": [
+    "e\u0301",
+    " combining",
+    " and",
+    " \u0915\u094d\u0937",
+    " Devanagari"
+   ]
+  },
+  {
+   "text": "path/to/file.txt and a+b=c; <tag> {json: [1,2]}",
+   "gpt2": [
+    "path",
+    "/",
+    "to",
+    "/",
+    "file",
+    ".",
+    "txt",
+    " and",
+    " a",
+    "+",
+    "b",
+    "=",
+    "c",
+    ";",
+    " <",
+    "tag",
+    ">",
+    " {",
+    "json",
+    ":",
+    " [",
+    "1",
+    ",",
+    "2",
+    "]}"
+   ],
+   "cl100k": [
+    "path",
+    "/to",
+    "/file",
+    ".txt",
+    " and",
+    " a",
+    "+b",
+    "=c",
+    ";",
+    " <",
+    "tag",
+    ">",
+    " {",
+    "json",
+    ":",
+    " [",
+    "1",
+    ",",
+    "2",
+    "]}"
+   ],
+   "o200k": [
+    "path",
+    "/to",
+    "/file",
+    ".txt",
+    " and",
+    " a",
+    "+b",
+    "=c",
+    ";",
+    " <",
+    "tag",
+    ">",
+    " {",
+    "json",
+    ":",
+    " [",
+    "1",
+    ",",
+    "2",
+    "]}"
+   ]
+  }
+ ]
+}

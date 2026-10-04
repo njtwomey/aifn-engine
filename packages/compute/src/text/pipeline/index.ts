@@ -1,0 +1,107 @@
+/**
+ * `aifn-compute/text/pipeline`: tokenisers as pipelines of composable stages, as Hugging Face `tokenizers`. Normalisers
+ * (Unicode forms, case, accents, replace, prepend) that keep offsets; pre-tokenisers (white space, punctuation, BERT,
+ * digits, regular-expression splits with the GPT-2, cl100k and o200k patterns, Metaspace, ByteLevel, Treebank,
+ * casual); models (BPE with byte fallback and BPE-dropout, WordPiece, unigram, word level, character, byte); template
+ * post-processing with truncation (stride, overflow) and padding; decoders; training through the pipeline.
+ */
+
+export {
+  applyNormaliser,
+  caseFoldNormaliser,
+  collapseWhitespaceNormaliser,
+  lowercaseNormaliser,
+  normaliserSequence,
+  prependNormaliser,
+  replaceNormaliser,
+  stripAccentsNormaliser,
+  stripNormaliser,
+  unicodeNormaliser,
+  type NormalForm,
+  type Normaliser,
+} from './normalisers'
+export {
+  applyPreTokeniser,
+  bertPreTokeniser,
+  byteLevelPreTokeniser,
+  casualPreTokeniser,
+  digitsPreTokeniser,
+  metaspacePreTokeniser,
+  preTokeniserSequence,
+  punctuationPreTokeniser,
+  splitAligned,
+  splitPreTokeniser,
+  treebankPreTokeniser,
+  whitespacePreTokeniser,
+  whitespaceSplitPreTokeniser,
+  type PreTokeniser,
+  type SplitBehaviour,
+} from './pre-tokenisers'
+export {
+  BYTE_TOKENS,
+  bpeStage,
+  byteOfToken,
+  byteStage,
+  byteToken,
+  characterStage,
+  modelSegment,
+  unigramStage,
+  vocabularyWithIds,
+  wordLevelStage,
+  wordPieceStage,
+  type BpeStage,
+  type ByteStage,
+  type CharacterStage,
+  type ModelOptions,
+  type ModelToken,
+  type SegmentOptions,
+  type TokeniserModel,
+  type UnigramStage,
+  type WordLevelStage,
+  type WordPieceStage,
+} from './models'
+export {
+  addedTokens,
+  bertProcessor,
+  padding,
+  pairLengths,
+  templateProcessor,
+  truncation,
+  truncationWindows,
+  type Padding,
+  type PostProcessor,
+  type TemplateItem,
+  type Truncation,
+} from './post-processors'
+export {
+  applyDecoder,
+  byteFallbackDecoder,
+  byteLevelDecoder,
+  decoderSequence,
+  endOfWordDecoder,
+  fuseDecoder,
+  metaspaceDecoder,
+  replaceDecoder,
+  stripDecoder,
+  wordPieceDecoder,
+  type Decoder,
+} from './decoders'
+export {
+  byteTokeniser,
+  decodeIds,
+  encodeText,
+  encodeBatch,
+  encodingTokenisation,
+  preTokenCounts,
+  tokeniser,
+  vocabularySize,
+  withStages,
+  type DecodeOptions,
+  type Encoding,
+  type EncodeOptions,
+  type Tokeniser,
+  type TokeniserParts,
+  type UntrainedTokeniser,
+} from './tokeniser'
+export { trainTokeniser, trainedModel, trainingSteps, type Trainer, type TrainerState } from './trainers'
+export { pipelineAlgorithms, pipelineFunctions } from './registry'

@@ -1,0 +1,40 @@
+/**
+ * `aifn-methods/evaluation/text`: text metrics.
+ */
+
+export {
+  backretrieval,
+  bertScore,
+  bleu,
+  bleuScore,
+  characterErrorRate,
+  chrF,
+  chrFScore,
+  editAlignment,
+  longestCommonSubsequence,
+  matchErrorRate,
+  ngrams,
+  normaliseAnswer,
+  rougeL,
+  rougeLScores,
+  rougeN,
+  rougeNScores,
+  squadExactMatch,
+  squadF1,
+  translationEditRate,
+  translationEdits,
+  whitespaceTokens,
+  wordErrorRate,
+  wordInformationLost,
+  words,
+  type Alignment,
+  type BleuOptions,
+  type BleuResult,
+  type BleuSmoothing,
+  type EditOperation,
+  type Prf,
+  type References,
+  type Text,
+  type Tokeniser,
+} from './text'
+export { textEvaluationFunctions } from './registry'

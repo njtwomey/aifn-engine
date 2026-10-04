@@ -1,0 +1,265 @@
+{
+ "scalar": {
+  "cubic": {
+   "lo": 2.0,
+   "hi": 3.0,
+   "x0": 2.0,
+   "root": 2.094551481542327,
+   "brentqIterations": 7,
+   "brentqCalls": 8
+  },
+  "cosMinusX": {
+   "lo": 0.0,
+   "hi": 1.0,
+   "x0": 0.5,
+   "root": 0.7390851332151606,
+   "brentqIterations": 8,
+   "brentqCalls": 9
+  },
+  "kepler": {
+   "lo": 0.0,
+   "hi": 3.141592653589793,
+   "x0": 1.0,
+   "root": 1.3844127202021626,
+   "brentqIterations": 11,
+   "brentqCalls": 12
+  },
+  "lambert": {
+   "lo": 0.0,
+   "hi": 2.0,
+   "x0": 1.0,
+   "root": 1.04990889496404,
+   "brentqIterations": 10,
+   "brentqCalls": 11
+  },
+  "logShift": {
+   "lo": 0.5,
+   "hi": 3.0,
+   "x0": 1.0,
+   "root": 1.5571455989976113,
+   "brentqIterations": 8,
+   "brentqCalls": 9
+  },
+  "tanhShift": {
+   "lo": -5.0,
+   "hi": 10.0,
+   "x0": 0.0,
+   "root": 0.3,
+   "brentqIterations": 9,
+   "brentqCalls": 10
+  },
+  "wilkinson": {
+   "lo": 2.5,
+   "hi": 3.4,
+   "x0": 3.2,
+   "root": 3.0,
+   "brentqIterations": 6,
+   "brentqCalls": 7
+  },
+  "steepExp": {
+   "lo": 0.0,
+   "hi": 1.0,
+   "x0": 0.8,
+   "root": 0.6907755278982136,
+   "brentqIterations": 13,
+   "brentqCalls": 14
+  }
+ },
+ "bisection": {
+  "functions": [
+   "cubic",
+   "cosMinusX",
+   "kepler",
+   "lambert",
+   "logShift",
+   "tanhShift",
+   "wilkinson",
+   "steepExp"
+  ]
+ },
+ "regulaFalsi": {
+  "functions": [
+   "cubic",
+   "cosMinusX",
+   "kepler",
+   "lambert",
+   "logShift",
+   "tanhShift",
+   "wilkinson",
+   "steepExp"
+  ]
+ },
+ "brent": {
+  "functions": [
+   "cubic",
+   "cosMinusX",
+   "kepler",
+   "lambert",
+   "logShift",
+   "tanhShift",
+   "wilkinson",
+   "steepExp"
+  ]
+ },
+ "secant": {
+  "functions": [
+   "cubic",
+   "cosMinusX",
+   "kepler",
+   "lambert",
+   "logShift",
+   "tanhShift",
+   "wilkinson",
+   "steepExp"
+  ]
+ },
+ "newtonRoot": {
+  "functions": [
+   "cubic",
+   "cosMinusX",
+   "kepler",
+   "lambert",
+   "logShift",
+   "tanhShift",
+   "wilkinson",
+   "steepExp"
+  ]
+ },
+ "systems": {
+  "circleLine": {
+   "x0": [
+    1.0,
+    1.0
+   ],
+   "root": [
+    1.6419410907075054,
+    1.1419410907075054
+   ]
+  },
+  "rosenbrockGradient": {
+   "x0": [
+    -1.2,
+    1.0
+   ],
+   "root": [
+    1.0,
+    1.0
+   ]
+  },
+  "burdenFaires": {
+   "x0": [
+    0.1,
+    0.1,
+    -0.1
+   ],
+   "root": [
+    0.5,
+    -1.7144774211395718e-17,
+    -0.5235987755982989
+   ]
+  },
+  "broydenTridiagonal": {
+   "x0": [
+    -1.0,
+    -1.0,
+    -1.0,
+    -1.0,
+    -1.0,
+    -1.0
+   ],
+   "root": [
+    -0.5685882196342722,
+    -0.6761748929582793,
+    -0.6871807154874238,
+    -0.6649009624898033,
+    -0.5958543759108603,
+    -0.4163735199135095
+   ]
+  }
+ },
+ "newtonSystem": {
+  "systems": [
+   "circleLine",
+   "rosenbrockGradient",
+   "burdenFaires",
+   "broydenTridiagonal"
+  ]
+ },
+ "broyden": {
+  "systems": [
+   "circleLine",
+   "rosenbrockGradient",
+   "burdenFaires",
+   "broydenTridiagonal"
+  ]
+ },
+ "continuation": {
+  "systems": [
+   "circleLine",
+   "rosenbrockGradient",
+   "burdenFaires",
+   "broydenTridiagonal"
+  ]
+ },
+ "fixedPoint": {
+  "dottie": {
+   "x0": [
+    1.0
+   ],
+   "point": [
+    0.7390851332151607
+   ]
+  },
+  "planar": {
+   "x0": [
+    0.0,
+    0.0
+   ],
+   "point": [
+    0.4564651348595855,
+    0.4203889576005689
+   ]
+  }
+ },
+ "minimizeScalar": {
+  "quartic": {
+   "bracket": [
+    0.0,
+    1.0
+   ],
+   "bounds": [
+    -3.0,
+    4.0
+   ],
+   "x": 1.299999993141708,
+   "value": -2.0,
+   "boundedX": 1.2999999906634954
+  },
+  "sinPlus": {
+   "bracket": [
+    3.0,
+    4.0
+   ],
+   "bounds": [
+    2.0,
+    6.0
+   ],
+   "x": 4.612221566151725,
+   "value": -0.533765281184307,
+   "boundedX": 4.6122215584155954
+  },
+  "gammaLog": {
+   "bracket": [
+    1.0,
+    2.0
+   ],
+   "bounds": [
+    0.5,
+    4.0
+   ],
+   "x": 1.4616321455118748,
+   "value": -0.12148629053584975,
+   "boundedX": 1.4616321470034634
+  }
+ }
+}

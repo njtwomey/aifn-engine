@@ -1,0 +1,13 @@
+{
+  "name": "aifn-methods",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "AI Field Notes applications: named models, problems, environments, datasets and worked examples built on aifn-compute.",
+  "dependencies": {
+    "aifn-compute": "*"
+  },
+  "exports": {
+    "./*": "./src/*/index.ts"
+  }
+}

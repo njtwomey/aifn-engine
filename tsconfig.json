@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/compute" },
+    { "path": "./packages/methods" },
+    { "path": "./packages/render" },
+    { "path": "./examples" },
+    { "path": "./scripts" }
+  ]
+}
