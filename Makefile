@@ -2,9 +2,11 @@
 .DEFAULT_GOAL := help
 # Python sources (the fixture generators and the data scripts) that ruff lints and formats.
 PY_SRC := packages/compute/test/fixtures packages/methods/test/fixtures scripts
+# The version the packages are stamped with; a release passes the real one (make release VERSION=0.1.0).
+VERSION ?= 0.0.0-dev
 PRETTIER_FILES := git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f; do [ -f "$$f" ] && printf "%s\0" "$$f"; done' _
 
-.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check package examples examples-check examples-build shots thumbs clean
+.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check packages packages-smoke release examples examples-check examples-build shots thumbs clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -49,8 +51,20 @@ fixtures: ## Regenerate golden test values from Python (FIXTURES="numerics/linal
 fixtures-check: ## Regenerate every fixture in memory and fail if any differs from its committed file (slow; not in check)
 	uv run python packages/compute/test/fixtures/generate.py --check $(FIXTURES)
 
-package: ## Build aifn-compute as a publishable package in packages/compute/dist (ARGS="--version x.y.z")
-	node scripts/package.ts $(ARGS)
+packages: ## Build aifn-compute and aifn-methods and pack them into dist/packages (VERSION=x.y.z)
+	node scripts/package.ts --version $(VERSION)
+
+packages-smoke: ## Pack the packages, install them into an empty project and use them as a consumer would
+	node scripts/package.ts --version $(VERSION) --local
+	node scripts/smoke-packages.ts
+
+release: ## Tag v$(VERSION) on main and push the tag; CI then checks, packs and publishes the GitHub release
+	@test "$(VERSION)" != "0.0.0-dev" || (echo "release: give the version, e.g. make release VERSION=0.1.0" && exit 1)
+	@test -z "$$(git status --porcelain)" || (echo "release: the working tree has uncommitted changes" && exit 1)
+	@test "$$(git rev-parse --abbrev-ref HEAD)" = "main" || (echo "release: not on main" && exit 1)
+	@git fetch -q origin main && test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || (echo "release: main is not in step with origin/main; push first" && exit 1)
+	git tag -a v$(VERSION) -m "v$(VERSION)"
+	git push origin v$(VERSION)
 
 examples: ## Run the AIFN Engine site (front page and examples gallery) → http://localhost:5192/
 	@echo "AIFN Engine examples → http://localhost:5192/  (recipes at /<section>/<slug>)"
@@ -71,4 +85,4 @@ thumbs: ## Rebuild the gallery thumbnails in examples/public/thumbs (ARGS="--onl
 	node scripts/screenshot.ts --thumbs --no-sliders $(ARGS)
 
 clean: ## Remove build output and caches
-	rm -rf packages/*/dist examples/dist node_modules/.tmp node_modules/.vite .ruff_cache
+	rm -rf dist packages/*/dist examples/dist node_modules/.tmp node_modules/.vite .ruff_cache

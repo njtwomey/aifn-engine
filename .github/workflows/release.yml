@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: make check
+      # The tag is v<version>; every package of the release carries that version.
+      - run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      # Install the tarballs into an empty project and use them, before anything is published.
+      - run: make packages-smoke VERSION="$VERSION"
+      # Pack again for publication: a package's dependency on another now names this release's tarball.
+      - run: make packages VERSION="$VERSION"
+      - run: gh release create "$GITHUB_REF_NAME" dist/packages/*.tgz --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

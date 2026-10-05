@@ -15,9 +15,41 @@ make check     # lints, types, tests, examples render
 make examples  # the aifn-render gallery on http://localhost:5192/
 ```
 
-Packages export their TypeScript source (`exports` in each `package.json`), so a consumer imports
-`aifn-compute/numerics/linalg`, `aifn-methods/learning` or `aifn-render` and bundles them with its own toolchain;
-`make package` also builds `aifn-compute` as plain JavaScript with declarations in `packages/compute/dist`.
+## Installing
+
+`aifn-compute` and `aifn-methods` are released as tarballs attached to this repository's
+[GitHub releases](https://github.com/njtwomey/aifn-engine/releases), not to the npm registry. Depend on a release by
+URL:
+
+```json
+{
+  "dependencies": {
+    "aifn-compute": "https://github.com/njtwomey/aifn-engine/releases/download/v0.1.0/aifn-compute-0.1.0.tgz",
+    "aifn-methods": "https://github.com/njtwomey/aifn-engine/releases/download/v0.1.0/aifn-methods-0.1.0.tgz"
+  }
+}
+```
+
+```ts
+import { tensor } from 'aifn-compute'
+import { cholesky } from 'aifn-compute/numerics/linalg'
+import { datasetRegistry } from 'aifn-methods/data'
+```
+
+- The packages are plain ES modules with type declarations: they need no bundler and no TypeScript, and run in Node,
+  the browser and a Web Worker. `aifn-methods` depends on the `aifn-compute` of the same release.
+- Every package of a release has the same version. To update, change the version in both places of each URL.
+- `aifn-render` is not packaged yet: a consumer imports its source from this repository (a git dependency or a
+  submodule) and builds it with its own toolchain, as the examples do.
+- To work on the engine and a consumer together, link a local checkout in place of the release (`npm link`, or an
+  `overrides` entry pointing at the tarballs `make packages-smoke` leaves in `dist/packages`).
+
+**Releasing.** `make release VERSION=x.y.z` tags `v<version>` on `main` and pushes the tag. The release workflow then
+runs `make check`, packs the packages (`make packages`), installs the tarballs into an empty project and uses them
+(`make packages-smoke`), and publishes the GitHub release with the tarballs attached.
+
+Inside this repository the packages export their TypeScript source (`exports` in each `package.json`), linked to each
+other by the npm workspace, so nothing is built during development.
 
 `aifn-compute` and `aifn-methods` are trees: compute has 14 families in tiers, each holding modules in local
 tiers and optional shared files at the family root; applications (the modules of `aifn-methods`) have 17 areas holding
