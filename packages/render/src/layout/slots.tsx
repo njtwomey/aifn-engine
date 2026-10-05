@@ -5,7 +5,7 @@
  */
 import { useContext, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Readouts } from '@render/viz/Readout'
+import { Readouts } from '../viz/Readout'
 import { Controls } from './Controls'
 
 import { FrameSlotsContext, type SlotName } from './slots-context'

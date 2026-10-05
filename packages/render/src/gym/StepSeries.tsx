@@ -5,7 +5,7 @@
  */
 import { useMemo } from 'react'
 import type { Environment, Trajectory } from 'aifn-compute/foundation/contracts'
-import { Curve, Handle, Plot, Plots, Raster, useAxis, useChartHeight } from '@render/viz'
+import { Curve, Handle, Plot, Plots, Raster, useAxis, useChartHeight } from '../viz'
 import { actionSeries, stateSeries } from './series'
 
 export type StepSeriesProps = {

@@ -1,6 +1,6 @@
 /**
  * Variants: a figure offers several functions (or models, or methods), each with its own parameters. The reader picks
- * one and the controls change to its parameters. Built on figure state (`@render/state`): a variant set is a `variants`
+ * one and the controls change to its parameters. Built on figure state (`aifn-render/state`): a variant set is a `variants`
  * field, and `useVariants` is `useFigureState` with that one field.
  *
  *   const functions = defineVariants({
@@ -15,9 +15,9 @@
  * `variants(...)` field of `useFigureState`, which adds the row, reset and URL state.
  */
 import { useMemo, useState } from 'react'
-import type { AnyValues, CaseDef, ParamDefs, ParamValue, VariantsDef, VariantValue } from '@render/state/schema'
-import { useFigureState } from '@render/state/useFigureState'
-import type { RawVariants } from '@render/state/store'
+import type { AnyValues, CaseDef, ParamDefs, ParamValue, VariantsDef, VariantValue } from '../../state/schema'
+import { useFigureState } from '../../state/useFigureState'
+import type { RawVariants } from '../../state/store'
 
 /** One variant: a label, its parameters, and optionally a function of an input and its values. */
 export type VariantSpec<

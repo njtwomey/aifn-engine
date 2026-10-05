@@ -46,7 +46,7 @@ import {
   type Prelude,
   type PreludeEntry,
 } from 'aifn-compute/interpreter'
-import { cn } from '@render/lib/utils'
+import { cn } from '../../lib/utils'
 import { prologLanguage } from './prolog-language'
 
 /** An error to mark: a message and, when known, a 1-based line and column. */

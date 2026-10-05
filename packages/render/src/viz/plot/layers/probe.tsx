@@ -1,4 +1,4 @@
-import type { ProbeModel } from '@render/state/probe'
+import type { ProbeModel } from '../../../state/probe'
 import type { Handle } from '../../handles'
 import { defineLayer, type CommonProps, type Orient } from '../layer'
 import { LABEL_ROW } from './marks'

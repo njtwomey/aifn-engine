@@ -1,5 +1,5 @@
 /** The `tex` tag and live slots of `Equation` (layout/Equation.tsx): TeX with highlighted live values. */
-import { formatNumber } from '@render/viz/format'
+import { formatNumber } from '../viz/format'
 
 /** A live value in an equation: highlighted, formatted to `digits` significant digits (default the lab's format). */
 export type LiveValue = { value: number | string; digits?: number; strong?: boolean }

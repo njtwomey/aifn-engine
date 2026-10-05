@@ -9,8 +9,8 @@
  */
 import katex from 'katex'
 import { useMemo, type ReactNode } from 'react'
-import { Player } from '@render/controls/Player'
-import { cn } from '@render/lib/utils'
+import { Player } from '../controls/Player'
+import { cn } from '../lib/utils'
 import { toTex, type EquationTemplate } from './equation-tex'
 import { useRenderMathMacros } from './math-macros'
 

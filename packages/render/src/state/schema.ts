@@ -27,7 +27,7 @@ import {
   type DimSpec,
   type Space,
 } from 'aifn-compute/foundation/space'
-import { niceStep } from '@render/viz/format'
+import { niceStep } from '../viz/format'
 import { snapToStep } from './step'
 import { clampNumber, nextDown, nextUp, numberBounds, type NumberOptions } from './number'
 

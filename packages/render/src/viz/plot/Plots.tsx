@@ -1,5 +1,5 @@
 import { Children, useCallback, useContext, useId, useMemo, useState, type ReactNode } from 'react'
-import { cn } from '@render/lib/utils'
+import { cn } from '../../lib/utils'
 import { FrameContext, useChartHeight, useElementSize } from '../frame'
 import { LABEL_GAP, Y_NAME_ROOM, type Margins } from './ticks'
 import { equalRowWidths, layoutColumn, layoutEqualColumn } from './grid-layout'

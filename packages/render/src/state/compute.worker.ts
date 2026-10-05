@@ -6,15 +6,7 @@
  * unchanged. A stale job is cancelled by the page, which terminates this worker and starts a fresh one.
  */
 import { fromMessage, isTask, toMessage, type WorkerRequest, type WorkerResponse } from './task'
-
-// Every aifn module (a directory with an index.ts; `_` folders are private), imported lazily by path.
-const MODULES = {
-  ...import.meta.glob(['../../../compute/src/**/index.ts', '!**/_*/**']),
-  ...import.meta.glob(['../../../methods/src/**/index.ts', '!**/_*/**']),
-} as Record<string, () => Promise<Record<string, unknown>>>
-
-const CORE = '../../../compute/src/'
-const APPLIED = '../../../methods/src/'
+import { loaderOf } from './worker-modules'
 
 /** The aifn export at `address` (`<module>/<export>`), from the compute or the applications. */
 async function resolve(address: string): Promise<unknown> {
@@ -22,8 +14,7 @@ async function resolve(address: string): Promise<unknown> {
   if (cut <= 0) throw new Error(`worker: '${address}' is not an address (<module>/<export>)`)
   const module = address.slice(0, cut)
   const key = address.slice(cut + 1)
-  const local = module.replace(/^applied\//, '')
-  const load = MODULES[`${CORE}${module}/index.ts`] ?? MODULES[`${APPLIED}${local}/index.ts`]
+  const load = loaderOf(module)
   if (!load) throw new Error(`worker: no aifn module '${module}' (from '${address}')`)
   const ns = await load()
   if (key in ns) return ns[key]

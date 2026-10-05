@@ -2,7 +2,7 @@
  * The lab's diagrams: hand-specified SVG diagrams (architecture diagrams, flow charts, graphical models, factor graphs)
  * with grid placement, ports, orthogonal, straight and curved edges, KaTeX labels, notes, edge chips and step states,
  * plus an automatic layered layout for graphs generated from data and a tidy layout for trees (`treeLayout`).
- * Diagrams are not charts: use `@render/viz` for data. Import from '@render/diagram'.
+ * Diagrams are not charts: use `aifn-render/viz` for data. Import from '.'.
  */
 export { Diagram, type DiagramProps } from './Diagram'
 export { layeredLayout } from './layout'

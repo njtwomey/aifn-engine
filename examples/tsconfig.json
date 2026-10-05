@@ -7,9 +7,6 @@
     "jsx": "react-jsx",
     "resolveJsonModule": true,
     "paths": {
-      "@render/*": ["../packages/render/src/*"],
-      "aifn-render": ["../packages/render/src/index.ts"],
-      "aifn-render/*": ["../packages/render/src/*"],
       "@examples/*": ["./src/*"]
     }
   },

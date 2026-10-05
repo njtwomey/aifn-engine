@@ -1,4 +1,4 @@
-/** The lab's visual layer. Everything outside src/viz imports from '@render/viz' only. */
+/** The lab's visual layer. Everything outside src/viz imports from '.' only. */
 export { EChart, type EChartProps, type EChartClick, type PlotPointer } from './EChart'
 export { Readout, ReadoutGroup, Readouts } from './Readout'
 export { zoomRange, panRange, type Range } from './viewport'

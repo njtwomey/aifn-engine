@@ -43,6 +43,8 @@
     "./viz": "./src/viz/index.ts",
     "./lib/*": "./src/lib/*.ts",
     "./ui": "./src/ui/index.ts",
-    "./ui/*": "./src/ui/*.tsx"
+    "./ui/*": "./src/ui/*.tsx",
+    "./theme.css": "./styles/theme.css",
+    "./base.css": "./styles/base.css"
   }
 }

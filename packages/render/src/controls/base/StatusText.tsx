@@ -1,6 +1,6 @@
 import { CircleAlert } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { cn } from '@render/lib/utils'
+import { cn } from '../../lib/utils'
 
 /**
  * A one-line status beside a control (a training run's progress, a computation's state). `tone="error"` shows it in the

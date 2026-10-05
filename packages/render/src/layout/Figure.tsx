@@ -13,12 +13,12 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
-import { Button } from '@render/ui/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@render/ui/select'
-import { cn } from '@render/lib/utils'
-import { FrameContext, Readout, ReadoutGroup, Readouts, type FrameContextValue, type HoverInfo } from '@render/viz'
-import { FigureControls } from '@render/controls/ParamControls'
-import type { FigureState } from '@render/state/useFigureState'
+import { Button } from '../ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
+import { cn } from '../lib/utils'
+import { FrameContext, Readout, ReadoutGroup, Readouts, type FrameContextValue, type HoverInfo } from '../viz'
+import { FigureControls } from '../controls/ParamControls'
+import type { FigureState } from '../state/useFigureState'
 import { ControlGroup } from './Controls'
 import { FrameSlotsContext, type FrameSlots } from './slots-context'
 import { useFigureId } from './figure-ids'
@@ -83,7 +83,7 @@ export type FigureProps = {
    */
   equation?: ReactNode
   /**
-   * Readouts under the chart area (`Readout` from @render/viz): a list, or labelled groups as a record
+   * Readouts under the chart area (`Readout` from aifn-render/viz): a list, or labelled groups as a record
    * (`{ 'at x₀': <>…</>, totals: <>…</> }`).
    */
   readouts?: ReactNode | Readonly<Record<string, ReactNode>>

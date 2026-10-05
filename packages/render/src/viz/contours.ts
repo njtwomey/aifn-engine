@@ -1,6 +1,6 @@
 /** Contour lines of a field sampled on a rectangular grid, as ECharts series; the marching squares are aifn's. */
 import { contourLines } from 'aifn-compute/numerics/geometry'
-import { chrome, type Mode } from '@render/design/palette'
+import { chrome, type Mode } from '../design/palette'
 import { formatNumber } from './format'
 
 /**

@@ -4,7 +4,7 @@
  * backtracking visible.
  */
 import type { GridRender } from 'aifn-compute/foundation/contracts'
-import type { Vector } from '@render/viz'
+import type { Vector } from '../viz'
 
 /** Cell kinds drawn in colour, in slot order; other cells are blank. */
 export const GRID_KINDS = ['wall', 'goal', 'trap', 'start', 'hole', 'cliff', 'terminal'] as const

@@ -8,8 +8,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
-import { chrome, seriesColor, useTheme, type Mode } from '@render/design'
-import { FrameContext, useElementSize } from '@render/viz'
+import { chrome, seriesColor, useTheme, type Mode } from '../design'
+import { FrameContext, useElementSize } from '../viz'
 import { parseEnd } from './ends'
 import { layeredLayout } from './layout'
 import { nodeSize } from './size'

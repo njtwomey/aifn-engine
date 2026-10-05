@@ -16,8 +16,8 @@
  * depend on `state.input.values` do not rerun when another field moves.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Handle } from '@render/viz/handles'
-import { niceStep } from '@render/viz/format'
+import type { Handle } from '../viz/handles'
+import { niceStep } from '../viz/format'
 import { numberBounds } from './number'
 import { sliderStep, type ParamDefs, type Values } from './schema'
 import {

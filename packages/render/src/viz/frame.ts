@@ -1,5 +1,5 @@
 /**
- * What a chart learns from the frame around it. A `Figure` (in @render/layout) owns the size of its chart area and tells
+ * What a chart learns from the frame around it. A `Figure` (in aifn-render/layout) owns the size of its chart area and tells
  * the charts inside how tall to be; charts register their data (for the frame's export button) and their hovered values
  * (for the frame's hover readout). Outside a frame, charts use their own `height` and register nothing.
  */

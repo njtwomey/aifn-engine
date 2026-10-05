@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { formatNumber } from '@render/viz/format'
-import { Readout, Readouts } from '@render/viz/Readout'
+import { formatNumber } from '../viz/format'
+import { Readout, Readouts } from '../viz/Readout'
 import type { ProbeModel } from './probe'
 
 /**

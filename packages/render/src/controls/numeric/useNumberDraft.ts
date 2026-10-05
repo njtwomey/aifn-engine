@@ -1,5 +1,5 @@
 import { useState, type FocusEvent, type KeyboardEvent } from 'react'
-import { formatField } from '@render/state/step'
+import { formatField } from '../../state/step'
 
 /** A draft's value, or why it cannot be committed. */
 export type DraftCheck = { value: number; error?: undefined } | { error: string }

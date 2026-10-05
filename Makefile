@@ -51,7 +51,7 @@ fixtures: ## Regenerate golden test values from Python (FIXTURES="numerics/linal
 fixtures-check: ## Regenerate every fixture in memory and fail if any differs from its committed file (slow; not in check)
 	uv run python packages/compute/test/fixtures/generate.py --check $(FIXTURES)
 
-packages: ## Build aifn-compute and aifn-methods and pack them into dist/packages (VERSION=x.y.z)
+packages: ## Build aifn-compute, aifn-methods and aifn-render and pack them into dist/packages (VERSION=x.y.z)
 	node scripts/package.ts --version $(VERSION)
 
 packages-smoke: ## Pack the packages, install them into an empty project and use them as a consumer would

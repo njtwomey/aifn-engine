@@ -1,6 +1,6 @@
 /**
  * Figure state (DESIGN.md §4, §6, §8a): `useFigureState` and its field builders, probes and the `useComputed`
- * scheduler. Import from '@render/state'.
+ * scheduler. Import from '.'.
  */
 export {
   choice,

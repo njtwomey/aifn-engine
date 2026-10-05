@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
-import { slider, sliderStep } from '@render/state/schema'
-import { useFigureState, type Param } from '@render/state/useFigureState'
+import { slider, sliderStep } from '../../state/schema'
+import { useFigureState, type Param } from '../../state/useFigureState'
 
-export type { Param } from '@render/state/useFigureState'
+export type { Param } from '../../state/useFigureState'
 export type ParamSpec = { min: number; max: number; step?: number }
 
 /**

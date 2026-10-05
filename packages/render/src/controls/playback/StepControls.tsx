@@ -1,6 +1,6 @@
 import { Play, RotateCcw, StepForward } from 'lucide-react'
-import { Button } from '@render/ui/button'
-import { ButtonGroup } from '@render/ui/button-group'
+import { Button } from '../../ui/button'
+import { ButtonGroup } from '../../ui/button-group'
 
 /** Step, Run and Reset for iterative algorithms run live (k-means, EM, ...). Step and Run disable once `done`. */
 export function StepControls({

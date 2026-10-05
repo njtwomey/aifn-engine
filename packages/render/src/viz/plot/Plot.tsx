@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useState, type ReactNode } from 'react'
-import { useTheme } from '@render/design/theme'
+import { useTheme } from '../../design/theme'
 import { EChart, type PlotPointer } from '../EChart'
 import { formatNumber, formatPower } from '../format'
 import { useChartHeight, useElementSize, useFrameData, useFrameHover, type HoverRow } from '../frame'

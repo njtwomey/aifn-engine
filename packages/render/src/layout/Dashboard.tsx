@@ -8,8 +8,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react'
-import { cn } from '@render/lib/utils'
-import { FrameContext, useChartHeight, useElementSize } from '@render/viz'
+import { cn } from '../lib/utils'
+import { FrameContext, useChartHeight, useElementSize } from '../viz'
 
 /**
  * A dashboard: a Figure's chart area split into rows of cells holding charts, tables or views. Rows share the frame's

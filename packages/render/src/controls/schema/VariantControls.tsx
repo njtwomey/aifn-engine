@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { ParamDefs } from '@render/state/schema'
+import type { ParamDefs } from '../../state/schema'
 import { Choice } from '../selection/Choice'
 import { ParamControls } from './ParamControls'
 import type { VariantsControl } from './variants'

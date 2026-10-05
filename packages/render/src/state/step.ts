@@ -2,7 +2,7 @@
  * Snapping and showing a stepped number: the one rule every input of a figure value goes through (sliders, number
  * fields, chart handles, URL values).
  */
-import { formatNumber, stepDecimals } from '@render/viz/format'
+import { formatNumber, stepDecimals } from '../viz/format'
 
 /**
  * `v` clamped to [min, max] and snapped to the nearest multiple of `step` (k·step, not min + k·step), so a slider from

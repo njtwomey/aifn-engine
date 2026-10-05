@@ -15,7 +15,7 @@ import type {
   Trajectory,
   Training,
 } from 'aifn-compute/foundation/contracts'
-import { Bars, Plot, Points, useAxis } from '@render/viz'
+import { Bars, Plot, Points, useAxis } from '../viz'
 import { GridView, type GridValueField } from './GridView'
 import { CartPoleView } from './CartPoleView'
 import { PendulumView, type PendulumViewProps } from './PendulumView'

@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
-import { interpolateColors, scaleStops } from '@render/design/palette'
-import { useTheme } from '@render/design/theme'
+import { interpolateColors, scaleStops } from '../design/palette'
+import { useTheme } from '../design/theme'
 
 /**
  * The colour at fraction t ∈ [0, 1] of a sequential or diverging scale in the current theme: the colour a `Raster` with

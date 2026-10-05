@@ -10,8 +10,8 @@ import {
   ComboboxList,
   ComboboxValue,
   useComboboxAnchor,
-} from '@render/ui/combobox'
-import { cn } from '@render/lib/utils'
+} from '../../ui/combobox'
+import { cn } from '../../lib/utils'
 import { ControlLabel } from '../base/ControlLabel'
 import { normalise, type NormalOption, type Options } from './options'
 

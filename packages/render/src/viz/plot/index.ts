@@ -1,4 +1,4 @@
-/** Plot v2 (DESIGN.md §5): axis models, `Plot`, `Plots` and the layers. Re-exported from '@render/viz'. */
+/** Plot v2 (DESIGN.md §5): axis models, `Plot`, `Plots` and the layers. Re-exported from '..'. */
 export { useAxis, AxisModel, type AxisOptions, type AxisInterval } from './axis'
 export { niceRange } from './ticks'
 export { Plot, type PlotProps } from './Plot'

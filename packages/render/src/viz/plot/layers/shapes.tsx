@@ -3,7 +3,7 @@
  * and `Shapes`, filled vector outlines with holes (glyphs, regions, the mass under a curve). They replaced compat's
  * `ImagePlot` and `GlyphPlot`, whose lines, guides and handles are now ordinary layers in the same Plot.
  */
-import { chrome, interpolateColors, scaleStops, seriesColor, type Mode } from '@render/design/palette'
+import { chrome, interpolateColors, scaleStops, seriesColor, type Mode } from '../../../design/palette'
 import type { Range } from '../../viewport'
 import { defineLayer, extentOf, type CommonProps } from '../layer'
 import type { CustomApi } from './marks'

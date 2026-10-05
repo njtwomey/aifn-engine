@@ -1,7 +1,7 @@
 import { type ReactNode } from 'react'
-import { diverging, sequential } from '@render/design/palette'
-import { useTheme } from '@render/design/theme'
-import { cn } from '@render/lib/utils'
+import { diverging, sequential } from '../../design/palette'
+import { useTheme } from '../../design/theme'
+import { cn } from '../../lib/utils'
 import { ControlLabel } from '../ControlLabel'
 
 export type RampType = 'sequential' | 'diverging'

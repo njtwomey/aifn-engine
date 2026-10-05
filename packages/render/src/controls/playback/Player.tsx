@@ -1,8 +1,8 @@
 import { ChevronLeft, ChevronRight, Pause, Play, SkipBack, SkipForward } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Button } from '@render/ui/button'
-import { ButtonGroup } from '@render/ui/button-group'
-import { cn } from '@render/lib/utils'
+import { Button } from '../../ui/button'
+import { ButtonGroup } from '../../ui/button-group'
+import { cn } from '../../lib/utils'
 import { Select } from '../selection/Select'
 import { Slider } from '../numeric/Slider'
 

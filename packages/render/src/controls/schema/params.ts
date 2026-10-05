@@ -1,5 +1,5 @@
 /**
- * Declarative parameters: the field builders and types of figure state (`@render/state`), re-exported where controls
+ * Declarative parameters: the field builders and types of figure state (`aifn-render/state`), re-exported where controls
  * have always imported them. `useParams` and `defineVariants` (variants.ts) and `useFigureState` share them, so a
  * parameter is described one way everywhere.
  */
@@ -26,4 +26,4 @@ export {
   type SwitchDef,
   type ValueOf,
   type Values,
-} from '@render/state/schema'
+} from '../../state/schema'

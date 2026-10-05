@@ -12,8 +12,8 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { tsxLanguage } from '@codemirror/lang-javascript'
 import { highlightCode, tagHighlighter, tags as t } from '@lezer/highlight'
-import { Button } from '@render/ui/button'
-import { cn } from '@render/lib/utils'
+import { Button } from '../../ui/button'
+import { cn } from '../../lib/utils'
 
 export type CodeBlockProps = {
   code: string

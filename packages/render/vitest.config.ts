@@ -7,7 +7,6 @@ export default defineConfig({
   root: import.meta.dirname,
   resolve: {
     alias: [
-      { find: /^@render\//, replacement: `${src}/` },
       { find: /^aifn-render\//, replacement: `${src}/` },
       { find: /^aifn-render$/, replacement: `${src}/index.ts` },
     ],

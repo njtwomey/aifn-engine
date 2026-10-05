@@ -8,9 +8,9 @@ import {
   type ParamDefs,
   type ParamValue,
   type VariantsDef,
-} from '@render/state/schema'
-import type { FigureState } from '@render/state/useFigureState'
-import { ControlGroup } from '@render/layout/Controls'
+} from '../../state/schema'
+import type { FigureState } from '../../state/useFigureState'
+import { ControlGroup } from '../../layout/Controls'
 import { Choice } from '../selection/Choice'
 import { NumberField } from '../numeric/NumberField'
 import { Slider } from '../numeric/Slider'

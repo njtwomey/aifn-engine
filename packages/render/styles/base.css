@@ -1,0 +1,20 @@
+/*
+ * Page-level defaults that aifn-render's components assume: borders and outlines take the theme's colours, and the
+ * page takes its background, text colour and font. Optional: an app with its own base styles can leave this out and
+ * set a border colour on the elements that hold figures instead.
+ */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}

@@ -2,7 +2,7 @@
 import { toFlat } from 'aifn-compute/foundation/tensor'
 import type { Univariate } from 'aifn-compute/probability/distributions'
 import { histogram, type BinRule } from 'aifn-compute/probability/stats'
-import { chrome } from '@render/design/palette'
+import { chrome } from '../../../design/palette'
 import { LINE_WIDTH } from '../../theme'
 import type { Range } from '../../viewport'
 import type { AxisInterval } from '../axis'

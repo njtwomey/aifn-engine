@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from 'react'
-import { Switch as SwitchPrimitive } from '@render/ui/switch'
-import { cn } from '@render/lib/utils'
+import { Switch as SwitchPrimitive } from '../../ui/switch'
+import { cn } from '../../lib/utils'
 import { ControlLabel } from './ControlLabel'
 
 /** An on/off setting, label to the right. */

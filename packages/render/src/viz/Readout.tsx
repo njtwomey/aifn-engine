@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { cn } from '@render/lib/utils'
+import { cn } from '../lib/utils'
 
 /** A labelled value under a figure, e.g. the current loss. Numbers are set in tabular mono so they do not jitter. */
 export function Readout({ label, value, color }: { label: ReactNode; value: ReactNode; color?: string }) {

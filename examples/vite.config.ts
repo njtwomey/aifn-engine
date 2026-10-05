@@ -5,7 +5,6 @@ import { defineConfig } from 'vite'
 import { aifnDocs } from './plugins/docs.ts'
 
 const src = path.join(import.meta.dirname, 'src')
-const renderSrc = path.join(import.meta.dirname, '..', 'packages', 'render', 'src')
 
 /**
  * The AIFN Engine site: the front page, the generated pages of aifn-compute and aifn-methods (`plugins/docs.ts`) and
@@ -32,13 +31,9 @@ export default defineConfig({
       },
     },
   ],
+  // aifn-compute, aifn-methods and aifn-render resolve through the workspace (each package's `exports`).
   resolve: {
-    alias: [
-      { find: /^@render\//, replacement: `${renderSrc}/` },
-      { find: /^aifn-render\//, replacement: `${renderSrc}/` },
-      { find: /^aifn-render$/, replacement: `${renderSrc}/index.ts` },
-      { find: /^@examples\//, replacement: `${src}/` },
-    ],
+    alias: [{ find: /^@examples\//, replacement: `${src}/` }],
   },
   // A single-page app with path URLs (/<chapter>/<page>).
   appType: 'spa',

@@ -4,7 +4,7 @@
  * state and URL like any other; `GymTrainer` reads them from `state.run`. Pages declare no budget or seed fields.
  */
 import type { ReactNode } from 'react'
-import { choice, int, row, when } from '@render/state'
+import { choice, int, row, when } from '../state'
 
 /** A page's default budget: a number of episodes or of environment steps, and the seed (default 1). */
 export type TrainingRunDefaults = ({ episodes: number } | { steps: number }) & {

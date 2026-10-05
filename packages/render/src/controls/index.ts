@@ -18,5 +18,5 @@ export * from './code'
 export * from './base'
 
 // Buttons re-exported from UI primitives so figures have a single controls import point
-export { Button } from '@render/ui/button'
-export { ButtonGroup, ButtonGroupSeparator, ButtonGroupText } from '@render/ui/button-group'
+export { Button } from '../ui/button'
+export { ButtonGroup, ButtonGroupSeparator, ButtonGroupText } from '../ui/button-group'

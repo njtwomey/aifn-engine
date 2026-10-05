@@ -1,9 +1,9 @@
 import { ChevronDown, Minus, Plus } from 'lucide-react'
 import { useId, type ReactNode } from 'react'
-import { Button } from '@render/ui/button'
-import { ButtonGroup } from '@render/ui/button-group'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@render/ui/dropdown-menu'
-import { cn } from '@render/lib/utils'
+import { Button } from '../../ui/button'
+import { ButtonGroup } from '../../ui/button-group'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../../ui/dropdown-menu'
+import { cn } from '../../lib/utils'
 import {
   checkNumber,
   defaultSuggestions,
@@ -11,7 +11,7 @@ import {
   formatNumberValue,
   stepNumber,
   type NumberOptions,
-} from '@render/state/number'
+} from '../../state/number'
 import { ControlLabel } from '../base/ControlLabel'
 import type { Param } from '../schema/param'
 import { useNumberDraft } from './useNumberDraft'

@@ -2,7 +2,7 @@
  * The basic layers: curves, points, bars, areas, a signed area, segments, vectors, a vector field, a rug, annotations
  * and handles.
  */
-import { chrome, coolWarm, interpolateColors, MARKER_SHAPES, scaleStops, seriesColor } from '@render/design/palette'
+import { chrome, coolWarm, interpolateColors, MARKER_SHAPES, scaleStops, seriesColor } from '../../../design/palette'
 import { formatNumber } from '../../format'
 import type { Handle as HandleSpec } from '../../handles'
 import { LINE_WIDTH, MARKER_SIZE } from '../../theme'

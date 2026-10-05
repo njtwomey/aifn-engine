@@ -1,6 +1,6 @@
 import { Moon, Sun } from 'lucide-react'
-import { useTheme } from '@render/design/theme'
-import { Button } from '@render/ui/button'
+import { useTheme } from '../../design/theme'
+import { Button } from '../../ui/button'
 
 /**
  * Switches between light and dark with one click. The icon shows the theme in effect; until the first click the

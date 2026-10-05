@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { cn } from '@render/lib/utils'
+import { cn } from '../../lib/utils'
 
 /** The small muted label every control sits under. */
 export function ControlLabel({

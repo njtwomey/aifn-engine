@@ -6,7 +6,7 @@
  * probability operators \reals, \expect, etc.), along with a React context, hook,
  * and global registry so consumers can easily provide or extend symbols.
  */
-import katex from 'katex'
+import katex, { type KatexOptions } from 'katex'
 import { createContext, useContext, useMemo, type ReactNode } from 'react'
 
 const LOWER = 'abcdefghijklmnopqrstuvwxyz'.split('')
@@ -208,7 +208,7 @@ const katexCache = new Map<string, string>()
 /**
  * Render LaTeX using KaTeX with effective mathematical macros and caching.
  */
-export function renderKatex(tex: string, options?: katex.KatexOptions & { macros?: Record<string, string> }): string {
+export function renderKatex(tex: string, options?: KatexOptions & { macros?: Record<string, string> }): string {
   const display = options?.displayMode ?? false
   const effectiveMacros = options?.macros ?? globalMacros
   const hasCustomMacros = !!options?.macros

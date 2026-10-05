@@ -1,6 +1,6 @@
 import { Eye, EyeOff } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { Toggle } from '@render/ui/toggle'
+import { Toggle } from '../../ui/toggle'
 
 export type RevealToggleProps = {
   label: ReactNode

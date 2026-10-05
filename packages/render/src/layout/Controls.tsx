@@ -1,6 +1,6 @@
 import { useState, type ComponentType, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { cn } from '@render/lib/utils'
+import { cn } from '../lib/utils'
 
 /**
  * The layout for a set of controls: a responsive multi-column grid whose items align neatly,

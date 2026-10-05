@@ -9,7 +9,7 @@
  */
 import { useMemo, type ReactNode } from 'react'
 import type { EpisodeEnd, GridRender } from 'aifn-compute/foundation/contracts'
-import { Plot, Points, Raster, useAxis, Vectors, type AxisModel, type Range } from '@render/viz'
+import { Plot, Points, Raster, useAxis, Vectors, type AxisModel, type Range } from '../viz'
 import { cellXY, GRID_KINDS, kindRows, pathMoves, policyArrows, toneRows, valueRows } from './grid'
 
 export type GridValueField = {

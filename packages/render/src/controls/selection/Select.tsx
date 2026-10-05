@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from 'react'
-import { Select as SelectRoot, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@render/ui/select'
-import { cn } from '@render/lib/utils'
+import { Select as SelectRoot, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../ui/select'
+import { cn } from '../../lib/utils'
 import { ControlLabel } from '../base/ControlLabel'
 import { normalise, type Options } from './options'
 

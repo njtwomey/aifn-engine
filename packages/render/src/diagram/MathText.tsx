@@ -1,4 +1,4 @@
-import { Tex } from '@render/layout'
+import { Tex } from '../layout'
 
 /** Text with inline `$…$` maths: the maths is set by KaTeX, the rest as plain text. */
 export function MathText({

@@ -1,5 +1,5 @@
 /** A value grid drawn as one cached canvas image (the heatmap), and contour lines of a field. */
-import { categorical, chrome, interpolateColors, mute, scaleStops, type Mode } from '@render/design/palette'
+import { categorical, chrome, interpolateColors, mute, scaleStops, type Mode } from '../../../design/palette'
 import { argmaxMargins, contourSeries } from '../../contours'
 import { formatNumber } from '../../format'
 import { BAR, colorBarTicks } from '../../scale-bar'

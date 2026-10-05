@@ -1,4 +1,4 @@
-import { chrome, seriesColor, type Mode } from '@render/design/palette'
+import { chrome, seriesColor, type Mode } from '../design/palette'
 import type { Range } from './viewport'
 
 /**

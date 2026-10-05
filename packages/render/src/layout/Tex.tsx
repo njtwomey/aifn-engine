@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { cn } from '@render/lib/utils'
+import { cn } from '../lib/utils'
 import { renderKatex, useRenderMathMacros } from './math-macros'
 
 /**

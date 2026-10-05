@@ -9,7 +9,7 @@
  * moves the axes.
  */
 import { Children, Fragment, isValidElement, type ReactElement, type ReactNode } from 'react'
-import { chrome, seriesColor, type Mode } from '@render/design/palette'
+import { chrome, seriesColor, type Mode } from '../../design/palette'
 import type { HoverInfo } from '../frame'
 import type { Handle } from '../handles'
 import type { Range } from '../viewport'

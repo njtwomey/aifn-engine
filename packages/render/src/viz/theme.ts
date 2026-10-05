@@ -1,4 +1,4 @@
-import { categorical, chrome, type Mode } from '@render/design/palette'
+import { categorical, chrome, type Mode } from '../design/palette'
 
 const FONT = "'Geist Variable', system-ui, sans-serif"
 

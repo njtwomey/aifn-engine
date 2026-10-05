@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from 'react'
-import { ToggleGroup, ToggleGroupItem } from '@render/ui/toggle-group'
-import { cn } from '@render/lib/utils'
+import { ToggleGroup, ToggleGroupItem } from '../../ui/toggle-group'
+import { cn } from '../../lib/utils'
 import { ControlLabel } from '../base/ControlLabel'
 import { normalise, type Options } from './options'
 

@@ -17,15 +17,16 @@ make examples  # the aifn-render gallery on http://localhost:5192/
 
 ## Installing
 
-`aifn-compute` and `aifn-methods` are released as tarballs attached to this repository's
+The three packages are released as tarballs attached to this repository's
 [GitHub releases](https://github.com/njtwomey/aifn-engine/releases), not to the npm registry. Depend on a release by
 URL:
 
 ```json
 {
   "dependencies": {
-    "aifn-compute": "https://github.com/njtwomey/aifn-engine/releases/download/v0.1.0/aifn-compute-0.1.0.tgz",
-    "aifn-methods": "https://github.com/njtwomey/aifn-engine/releases/download/v0.1.0/aifn-methods-0.1.0.tgz"
+    "aifn-compute": "https://github.com/njtwomey/aifn-engine/releases/download/v0.2.0/aifn-compute-0.2.0.tgz",
+    "aifn-methods": "https://github.com/njtwomey/aifn-engine/releases/download/v0.2.0/aifn-methods-0.2.0.tgz",
+    "aifn-render": "https://github.com/njtwomey/aifn-engine/releases/download/v0.2.0/aifn-render-0.2.0.tgz"
   }
 }
 ```
@@ -34,19 +35,23 @@ URL:
 import { tensor } from 'aifn-compute'
 import { cholesky } from 'aifn-compute/numerics/linalg'
 import { datasetRegistry } from 'aifn-methods/data'
+import { Curve, Figure, Plot } from 'aifn-render'
 ```
 
-- The packages are plain ES modules with type declarations: they need no bundler and no TypeScript, and run in Node,
-  the browser and a Web Worker. `aifn-methods` depends on the `aifn-compute` of the same release.
-- Every package of a release has the same version. To update, change the version in both places of each URL.
-- `aifn-render` is not packaged yet: a consumer imports its source from this repository (a git dependency or a
-  submodule) and builds it with its own toolchain, as the examples do.
+- The packages are plain ES modules with type declarations: no TypeScript, no aliases. `aifn-compute` and
+  `aifn-methods` need no bundler and run in Node, the browser and a Web Worker.
+- `aifn-methods` depends on the `aifn-compute` of the same release, and `aifn-render` on both, so list only the ones
+  you import. Every package of a release has the same version; to update, change it in both places of each URL.
+- `aifn-render` needs React 19 from the app, and its stylesheet: see `packages/render/README.md` for the two ways to
+  take the styles (with or without Tailwind) and for the compute worker.
 - To work on the engine and a consumer together, link a local checkout in place of the release (`npm link`, or an
   `overrides` entry pointing at the tarballs `make packages-smoke` leaves in `dist/packages`).
 
 **Releasing.** `make release VERSION=x.y.z` tags `v<version>` on `main` and pushes the tag. The release workflow then
-runs `make check`, packs the packages (`make packages`), installs the tarballs into an empty project and uses them
-(`make packages-smoke`), and publishes the GitHub release with the tarballs attached.
+runs `make check`, installs the packed tarballs into an empty project and uses them (`make packages-smoke`), packs them
+for publication (`make packages`), and publishes the GitHub release with the tarballs attached. The smoke test does
+not open a browser: before a release that changes `aifn-render`'s build, install the tarballs into a small Vite app and
+look at a figure that uses the worker.
 
 Inside this repository the packages export their TypeScript source (`exports` in each `package.json`), linked to each
 other by the npm workspace, so nothing is built during development.

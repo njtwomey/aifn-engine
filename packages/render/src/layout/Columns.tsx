@@ -1,5 +1,5 @@
 import { useContext, type ReactNode } from 'react'
-import { DEFAULT_HEIGHT, FrameContext } from '@render/viz'
+import { DEFAULT_HEIGHT, FrameContext } from '../viz'
 
 /**
  * The panels of a figure side by side, each with a small title, a body filling the frame's height and an optional
