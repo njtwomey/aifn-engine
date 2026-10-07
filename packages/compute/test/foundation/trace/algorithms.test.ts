@@ -199,6 +199,8 @@ import { lms, nlms, rls } from 'aifn-compute/signal/statistical'
 import { scrimpSteps } from 'aifn-compute/signal/similarity'
 import {
   basisPursuitDenoisingSteps,
+  convolutionalDictionaryLearningSteps,
+  convolutionalSparseCodeSteps,
   dictionaryLearningSteps,
   iterativeHardThresholdingSteps,
   matchingPursuitSteps,
@@ -446,6 +448,27 @@ const CASES: Record<string, () => Case> = {
     at(basisPursuitDenoisingSteps(sparseDictionary, [0, 2, -3], { lambda: 0.1 }), undefined, 6),
   'signal/sparse/iterativeHardThresholdingSteps': () =>
     at(iterativeHardThresholdingSteps(sparseDictionary, [0, 2, -3], { sparsity: 2 }), undefined, 6),
+  'signal/sparse/convolutionalSparseCodeSteps': () =>
+    at(
+      convolutionalSparseCodeSteps([[1, 2, 1]], [0, 0, 1, 2, 1, 0, 0, 0, -1, -2, -1, 0], { lambda: 0.1 }),
+      undefined,
+      6,
+    ),
+  'signal/sparse/convolutionalDictionaryLearningSteps': () =>
+    at(
+      convolutionalDictionaryLearningSteps(
+        [0.3, 1, -0.4, 2, 0.1, -1.5, 0.8, 0, 1.2, -0.7, 0.5, 2.2, -0.9, 0.4, 1.7, -0.2, 0.6, -1.1, 0.9, 0.05, -0.6],
+        {
+          filters: 2,
+          length: 4,
+          lambda: 0.1,
+          codeSteps: 5,
+          filterSteps: 5,
+        },
+      ),
+      undefined,
+      3,
+    ),
   'signal/sparse/dictionaryLearningSteps': () =>
     at(
       dictionaryLearningSteps(

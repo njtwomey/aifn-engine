@@ -1,12 +1,13 @@
 /**
  * The registry of `aifn-compute/signal/sparse`: the greedy pursuits, basis pursuit and its denoising form, iterative
- * hard thresholding, batch sparse coding and dictionary learning.
+ * hard thresholding, batch sparse coding, dictionary learning, and convolutional sparse coding and dictionary learning.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as atoms from './atoms'
 import * as code from './code'
 import * as convex from './convex'
+import * as convolutional from './convolutional'
 import * as dictionary from './dictionary'
 import * as pursuit from './pursuit'
 
@@ -14,6 +15,7 @@ const MODULE = 'signal/sparse'
 const PURSUIT = ['sparse-approximation', 'matching-pursuit']
 const CONVEX = ['sparse-approximation', 'basis-pursuit']
 const LEARNING = ['dictionary-learning']
+const CONVOLUTIONAL = ['convolutional-sparse-coding']
 const fn = definer<FunctionInfo>('function', MODULE)
 const algorithm = definer<AlgorithmInfo>('algorithm', MODULE)
 
@@ -172,6 +174,66 @@ fn(
   dictionary.dictionaryLearning,
 )
 
+fn(
+  {
+    key: 'convolutionalSynthesis',
+    name: 'Convolutional synthesis',
+    tex: 'y = \\sum_k z_k * d_k',
+    summary: 'Every filter convolved with its activation map, and the results added.',
+    role: 'transform',
+    notes: CONVOLUTIONAL,
+    cite: ['grosse2007', 'zeiler2010'],
+  },
+  convolutional.convolutionalSynthesis,
+)
+algorithm(
+  {
+    key: 'convolutionalSparseCodeSteps',
+    name: 'Convolutional sparse coding by FISTA',
+    tex: '\\min_z \\tfrac{1}{2}\\|y - \\textstyle\\sum_k z_k * d_k\\|^2 + \\lambda \\sum_k \\|z_k\\|_1',
+    summary: 'The convolutional lasso: a gradient step through the filters’ correlations, then soft thresholding.',
+    problem: 'signal',
+    state: { iterate: 'x', objective: 'value', stepSize: 'stepSize', flags: ['converged', 'diverged'] },
+    notes: CONVOLUTIONAL,
+    cite: ['zeiler2010', 'wohlberg2016'],
+  },
+  convolutional.convolutionalSparseCodeSteps,
+)
+fn(
+  {
+    key: 'convolutionalSparseCode',
+    name: 'Convolutional sparse coding',
+    role: 'solver',
+    notes: CONVOLUTIONAL,
+    cite: ['zeiler2010', 'wohlberg2016'],
+  },
+  convolutional.convolutionalSparseCode,
+)
+algorithm(
+  {
+    key: 'convolutionalDictionaryLearningSteps',
+    name: 'Convolutional dictionary learning',
+    summary: 'Alternate unit-norm least-squares filters with warm-started convolutional coding.',
+    problem: 'signal',
+    state: { iterate: 'D', objective: 'objective', flags: ['converged', 'diverged'] },
+    random: true,
+    notes: [...CONVOLUTIONAL, ...LEARNING],
+    cite: ['grosse2007', 'bristow2013', 'garciacardona2018'],
+  },
+  convolutional.convolutionalDictionaryLearningSteps,
+)
+fn(
+  {
+    key: 'convolutionalDictionaryLearning',
+    name: 'Convolutional dictionary learning',
+    role: 'fit',
+    random: true,
+    notes: [...CONVOLUTIONAL, ...LEARNING],
+    cite: ['grosse2007', 'bristow2013', 'garciacardona2018'],
+  },
+  convolutional.convolutionalDictionaryLearning,
+)
+
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 /** The algorithms of the module, keyed by factory name. */
 export const sparseAlgorithms: Table<AlgorithmInfo> = entries<AlgorithmInfo>(
@@ -179,6 +241,7 @@ export const sparseAlgorithms: Table<AlgorithmInfo> = entries<AlgorithmInfo>(
   pursuit,
   convex,
   dictionary,
+  convolutional,
 ) as Table<AlgorithmInfo>
 /** The functions of the module, keyed by name. */
 export const sparseFunctions: Table<FunctionInfo> = entries<FunctionInfo>(
@@ -188,4 +251,5 @@ export const sparseFunctions: Table<FunctionInfo> = entries<FunctionInfo>(
   convex,
   code,
   dictionary,
+  convolutional,
 ) as Table<FunctionInfo>

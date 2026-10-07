@@ -11,10 +11,13 @@
  * - Many signals at once: `sparseCode` codes every column of $\Ymat$ by any of these methods.
  * - Learning the dictionary: `dictionaryLearning` and `dictionaryLearningSteps`, alternating orthogonal matching
  *   pursuit with a K-SVD or method-of-optimal-directions update.
+ * - Convolutional: `convolutionalSparseCode` (the convolutional lasso, by FISTA) and `convolutionalDictionaryLearning`
+ *   (short filters shared across the signal, with unit-norm least-squares updates), with their step-through forms, and
+ *   `convolutionalSynthesis` for $\sum_k \zvec_k * \dvec_k$. Their filters are the rows of $\Dmat$, not the columns.
  * - Dictionaries and sparse vectors: `mutualCoherence` (which bounds when the pursuits recover the sparsest
  *   representation), `normaliseAtoms` and `hardThreshold`.
  *
- * Dictionaries hold their atoms as columns, $\Dmat$ is $m \times k$, and a signal is $\yvec \approx \Dmat\xvec$; a
+ * Dictionaries hold their atoms as columns (the convolutional functions excepted), $\Dmat$ is $m \times k$, and a signal is $\yvec \approx \Dmat\xvec$; a
  * matrix of signals $\Ymat$ ($m \times n$) holds one per column, and its codes $\Xmat$ ($k \times n$) one per column.
  * The solvers reuse `aifn-compute/numerics/linalg` (`lstsq`, `svd`) and `aifn-compute/optim` (`linprog`,
  * `proximalGradient` with `proxL1`).
@@ -49,3 +52,14 @@ export {
   type DictionaryUpdate,
 } from './dictionary'
 export { sparseAlgorithms, sparseFunctions } from './registry'
+export {
+  convolutionalDictionaryLearning,
+  convolutionalDictionaryLearningSteps,
+  convolutionalSparseCode,
+  convolutionalSparseCodeSteps,
+  convolutionalSynthesis,
+  type ConvolutionalCode,
+  type ConvolutionalCodeOptions,
+  type ConvolutionalDictionaryOptions,
+  type ConvolutionalDictionaryState,
+} from './convolutional'
