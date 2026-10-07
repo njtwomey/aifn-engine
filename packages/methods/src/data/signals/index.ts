@@ -2,7 +2,8 @@
  * `aifn-methods/data/signals`: test signals: chirps and tones; and registered generators of series with a known power
  * spectrum (`SpectralTruth`): sinusoids in noise, AR and ARMA processes, unevenly sampled sinusoids and a coupled
  * pair with known coherence; deterministic test signals: the Donoho–Johnstone test functions and a synthetic voiced
- * sound with its true f₀.
+ * sound with its true f₀; and a synthetic electrocardiogram (`syntheticEcg`, `syntheticBeat`): beats of a few shapes,
+ * some ectopic, on a baseline wander with noise.
  */
 
 export { chirp, uniformTimes, tones } from './signals'
@@ -29,3 +30,4 @@ export {
   type UnevenSampling,
   type UnevenSinusoidsOptions,
 } from './processes'
+export { syntheticBeat, syntheticEcg, type SyntheticEcg, type SyntheticEcgOptions } from './heartbeat'
