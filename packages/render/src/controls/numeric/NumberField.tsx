@@ -1,4 +1,5 @@
-import { ChevronDown, Minus, Plus } from 'lucide-react'
+import { Slider as Rail } from '@base-ui/react/slider'
+import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useId, type ReactNode } from 'react'
 import { Button } from '../../ui/button'
 import { ButtonGroup } from '../../ui/button-group'
@@ -9,6 +10,9 @@ import {
   defaultSuggestions,
   formatHeaderValue,
   formatNumberValue,
+  railFraction,
+  railRange,
+  railValue,
   stepNumber,
   type NumberOptions,
 } from '../../state/number'
@@ -33,9 +37,14 @@ export type NumberFieldProps = Common & {
 }
 
 /**
- * A typed number with − and + buttons, for values with no natural track: a seed, an episode count, a learning rate.
+ * A typed number in one tight row, `‹ [ value ⌄ ] ›`: step buttons either side of the field, a menu of `suggestions`
+ * inside it at the right, and a rail along its bottom edge to drag. For a seed, an episode count, a learning rate.
  * One field for every typed number: `type` float or int, bounds `gt`/`ge`/`lt`/`le` (`min`/`max` alias `ge`/`le`),
- * `scale` linear or log10, `spacing` ('lin' | 'log'), and `suggestions` (a menu of common values beside the field).
+ * `scale` linear or log10, `spacing` ('lin' | 'log').
+ *
+ * The rail appears when the number has a range to drag across: both bounds, or `suggestions` standing in for a
+ * missing one (a rate over decades with `gt: 0` runs from its smallest suggestion). It follows the field's scale, so
+ * a log10 field drags evenly through the decades, and lands on readable values. A number with no range has no rail.
  *
  * Typing is validated, not clamped: a draft that does not parse or breaks the type or a bound turns the field red with
  * a short message ("must be > 0"), Enter is refused, and Escape or blur reverts to the last valid value. The buttons
@@ -86,9 +95,10 @@ export function NumberField(props: NumberFieldProps) {
   })
   const down = step(-1)
   const up = step(1)
+  const rail = railRange(options)
 
   return (
-    <div className={cn('flex w-full max-w-xs min-w-40 flex-col gap-1.5', className)}>
+    <div className={cn('flex w-full max-w-xs min-w-32 flex-col gap-1.5', className)}>
       <div className="flex items-center justify-between gap-2">
         <ControlLabel
           htmlFor={id}
@@ -112,19 +122,80 @@ export function NumberField(props: NumberFieldProps) {
             if (next !== null) commit(next)
           }}
         >
-          <Minus />
+          <ChevronLeft />
         </Button>
-        <input
-          id={id}
-          disabled={disabled}
+        {/* The field: the typed value, the suggestions menu at its right, and the rail on its bottom edge. */}
+        <div
           data-slot="input"
-          aria-describedby={error ? errorId : undefined}
           className={cn(
-            'h-8 min-w-0 flex-1 border border-input bg-transparent px-2 text-right font-mono text-xs tabular-nums outline-none focus-visible:z-10 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30',
-            error && 'z-10 border-destructive focus-visible:border-destructive focus-visible:ring-destructive/30',
+            'relative flex h-8 min-w-0 flex-1 items-center border border-input bg-transparent focus-within:z-10 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/50 dark:bg-input/30',
+            disabled && 'opacity-50',
+            error && 'z-10 border-destructive focus-within:border-destructive focus-within:ring-destructive/30',
           )}
-          {...field}
-        />
+        >
+          <input
+            id={id}
+            disabled={disabled}
+            aria-describedby={error ? errorId : undefined}
+            className={cn(
+              'h-full w-0 min-w-0 flex-1 bg-transparent pl-2 text-right font-mono text-xs tabular-nums outline-none',
+              suggestions && suggestions.length > 0 ? 'pr-0.5' : 'pr-2',
+            )}
+            {...field}
+          />
+          {suggestions && suggestions.length > 0 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                disabled={disabled}
+                aria-label="Suggested values"
+                title="Suggested values"
+                className="flex h-full shrink-0 items-center pr-1.5 pl-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground data-popup-open:text-foreground"
+              >
+                <ChevronDown className="size-3.5" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="max-h-60 w-auto min-w-24 overflow-y-auto">
+                {suggestions.map((s) => (
+                  <DropdownMenuItem
+                    key={s}
+                    onClick={() => commit(s)}
+                    className={cn(
+                      'justify-end font-mono text-xs tabular-nums',
+                      s === value && 'bg-accent font-semibold',
+                    )}
+                  >
+                    {format(s)}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          {rail ? (
+            // The track is centred on the field's bottom border; a press anywhere along it jumps there, a drag follows.
+            <Rail.Root
+              className="absolute inset-x-0 -bottom-[5px] z-10"
+              value={[railFraction(options, value)]}
+              min={0}
+              max={1}
+              step={0.001}
+              disabled={disabled}
+              thumbAlignment="edge"
+              onValueChange={(v) => {
+                const next = railValue(options, Array.isArray(v) ? v[0] : (v as number))
+                if (Number.isFinite(next)) commit(next)
+              }}
+            >
+              <Rail.Control className="relative flex h-[10px] w-full cursor-pointer touch-none items-center select-none data-disabled:cursor-default">
+                <Rail.Track className="relative h-0.5 w-full select-none">
+                  <Rail.Indicator className="h-full bg-primary select-none" />
+                </Rail.Track>
+                <Rail.Thumb
+                  aria-label={typeof label === 'string' ? `${label} rail` : 'rail'}
+                  className="relative block size-2.5 shrink-0 rounded-full border border-ring bg-white ring-ring/50 transition-[color,box-shadow] select-none after:absolute after:-inset-1.5 hover:ring-3 focus-visible:ring-3 focus-visible:outline-hidden active:ring-3"
+                />
+              </Rail.Control>
+            </Rail.Root>
+          ) : null}
+        </div>
         <Button
           variant="outline"
           size="icon"
@@ -135,29 +206,8 @@ export function NumberField(props: NumberFieldProps) {
             if (next !== null) commit(next)
           }}
         >
-          <Plus />
+          <ChevronRight />
         </Button>
-        {suggestions && suggestions.length > 0 ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              disabled={disabled}
-              render={<Button variant="outline" size="icon" aria-label="Suggested values" title="Suggested values" />}
-            >
-              <ChevronDown className="size-3.5" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="max-h-60 w-auto min-w-24 overflow-y-auto">
-              {suggestions.map((s) => (
-                <DropdownMenuItem
-                  key={s}
-                  onClick={() => commit(s)}
-                  className={cn('justify-end font-mono text-xs tabular-nums', s === value && 'bg-accent font-semibold')}
-                >
-                  {format(s)}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
       </ButtonGroup>
       {error ? (
         <p id={errorId} role="alert" className="text-xs leading-none text-destructive">

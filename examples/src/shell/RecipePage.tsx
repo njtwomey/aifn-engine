@@ -15,13 +15,20 @@ export function RecipePage({ entry }: { entry: Entry }) {
   return (
     <FigurePage scope={entry.path} key={entry.path}>
       <header className="space-y-1.5">
-        <a
-          href={`${hrefOf('render')}#${section.id}`}
-          onClick={onLink('render')}
-          className="text-xs font-medium tracking-wide text-muted-foreground uppercase hover:text-foreground"
-        >
-          {section.title}
-        </a>
+        <div className="flex items-center justify-between gap-4">
+          <a
+            href={`${hrefOf('render')}#${section.id}`}
+            onClick={onLink('render')}
+            className="shrink-0 text-xs font-medium tracking-wide text-muted-foreground uppercase hover:text-foreground"
+          >
+            {section.title}
+          </a>
+          {/* The neighbours, as at the foot of the page, so stepping through recipes needs no scrolling. */}
+          <nav aria-label="Neighbouring recipes" className="flex min-w-0 items-center gap-4 text-xs">
+            {prev && <Neighbour entry={prev} dir="prev" />}
+            {next && <Neighbour entry={next} dir="next" />}
+          </nav>
+        </div>
         <h1 className="text-xl font-semibold tracking-tight">{entry.question}</h1>
         <Prose text={entry.explain} className="text-base text-muted-foreground" />
       </header>
@@ -40,11 +47,12 @@ function Neighbour({ entry, dir }: { entry: Entry; dir: 'prev' | 'next' }) {
     <a
       href={hrefOf(entry.path)}
       onClick={onLink(entry.path)}
-      className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
+      title={dir === 'prev' ? `Previous: ${entry.title}` : `Next: ${entry.title}`}
+      className="flex min-w-0 items-center gap-1 text-muted-foreground hover:text-foreground"
     >
-      {dir === 'prev' && <ChevronLeft className="size-4" />}
-      {entry.title}
-      {dir === 'next' && <ChevronRight className="size-4" />}
+      {dir === 'prev' && <ChevronLeft className="size-4 shrink-0" />}
+      <span className="truncate">{entry.title}</span>
+      {dir === 'next' && <ChevronRight className="size-4 shrink-0" />}
     </a>
   )
 }

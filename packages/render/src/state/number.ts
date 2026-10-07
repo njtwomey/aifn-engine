@@ -139,6 +139,52 @@ export function clampNumber(o: NumberOptions, x: number): number {
 const clean = (x: number) => Number(x.toPrecision(12))
 
 /**
+ * The interval a number field's rail covers, or null when the field has none. Each end is the bound on that side when
+ * it is finite, else the smallest (largest) of the `suggestions`; a log scale needs a positive lower end, so a bound
+ * of 0 there also falls back to the suggestions. A number with no range on one side and no suggestions has no rail:
+ * there is nowhere to put its ends.
+ */
+export function railRange(o: NumberOptions): { lo: number; hi: number } | null {
+  const b = numberBounds(o)
+  const log = isLogScale(o)
+  const usable = (x: number) => Number.isFinite(x) && (!log || x > 0)
+  const suggested = (o.suggestions ?? []).filter(usable)
+  const lo = usable(b.lower) ? b.lower : suggested.length ? Math.min(...suggested) : NaN
+  const hi = usable(b.upper) ? b.upper : suggested.length ? Math.max(...suggested) : NaN
+  return lo < hi ? { lo, hi } : null
+}
+
+/** Where `x` sits along the rail, from 0 at its low end to 1 at its high end (clamped), on the field's scale. */
+export function railFraction(o: NumberOptions, x: number): number {
+  const r = railRange(o)
+  if (!r) return 0
+  const at = (v: number) => (isLogScale(o) ? Math.log10(Math.max(v, Number.MIN_VALUE)) : v)
+  const t = (at(x) - at(r.lo)) / (at(r.hi) - at(r.lo))
+  return Number.isFinite(t) ? Math.min(Math.max(t, 0), 1) : 0
+}
+
+/**
+ * The value at fraction `t` of the rail: placed on the field's scale, rounded to a value worth reading (the `step`
+ * grid when one is given, else three significant figures of the range, or two of the value on a log scale; a whole
+ * number for an `int`), and kept inside the bounds. The ends of the rail give the ends of the range exactly.
+ */
+export function railValue(o: NumberOptions, t: number): number {
+  const r = railRange(o)
+  if (!r) return NaN
+  const u = Math.min(Math.max(t, 0), 1)
+  if (u === 0 || u === 1) return clampNumber(o, u === 0 ? r.lo : r.hi)
+  let x: number
+  if (isLogScale(o)) {
+    x = Number((10 ** (Math.log10(r.lo) + u * (Math.log10(r.hi) - Math.log10(r.lo)))).toPrecision(2))
+  } else {
+    const raw = r.lo + u * (r.hi - r.lo)
+    const grid = o.step ?? 10 ** (Math.floor(Math.log10(r.hi - r.lo)) - 2)
+    x = clean(r.lo + Math.round((raw - r.lo) / grid) * grid)
+  }
+  return clampNumber(o, o.type === 'int' ? Math.round(x) : x)
+}
+
+/**
  * The next value from `x` in direction `dir` (− or + button, ↓ or ↑ key; `big` with Shift), clamped to the bounds; null
  * when there is no move (at an inclusive bound, or the step would cross a strict one: the buttons stop just inside).
  * Log10 steps along the grid 10^(k·step), so 2e-3 goes up to 3.16e-3 rather than 6.32e-3.

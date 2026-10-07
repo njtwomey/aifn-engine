@@ -5,6 +5,9 @@ import {
   formatNumberValue,
   numberBounds,
   parseNumber,
+  railFraction,
+  railRange,
+  railValue,
   stepNumber,
   validateNumber,
 } from './number'
@@ -72,6 +75,45 @@ describe('clampNumber', () => {
     const y = clampNumber({ gt: 0 }, -1)
     expect(y > 0).toBe(true)
     expect(validateNumber({ gt: 0 }, y)).toBeNull()
+  })
+})
+
+describe('the rail', () => {
+  it('spans the bounds, and has none without a range', () => {
+    expect(railRange({ type: 'int', ge: 1, le: 2000 })).toEqual({ lo: 1, hi: 2000 })
+    expect(railRange({ gt: 0 })).toBeNull()
+    expect(railRange({})).toBeNull()
+  })
+
+  it('takes a missing end from the suggestions, and on a log scale replaces a bound of zero', () => {
+    const rate = { gt: 0, lt: 1, scale: 'log10', suggestions: [0.001, 0.01, 0.1, 0.5] } as const
+    expect(railRange(rate)).toEqual({ lo: 0.001, hi: 1 })
+    expect(railRange({ ge: 0, suggestions: [10, 50, 100] })).toEqual({ lo: 0, hi: 100 })
+  })
+
+  it('places a value along its scale and reads one back, ends exact and inside the bounds', () => {
+    const steps = { type: 'int', ge: 1, le: 2000 } as const
+    expect(railFraction(steps, 1)).toBe(0)
+    expect(railFraction(steps, 2000)).toBe(1)
+    expect(railFraction(steps, 5000)).toBe(1)
+    expect(railValue(steps, 0)).toBe(1)
+    expect(railValue(steps, 1)).toBe(2000)
+    expect(Number.isInteger(railValue(steps, 0.3333))).toBe(true)
+
+    const rate = { gt: 0, lt: 1, scale: 'log10', suggestions: [0.001, 0.01, 0.1, 0.5] } as const
+    // Half-way along three decades from 0.001 is 10^-1.5, to two figures.
+    expect(railFraction(rate, 0.01)).toBeCloseTo(1 / 3, 12)
+    expect(railValue(rate, 0.5)).toBe(0.032)
+    expect(railValue(rate, 0)).toBe(0.001)
+    // The upper bound is strict: the top of the rail stops just inside it.
+    expect(railValue(rate, 1)).toBeLessThan(1)
+    expect(railValue(rate, 1)).toBeGreaterThan(0.999)
+  })
+
+  it('lands on the step grid when one is given, else on three figures of the range', () => {
+    expect(railValue({ ge: 0, le: 10, step: 0.5 }, 0.52)).toBe(5)
+    expect(railValue({ ge: 0, le: 1 }, 0.33333)).toBe(0.33)
+    expect(railValue({ ge: -5, le: 5 }, 0.5)).toBe(0)
   })
 })
 

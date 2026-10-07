@@ -5,7 +5,7 @@ export const recipe: Recipe = {
   title: 'Number field',
   question: 'How do I take a number that a slider cannot hold: an integer count or a rate over decades?',
   explain:
-    '`int` and `float` draw a typed field with − and + buttons. Bounds are `gt`, `ge`, `lt`, `le`; `scale: "log10"` steps by decades; `suggestions` offers a menu of common values. Typing a value that breaks the type or a bound (try 0.5 steps, or a rate of 2) turns the field red with a message and is not applied; `format` sets how the value is shown.',
+    '`int` and `float` draw a typed field with step buttons either side, a menu of `suggestions` inside it, and a rail along its bottom edge to drag across the range. Bounds are `gt`, `ge`, `lt`, `le`; `scale: "log10"` steps and drags by decades. Typing a value that breaks the type or a bound (try 0.5 steps, or a rate of 2) turns the field red with a message and is not applied; `format` sets how the value is shown.',
 }
 
 export default function TypedNumbers() {
