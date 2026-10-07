@@ -21,6 +21,12 @@ export const SECTIONS = [
     blurb: 'Curves, scatter plots, bars, areas and series built by code.',
   },
   { id: 'statistical', title: 'Statistical', blurb: 'Histograms, densities, mass functions, supports and rugs.' },
+  {
+    id: 'datasets',
+    title: 'Datasets',
+    blurb:
+      'The real datasets of aifn-methods, each drawn the way it is read: ECG, Iris, Old Faithful, Anscombe and more.',
+  },
   { id: 'fields', title: 'Images and fields', blurb: 'Heatmaps, contours, vector fields, pixels and filled shapes.' },
   {
     id: 'axes',

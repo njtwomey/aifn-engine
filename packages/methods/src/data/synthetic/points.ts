@@ -673,7 +673,7 @@ export interface CheckerboardOptions extends ClassSizeOptions {
    * `prevalence`, `classWeights` or counts draw within each class's tiles for exact sizes.
    */
   n?: Sizes
-  /** Tiles per side. Default 4. */
+  /** Tiles per side, at least 2 (one tile has a single colour, so a single class). Default 4. */
   tiles?: number
 }
 
@@ -683,6 +683,8 @@ export interface CheckerboardOptions extends ClassSizeOptions {
  */
 export function checkerboard(s: Stream, options: CheckerboardOptions = {}): Dataset {
   const { tiles = 4 } = options
+  if (!(Number.isInteger(tiles) && tiles >= 2))
+    throw new DomainError('checkerboard', `checkerboard: tiles must be an integer of at least 2, got ${tiles}`)
   const cells: [number, number][][] = [[], []]
   for (let a = 0; a < tiles; a++) for (let b = 0; b < tiles; b++) cells[(a + b) % 2].push([a, b])
   const area = cells.map((c) => c.length)
@@ -1138,7 +1140,7 @@ dataset(
     output: 'dataset',
     knobs: space({
       n: int(2, 5000, { default: 400 }),
-      tiles: int(1, 12, { default: 4 }),
+      tiles: int(2, 12, { default: 4 }),
       prevalence: real(0.01, 0.99, { default: 0.5, doc: 'The share of class 1.' }),
     }),
     truth: true,

@@ -491,6 +491,7 @@ for (const file of files(path.join(computeDir, 'test')))
 const privateTestImports: Record<string, string> = {
   'packages/compute/test/foundation/trace/protocol.test.ts': 'the runners’ shared protocol helpers are internal',
   'packages/methods/test/data/real/hyphenation.test.ts': 'checks the vendored word list against its source',
+  'packages/methods/test/data/real/ecg.test.ts': 'checks the vendored ECG samples against what scripts/ecg.py wrote',
 }
 for (const dir of [path.join(computeDir, 'test'), path.join(computeDir, 'bench'), path.join(appsDir, 'test')]) {
   if (!fs.existsSync(dir)) continue
