@@ -167,23 +167,23 @@ Families import only strictly lower tiers; modules of a family import only lower
 
 <!-- Generated from modules.json by `node scripts/layers.ts --write`; do not edit. -->
 
-| Tier | Family      | Modules (local tiers, low to high; * gap)                                                                                          | Shared             |
-| ---- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| 0    | foundation  | contracts, errors · registry · tensor · pytree, fourier · convolution, autodiff, random · space, trace                             |                    |
-| 1    | numerics    | special · linalg · polynomial, quadrature, roots, implicit, geometry, neighbours, robust, factorisation · interpolate              |                    |
-| 2    | graph       | traversal, shortest-paths, spanning-trees, structures, matrices · flows, structured, propagation                                   | graph, tree, heap  |
-| 3    | probability | stats, bijectors, samplers · distributions · likelihoods, information, tests, extremes, privacy · markov                           |                    |
-| 3    | optim       | line-search, search · first-order, second-order, proximal, derivative-free, programming, online · minimize                         | options, schedules |
-| 3    | systems     | (one module)                                                                                                                       |                    |
-| 4    | inference   | model · exact, message-passing, expectation-propagation, variational, stochastic, filtering · engines                              |                    |
-| 4    | dynamics    | ode, sde · fields, control                                                                                                         |                    |
-| 4    | signal      | windows · filters, spectral, time-frequency, wavelets, statistical, cepstrum, similarity, image · multirate, audio, decompositions | signal             |
-| 4    | transport   | (one module)                                                                                                                       |                    |
-| 4    | text        | normalise, tokenise, stem, hyphenation · vocabulary · subword, features, cooccurrence · pipeline, representations · statistics     | aligned            |
-| 4    | logic       | terms · resolution, induction                                                                                                      |                    |
-| 5    | learning    | estimators, kernels, conformal, subgroups · losses, metrics, compose, validate · calibration, off-policy, explain                  |                    |
-| 6    | nn          | functional, init, decoding · layers, quantise · attention, training, experts, graph · sequence                                     |                    |
-| 7    | interpreter | (one module)                                                                                                                       |                    |
+| Tier | Family      | Modules (local tiers, low to high; * gap)                                                                                                  | Shared             |
+| ---- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| 0    | foundation  | contracts, errors · registry · tensor · pytree, fourier · convolution, autodiff, random · space, trace                                     |                    |
+| 1    | numerics    | special · linalg · polynomial, quadrature, roots, implicit, geometry, neighbours, robust, factorisation · interpolate                      |                    |
+| 2    | graph       | traversal, shortest-paths, spanning-trees, structures, matrices · flows, structured, propagation                                           | graph, tree, heap  |
+| 3    | probability | stats, bijectors, samplers · distributions · likelihoods, information, tests, extremes, privacy · markov                                   |                    |
+| 3    | optim       | line-search, search · first-order, second-order, proximal, derivative-free, programming, online · minimize                                 | options, schedules |
+| 3    | systems     | (one module)                                                                                                                               |                    |
+| 4    | inference   | model · exact, message-passing, expectation-propagation, variational, stochastic, filtering · engines                                      |                    |
+| 4    | dynamics    | ode, sde · fields, control                                                                                                                 |                    |
+| 4    | signal      | windows, sparse · filters, spectral, time-frequency, wavelets, statistical, cepstrum, similarity, image · multirate, audio, decompositions | signal             |
+| 4    | transport   | (one module)                                                                                                                               |                    |
+| 4    | text        | normalise, tokenise, stem, hyphenation · vocabulary · subword, features, cooccurrence · pipeline, representations · statistics             | aligned            |
+| 4    | logic       | terms · resolution, induction                                                                                                              |                    |
+| 5    | learning    | estimators, kernels, conformal, subgroups · losses, metrics, compose, validate · calibration, off-policy, explain                          |                    |
+| 6    | nn          | functional, init, decoding · layers, quantise · attention, training, experts, graph · sequence                                             |                    |
+| 7    | interpreter | (one module)                                                                                                                               |                    |
 
 <!-- aifn-layers:end -->
 

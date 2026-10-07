@@ -344,6 +344,10 @@
             "tier": 2
           },
           {
+            "module": "sparse",
+            "tier": 0
+          },
+          {
             "module": "decompositions",
             "tier": 2
           },

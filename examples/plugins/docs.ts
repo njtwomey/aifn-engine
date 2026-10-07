@@ -123,7 +123,7 @@ function splitDoc(text: string): Tags {
 }
 
 /** The first sentence of a doc comment, without the leading "`package/path`:" that module comments open with. */
-function summaryOf(doc: string): string {
+export function summaryOf(doc: string): string {
   const para = doc.split(/\n\s*\n/)[0].replace(/\s+/g, ' ')
   const body = para.replace(/^`[^`]+`:\s*/, '')
   const end = body.search(/[.:](\s|$)/)

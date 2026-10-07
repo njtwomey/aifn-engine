@@ -6,7 +6,7 @@ PY_SRC := packages/compute/test/fixtures packages/methods/test/fixtures scripts
 VERSION ?= 0.0.0-dev
 PRETTIER_FILES := git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f; do [ -f "$$f" ] && printf "%s\0" "$$f"; done' _
 
-.PHONY: help install check lint layers names format typecheck test bench fixtures fixtures-check packages packages-smoke release examples examples-check examples-build shots thumbs clean
+.PHONY: help install map check lint layers names format typecheck test bench fixtures fixtures-check packages packages-smoke release examples examples-check examples-build shots thumbs clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -14,6 +14,9 @@ help: ## List targets
 install: ## Install the Node dependencies, and the Python fixture libraries into .venv when uv is installed
 	npm install
 	@if command -v uv >/dev/null; then uv sync; else echo "uv not found: skipping the Python environment (only make fixtures and the Python lint need it)"; fi
+
+map: ## Print the packages as a tree: each module and file with its one-line summary and exports (ARGS="compute/optim")
+	@node scripts/map.ts $(ARGS)
 
 check: lint typecheck test examples-check ## Everything: lints, types, tests, examples render
 

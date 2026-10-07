@@ -197,6 +197,13 @@ import {
 import { siftSteps, vmdSteps } from 'aifn-compute/signal/decompositions'
 import { lms, nlms, rls } from 'aifn-compute/signal/statistical'
 import { scrimpSteps } from 'aifn-compute/signal/similarity'
+import {
+  basisPursuitDenoisingSteps,
+  dictionaryLearningSteps,
+  iterativeHardThresholdingSteps,
+  matchingPursuitSteps,
+  orthogonalMatchingPursuitSteps,
+} from 'aifn-compute/signal/sparse'
 import { stateSpace, simulate, predictionErrorMethod } from 'aifn-compute/systems'
 import { lqg, lqgSimulation, mpcController, recedingHorizon } from 'aifn-compute/dynamics/control'
 import { ransac } from 'aifn-compute/numerics/robust'
@@ -221,6 +228,12 @@ const at = <S, St extends Status>(alg: Algorithm<S, St>, start: S, steps?: numbe
   start,
   steps,
 })
+
+const sparseDictionary = [
+  [1, 0, 0, 0.5],
+  [0, 1, 0, 0.5],
+  [0, 0, 1, 0.7],
+]
 
 const diagonallyDominant = [
   [4, 1, 0],
@@ -426,6 +439,26 @@ const CASES: Record<string, () => Case> = {
   'graph/propagation/labelSpreadingSteps': () =>
     at(labelSpreadingSteps(undirected, [0, -1, -1, -1, -1, -1, -1, 1], { alpha: 0.5 }), undefined, 6),
   'signal/similarity/scrimpSteps': () => at(scrimpSteps(sift, 16, { diagonalsPerStep: 10 }), undefined, 6),
+  'signal/sparse/matchingPursuitSteps': () => at(matchingPursuitSteps(sparseDictionary, [0, 2, -3]), undefined, 3),
+  'signal/sparse/orthogonalMatchingPursuitSteps': () =>
+    at(orthogonalMatchingPursuitSteps(sparseDictionary, [0, 2, -3], { sparsity: 2 }), undefined, 2),
+  'signal/sparse/basisPursuitDenoisingSteps': () =>
+    at(basisPursuitDenoisingSteps(sparseDictionary, [0, 2, -3], { lambda: 0.1 }), undefined, 6),
+  'signal/sparse/iterativeHardThresholdingSteps': () =>
+    at(iterativeHardThresholdingSteps(sparseDictionary, [0, 2, -3], { sparsity: 2 }), undefined, 6),
+  'signal/sparse/dictionaryLearningSteps': () =>
+    at(
+      dictionaryLearningSteps(
+        [
+          [1, 0, 0.5, -1, 2, 0],
+          [0, 1, 0.5, 1, 0, -1],
+          [0.3, 0, 1, 0, 1, 1],
+        ],
+        { atoms: 4, sparsity: 1 },
+      ),
+      undefined,
+      4,
+    ),
   'graph/flows/minCostFlowSteps': () =>
     at(
       minCostFlowSteps({
