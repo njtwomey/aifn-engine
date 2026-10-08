@@ -784,7 +784,7 @@
       },
       {
         "area": "neural",
-        "dependsOn": [],
+        "dependsOn": ["learning"],
         "shared": [],
         "children": [
           {
@@ -813,6 +813,15 @@
           },
           {
             "module": "graph"
+          },
+          {
+            "module": "post-training"
+          },
+          {
+            "module": "adaptation"
+          },
+          {
+            "module": "reward-models"
           }
         ]
       },

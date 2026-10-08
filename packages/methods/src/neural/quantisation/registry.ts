@@ -29,6 +29,52 @@ fn(
 
 fn(
   {
+    key: 'adapterParameters',
+    name: 'LoRA adapter parameters',
+    tex: '\\Psi_a = L\\,r \\sum_{\\text{targets}} (d_{\\text{in}} + d_{\\text{out}})',
+    summary: 'The trainable parameters of rank-r LoRA adapters on chosen linear layers of every block.',
+    role: 'property',
+    notes: ['low-rank-adaptation', 'bootstrapping-a-language-model-for-a-new-task', 'quantised-low-rank-adaptation'],
+  },
+  cost.adapterParameters,
+)
+fn(
+  {
+    key: 'linearParameters',
+    name: 'Linear-layer parameters of a transformer',
+    summary: 'The weights of the seven linear layers of every block: what QLoRA stores in 4 bits.',
+    role: 'property',
+    notes: ['quantised-low-rank-adaptation'],
+  },
+  cost.linearParameters,
+)
+fn(
+  {
+    key: 'fineTuningMemory',
+    name: 'Fine-tuning memory (full, LoRA, QLoRA)',
+    summary:
+      'Weights, adapter and optimiser state, gradients, activations and logits of a fine-tuning run: 16Ψ, 2Ψ + 16Ψ_a or about 0.52Ψ + 16Ψ_a of model state.',
+    role: 'property',
+    notes: ['quantised-low-rank-adaptation', 'bootstrapping-a-language-model-for-a-new-task', 'low-rank-adaptation'],
+    cite: ['dettmers2023', 'rajbhandari2020', 'korthikanti2022'],
+  },
+  cost.fineTuningMemory,
+)
+fn(
+  {
+    key: 'fineTuningCompute',
+    name: 'Fine-tuning compute and price',
+    summary:
+      'FLOPs per token (6Ψ for full fine-tuning; about 6Ψ for checkpointed LoRA), run time at a model FLOP utilisation, and price.',
+    role: 'property',
+    notes: ['bootstrapping-a-language-model-for-a-new-task', 'quantised-low-rank-adaptation'],
+    cite: ['kaplan2020'],
+  },
+  cost.fineTuningCompute,
+)
+
+fn(
+  {
     key: 'quantisationStudy',
     name: 'Streamed quantisation study of a small MLP',
     summary:
