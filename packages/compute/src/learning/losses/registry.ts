@@ -10,12 +10,13 @@ import { type Loss, type LossFamily, type LossInput } from './core'
 import * as divergence from './divergence'
 import * as energy from './energy'
 import * as mixture from './mixture'
+import * as preference from './preference'
 import * as regression from './regression'
 import * as representation from './representation'
 import * as weak from './weak'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-const modules = [classification, regression, divergence, representation, adversarial, energy, mixture, weak]
+const modules = [classification, regression, divergence, representation, adversarial, energy, mixture, weak, preference]
 
 /** Every loss, keyed by its `info.key`. */
 export const lossRegistry: Readonly<Record<string, Loss>> = entries('loss', ...modules) as unknown as Readonly<

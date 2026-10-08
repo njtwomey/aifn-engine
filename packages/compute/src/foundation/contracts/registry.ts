@@ -109,15 +109,32 @@ export interface MetricInfo extends Info {
 
 /** The family a loss belongs to, as the site's notes group them. */
 export type LossFamily =
-  'classification' | 'regression' | 'ranking' | 'retrieval' | 'representation' | 'divergence' | 'adversarial' | 'energy'
+  | 'classification'
+  | 'regression'
+  | 'ranking'
+  | 'retrieval'
+  | 'representation'
+  | 'divergence'
+  | 'adversarial'
+  | 'energy'
+  | 'preference'
 
 /**
  * What a loss reads from a model: `logits`, `probabilities`, `margins` (scores with labels in {−1, +1}), `values`,
  * `distribution` (predictive parameters), `scores` (of the items of a list), `embeddings` or `distributions` (two to
- * compare). Shared names mean the same as in `InputKind`.
+ * compare), or `log-probabilities` (of whole responses under a policy and a reference, as preference losses read
+ * them). Shared names mean the same as in `InputKind`.
  */
 export type LossInput =
-  'logits' | 'probabilities' | 'margins' | 'values' | 'distribution' | 'scores' | 'embeddings' | 'distributions'
+  | 'logits'
+  | 'probabilities'
+  | 'margins'
+  | 'values'
+  | 'distribution'
+  | 'scores'
+  | 'embeddings'
+  | 'distributions'
+  | 'log-probabilities'
 
 /** Loss metadata: the registry `Info` plus its family, inputs, and the metric its minimiser optimises. */
 export interface LossInfo extends Info {

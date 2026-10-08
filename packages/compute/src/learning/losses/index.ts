@@ -2,7 +2,8 @@
  * `aifn-compute/learning/losses`: training losses, each a composition of `aifn-compute/foundation/tensor` primitives with its registry
  * metadata: classification, regression, divergence, representation (InfoNCE, CLIP's learnable temperature),
  * adversarial (GAN games, gradient penalty), energy-based (contrastive divergence), mixture density (MDN heads)
- * and weak-supervision (uPU, nnPU, LLP proportion, complementary-label) losses; `lossRegistry`, `getLoss`, `listLosses`. Ranking and retrieval losses are in `aifn-methods/retrieval/losses`.
+ * weak-supervision (uPU, nnPU, LLP proportion, complementary-label) and preference (`dpo`, `ipo`, `kto`, `simpo`,
+ * `orpo`) losses; `lossRegistry`, `getLoss`, `listLosses`. Ranking and retrieval losses are in `aifn-methods/retrieval/losses`.
  */
 
 export {
@@ -55,6 +56,18 @@ export {
   type PoissonNllOptions,
 } from './regression'
 export { distillation, jensenShannonLoss, klLoss, type DistillationOptions } from './divergence'
+export {
+  dpo,
+  ipo,
+  kto,
+  orpo,
+  simpo,
+  type DpoOptions,
+  type IpoOptions,
+  type KtoOptions,
+  type OrpoOptions,
+  type SimpoOptions,
+} from './preference'
 export { infoNce, learnedTemperature, type InfoNceOptions } from './representation'
 export {
   adversarialGames,
