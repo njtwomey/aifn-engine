@@ -141,11 +141,9 @@ function Hero() {
           Everything on this site runs in your browser
         </div>
         <h1 className="text-4xl leading-[1.05] font-semibold tracking-tight md:text-6xl">
-          Machine learning you can{' '}
-          <span className="bg-gradient-to-r from-[#2a78d6] via-[#1baf7a] to-[#eb6834] bg-clip-text text-transparent">
-            grab and move
+          <span className="bg-gradient-to-r from-[#2a78d6] via-[#1baf7a] to-[#eb6834] box-decoration-clone bg-clip-text pb-1 text-transparent">
+            Machine learning you can grab and move.
           </span>
-          .
         </h1>
         <p className="max-w-prose text-base text-muted-foreground md:text-lg">
           AIFN Engine is the numerics, the models and the figures behind interactive explanations of machine learning.
