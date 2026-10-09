@@ -7,10 +7,12 @@ import { Carousel, type Slide } from './Carousel'
 import { FourierEpicycles } from './FourierEpicycles'
 import { HeroFigure } from './HeroFigure'
 import { LorenzSwarm } from './LorenzSwarm'
+import { MazeSearch } from './MazeSearch'
 import { MIXTURE_PLAY_MS, MixtureSteps } from './MixtureSteps'
 import { NetworkTraining } from './NetworkTraining'
 import { OptimiserRace } from './OptimiserRace'
 import { SamplerRace } from './SamplerRace'
+import { TreeGrowth } from './TreeGrowth'
 import { hrefOf, onLink, thumbnailOf } from './paths'
 import { ENTRIES } from './registry'
 
@@ -99,7 +101,10 @@ const go = (path: string) => {
   return { href: hash ? `${hrefOf(p)}#${hash}` : hrefOf(p), onClick: onLink(p, hash) }
 }
 
-/** The landing page (under the shell's top bar): a live figure, the engine in numbers, more live figures, the packages and the gallery. */
+/**
+ * The landing page (under the shell's top bar): a live figure, the engine in numbers, more live figures, the packages
+ * and the gallery.
+ */
 export function Home() {
   return (
     <>
@@ -179,11 +184,30 @@ function Stats() {
   )
 }
 
-function SectionHead({ kicker, title, children }: { kicker: string; title: string; children: ReactNode }) {
+/**
+ * A section's heading: a kicker, the title and a line under it. The heading carries `id` and its title links to
+ * it, so the URL (`/#every-figure-is-a-running-model`) brings a reload or a shared link back to the section.
+ */
+function SectionHead({
+  id,
+  kicker,
+  title,
+  children,
+}: {
+  id: string
+  kicker: string
+  title: string
+  children: ReactNode
+}) {
   return (
-    <div className="max-w-2xl space-y-2">
+    <div id={id} className="max-w-2xl scroll-mt-6 space-y-2">
       <div className="text-xs font-medium tracking-widest text-muted-foreground uppercase">{kicker}</div>
-      <h2 className="text-3xl font-semibold tracking-tight">{title}</h2>
+      <h2 className="text-3xl font-semibold tracking-tight">
+        <a href={`#${id}`} className="group">
+          {title}
+          <span className="ml-2 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-60">#</span>
+        </a>
+      </h2>
       <p className="text-muted-foreground">{children}</p>
     </div>
   )
@@ -215,6 +239,18 @@ const SLIDES: Slide[] = [
     duration: 10000,
   },
   {
+    label: 'Maze',
+    blurb: 'Dijkstra, A* and a greedy search solving maze after maze. Compare how much of each one they explore.',
+    Figure: MazeSearch,
+    duration: 12000,
+  },
+  {
+    label: 'Decision tree',
+    blurb: 'A decision tree grown one split at a time on two moons. Click to add points and watch it regrow.',
+    Figure: TreeGrowth,
+    duration: 14000,
+  },
+  {
     label: 'Mixture',
     blurb: 'A Gaussian mixture fitted by EM from one corner to convergence, again and again. Scrub or step it.',
     Figure: MixtureSteps,
@@ -231,7 +267,11 @@ const SLIDES: Slide[] = [
 function Showcase() {
   return (
     <section className="space-y-6">
-      <SectionHead kicker="Live, in the page" title="Every figure is a running model">
+      <SectionHead
+        id="every-figure-is-a-running-model"
+        kicker="Live, in the page"
+        title="Every figure is a running model"
+      >
         Not videos and not screenshots: each of these is recomputed on every move of the pointer, by the same code the
         reference pages document.
       </SectionHead>
@@ -243,7 +283,7 @@ function Showcase() {
 function Packages() {
   return (
     <section className="space-y-6">
-      <SectionHead kicker="The stack" title="Three packages, one engine">
+      <SectionHead id="three-packages-one-engine" kicker="The stack" title="Three packages, one engine">
         Numerics at the bottom, named methods on top of them, and the figures that draw both. Each is documented from
         its own source, with examples you can edit and run.
       </SectionHead>
@@ -291,7 +331,7 @@ function Mosaic() {
   return (
     <section className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <SectionHead kicker="Render Gallery" title={`${ENTRIES.length} recipes, one question each`}>
+        <SectionHead id="recipes" kicker="Render Gallery" title={`${ENTRIES.length} recipes, one question each`}>
           Every picture is a live figure and the few lines that make it.
         </SectionHead>
         <Button variant="outline" render={<a {...go('render')} />}>
