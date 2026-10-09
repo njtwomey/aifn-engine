@@ -8,13 +8,16 @@ import { useFrames, useOnScreen } from './live'
 
 const N = 10
 /** One colour per particle, evenly round the hue wheel. */
-const RAINBOW = Array.from({ length: N }, (_, i) => `hsl(${(360 * i) / N}, 85%, 58%)`)
+const HUES = Array.from({ length: N }, (_, i) => (360 * i) / N)
+const RAINBOW = HUES.map((h) => `hsl(${h}, 85%, 58%)`)
 const SIGMA = 10
 const BETA = 8 / 3
 /** Fixed offsets of the swarm from its centre, scaled by the spread. */
 const BALL = toRows(normal(stream('home/lorenz'), 0, 1, { shape: [N, 3] }))
 /** Points of each particle's trail kept on screen. */
 const TAIL = 400
+/** A trail is drawn as this many pieces, each older one fainter, so it fades out behind the particle. */
+const PIECES = 8
 /** Integration steps per frame, of size H. */
 const PER_FRAME = 3
 const H = 0.008
@@ -69,10 +72,21 @@ export function LorenzSwarm() {
     setFrames((f) => ({ trails: [...f.trails, now].slice(-TAIL), t: state.time }))
   })
   // Each particle's trail, its own colour.
-  const trails = Array.from({ length: N }, (_, i) => ({
-    xs: frames.trails.map((f) => f[i][0]),
-    zs: frames.trails.map((f) => f[i][1]),
-  }))
+  // Each trail in pieces counted back from the particle (piece 0 the newest), sharing an end point so they join up.
+  const L = frames.trails.length
+  const size = Math.ceil(TAIL / PIECES)
+  const pieces = Array.from({ length: N }, (_, i) =>
+    Array.from({ length: PIECES }, (_, k) => {
+      const to = L - k * size
+      const from = Math.max(0, to - size - 1)
+      const span = frames.trails.slice(from, Math.max(from, to))
+      return {
+        xs: span.map((f) => f[i][0]),
+        zs: span.map((f) => f[i][1]),
+        color: `hsla(${HUES[i]}, 85%, 58%, ${((1 - k / PIECES) ** 1.6).toFixed(3)})`,
+      }
+    }).filter((piece) => piece.xs.length > 1),
+  )
   const last = frames.trails.at(-1)
   const x = useAxis({ label: 'x', range: [-25, 25] })
   const y = useAxis({ label: 'z', range: [0, 55] })
@@ -88,9 +102,11 @@ export function LorenzSwarm() {
         caption="Click to restart the swarm there. Lower ρ below about 24.7 and the chaos stops: they settle on a point."
       >
         <Plot x={x} y={y} onPlotClick={([a, b]) => setCentre([a, b])}>
-          {trails.map((t, i) => (
-            <Curve key={i} x={t.xs} y={t.zs} color={RAINBOW[i]} silent live />
-          ))}
+          {pieces.flatMap((trail, i) =>
+            trail.map((piece, k) => (
+              <Curve key={`${i}-${k}`} x={piece.xs} y={piece.zs} color={piece.color} silent live />
+            )),
+          )}
           {last && last.map((p, i) => <Points key={i} x={[p[0]]} y={[p[1]]} color={RAINBOW[i]} size={8} live />)}
         </Plot>
       </Figure>
