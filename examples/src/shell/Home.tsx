@@ -4,6 +4,7 @@ import { Button, useTheme } from 'aifn-render'
 import { SECTIONS } from '@examples/recipe'
 import { nodePath, TREE, type DocTreeNode } from '../docs/data'
 import { Carousel, type Slide } from './Carousel'
+import { ChangepointStream } from './ChangepointStream'
 import { FourierEpicycles } from './FourierEpicycles'
 import { HeroFigure } from './HeroFigure'
 import { KalmanTracker } from './KalmanTracker'
@@ -238,6 +239,12 @@ const SLIDES: Slide[] = [
     blurb: 'A Kalman filter following a moving target from noisy readings. Drag the target and the filter chases it.',
     Figure: KalmanTracker,
     duration: 10000,
+  },
+  {
+    label: 'Change points',
+    blurb: 'Bayesian online changepoint detection on a live stream: a posterior over how long each regime has lasted.',
+    Figure: ChangepointStream,
+    duration: 12000,
   },
   {
     label: 'Chaos',
