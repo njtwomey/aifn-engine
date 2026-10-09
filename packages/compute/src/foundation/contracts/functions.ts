@@ -45,7 +45,10 @@ export type Sampler<P extends readonly Raw[] = readonly Raw[]> = (
   ...args: [...P, options?: SampleOptions]
 ) => Raw
 
-/** A kernel evaluation: the cross-covariance [n, m] of the rows of x [n, d] and y [m, d] (`null`: y is x). */
+/**
+ * A kernel evaluation: the $n \times m$ cross-covariance of the rows of `x` ($n \times d$) and `y` ($m \times d$);
+ * `null` for `y` means `y` is `x`.
+ */
 export type KernelFn = (x: Value, y: Value | null) => Value
 
 /**

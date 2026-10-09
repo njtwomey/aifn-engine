@@ -1,18 +1,20 @@
 /**
- * `aifn-compute/foundation/contracts`: the shapes and signatures of aifn, each defined once. Types only; nothing here runs, so every
- * module can import it (tier 0). Implementations are checked against these with `satisfies` and type tests
- * (`test/contracts.test.ts`); modules re-export the ones they serve under their established names.
+ * `aifn-compute/foundation/contracts`: the shapes and signatures of aifn, each defined once. Types only; nothing here
+ * runs, so every module can import it (tier 0). Implementations are checked against these with `satisfies` and type
+ * tests (`test/foundation/contracts/contracts.test.ts`); modules re-export the ones they serve under their established
+ * names.
  *
  * - Numbers: `Scalar` (a mathematical value), the integer metadata `Size`, `Index`, `Axis`, `Axes`, `Shape`; `DType`,
- *   `Tensor`, `Traced`, `Value`, `Raw`, `Aval` (shape and dtype without data), and the inputs `TensorLike`, `VectorLike`,
- *   `MatrixLike`, `DataLike`, `NestedArray`.
+ *   `Tensor`, `Traced`, `Value`, `Raw`, `Aval` (shape and dtype without data), and the inputs `TensorLike`,
+ *   `VectorLike`, `MatrixLike`, `DataLike`, `NestedArray`.
  * - Randomness: `Key`, `Stream` (plain data), `SampleOptions`.
  * - Iteration: `Algorithm`, `Status`, `StepContext`, `AlgorithmRef`, `Trace`, `TraceOptions`, `TraceMeta`,
  *   `TraceTiming`, `Checkpoints`, `Recorder`, `KeepStates`, `TimingMode`, `TraceWire`.
  * - Probability: `Distribution`, `AnyUnivariate`, `AnyMultivariate` and their typed forms, `Kind`, `Support`,
- *   `ExponentialFamily`, `LogDensity`, `Bijector`, `Interval`.
+ *   `ExponentialFamily`, `LogDensity`, `Bijector`, `Interval`, `DistributionSpec`.
  * - Decisions: `Environment`, `EnvironmentShape`, `Step`, `Domain`, `DomainKind`, `Agent`, `Decision`, `Transition`,
- *   `TabularModel`, `Outcome`, `EnvironmentModel`, `EnvironmentOracle`, `RenderSpec`, `GridRender`.
+ *   `TabularModel`, `Outcome`, `EnvironmentModel`, `EnvironmentOracle`, `RenderSpec`, `GridRender`, and the records of
+ *   a run, `Trajectory` and `Training`.
  * - Optimisation: `Objective`, `ObjectiveFn`, `Evaluation`, `ValueFunction`, `Hessian`, `Schedule`, `IterateState`,
  *   `StoppingOptions`.
  * - Learning: `Kernel`, `Model` and the capabilities, `Dataset`, `DatasetMeta`, `Recipe`, `Truth`, `Features`;
@@ -21,10 +23,13 @@
  *   `FilterDesignInfo`, `AlgorithmInfo` with `StateRoles`, `FunctionInfo` with `FunctionRole`, `TestInfo` with
  *   `TestData`, `PrimitiveInfo`, and the applications' kinds).
  * - Structure and signals: `Graph`, `Tree`, `Signal`, `Spectrum`, `TimeFrequency`, `LtiSystem`, `Decomposition`,
- *   `Curve`; parameter spaces `Space`, `Dim`; error kinds.
- * - Function families: `Unary`, `Binary`, `Reduction`, `Sampler`, `KernelFn`, `MetricFn`, `LossFn`.
+ *   `Curve`; parameter spaces `Space`, `Dim`; error kinds (`ErrorKind`, `NumericalErrorKind`, `ErrorInfo`).
+ * - Function families: `Unary`, `Binary`, `Reduction` (with `ReductionMode`), `Sampler`, `KernelFn`, `MetricFn`,
+ *   `LossFn`.
  *
- * Each protocol has this one definition. Modules re-export the types they serve under the same names, never renamed.
+ * Displayable objects carry a `kind` brand (`Kinded`, `ObjectKind`) by which a view is chosen, and the plain-data
+ * forms (`TensorWire`, `TraceWire`, `DatasetWire`, `DistributionSpec`) cross a worker boundary or a URL. Each protocol
+ * has this one definition. Modules re-export the types they serve under the same names, never renamed.
  */
 
 export type * from './algorithm'

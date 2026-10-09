@@ -1,19 +1,30 @@
 /**
- * `aifn-compute/foundation/tensor`: the n-dimensional array everything numeric builds on, and the primitive machinery that defines each
- * operation once with its derivative rule.
+ * `aifn-compute/foundation/tensor`: the n-dimensional array everything numeric builds on, and the primitive machinery
+ * that defines each operation once with its derivative rule.
  *
- * - Type and storage: `Tensor` (shape, strides, offset, dtype, typed-array data), `Vector`, `Matrix`, `DType`.
- * - Constructors: `tensor`, `zeros`, `ones`, `full`, `eye`, `arange`, `linspace`, `fromRows`, `scalar`, `fromData`.
+ * - Type and storage: `Tensor` (shape, strides, offset, dtype, typed-array data), `Vector`, `Matrix`, `DType`; `size`,
+ *   `rowMajorStrides`, `isContiguous`, `showShape`, and the reads `readonlyData` (zero-copy when contiguous) and
+ *   `float64Data`.
+ * - Constructors: `tensor`, `zeros`, `ones`, `full`, `eye`, `arange`, `linspace`, `fromRows`, `scalar`, `fromData`
+ *   (wraps a typed array without copying); grids: `meshgrid`, `logspace`; `shapeOf`, `copy`, `astype`.
  * - Converters (the chart boundary): `toArray`, `toRows`, `toFlat`, `item`; complex: `toComplexFlat`,
  *   `toComplexArray`, `complexItem`.
  * - Dtypes (design K §3.2): `bool`, `int32`, `float32`, `float64`, `complex128` (interleaved), one promotion table
- *   (`promoteTypes`, `weakType`) and the result rules (`resultType`). Complex numbers: `complex`, `conj`, `realPart`,
- *   `imagPart` (zero-copy views), `angle`, `complexAbs`, `expj`; autodiff treats them as ℝ² pairs (complex.ts).
- * - Primitives (numbers, tensors and traced values alike): elementwise, structural, reductions and products.
- * - Defining primitives: `definePrimitive` and `elementwise`, registered under node-path ids (`numerics/special/erf`) in `registry`
- *   (`registry.list()`); `defineOp` is a thin wrapper over
- *   `definePrimitive`; `sumLike`; the transform hook: `apply`, `Tracer`, `Interpreter`, `avalOf`, `nextLevel`.
- * - Constants and tolerances: `EPS`, `SQRT_EPS`, `TINY`, `DEFAULT_TOLERANCE`. The errors are
+ *   (`promoteTypes`, `weakType`), the result rules (`resultType`), and `isComplexDType`, `isFloatDType`,
+ *   `elementWidth`.
+ * - Complex numbers: `complex`, `conj`, `realPart`, `imagPart` (zero-copy views, as `complexPartView`), `angle`,
+ *   `complexAbs`, `expj`, `refuseComplex`; kernels: `complexKernel`, `splitComplex`, `joinComplex`. Autodiff treats
+ *   them as $\reals^2$ pairs (complex.ts).
+ * - Primitives (numbers, tensors and traced values alike): elementwise (`add`, `mul`, `exp`, `where`, the comparisons,
+ *   `map`, `map2`, ...), structural (`reshape`, `transpose`, `slice`, `concat`, `stack`, `broadcastTo`, ...;
+ *   `broadcastShapes`), reductions (`sum`, `mean`, `max`, `logsumexp`, `norm`, `cumsum`, ...) and products (`matmul`,
+ *   `dot`, `outer`, `einsum`, `linearCombination`).
+ * - Defining primitives: `definePrimitive` and `elementwise`, registered under node-path ids (`numerics/special/erf`)
+ *   in `registry` (`registry.list()`); `defineOp` is a thin wrapper over `definePrimitive`; rule helpers: `sumLike`,
+ *   `zerosOf`, `fitTo`, `projectReal`, `batchToFront`, `broadcastBatch`, `batchByLoop`; the transform hook: `apply`,
+ *   `Tracer`, `Interpreter`, `isTraced`, `avalOf`, `unwrap`, `nextLevel`, `batchedValueError`.
+ * - Constants and tolerances: `EPS`, `EPS32`, `SQRT_EPS`, `TINY`, `DEFAULT_TOLERANCE`, `tolerance`; whole-tensor
+ *   comparisons for tests: `allclose` (within tolerance) and `equal` (exact). The errors are
  *   `aifn-compute/foundation/errors`.
  * - The brand: `isTensor` checks it; `revive` re-brands tensors that crossed `structuredClone` or a worker.
  * - Indexed reads and writes (primitives): `gather`, `scatterAdd`, `take` (rows along the first axis).
@@ -22,6 +33,9 @@
  * - Inputs: `VectorLike` and `MatrixLike`, the one sanctioned relaxation of `Tensor` for data arguments.
  * - Dense kernels for inner loops, on row-major `Float64Array`s: the `dense` namespace (`dense.toF64`,
  *   `dense.toMatrixF64`, `dense.dot`, `dense.matVec`, `dense.matMul`, `dense.axpy`, …). Not primitives.
+ *
+ * Tensors are immutable by convention and stored row-major; a view (a transpose, a slice, a complex part) is a new
+ * header over the same data.
  */
 
 export type { Axes, DType, NestedArray, Tensor, TensorData, TensorLike, Vector, Matrix } from './core'

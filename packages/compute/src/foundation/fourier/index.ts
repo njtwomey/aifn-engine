@@ -1,15 +1,22 @@
 /**
- * `aifn-compute/foundation/fourier`: discrete Fourier transforms with numpy.fft's conventions, on complex128 tensors (design K
- * §8.2).
+ * `aifn-compute/foundation/fourier`: discrete Fourier and cosine transforms with numpy.fft's conventions, on complex128
+ * tensors (design K §8.2).
  *
- * - Primitives (linear, differentiable, batched along any axis): `fft`, `ifft`, `rfft`, `irfft`, each with
- *   `{ axis, n, norm: 'backward' | 'ortho' | 'forward' }`. Any length is fast (radix-2 or Bluestein).
- * - Compositions: `fftn`, `ifftn`, `fft2`, `ifft2`, `fftshift`, `ifftshift`; grids `fftfreq`, `rfftfreq`;
- *   `nextPowerOfTwo`, `isPowerOfTwo`.
- * - The definition: `dftMatrix(n, { norm })` and `dft(x)`, the O(n²) product with it.
- * - `dct`, `idct`, `dctMatrix` (orthonormal DCT-II and its inverse); `decibels`.
+ * - The transforms: `fft`, `ifft`, `rfft` (a real signal's non-negative half-spectrum) and `irfft`, each with
+ *   `{ axis, n, norm: 'backward' | 'ortho' | 'forward' }`. They are primitives: linear, differentiable in both modes,
+ *   batched along any axis, and fast at any length (radix-2, or Bluestein's algorithm).
+ * - Several axes: `fftn`, `ifftn`, and `fft2`, `ifft2` over the last two axes.
+ * - Frequency grids and ordering: `fftfreq`, `rfftfreq` give each bin's frequency; `fftshift`, `ifftshift` move the
+ *   zero frequency to the centre and back. `nextPowerOfTwo` and `isPowerOfTwo` choose padded lengths.
+ * - The definition: `dftMatrix(n, { norm, inverse })` and `dft(x)`, the $O(n^2)$ product with it, to check the fast
+ *   transforms against.
+ * - Cosine transforms: `dct`, `idct` and `dctMatrix` (the orthonormal DCT-II and its inverse, as products with the
+ *   matrix).
+ * - `decibels` for powers and amplitudes; `readSignal` and `readValues` copy real values into a `Float64Array` for
+ *   raw-array code; `fourierFunctions` is the registry of the non-primitive functions.
  *
- * Fourier analysis (windows, spectra, time-frequency) is `aifn-compute/signal`.
+ * Every transform returns a new tensor and leaves its input alone. Fourier analysis (windows, spectra,
+ * time-frequency) is `aifn-compute/signal`.
  */
 
 export { decibels, type Signal } from './complex'

@@ -10,11 +10,11 @@ import { ReverseInterpreter } from './reverse'
 import { treeFlatten, treeUnflatten, zerosLike } from 'aifn-compute/foundation/pytree'
 
 /**
- * An input of a graph node: another node, or a constant (a number or tensor that does not depend on x). A node input
- * carries what travels along its edge in the backward pass: `partial`, the local derivative ∂(this node)/∂(input) (for
- * a scalar node; null for a tensor node or a primitive without a rule), and `message`, the adjoint contribution
- * pulled back to the input, adjoint · ∂(this node)/∂(input) (null when this node has no adjoint). An input's adjoint is
- * the sum of the messages on its outgoing edges.
+ * An input of a graph node: another node, or a constant (a number or tensor that does not depend on x). For a node
+ * $v$ with input $u$, the input carries what travels along the edge from $u$ to $v$ in the backward pass: `partial`,
+ * the local derivative $\partial v / \partial u$ (for a scalar node; null for a tensor node or a primitive without a
+ * rule), and `message`, the adjoint contribution pulled back to the input, $\bar{v} \, \partial v / \partial u$ (null
+ * when this node has no adjoint). An input's adjoint $\bar{u}$ is the sum of the messages on its outgoing edges.
  */
 export type GraphInput =
   { node: number; partial: number | Tensor | null; message: number | Tensor | null } | { constant: number | Tensor }
@@ -27,10 +27,14 @@ export type GraphNode = {
   op: string
   /** For inputs, the leaf's path in x (`x`, `x[1]`, `w.bias`). */
   label?: string
+  /** The node's inputs, in the primitive's argument order (empty for an input leaf). */
   inputs: GraphInput[]
   /** The forward value. */
   value: number | Tensor
-  /** ∂(output)/∂(this node), the cotangent the reverse sweep assigns it; null when the output does not depend on it. */
+  /**
+   * The adjoint $\partial y / \partial v$ of the output $y$ with respect to this node $v$: the cotangent the reverse
+   * sweep assigns it; null when the output does not depend on it.
+   */
   adjoint: number | Tensor | null
   /** False for a primitive without a derivative rule. */
   differentiable: boolean
@@ -38,13 +42,16 @@ export type GraphNode = {
 
 /** A recorded computation graph (see `traceGraph`). */
 export type Graph = {
-  /** Every recorded node in evaluation order: the forward pass visits them by increasing id, the backward by decreasing. */
+  /**
+   * Every recorded node in evaluation order: the forward pass visits them by increasing id, the backward by
+   * decreasing.
+   */
   nodes: GraphNode[]
   /** Ids of the input leaves, in the order of x's leaves. */
   inputs: number[]
-  /** Id of the output node, or −1 when the output does not depend on x. */
+  /** Id of the output node, or $-1$ when the output does not depend on x. */
   output: number
-  /** f(x). */
+  /** The value $f(\xvec)$. */
   value: number | Tensor
   /** The gradient, with the structure of x. */
   grad: unknown
@@ -52,8 +59,20 @@ export type Graph = {
 
 /**
  * Record the computation graph of a scalar function f at x (a number, tensor or pytree) and run its reverse sweep.
- * Every primitive application becomes a node, with its inputs, forward value and adjoint. Throws if a primitive on a
- * path to the output has no derivative rule.
+ * Every primitive application becomes a node, with its inputs, forward value and adjoint. Throws
+ * `NotDifferentiableError` if a primitive on a path to the output has no derivative rule, and `ShapeError` if f does
+ * not return a scalar.
+ *
+ * @param f A scalar function of x, returning a number or a rank-0 tensor.
+ * @param x The point to record at: a number, a tensor or a pytree of them. Leaves are read through their values, and
+ *   input nodes are labelled by their paths (`x`, `x[1]`, `x.w`).
+ * @returns The nodes in evaluation order, the ids of the inputs and of the output, $f(\xvec)$ and the gradient.
+ *
+ * @example The graph of $x \sin x$ at 1
+ * const g = traceGraph((x) => mul(x, sin(x)), 1)
+ * for (const n of g.nodes) print(n.id, n.op, 'value', n.value, 'adjoint', n.adjoint)
+ * print('edges into mul:', g.nodes[2].inputs)
+ * print('grad =', g.grad, '= sin 1 + cos 1 =', Math.sin(1) + Math.cos(1))
  */
 export function traceGraph<T>(f: (x: T) => Value, x: T): Graph {
   const rev = new ReverseInterpreter()

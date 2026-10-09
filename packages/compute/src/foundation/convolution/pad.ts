@@ -1,8 +1,11 @@
 /**
- * Padding, part of `aifn-compute/foundation/convolution`: a movement primitive that extends each axis by `lo` samples before
- * and `hi` after, read by a border mode. Every mode is a fixed map from output positions to input positions (or to
- * zero), so `pad` is linear; its transpose `padAdjoint` adds each output cotangent back onto the input position it was
- * read from, and the two are each other's transposes.
+ * Padding: a movement primitive that extends each axis by `lo` samples before and `hi` after, the new samples read by
+ * a border mode.
+ *
+ * Every mode is a fixed map from output positions to input positions (or to zero), so the padding is linear in its
+ * input; its transpose `padAdjoint` adds each output cotangent back onto the input position it was read from, and the
+ * two are each other's transposes, so `pad` differentiates to any order and batches without a loop. The border modes
+ * and the forms of the widths are those of `numpy.pad`. Real values only for now.
  */
 
 import { ShapeError } from 'aifn-compute/foundation/errors'
@@ -21,27 +24,41 @@ import {
 } from 'aifn-compute/foundation/tensor'
 
 /**
- * How samples beyond an edge are read, with numpy.pad's names (for a b c d):
- * `constant` (0 0 | a b c d | 0 0), `reflect` (c b | a b c d | c b, the edge sample not repeated),
- * `symmetric` (b a | a b c d | d c, the edge repeated), `edge` (a a | a b c d | d d) and `wrap` (c d | a b c d | a b).
+ * How samples beyond an edge are read, with `numpy.pad`'s names, shown for the signal `a b c d` padded by two on each
+ * side: `constant` (`0 0 | a b c d | 0 0`, or the fill value), `reflect` (`c b | a b c d | c b`, the edge sample not
+ * repeated), `symmetric` (`b a | a b c d | d c`, the edge repeated), `edge` (`a a | a b c d | d d`) and `wrap`
+ * (`c d | a b c d | a b`, periodic).
  */
 export type PadMode = 'constant' | 'reflect' | 'symmetric' | 'edge' | 'wrap'
 
 /**
- * Padding widths, as numpy.pad's `pad_width`: one number for every side of every axis, a [lo, hi] pair of numbers for
- * every axis, or a list with one entry (a number or a [lo, hi] pair) per trailing axis.
+ * Padding widths, as `numpy.pad`'s `pad_width`: one number for every side of every axis, a `[lo, hi]` pair of numbers
+ * for every axis, or a list with one entry (a number or a `[lo, hi]` pair) per trailing axis, the leading axes left
+ * unpadded. A list of exactly two numbers is read as one `[lo, hi]` pair for every axis, not as one width per axis.
+ * Widths are non-negative integers.
  */
 export type PadWidths = number | readonly [number, number] | readonly (number | readonly [number, number])[]
 
+/** Parameters of the `pad` primitive and its adjoint. */
 type PadParams = {
-  /** [lo, hi] per axis of the input. */
+  /** One `[lo, hi]` pair per axis of the input: the samples added before and after it. */
   readonly widths: readonly (readonly [number, number])[]
+  /** The border mode the added samples are read by. */
   readonly mode: PadMode
   /** The input shape (for the adjoint, whose output it is). */
   readonly shape: readonly number[]
 }
 
-/** The input position that output position `j` (of an axis padded by `lo`) reads, or −1 for a constant zero. */
+/**
+ * The input position that an output position of one padded axis reads under a border mode.
+ *
+ * @param j The output position on the padded axis, from 0 to $n + \mathrm{lo} + \mathrm{hi} - 1$.
+ * @param n The length of the axis before padding.
+ * @param lo The number of samples added before the axis, so that output position `lo` reads input position 0.
+ * @param mode The border mode that decides which input position a position beyond an edge reads.
+ * @returns The input position, from 0 to $n - 1$, or $-1$ when the position is a constant (`constant` mode beyond an
+ *   edge).
+ */
 export function sourceIndex(j: number, n: number, lo: number, mode: PadMode): number {
   const i = j - lo
   if (i >= 0 && i < n) return i
@@ -66,13 +83,23 @@ export function sourceIndex(j: number, n: number, lo: number, mode: PadMode): nu
   }
 }
 
-/** The padded shape. */
+/**
+ * The shape of a value after padding.
+ *
+ * @param shape The shape before padding.
+ * @param widths One `[lo, hi]` pair per axis of `shape`.
+ * @returns Each axis length $n$ grown to $n + \mathrm{lo} + \mathrm{hi}$.
+ */
 const paddedShape = (shape: readonly number[], widths: PadParams['widths']): number[] =>
   shape.map((n, d) => n + widths[d][0] + widths[d][1])
 
 /**
- * Visit every (output offset, input offset) pair of a padding; input offset −1 for a constant zero. Per-axis maps are
- * precomputed, and the last axis is the inner loop.
+ * Visit every (output offset, input offset) pair of a padding, in row-major order of the output; the input offset is
+ * $-1$ for a constant zero. Per-axis maps are precomputed, and the last axis is the inner loop.
+ *
+ * @param p The padding: the input shape, the widths per axis and the border mode.
+ * @param visit Called once per element of the padded output with its row-major offset `out` and the row-major offset
+ *   `src` of the input element it reads, or $-1$ when it reads none.
  */
 function padLoop(p: PadParams, visit: (out: number, src: number) => void): void {
   const rank = p.shape.length
@@ -105,13 +132,30 @@ function padLoop(p: PadParams, visit: (out: number, src: number) => void): void 
   walk(0, 0)
 }
 
+/**
+ * The number of elements of a shape.
+ *
+ * @param shape The axis lengths.
+ * @returns Their product (1 for a scalar).
+ */
 const size = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1)
 
+/**
+ * The tensor a primitive's impl was given, refusing a plain number.
+ *
+ * @param x The raw input of the impl.
+ * @param what The caller's name for error messages.
+ * @returns `x`, known to be a tensor. Throws `ShapeError` for a number.
+ */
 function tensorOf(x: Raw, what: string): Tensor {
   if (typeof x === 'number') throw new ShapeError(what, `${what}: expected a tensor, got a number`)
   return x
 }
 
+/**
+ * The padding primitive: copies each output element from the input position its border mode reads (zero where it reads
+ * none). Linear, with `padAdjoint` as its transpose; batched by inserting an unpadded axis.
+ */
 const padOp: Op<PadParams> = definePrimitive<PadParams>({
   id: 'foundation/convolution/pad',
   arity: 1,
@@ -168,7 +212,14 @@ const padAdjointOp: Op<PadParams> = definePrimitive<PadParams>({
   },
 })
 
-/** Params with an unpadded batch axis of length `n` inserted at `axis`. */
+/**
+ * The parameters of a padding with an unpadded batch axis inserted, for batching the primitives.
+ *
+ * @param p The parameters of the padding of one example.
+ * @param axis Where the batch axis sits in the batched value.
+ * @param n The length of the batch axis.
+ * @returns `p` with widths `[0, 0]` and length `n` inserted at `axis`.
+ */
 function batchedParams(p: PadParams, axis: number, n: number): PadParams {
   const widths = [...p.widths]
   const shape = [...p.shape]
@@ -177,7 +228,15 @@ function batchedParams(p: PadParams, axis: number, n: number): PadParams {
   return { ...p, widths, shape }
 }
 
-/** Widths as one [lo, hi] pair per axis of a rank-`rank` value (a shorter list pads the trailing axes). */
+/**
+ * Widths as one `[lo, hi]` pair per axis of a value. Throws `ShapeError` for a list longer than the rank, or for a
+ * width that is not a non-negative integer.
+ *
+ * @param widths The widths in any form `PadWidths` allows. A list shorter than the rank pads the trailing axes, and a
+ *   list of exactly two numbers is one `[lo, hi]` pair for every axis.
+ * @param rank The number of axes of the value being padded.
+ * @returns One `[lo, hi]` pair per axis, leading axes not covered by a list given `[0, 0]`.
+ */
 export function padWidths(widths: PadWidths, rank: number): [number, number][] {
   let pairs: [number, number][]
   if (typeof widths === 'number') pairs = Array.from({ length: rank }, () => [widths, widths])
@@ -197,7 +256,34 @@ export function padWidths(widths: PadWidths, rank: number): [number, number][] {
 }
 
 /**
- * Pad `x` by `widths` (see `PadWidths`) with a border mode, as `numpy.pad`. Linear in x for every mode, so differentiable to any order; `value` fills the constant mode (default 0).
+ * Pad `x` by `widths` with a border mode, as `numpy.pad`. Linear in `x` for every mode, so differentiable to any order
+ * and batched by `vmap`; a nonzero `value` makes the constant mode affine (zeros are padded, then `value` added on the
+ * border). Throws `ShapeError` for invalid widths, or for a non-constant mode asked to pad an empty axis. Real values
+ * only.
+ *
+ * @param x The value to pad, of any rank.
+ * @param widths How many samples to add before and after each axis, in any form of `PadWidths`: one number for every
+ *   side, one `[lo, hi]` pair for every axis, or a list per trailing axis.
+ * @param mode How the added samples are read from `x` (see `PadMode`).
+ * @param options Options of the constant mode.
+ * @param options.value The value of the added samples in `constant` mode; ignored by the other modes.
+ * @returns `x` with each axis of length $n$ grown to $n + \mathrm{lo} + \mathrm{hi}$.
+ *
+ * @example The border modes on a short signal
+ * const x = tensor([1, 2, 3, 4])
+ * print('constant ', pad(x, 2))
+ * print('reflect  ', pad(x, 2, 'reflect'))
+ * print('symmetric', pad(x, 2, 'symmetric'))
+ * print('edge     ', pad(x, 2, 'edge'))
+ * print('wrap     ', pad(x, 2, 'wrap'))
+ *
+ * @example Pad only the last axis of a matrix, with a fill value
+ * const m = tensor([[1, 2], [3, 4]])
+ * print('padded =', pad(m, [[0, 1]], 'constant', { value: 9 }))
+ *
+ * @example The gradient adds each border read back onto its source
+ * // Edge padding reads the end samples again for every sample it adds.
+ * print('grad =', grad((x) => sum(pad(x, 2, 'edge')))(tensor([1, 2, 3])))
  */
 export function pad(x: Value, widths: PadWidths, mode: PadMode = 'constant', { value = 0 } = {}): Value {
   refuseComplex('pad', x, 'is real-only for now')

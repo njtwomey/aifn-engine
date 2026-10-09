@@ -17,7 +17,7 @@ export type Size = number
 /** A zero-based integer position along an axis or in a list. Negative indices count from the end where documented. */
 export type Index = number
 
-/** One axis of a tensor, zero-based; negative axes count from the end (−1 is the last). */
+/** One axis of a tensor, zero-based; negative axes count from the end ($-1$ is the last). */
 export type Axis = number
 
 /** One axis or several (duplicates are an error); functions that reduce read `null` or omission as every axis. */
@@ -35,12 +35,17 @@ export type Shape = readonly Size[]
  */
 export type DType = 'bool' | 'int32' | 'float32' | 'float64' | 'complex128'
 
-/** The typed array that backs a tensor: Float64Array for float64 and complex128 (two per element), Uint8Array for bool. */
+/**
+ * The typed array that backs a tensor: Float64Array for float64 and complex128 (two per element), Float32Array for
+ * float32, Int32Array for int32 and Uint8Array for bool.
+ */
 export type TensorData = Float64Array | Float32Array | Int32Array | Uint8Array
 
 /** A complex number as plain data: its real and imaginary parts (what the complex converters return). */
 export interface ComplexNumber {
+  /** The real part. */
   readonly re: number
+  /** The imaginary part. */
   readonly im: number
 }
 
@@ -48,15 +53,15 @@ declare const tensorBrand: unique symbol
 
 /**
  * The type of the symbol that brands a tensor. The runtime symbol is `aifn-compute/foundation/tensor`'s `TENSOR`
- * (`Symbol.for('aifn.tensor')`), set only by its constructors and typed as this, so this `Tensor` and `aifn-compute/foundation/tensor`'s
- * are one type.
+ * (`Symbol.for('aifn.tensor')`), set only by its constructors and typed as this, so this `Tensor` and
+ * `aifn-compute/foundation/tensor`'s are one type.
  */
 export type TensorBrand = typeof tensorBrand
 
 /**
- * An n-dimensional array: `shape[k]` elements along axis k, stored in `data` at `offset + Σ_k index[k] · strides[k]`
- * (NumPy's strided layout). Immutable by convention: operations return new tensors, and views share `data`. Only
- * `aifn-compute/foundation/tensor` constructs tensors.
+ * An $n$-dimensional array: `shape[k]` elements along axis $k$, the element at index $(i_0, \dots, i_{n-1})$ stored in
+ * `data` at $\text{offset} + \sum_k i_k \, \text{strides}_k$ (NumPy's strided layout). Immutable by convention:
+ * operations return new tensors, and views share `data`. Only `aifn-compute/foundation/tensor` constructs tensors.
  */
 export interface Tensor {
   /** The brand set by `aifn-compute/foundation/tensor`'s constructors; `isTensor` checks it (no duck typing). */
@@ -65,12 +70,14 @@ export interface Tensor {
   readonly shape: Shape
   /**
    * Step in `data`, in elements, for a unit step along each axis. Row-major (C order) by default. For complex128 an
-   * element is a complex number (two doubles): element k starts at `data[2k]`.
+   * element is a complex number (two doubles): element $k$ starts at `data[2 * k]`.
    */
   readonly strides: readonly number[]
-  /** Position in `data` of the element at index (0, …, 0), in elements (complex elements for complex128). */
+  /** Position in `data` of the element at index $(0, \dots, 0)$, in elements (complex elements for complex128). */
   readonly offset: Index
+  /** The element type, which fixes the kind of `data`. */
   readonly dtype: DType
+  /** The storage, shared with every view of the same tensor; may hold more than this tensor's elements. */
   readonly data: TensorData
 }
 
@@ -85,7 +92,9 @@ export type Matrix = Tensor
  * the strings `"nan"`, `"inf"` and `"-inf"`.
  */
 export interface TensorWire {
+  /** The element type. */
   readonly dtype: DType
+  /** The length of each axis; `[]` for a scalar. */
   readonly shape: Shape
   /** Row-major values; complex128 is interleaved (re, im, re, im, …), twice as many entries as elements. */
   readonly data: readonly (number | 'nan' | 'inf' | '-inf')[]
@@ -106,8 +115,11 @@ export type TracedBrand = typeof tracedBrand
  * value is a JS number rather than a tensor (a number has shape `[]`, but so does a rank-0 tensor).
  */
 export interface Aval {
+  /** The value's shape; `[]` for a number or a rank-0 tensor. */
   readonly shape: Shape
+  /** The value's element type (for a number, the dtype it stands for: float64, or int32 for an integer result). */
   readonly dtype: DType
+  /** True when the value is a JS number rather than a tensor. */
   readonly number: boolean
 }
 
@@ -118,8 +130,11 @@ export interface Aval {
  * sees (for a batch tracer, one example's).
  */
 export interface Traced {
+  /** The brand that marks a traced value; set only by `aifn-compute/foundation/tensor`. */
   readonly [tracedBrand]: true
+  /** The nesting level of the transform that owns the tracer: higher levels are inner transforms. */
   readonly level: Index
+  /** The shape and dtype of the value the traced function sees (for a batch tracer, one example's). */
   readonly aval: Aval
 }
 

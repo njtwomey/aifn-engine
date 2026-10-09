@@ -2,10 +2,11 @@
  * Elementwise primitives with NumPy broadcasting. Each is defined once with its derivative rule; the rules are written
  * with primitives so that derivatives of derivatives work for these built-ins.
  *
- * Complex values: neg, square, exp, log, sqrt, add, sub, mul, div and pow carry a complex rule (principal branches)
- * and are holomorphic, so their derivatives are complex derivatives (see complex.ts for the ℝ² convention); `abs`
- * gives the float64 modulus. The others are defined on the real line and raise `DTypeError` for complex arguments,
- * as do the ordering comparisons; `equalTo` and `notEqualTo` compare complex values.
+ * Complex values: `neg`, `square`, `exp`, `log`, `sqrt`, `add`, `sub`, `mul`, `div` and `pow` carry a complex rule
+ * (principal branches) and are holomorphic, so their derivatives are complex derivatives (see complex.ts for the
+ * $\reals^2$ convention); `abs` gives the float64 modulus, and `where` selects complex values as they are. The others
+ * are defined on the real line and raise `DTypeError` for complex arguments, as do the ordering comparisons and the
+ * scalar maps `map` and `map2`; `equalTo` and `notEqualTo` compare complex values.
  */
 
 import { DTypeError } from 'aifn-compute/foundation/errors'
@@ -18,7 +19,12 @@ import { broadcastShapes, broadcastView } from './views'
 
 // ── Unary ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** −x. */
+/**
+ * Negation $-x$, elementwise, for real and complex values; the dtype is kept (int32 stays int32).
+ *
+ * @example Negate a vector
+ * print('neg([1, -2, 0.5]) =', neg(tensor([1, -2, 0.5])))
+ */
 export const neg: Unary = elementwise({
   id: 'foundation/tensor/neg',
   f: (x) => -x,
@@ -32,7 +38,13 @@ export const neg: Unary = elementwise({
   doc: { summary: 'Negation −x.' },
 })
 
-/** The sign of x: −1, 0 or 1 (NaN for NaN). Piecewise constant: its derivative is zero wherever it exists. */
+/**
+ * The sign of $x$, elementwise: $-1$, $0$ or $1$ (NaN for NaN). Piecewise constant: its derivative is taken as zero
+ * everywhere, which it is wherever it exists. Real values only.
+ *
+ * @example The sign of each entry
+ * print('sign([-3, 0, 2]) =', sign(tensor([-3, 0, 2])))
+ */
 export const sign: Unary = elementwise({
   id: 'foundation/tensor/sign',
   f: Math.sign,
@@ -41,6 +53,7 @@ export const sign: Unary = elementwise({
   doc: { summary: 'The sign of x: −1, 0 or 1.' },
 })
 
+/** The real absolute value $\lvert x \rvert$ as a primitive, with derivative $\sgn x$ (so 0 at 0); `abs` calls it. */
 const absReal: Unary = elementwise({
   id: 'foundation/tensor/abs',
   f: Math.abs,
@@ -50,13 +63,23 @@ const absReal: Unary = elementwise({
 })
 
 /**
- * |x|; the derivative at 0 is taken as 0 (the subgradient sign(0)). For complex values, the modulus |z| as float64
- * (`complexAbs`, whose ℝ² gradient is z/|z|).
+ * The absolute value $\lvert x \rvert$, elementwise; the derivative at 0 is taken as 0 (the subgradient $\sgn 0$). For
+ * complex values, the modulus $\lvert z \rvert$ as float64 (`complexAbs`, whose $\reals^2$ gradient is
+ * $z / \lvert z \rvert$).
+ *
+ * @example Real and complex values
+ * print('abs([-2, 0, 3]) =', abs(tensor([-2, 0, 3])))
+ * print('abs(3 + 4i) =', abs(complex(3, 4)))
  */
 export const abs: Unary = ((x: Value) =>
   typeof x !== 'number' && avalOf(x).dtype === 'complex128' ? complexAbs(x) : absReal(x)) as Unary
 
-/** x². */
+/**
+ * The square $x^2$, elementwise, for real and complex values; the dtype is kept.
+ *
+ * @example Square a vector
+ * print('square([-3, 0.5, 2]) =', square(tensor([-3, 0.5, 2])))
+ */
 export const square: Unary = elementwise({
   id: 'foundation/tensor/square',
   f: (x) => x * x,
@@ -70,7 +93,14 @@ export const square: Unary = elementwise({
   doc: { summary: 'The square x².' },
 })
 
-/** eˣ. */
+/**
+ * The exponential $e^x$, elementwise; for complex $z = x + iy$, $e^z = e^x(\cos y + i \sin y)$. Its derivative is the
+ * output itself.
+ *
+ * @example Real values, and Euler's identity
+ * print('exp([0, 1]) =', exp(tensor([0, 1])))
+ * print('exp(iπ) =', complexItem(exp(complex(0, Math.PI))))
+ */
 export const exp: Unary = elementwise({
   id: 'foundation/tensor/exp',
   f: Math.exp,
@@ -84,7 +114,14 @@ export const exp: Unary = elementwise({
   doc: { note: 'exponential-and-logarithm', summary: 'The exponential eˣ.' },
 })
 
-/** eˣ − 1, accurate for small x. */
+/**
+ * $e^x - 1$, elementwise, accurate for small $x$, where computing $e^x$ first loses the digits that matter. Real
+ * values only.
+ *
+ * @example Accurate where the plain formula is not
+ * print('expm1(1e-15) =', expm1(1e-15))
+ * print('exp(1e-15) - 1 =', exp(1e-15) - 1)
+ */
 export const expm1: Unary = elementwise({
   id: 'foundation/tensor/expm1',
   f: Math.expm1,
@@ -92,7 +129,15 @@ export const expm1: Unary = elementwise({
   doc: { summary: 'eˣ − 1, accurate for small x.' },
 })
 
-/** Natural logarithm (NaN below 0, −∞ at 0). For complex z, the principal branch log|z| + i·arg z. */
+/**
+ * The natural logarithm $\log x$, elementwise (NaN below 0, $-\infty$ at 0). For complex $z$, the principal branch
+ * $\log \lvert z \rvert + i \arg z$.
+ *
+ * @example Real values, and the logarithm of $-1$ as a complex number
+ * print('log([1, e, 0]) =', log(tensor([1, Math.E, 0])))
+ * print('log(-1) =', log(-1))
+ * print('log(-1 + 0i) =', complexItem(log(complex(-1, 0))))
+ */
 export const log: Unary = elementwise({
   id: 'foundation/tensor/log',
   f: Math.log,
@@ -106,7 +151,13 @@ export const log: Unary = elementwise({
   test: { domain: { lo: 0.1, hi: 3 } },
 })
 
-/** log(1 + x), accurate for small x. */
+/**
+ * $\log(1 + x)$, elementwise, accurate for small $x$, where $1 + x$ would round. Real values only.
+ *
+ * @example Accurate where the plain formula is not
+ * print('log1p(1e-17) =', log1p(1e-17))
+ * print('log(1 + 1e-17) =', log(1 + 1e-17))
+ */
 export const log1p: Unary = elementwise({
   id: 'foundation/tensor/log1p',
   f: Math.log1p,
@@ -115,7 +166,14 @@ export const log1p: Unary = elementwise({
   test: { domain: { lo: -0.5, hi: 2 } },
 })
 
-/** √x (NaN below 0). For complex z, the principal root (real part ≥ 0; branch cut on the negative real axis). */
+/**
+ * The square root $\sqrt{x}$, elementwise (NaN below 0). For complex $z$, the principal root (real part $\ge 0$;
+ * branch cut on the negative real axis).
+ *
+ * @example Real values, and the root of $-1$ as a complex number
+ * print('sqrt([4, 2, -1]) =', sqrt(tensor([4, 2, -1])))
+ * print('sqrt(-1 + 0i) =', complexItem(sqrt(complex(-1, 0))))
+ */
 export const sqrt: Unary = elementwise({
   id: 'foundation/tensor/sqrt',
   f: Math.sqrt,
@@ -126,7 +184,12 @@ export const sqrt: Unary = elementwise({
   test: { domain: { lo: 0.1, hi: 3 } },
 })
 
-/** sin x (radians). */
+/**
+ * The sine $\sin x$, elementwise, of $x$ in radians. Real values only.
+ *
+ * @example At $0$, $\pi/2$ and $\pi$
+ * print('sin([0, π/2, π]) =', sin(tensor([0, Math.PI / 2, Math.PI])))
+ */
 export const sin: Unary = elementwise({
   id: 'foundation/tensor/sin',
   f: Math.sin,
@@ -134,7 +197,12 @@ export const sin: Unary = elementwise({
   doc: { summary: 'The sine (radians).' },
 })
 
-/** cos x (radians). */
+/**
+ * The cosine $\cos x$, elementwise, of $x$ in radians. Real values only.
+ *
+ * @example At $0$, $\pi/2$ and $\pi$
+ * print('cos([0, π/2, π]) =', cos(tensor([0, Math.PI / 2, Math.PI])))
+ */
 export const cos: Unary = elementwise({
   id: 'foundation/tensor/cos',
   f: Math.cos,
@@ -142,7 +210,14 @@ export const cos: Unary = elementwise({
   doc: { summary: 'The cosine (radians).' },
 })
 
-/** tanh x. */
+/**
+ * The hyperbolic tangent $\tanh x$, elementwise, with derivative $1 - \tanh^2 x$ (computed from the output). Real
+ * values only.
+ *
+ * @example Values and slopes
+ * print('tanh([-1, 0, 1]) =', tanh(tensor([-1, 0, 1])))
+ * print('slope at 0 =', grad(tanh)(0))
+ */
 export const tanh: Unary = elementwise({
   id: 'foundation/tensor/tanh',
   f: Math.tanh,
@@ -152,7 +227,12 @@ export const tanh: Unary = elementwise({
 
 // ── Binary ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** a + b. */
+/**
+ * The sum $a + b$, elementwise with broadcasting, for real and complex values; the result has the promoted dtype.
+ *
+ * @example A row added to every row of a matrix
+ * print('add =', add(tensor([[1, 2], [3, 4]]), tensor([10, 20])))
+ */
 export const add: Binary = elementwise({
   id: 'foundation/tensor/add',
   f: (a, b) => a + b,
@@ -167,7 +247,13 @@ export const add: Binary = elementwise({
   doc: { summary: 'The sum a + b.' },
 })
 
-/** a − b. */
+/**
+ * The difference $a - b$, elementwise with broadcasting, for real and complex values; the result has the promoted
+ * dtype.
+ *
+ * @example Subtract a number from every entry
+ * print('sub([5, 7], 2) =', sub(tensor([5, 7]), 2))
+ */
 export const sub: Binary = elementwise({
   id: 'foundation/tensor/sub',
   f: (a, b) => a - b,
@@ -182,7 +268,14 @@ export const sub: Binary = elementwise({
   doc: { summary: 'The difference a − b.' },
 })
 
-/** a · b (elementwise). */
+/**
+ * The product $a \cdot b$, elementwise with broadcasting (not the matrix product: see `matmul`), for real and complex
+ * values; the result has the promoted dtype.
+ *
+ * @example Scale a vector, and broadcast a column against a row
+ * print('mul([1, 2, 3], 2) =', mul(tensor([1, 2, 3]), 2))
+ * print('column × row =', mul(tensor([[1], [2]]), tensor([10, 20, 30])))
+ */
 export const mul: Binary = elementwise({
   id: 'foundation/tensor/mul',
   f: (a, b) => a * b,
@@ -197,7 +290,14 @@ export const mul: Binary = elementwise({
   doc: { summary: 'The product a·b.' },
 })
 
-/** a / b (always floating point). */
+/**
+ * The quotient $a / b$, elementwise with broadcasting, always floating point (int32 operands give float64). Division
+ * by zero gives $\pm\infty$ or NaN, as in IEEE arithmetic. Complex quotients use Smith's algorithm.
+ *
+ * @example Halve a vector, and divide by zero
+ * print('div([1, 2, 3], 2) =', div(tensor([1, 2, 3]), 2))
+ * print('div([1, -1, 0], 0) =', div(tensor([1, -1, 0]), 0))
+ */
 export const div: Binary = elementwise({
   id: 'foundation/tensor/div',
   f: (a, b) => a / b,
@@ -215,11 +315,21 @@ export const div: Binary = elementwise({
 })
 
 /**
- * aᵇ (always floating point). The derivative in a is b·aᵇ⁻¹, taken as 0 at a = b = 0 (a⁰ = 1 for every a, where
- * b·aᵇ⁻¹ would be 0·∞, e.g. the constant term of polynomial features at x = 0). The derivative in b is y·log a, taken
- * as 0 where a = 0 (the limit for b > 0) and NaN for a < 0, where aᵇ is not differentiable in b. It is computed only
- * when b is differentiated, so a constant exponent never evaluates log a. Both guards also replace the operand inside
- * the unused branch (the "double where"), so that branch stays finite and second derivatives are not NaN there.
+ * The power $a^b$, elementwise with broadcasting (always floating point; complex values on the principal branch). The
+ * derivative in $a$ is $b a^{b-1}$, taken as 0 at $a = b = 0$ ($a^0 = 1$ for every $a$, where $b a^{b-1}$ would be
+ * $0 \cdot \infty$, e.g. the constant term of polynomial features at $x = 0$). The derivative in $b$ is $y \log a$,
+ * taken as 0 where $a = 0$ (the limit for $b > 0$) and NaN for $a < 0$, where $a^b$ is not differentiable in $b$. It is
+ * computed only when $b$ is differentiated, so a constant exponent never evaluates $\log a$. Both guards also replace
+ * the operand inside the unused branch (the "double where"), so that branch stays finite and second derivatives are not
+ * NaN there.
+ *
+ * @example Squares, and a square root as a power
+ * print('pow([2, 3, 4], 2) =', pow(tensor([2, 3, 4]), 2))
+ * print('pow(2, 0.5) =', pow(2, 0.5))
+ *
+ * @example The derivative of $x^0$ at $x = 0$ is 0, not NaN
+ * print('d/dx x^0 at 0 =', grad((x) => pow(x, 0))(0))
+ * print('d/dx x^3 at 2 =', grad((x) => pow(x, 3))(2))
  */
 export const pow: Binary = elementwise({
   id: 'foundation/tensor/pow',
@@ -245,7 +355,13 @@ export const pow: Binary = elementwise({
   },
 })
 
-/** The larger of a and b. Where they tie the derivative goes to a. NaN propagates. */
+/**
+ * The larger of $a$ and $b$, elementwise with broadcasting. Where they tie the derivative goes to $a$. NaN propagates.
+ * Real values only.
+ *
+ * @example A floor of 3, and NaN propagating
+ * print('maximum([1, 5, NaN], 3) =', maximum(tensor([1, 5, NaN]), 3))
+ */
 export const maximum: Binary = elementwise({
   id: 'foundation/tensor/maximum',
   f: (a, b) => (a !== a || b !== b ? NaN : a >= b ? a : b),
@@ -254,7 +370,13 @@ export const maximum: Binary = elementwise({
   doc: { summary: 'The larger of a and b.' },
 })
 
-/** The smaller of a and b. Where they tie the derivative goes to a. NaN propagates. */
+/**
+ * The smaller of $a$ and $b$, elementwise with broadcasting. Where they tie the derivative goes to $a$. NaN
+ * propagates. Real values only.
+ *
+ * @example A ceiling of 3, and NaN propagating
+ * print('minimum([1, 5, NaN], 3) =', minimum(tensor([1, 5, NaN]), 3))
+ */
 export const minimum: Binary = elementwise({
   id: 'foundation/tensor/minimum',
   f: (a, b) => (a !== a || b !== b ? NaN : a <= b ? a : b),
@@ -263,7 +385,19 @@ export const minimum: Binary = elementwise({
   doc: { summary: 'The smaller of a and b.' },
 })
 
-/** x limited to [lo, hi] elementwise (an explicit operation: nothing in aifn clips silently). */
+/**
+ * $x$ limited to $[\ell, h]$ elementwise, $\min(\max(x, \ell), h)$, with broadcasting (an explicit operation: nothing
+ * in aifn clips silently). Differentiable, through `maximum` and `minimum`: the derivative goes to $x$ inside the range
+ * (and at its ends), and to the bound outside it. Real values only.
+ *
+ * @param x The values to limit.
+ * @param lo The lower bound $\ell$, broadcast against `x`.
+ * @param hi The upper bound $h$, broadcast against `x`. It is applied last, so it wins where it is below `lo`.
+ * @returns `x` with entries below `lo` raised to it and entries above `hi` lowered to it, in the broadcast shape.
+ *
+ * @example Clip to the unit interval
+ * print('clip([-2, 0.5, 3], 0, 1) =', clip(tensor([-2, 0.5, 3]), 0, 1))
+ */
 export function clip(x: Value, lo: Value, hi: Value): Value {
   return minimum(maximum(x, lo), hi)
 }
@@ -282,6 +416,18 @@ export interface Comparison {
 // A comparison is a primitive (so it batches under vmap) whose derivative is zero: the derivative transforms compute
 // the mask on the primal values and treat it as a constant.
 // Ordering comparisons refuse complex values; equalTo and notEqualTo compare (re, im) pairs.
+/**
+ * Define the comparison primitive `foundation/tensor/<name>`: 1 where `test` holds and 0 elsewhere, a number for two
+ * numbers and a bool tensor otherwise. Its derivative is zero (the mask is a constant to the transforms), and it
+ * batches under `vmap`. Without a complex rule it refuses complex values with `DTypeError`.
+ *
+ * @param name The comparison's name: its primitive is registered as `foundation/tensor/<name>`, and errors name it.
+ * @param test The comparison of two real numbers.
+ * @param summary The one-line summary of the primitive in the registry.
+ * @param complex The rule for complex arguments, given (re, im) pairs, which writes 1 or 0 to the real part of its
+ *   result. Left out, complex arguments throw `DTypeError`.
+ * @returns The comparison, callable on numbers, tensors and traced values.
+ */
 function comparison(
   name: string,
   test: (a: number, b: number) => boolean,
@@ -306,15 +452,46 @@ function comparison(
   }) as Comparison
 }
 
-/** a < b. */
+/**
+ * $a < b$, elementwise with broadcasting: 1 where it holds, 0 elsewhere (a bool tensor for tensor arguments). Its
+ * derivative is zero. Complex values throw `DTypeError`.
+ *
+ * @example Which entries are below 2
+ * print('less([1, 2, 3], 2) =', less(tensor([1, 2, 3]), 2))
+ */
 export const less = comparison('less', (a, b) => a < b, 'a < b, as 1 or 0.')
-/** a ≤ b. */
+/**
+ * $a \le b$, elementwise with broadcasting: 1 where it holds, 0 elsewhere (a bool tensor for tensor arguments). Its
+ * derivative is zero. Complex values throw `DTypeError`.
+ *
+ * @example Which entries are at most 2
+ * print('lessEqual([1, 2, 3], 2) =', lessEqual(tensor([1, 2, 3]), 2))
+ */
 export const lessEqual = comparison('lessEqual', (a, b) => a <= b, 'a ≤ b, as 1 or 0.')
-/** a > b. */
+/**
+ * $a > b$, elementwise with broadcasting: 1 where it holds, 0 elsewhere (a bool tensor for tensor arguments). Its
+ * derivative is zero. Complex values throw `DTypeError`.
+ *
+ * @example Which entries are above 2
+ * print('greater([1, 2, 3], 2) =', greater(tensor([1, 2, 3]), 2))
+ */
 export const greater = comparison('greater', (a, b) => a > b, 'a > b, as 1 or 0.')
-/** a ≥ b. */
+/**
+ * $a \ge b$, elementwise with broadcasting: 1 where it holds, 0 elsewhere (a bool tensor for tensor arguments). Its
+ * derivative is zero. Complex values throw `DTypeError`.
+ *
+ * @example Which entries are at least 2
+ * print('greaterEqual([1, 2, 3], 2) =', greaterEqual(tensor([1, 2, 3]), 2))
+ */
 export const greaterEqual = comparison('greaterEqual', (a, b) => a >= b, 'a ≥ b, as 1 or 0.')
-/** a = b (NaN equals nothing). */
+/**
+ * $a = b$, elementwise with broadcasting: 1 where it holds, 0 elsewhere (a bool tensor for tensor arguments). NaN
+ * equals nothing, itself included. Complex values are equal when both parts are. Its derivative is zero.
+ *
+ * @example NaN equals nothing; complex values compare both parts
+ * print('equalTo([1, NaN, 3], [1, NaN, 0]) =', equalTo(tensor([1, NaN, 3]), tensor([1, NaN, 0])))
+ * print('1 + 2i = 1 + 2i:', equalTo(complex(1, 2), complex(1, 2)))
+ */
 export const equalTo = comparison(
   'equalTo',
   (a, b) => a === b,
@@ -323,7 +500,13 @@ export const equalTo = comparison(
     o[0] = z[0] === z[2] && z[1] === z[3] ? 1 : 0
   },
 )
-/** a ≠ b. */
+/**
+ * $a \ne b$, elementwise with broadcasting: 1 where it holds, 0 elsewhere (a bool tensor for tensor arguments). NaN
+ * differs from everything, itself included. Complex values differ when either part does. Its derivative is zero.
+ *
+ * @example Which entries differ from 1
+ * print('notEqualTo([1, 2, NaN], 1) =', notEqualTo(tensor([1, 2, NaN]), 1))
+ */
 export const notEqualTo = comparison(
   'notEqualTo',
   (a, b) => a !== b,
@@ -335,6 +518,10 @@ export const notEqualTo = comparison(
 
 // ── Selection and arbitrary maps ─────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The selection primitive behind `where`: its derivative is zero in the condition $c$, $[c \ne 0]$ in $a$ and
+ * $[c = 0]$ in $b$.
+ */
 const whereOp = elementwise({
   id: 'foundation/tensor/where',
   f: (c, a, b) => (c !== 0 ? a : b),
@@ -369,8 +556,24 @@ const whereOp = elementwise({
 })
 
 /**
- * Elementwise choice: a where `condition` is non-zero, b elsewhere, all three broadcast. Differentiable in a and b;
- * the condition is treated as a constant.
+ * Elementwise choice: $a$ where `condition` is non-zero, $b$ elsewhere, all three broadcast. Differentiable in $a$ and
+ * $b$ (each receives the cotangent where it was chosen); the condition is treated as a constant. Complex `a` and `b`
+ * are selected as they are.
+ *
+ * @param condition The mask: true where it is non-zero (a bool mask from a comparison, or any numbers).
+ * @param a The values taken where `condition` is non-zero.
+ * @param b The values taken where `condition` is zero.
+ * @returns The chosen values, in the broadcast shape of the three and the promoted dtype of the three (a bool
+ *   condition promotes nothing).
+ *
+ * @example Replace negative entries with zero
+ * const x = tensor([-1, 2, -3, 4])
+ * print('where(x > 0, x, 0) =', where(greater(x, 0), x, 0))
+ *
+ * @example The gradient flows to the branch that was chosen
+ * // A leaky ReLU: slope 1 above 0, 0.1 below.
+ * const leaky = (x) => sum(where(greater(x, 0), x, mul(0.1, x)))
+ * print('gradient at [-2, 3] =', grad(leaky)(tensor([-2, 3])))
  */
 export function where(condition: Value, a: number, b: number): number
 export function where(condition: Value, a: Traced, b: Value): Traced
@@ -383,8 +586,15 @@ export function where(condition: Value, a: Value, b: Value): Value {
 }
 
 /**
- * Apply an arbitrary scalar function elementwise. It has no derivative: to make a function differentiable, define it
- * with `elementwise` and give its derivative.
+ * Apply an arbitrary scalar function elementwise. It has no derivative (differentiating through it throws): to make a
+ * function differentiable, define it with `elementwise` and give its derivative. It batches under `vmap`.
+ *
+ * @param x The values: a number, or a real tensor (complex128 throws `DTypeError`).
+ * @param f The scalar function, called once per element.
+ * @returns `f` of each element: a number for a number, otherwise a float64 tensor of the shape of `x`.
+ *
+ * @example Any JavaScript function of one number
+ * print('odd entries:', map(tensor([1, 2, 3, 4]), (v) => v % 2))
  */
 export function map(x: number, f: (v: number) => number): number
 export function map(x: Tensor, f: (v: number) => number): Tensor
@@ -395,8 +605,12 @@ export function map(x: Value, f: (v: number) => number): Value {
 
 /**
  * A local primitive for `map` and `map2`: no derivative at all (`vjp: null`, so jvp is missing by design: the scalar
- * function is opaque), batched by broadcasting like every elementwise primitive, with the broadcasting shape rule.
- * Built once each; the scalar function is the primitive's parameter.
+ * function is opaque), batched by broadcasting like every elementwise primitive, with the broadcasting shape rule
+ * (float64 results). Built once each; the scalar function is the primitive's parameter.
+ *
+ * @param name The primitive's id: a bare name (`map`, `map2`), so the primitive is local and not registered.
+ * @param impl The forward rule on raw arguments, given the scalar function (the primitive's parameter).
+ * @returns The primitive, applied as `op(args, f)`.
  */
 function escapeHatch<P>(name: string, impl: (args: Raw[], f: P) => Raw) {
   return definePrimitive<P>({
@@ -412,7 +626,17 @@ function escapeHatch<P>(name: string, impl: (args: Raw[], f: P) => Raw) {
   })
 }
 
-/** Apply an arbitrary scalar function of two broadcast arguments elementwise. It has no derivative (see `map`). */
+/**
+ * Apply an arbitrary scalar function of two broadcast arguments elementwise. It has no derivative (see `map`).
+ *
+ * @param a The first arguments: a number, or a real tensor (complex128 throws `DTypeError`), broadcast against `b`.
+ * @param b The second arguments, broadcast against `a`.
+ * @param f The scalar function, called once per pair of broadcast elements.
+ * @returns `f` of each pair: a number when both are numbers, otherwise a float64 tensor of the broadcast shape.
+ *
+ * @example Any JavaScript function of two numbers
+ * print('[7, 8, 9] mod 4 =', map2(tensor([7, 8, 9]), 4, (x, y) => x % y))
+ */
 export function map2(a: number, b: number, f: (x: number, y: number) => number): number
 export function map2(a: Tensor, b: Tensor | number, f: (x: number, y: number) => number): Tensor
 export function map2(a: number, b: Tensor, f: (x: number, y: number) => number): Tensor
@@ -421,17 +645,25 @@ export function map2(a: Value, b: Value, f: (x: number, y: number) => number): V
   return map2Op([a, b], f)
 }
 
+/** The primitive behind `map`: the scalar function applied to each element of a real value. */
 const mapOp = escapeHatch<(v: number) => number>('map', ([v], f) =>
   typeof v === 'number' ? f(v) : unaryKernel(realOnly('map', v), f, 'float64'),
 )
 
+/** The primitive behind `map2`: the scalar function applied to each pair of broadcast elements of two real values. */
 const map2Op = escapeHatch<(x: number, y: number) => number>('map2', ([x, y], f) =>
   typeof x === 'number' && typeof y === 'number'
     ? f(x, y)
     : binaryKernel(realOnly('map2', x), realOnly('map2', y), f, 'float64'),
 )
 
-/** A raw value that must not be complex (the scalar maps take one real number per element). */
+/**
+ * A raw value that must not be complex (the scalar maps take one real number per element).
+ *
+ * @param where The caller's name, for the error message.
+ * @param x The raw value to check.
+ * @returns `x` itself; a complex128 tensor throws `DTypeError` instead.
+ */
 function realOnly<R extends Raw>(where: string, x: R): R {
   if (typeof x !== 'number' && x.dtype === 'complex128')
     throw new DTypeError(where, `${where}: the scalar function takes real numbers, not complex128`, ['complex128'])
@@ -440,7 +672,13 @@ function realOnly<R extends Raw>(where: string, x: R): R {
 
 // ── Complex scalar rules (principal branches) ────────────────────────────────────────────────────────────────────────
 
-/** (a + ib)/(c + id) by Smith's algorithm (1962), which avoids overflow in c² + d². */
+/**
+ * $(a + ib)/(c + id)$ by Smith's algorithm (1962), which avoids overflow in $c^2 + d^2$. A zero divisor divides each
+ * part by 0 (infinite or NaN parts).
+ *
+ * @param o Where the quotient is written: its real part to `o[0]` and its imaginary part to `o[1]`.
+ * @param z The operands as (re, im) pairs: $a$ and $b$ in `z[0]` and `z[1]`, $c$ and $d$ in `z[2]` and `z[3]`.
+ */
 function complexDivide(o: Float64Array, z: Float64Array): void {
   const [a, b, c, d] = [z[0], z[1], z[2], z[3]]
   if (Math.abs(c) >= Math.abs(d)) {
@@ -462,8 +700,12 @@ function complexDivide(o: Float64Array, z: Float64Array): void {
 }
 
 /**
- * The principal square root: real part ≥ 0, and the imaginary part takes the sign of im z (so −0 below the cut):
- * t = √((|z| + |x|)/2), then (t, y/2t) for x ≥ 0 and (|y|/2t, ±t) for x < 0.
+ * The principal square root of $z = x + iy$: real part $\ge 0$, and the imaginary part takes the sign of $y$ (so $-0$
+ * below the cut): $t = \sqrt{(\lvert z \rvert + \lvert x \rvert)/2}$, then $(t, y/2t)$ for $x \ge 0$ and
+ * $(\lvert y \rvert/2t, \pm t)$ for $x < 0$. The root of 0 is 0.
+ *
+ * @param o Where the root is written: its real part to `o[0]` and its imaginary part to `o[1]`.
+ * @param z The argument as $x$ in `z[0]` and $y$ in `z[1]`.
  */
 function complexSqrt(o: Float64Array, z: Float64Array): void {
   const [x, y] = [z[0], z[1]]
@@ -482,7 +724,13 @@ function complexSqrt(o: Float64Array, z: Float64Array): void {
   }
 }
 
-/** aᵇ = exp(b·log a) on the principal branch; 0ᵇ is 1 for b = 0, 0 for Re b > 0 and NaN otherwise. */
+/**
+ * $a^b = \exp(b \log a)$ on the principal branch; $0^b$ is 1 for $b = 0$, 0 for $\operatorname{Re} b > 0$ and NaN
+ * otherwise.
+ *
+ * @param o Where the power is written: its real part to `o[0]` and its imaginary part to `o[1]`.
+ * @param z The operands as (re, im) pairs: the base $a$ in `z[0]` and `z[1]`, the exponent $b$ in `z[2]` and `z[3]`.
+ */
 function complexPower(o: Float64Array, z: Float64Array): void {
   const [ar, ai, br, bi] = [z[0], z[1], z[2], z[3]]
   if (ar === 0 && ai === 0) {

@@ -8,6 +8,7 @@ import * as conv from './conv'
 import * as convolution from './convolution'
 import * as image from './image'
 
+/** Registers one function of this module with its registry entry (key, name, role and the notes it serves). */
 const fn = definer<FunctionInfo>('function', 'foundation/convolution')
 
 fn(

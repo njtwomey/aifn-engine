@@ -1,9 +1,9 @@
 /**
  * Pytrees (design K §4.5): nested arrays and plain objects whose leaves are numbers, tensors or traced values. The
- * autodiff transforms treeFlatten their arguments into leaves, differentiate with respect to the leaves and rebuild results
- * of the same structure; layers return their parameters as trees; optimisers update them leaf by leaf; L-BFGS and
- * Nelder–Mead read them as one flat vector (`ravel`). This is the one implementation (JAX's `jax.tree_util` at teaching
- * scale).
+ * autodiff transforms flatten their arguments into leaves with `treeFlatten`, differentiate with respect to the leaves
+ * and rebuild results of the same structure; layers return their parameters as trees; optimisers update them leaf by
+ * leaf; L-BFGS and Nelder–Mead read them as one flat vector (`ravel`). This is the one implementation (JAX's
+ * `jax.tree_util` at teaching scale).
  *
  * - A **leaf** is a number, a branded tensor or a traced value. Arrays and plain objects (prototype `Object` or null)
  *   are **nodes**. Anything else (strings, booleans, null, undefined, functions, class instances) is **static**:
@@ -54,31 +54,61 @@ export type TreeDef =
 
 /** A flattened tree: its leaves in order, a readable path per leaf, and the structure to rebuild it. */
 export type Flat<V extends Value = Value> = {
+  /** The leaves, depth first: arrays in index order, object keys in insertion order. */
   readonly leaves: V[]
   /** A readable path per leaf: `x`, `w[1]`, `layer.bias` (prefixed by the root name given to `treeFlatten`). */
   readonly paths: string[]
+  /** The structure, from which `treeUnflatten` rebuilds a tree of the same shape from new leaves. */
   readonly treedef: TreeDef
 }
 
-/** True for a pytree leaf: a number, a tensor or a traced value. */
+/**
+ * True for a pytree leaf: a number, a tensor or a traced value.
+ *
+ * @param x Any value.
+ * @returns Whether `x` is a leaf; arrays, objects and everything else are not.
+ */
 function isLeaf(x: unknown): x is Value {
   return typeof x === 'number' || isTensor(x) || isTraced(x)
 }
 
+/**
+ * True for a pytree object node: an object whose prototype is `Object.prototype` or null (not an array, a tensor or a
+ * class instance).
+ *
+ * @param x Any value.
+ * @returns Whether `x` is a plain object, whose own enumerable keys are its children.
+ */
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   if (typeof x !== 'object' || x === null) return false
   const proto = Object.getPrototypeOf(x) as unknown
   return proto === Object.prototype || proto === null
 }
 
+/**
+ * The path of a child: `path[i]` for an array index, `path.key` for an object key (just `key` at an unnamed root).
+ *
+ * @param path The parent's path; empty for an unnamed root.
+ * @param key The child's array index or object key.
+ * @returns The child's path.
+ */
 const childPath = (path: string, key: string | number): string =>
   typeof key === 'number' ? `${path}[${key}]` : path ? `${path}.${key}` : key
 
 /**
  * Flatten a tree into its leaves (depth first), their paths and its structure. `root` names the whole tree in the
- * paths (e.g. `x` gives `x[0]`, `x.w`).
+ * paths (e.g. `x` gives `x[0]`, `x.w`). Static values (strings, booleans, null, class instances, ...) are kept in the
+ * structure, not among the leaves.
  *
- * @example treeFlatten({ w: tensor([1, 2]), b: 0 }) // leaves [w, 0], paths ['w', 'b']
+ * @param tree The tree to flatten: a leaf, an array or a plain object, nested to any depth. It is not modified.
+ * @param root The name of the whole tree in the paths; left empty, the paths start at the first key (`w`, `[0]`).
+ * @returns The leaves in order, a path per leaf and the `treedef` that `treeUnflatten` rebuilds from.
+ *
+ * @example Leaves, paths and structure
+ * const { leaves, paths, treedef } = treeFlatten({ w: tensor([1, 2]), b: 0, act: 'relu' }, 'layer')
+ * print('leaves =', leaves)
+ * print('paths =', paths)
+ * print('treedef =', treedef)
  */
 export function treeFlatten<V extends Value = Value>(tree: unknown, root = ''): Flat<V> {
   const leaves: V[] = []
@@ -100,7 +130,16 @@ export function treeFlatten<V extends Value = Value>(tree: unknown, root = ''): 
   return { leaves, paths, treedef }
 }
 
-/** The number of leaves a structure holds. */
+/**
+ * The number of leaves a structure holds.
+ *
+ * @param treedef The structure, as `treeFlatten` returns it.
+ * @returns The count of `leaf` positions; static values count 0.
+ *
+ * @example Count the leaves of a nested structure
+ * const { treedef } = treeFlatten([1, [2, 3], { a: tensor([4, 5]), name: 'x' }])
+ * print('leaves =', leafCount(treedef))
+ */
 export function leafCount(treedef: TreeDef): Size {
   if (treedef.kind === 'leaf') return 1
   if (treedef.kind === 'static') return 0
@@ -108,8 +147,24 @@ export function leafCount(treedef: TreeDef): Size {
 }
 
 /**
- * Rebuild a tree of structure `treedef` from leaves in flattening order (the inverse of `treeFlatten`). The leaves may be
- * of any kind (the transforms rebuild gradients, tangents and traced inputs this way).
+ * Rebuild a tree of structure `treedef` from leaves in flattening order (the inverse of `treeFlatten`). The leaves may
+ * be of any kind (the transforms rebuild gradients, tangents and traced inputs this way). A wrong number of leaves
+ * throws `ShapeError`.
+ *
+ * @param treedef The structure to rebuild, as `treeFlatten` returns it. Its static values are put back as they were.
+ * @param leaves One value per leaf position, in flattening order; exactly `leafCount(treedef)` of them.
+ * @returns A new tree of fresh arrays and objects, with `leaves` at the leaf positions.
+ *
+ * @example Flatten, replace the leaves, rebuild
+ * const { leaves, treedef } = treeFlatten({ w: tensor([1, 2]), b: 0, act: 'relu' })
+ * print('rebuilt =', treeUnflatten(treedef, leaves.map((x) => mul(x, 10))))
+ *
+ * @example The number of leaves must match
+ * try {
+ *   treeUnflatten(treeFlatten([1, 2]).treedef, [1])
+ * } catch (e) {
+ *   print(e.name, ':', e.message)
+ * }
  */
 export function treeUnflatten<T = unknown>(treedef: TreeDef, leaves: readonly unknown[]): T {
   const expected = leafCount(treedef)
@@ -134,16 +189,43 @@ export function treeUnflatten<T = unknown>(treedef: TreeDef, leaves: readonly un
   return build(treedef) as T
 }
 
-/** The leaves of a tree with their paths, depth first. `V` is the leaf type the caller expects. */
+/**
+ * The leaves of a tree with their paths, depth first. `V` is the leaf type the caller expects.
+ *
+ * @param tree The tree to read; not modified.
+ * @param root The name of the whole tree in the paths, as for `treeFlatten`.
+ * @returns One `{ path, value }` per leaf, in flattening order.
+ *
+ * @example The parameters of a small network by name
+ * print(treeLeaves({ layers: [{ weight: tensor([[1, 2]]) }, { weight: 3 }] }, 'net'))
+ */
 export function treeLeaves<V extends Value = LeafValue>(tree: unknown, root = ''): Leaf<V>[] {
   const { leaves, paths } = treeFlatten<V>(tree, root)
   return leaves.map((value, k) => ({ path: paths[k], value }))
 }
 
 /**
- * Map the leaves of several trees of the same structure together: `treeZip([a, b], ([x, y], path) => …)` calls f on
- * each tuple of corresponding leaves and rebuilds the structure of the first tree. Static values come from the first
- * tree. The trees must have the same structure (the other trees' leaves are read at the first tree's leaf paths).
+ * Map the leaves of several trees of the same structure together: `treeZip([a, b], ([x, y], path) => ...)` calls `f`
+ * on each tuple of corresponding leaves and rebuilds the structure of the first tree. Static values come from the
+ * first tree, and may differ between the trees. The leaves must match: another tree with a different number of leaves,
+ * or with a leaf at a different path, throws `ShapeError`.
+ *
+ * @param trees The first tree, whose structure the result has, then the trees zipped with it; none is modified.
+ * @param f Called once per leaf of the first tree with the leaves at that position (the first tree's first) and its
+ *   path; returns the leaf of the result.
+ * @returns A tree of the first tree's structure holding what `f` returned.
+ *
+ * @example Add two parameter trees leaf by leaf
+ * const a = { w: tensor([1, 2]), b: 1 }
+ * const b = { w: tensor([10, 20]), b: 2 }
+ * print('a + b =', treeZip([a, b], ([x, y]) => add(x, y)))
+ *
+ * @example Leaves must sit at the same paths
+ * try {
+ *   treeZip([{ x: 1 }, { y: 2 }], ([p, q]) => add(p, q))
+ * } catch (e) {
+ *   print(e.name, ':', e.message)
+ * }
  */
 export function treeZip<T, V extends Value = LeafValue>(
   trees: readonly [T, ...unknown[]],
@@ -170,20 +252,45 @@ export function treeZip<T, V extends Value = LeafValue>(
   return treeUnflatten<T>(main.treedef, mapped)
 }
 
-/** Map the leaves of one tree, keeping its structure. */
+/**
+ * Map the leaves of one tree, keeping its structure (static values are carried through).
+ *
+ * @param tree The tree to map; not modified.
+ * @param f Called once per leaf with the leaf and its path; returns the leaf of the result.
+ * @returns A new tree of the same structure holding what `f` returned.
+ *
+ * @example Scale every parameter, or one by its path
+ * const params = { w: tensor([1, 2]), b: 1, act: 'relu' }
+ * print('doubled =', treeMap(params, (x) => mul(x, 2)))
+ * print('bias zeroed =', treeMap(params, (x, path) => (path === 'b' ? 0 : x)))
+ */
 export function treeMap<T, V extends Value = LeafValue>(tree: T, f: (leaf: V, path: string) => Value): T {
   return treeZip<T, V>([tree], ([leaf], path) => f(leaf, path))
 }
 
 /**
  * A tree of zeros with the structure of `tree`: 0 for a number leaf, `zeros(shape)` for a tensor (or traced) leaf
- * (complex128 for a complex leaf, float64 otherwise).
+ * (complex128 for a complex leaf, float64 otherwise). Static values are kept; the zeros are not traced.
+ *
+ * @param tree The tree whose structure and leaf shapes are copied; not modified.
+ * @returns A new tree with a zero of the same shape at each leaf, e.g. to start an accumulator of gradients.
+ *
+ * @example Zeros for a layer's parameters
+ * print(zerosLike({ w: tensor([[1, 2], [3, 4]]), b: 5, name: 'dense' }))
  */
 export function zerosLike<T>(tree: T): T {
   return treeMap<T, Value>(tree, (leaf) => zerosOf(avalOf(leaf)))
 }
 
-/** The number of scalar entries in a tree's leaves (a number counts 1, a tensor its size). */
+/**
+ * The number of scalar entries in a tree's leaves (a number counts 1, a tensor its size). A complex entry counts 1.
+ *
+ * @param tree The tree to count; static values count nothing.
+ * @returns The total number of entries over all leaves.
+ *
+ * @example A $2 \times 2$ weight and a bias
+ * print('parameters =', countParams({ w: tensor([[1, 2], [3, 4]]), b: 5, name: 'dense' }))
+ */
 export function countParams(tree: unknown): Size {
   return treeFlatten(tree).leaves.reduce<number>((n, leaf) => n + avalOf(leaf).shape.reduce((a, b) => a * b, 1), 0)
 }
@@ -199,7 +306,17 @@ export type Raveled<T> = {
 /**
  * Ravel a tree of raw leaves into one Float64Array (for L-BFGS, Nelder–Mead and other vector optimisers), with its
  * inverse. Traced leaves are read through their values; the vector is not differentiable. A complex128 leaf takes two
- * entries per element, (re, im) interleaved (the ℝ² view), and is rebuilt complex.
+ * entries per element, (re, im) interleaved (the $\reals^2$ view), and is rebuilt complex. `unravel` throws
+ * `ShapeError` for a vector of the wrong length.
+ *
+ * @param tree The tree to read; not modified. Its structure and leaf shapes are kept for `unravel`.
+ * @returns The `vector` of every leaf's entries in leaf order, and `unravel`, which rebuilds a tree of the same
+ *   structure from a vector of that length.
+ *
+ * @example To a vector and back
+ * const { vector, unravel } = ravel({ w: tensor([[1, 2], [3, 4]]), b: 5 })
+ * print('vector =', vector)
+ * print('unravelled =', unravel([0, 0, 0, 0, 1]))
  */
 export function ravel<T>(tree: T): Raveled<T> {
   const { leaves, treedef } = treeFlatten(tree)

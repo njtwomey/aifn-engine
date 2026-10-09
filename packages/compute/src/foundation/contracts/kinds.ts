@@ -23,5 +23,6 @@ export type ObjectKind =
 
 /** An object branded with its kind. */
 export interface Kinded<K extends ObjectKind = ObjectKind> {
+  /** What the object is, which picks its view. */
   readonly kind: K
 }

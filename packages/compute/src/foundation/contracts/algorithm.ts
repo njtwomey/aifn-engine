@@ -2,10 +2,10 @@
  * Iterative computation: the `Algorithm` protocol, the `Status` every state carries, and the `Trace` a run records
  * (design K §7, S §2.3).
  *
- * Algorithms are made by factories that close over the problem. `init(start, stream)` makes step 0 and `step(state,
- * ctx)` makes the next state, drawing only from `ctx.stream`, which the runner derives as `child(root, 'step', t)`. So
- * states are plain data and never hold a stream, and step t's randomness is fixed by the root key and t alone: a run
- * resumed from any stored state reproduces the rest exactly.
+ * Algorithms are made by factories that close over the problem. `init(start, stream)` makes step 0 and
+ * `step(state, ctx)` makes the next state, drawing only from `ctx.stream`, which the runner derives as
+ * `child(root, 'step', t)`. So states are plain data and never hold a stream, and step $t$'s randomness is fixed by the
+ * root key and $t$ alone: a run resumed from any stored state reproduces the rest exactly.
  */
 
 import type { Kinded } from './kinds'
@@ -21,15 +21,24 @@ import type { Key, Stream } from './random'
 export interface Status {
   /** Steps taken; 0 in the initial state. */
   t: Size
+  /** The method's convergence test has passed: the runners stop with `done`. */
   converged?: boolean
+  /** The iterate or a value is no longer finite or has blown up: the runners stop with `diverged`. */
   diverged?: boolean
+  /** No progress is being made; informative only, the runners do not stop on it. */
   stalled?: boolean
+  /** The process has reached a natural end (an episode, an exhausted search): the runners stop with `done`. */
   terminated?: boolean
 }
 
-/** What the runner passes to `step`: the step number of the state being stepped and its stream, `child(root, 'step', t)`. */
+/**
+ * What the runner passes to `step`: the step number of the state being stepped and its stream,
+ * `child(root, 'step', t)`.
+ */
 export interface StepContext {
+  /** The step number of the state being stepped (0 for the step from the initial state). */
   readonly t: Size
+  /** The only randomness `step` may draw from, made on first use. */
   readonly stream: Stream
 }
 
@@ -40,6 +49,7 @@ export type PlainData = null | boolean | number | string | readonly PlainData[] 
 export interface AlgorithmRef {
   /** `module/key`, e.g. `cluster/kmeans`. */
   readonly id: string
+  /** The arguments of the factory, as plain data. */
   readonly args: PlainData
 }
 
@@ -49,6 +59,7 @@ export interface AlgorithmRef {
  * from its stream and `step` only from `ctx.stream`; both are pure.
  */
 export interface Algorithm<Start, State extends Status> {
+  /** A readable name, kept in a trace's metadata and used in error messages. */
   readonly name: string
   /** Set by factories whose arguments are plain data, so a worker can rebuild the algorithm. */
   readonly ref?: AlgorithmRef
@@ -92,13 +103,21 @@ export type TimingMode = 'step' | 'total' | false
 
 /** Timing of a traced run. All times are in milliseconds from `performance.now()` (or `Date.now()` without it). */
 export interface TraceTiming {
-  /** With `timing: 'step'`, the time spent in `step` for each computed step (entry t: state t → t + 1); else empty. */
+  /**
+   * With `timing: 'step'`, the time spent in `step` for each computed step (entry $t$: from state $t$ to state
+   * $t + 1$); else empty.
+   */
   stepMs: Float64Array
-  /** With `timing: 'step'`, wall-clock time since the run began at each kept step (aligned with `index`); else empty. */
+  /**
+   * With `timing: 'step'`, wall-clock time since the run began at each kept step (aligned with `index`); else empty.
+   */
   elapsedMs: Float64Array
   /** Total time spent stepping (the sum of `stepMs` with `timing: 'step'`); 0 with `timing: false`. */
   totalMs: number
-  /** Steps per second of step time: `steps / (totalMs / 1000)`; `Infinity` when too fast to measure, NaN untimed. */
+  /**
+   * Steps per second of step time: `steps / (totalMs / 1000)`; 0 before the first step, `Infinity` when too fast to
+   * measure, NaN untimed.
+   */
   perSecond: number
   /**
    * Time per named phase: `init` and `record` (the recorders) with `timing: 'step'`, and every `profile(name, fn)`
@@ -109,23 +128,31 @@ export interface TraceTiming {
 
 /** Stored states for `seek`, keyed by step number (ascending). */
 export interface Checkpoints<State> {
+  /** The step number of each stored state, ascending. */
   readonly index: readonly Index[]
+  /** The stored states, aligned with `index`. */
   readonly states: readonly State[]
 }
 
 /** What a trace records about its run. */
 export interface TraceMeta {
+  /** The algorithm's `name`. */
   algorithm: string
+  /** Why the run stopped (`limit` for a partial trace of a run still going). */
   stopped: StopReason
   /** The number of steps computed (the step number of the final state). */
   steps: Size
+  /** The spacing of the kept steps, as the trace was run with. */
   every: Size
+  /** The spacing of the stored checkpoints, or null for step 0 only. */
   checkpointEvery: Size | null
+  /** Which states the trace stores. */
   keep: KeepStates
+  /** How the run was timed. */
   timing: TimingMode
   /** The start passed to `init`. */
   start: unknown
-  /** The root key: step t drew from `child(root, 'step', t)`, so `seek` and `extend` reproduce the run from it. */
+  /** The root key: step $t$ drew from `child(root, 'step', t)`, so `seek` and `extend` reproduce the run from it. */
   key: Key
   /** The names of the recorders, so `extend` (also across a worker boundary) can check it has the same set. */
   recorders: readonly string[]
@@ -154,7 +181,7 @@ export interface TraceOptions<State> {
 
 /**
  * A traced run (`kind: 'trace'`): recorded series over the kept steps, the stored states, timing and metadata. Series,
- * `index` and timing are views of the runner's buffers, so taking a trace of a run in progress costs O(1).
+ * `index` and timing are views of the runner's buffers, so taking a trace of a run in progress costs $O(1)$.
  */
 export interface Trace<State> extends Kinded<'trace'> {
   /** The step number of each kept step (steps divisible by `every`, and the final step). */
@@ -167,15 +194,22 @@ export interface Trace<State> extends Kinded<'trace'> {
   final: State
   /** States stored every `checkpointEvery` steps and at step 0 (empty with `keep: 'none'`). */
   checkpoints: Checkpoints<State>
+  /** How long the run took, in total, per step and per phase. */
   timing: TraceTiming
+  /** How the trace was run and why it stopped. */
   meta: TraceMeta
 }
 
 /** A trace on the wire: series and timing without states, which are not always serialisable. */
 export interface TraceWire {
+  /** The brand of a trace. */
   readonly kind: 'trace'
+  /** The step number of each kept step. */
   readonly index: readonly Index[]
+  /** Each recorded series, by recorder name. */
   readonly series: Readonly<Record<string, TensorWire>>
+  /** The total step time in milliseconds and the steps per second, as in `TraceTiming`. */
   readonly timing: { readonly totalMs: number; readonly perSecond: number }
+  /** How the trace was run and why it stopped. */
   readonly meta: TraceMeta
 }

@@ -30,13 +30,19 @@ import { BatchInterpreter } from './batch'
 import { ForwardInterpreter } from './forward'
 import { ReverseInterpreter, type ReverseTracer } from './reverse'
 
+/**
+ * The number of entries of a shape.
+ *
+ * @param shape The dimensions.
+ * @returns Their product (1 for a scalar's empty shape).
+ */
 const count = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1)
 
 // ── Types ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
  * A result that may be traced (design K A10). A transform's result is raw when nothing it computes on is traced, but
- * inside another transform (or when f closes over a traced value) it is traced by the enclosing transform. The type
+ * inside another transform (or when `f` closes over a traced value) it is traced by the enclosing transform. The type
  * says so at every level: a number leaf becomes `number | Traced`, a tensor `Tensor | Traced`, and the structure of
  * arrays and objects is kept. At the outermost level, narrow with `as` or read it through `unwrap`.
  */
@@ -63,7 +69,14 @@ export type TreeOf<T, L> = T extends Value
 
 // ── Helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Seed cotangent for a scalar output: 1, or a rank-0 tensor of ones. */
+/**
+ * Seed cotangent for a scalar output: 1, or a rank-0 tensor of ones. Throws `DTypeError` for a complex output and
+ * `ShapeError` for an output that is not a scalar.
+ *
+ * @param where The caller's name for error messages.
+ * @param y The output of the function being differentiated.
+ * @returns The cotangent $\partial y / \partial y = 1$, of `y`'s kind.
+ */
 function scalarSeed(where: string, y: Value): Value {
   const aval = avalOf(y)
   if (aval.dtype === 'complex128')
@@ -83,6 +96,14 @@ function scalarSeed(where: string, y: Value): Value {
 
 type Argnums = number | readonly number[]
 
+/**
+ * The argument positions to differentiate, as a list. Throws `AifnError` for a position out of range or repeated.
+ *
+ * @param argnums One position or several, as given in `GradOptions`.
+ * @param n The number of arguments of the call.
+ * @param where The caller's name for error messages.
+ * @returns The positions, in the order given.
+ */
 function argnumList(argnums: Argnums, n: number, where: string): number[] {
   const list = typeof argnums === 'number' ? [argnums] : [...argnums]
   for (const k of list) {
@@ -94,7 +115,15 @@ function argnumList(argnums: Argnums, n: number, where: string): number[] {
   return list
 }
 
-/** Make the arguments `argnums` input leaves of a reverse interpreter; returns the new arguments and their trees. */
+/**
+ * Make the arguments `argnums` input leaves of a reverse interpreter; returns the new arguments and their trees.
+ *
+ * @param rev The reverse interpreter to record the input leaves on, labelled `arg0`, `arg1.w`, ... by path.
+ * @param args The arguments of the call; not modified.
+ * @param argnums The positions of the arguments to trace; the others are passed through unchanged.
+ * @returns `args` with the traced arguments replaced by trees of tracers, the flattened traced arguments (in the
+ *   order of `argnums`) and all their tracers in order.
+ */
 function traceArgs(rev: ReverseInterpreter, args: readonly unknown[], argnums: readonly number[]) {
   const out = [...args]
   const flats: Flat[] = []
@@ -109,7 +138,13 @@ function traceArgs(rev: ReverseInterpreter, args: readonly unknown[], argnums: r
   return { args: out, flats, inputs }
 }
 
-/** Split a flat list of leaves back into one tree per argument. */
+/**
+ * Split a flat list of leaves back into one tree per argument.
+ *
+ * @param flats The flattened arguments, whose structures and leaf counts are used.
+ * @param leaves New leaves for all the arguments, in order.
+ * @returns One tree per argument, rebuilt with the new leaves.
+ */
 function splitLeaves(flats: readonly Flat[], leaves: readonly unknown[]): unknown[] {
   let at = 0
   return flats.map((flat) => {
@@ -119,7 +154,13 @@ function splitLeaves(flats: readonly Flat[], leaves: readonly unknown[]): unknow
   })
 }
 
-/** Cotangents with the missing ones (outputs independent of that leaf) replaced by zeros of the leaf's kind. */
+/**
+ * Cotangents with the missing ones (outputs independent of that leaf) replaced by zeros of the leaf's kind.
+ *
+ * @param cotangents One cotangent per input leaf, null where the outputs do not depend on it.
+ * @param leaves The input leaves, whose shape and dtype the zeros take.
+ * @returns One cotangent per input leaf, none null.
+ */
 function filled(cotangents: readonly (Value | null)[], leaves: readonly Value[]): Value[] {
   return cotangents.map((g, i) => g ?? zerosOf(avalOf(leaves[i])))
 }
@@ -136,13 +177,20 @@ export type GradOptions = {
 export type ValueAndGrad<V, G> = { value: V; grad: G }
 
 /**
- * `valueAndGrad(f)` is a function computing f(...args) and the gradient of f with respect to argument `argnums`
- * (default 0) in one forward and one reverse pass. f must return a number or a rank-0 tensor. Arguments may be
- * numbers, tensors or pytrees (nested arrays and objects) of them; each gradient has its argument's structure, with
- * numbers for numbers and tensors of the same shape for tensors. With `argnums` an array, `grad` is an array of
- * gradients. Inside another transform the results are traced by it (so nested `grad` gives second derivatives).
+ * `valueAndGrad(f)` is a function computing `f(...args)` and the gradient of f with respect to argument `argnums`
+ * (default 0) in one forward and one reverse pass. f must return a real number or rank-0 tensor (otherwise
+ * `ShapeError`, or `DTypeError` for a complex one). Arguments may be numbers, tensors or pytrees (nested arrays and
+ * objects) of them; each gradient has its argument's structure, with numbers for numbers and tensors of the same
+ * shape for tensors. With `argnums` an array, `grad` is an array of gradients. Inside another transform the results
+ * are traced by it (so nested `grad` gives second derivatives).
  *
- * @example valueAndGrad((w: Value) => sum(square(w)))(tensor([1, 2])) // { value: 5, grad: [2, 4] }
+ * @param f The scalar function to differentiate, of any number of arguments.
+ * @param options Which arguments to differentiate with respect to; see `GradOptions`.
+ * @returns A function of f's arguments returning `{ value, grad }`.
+ *
+ * @example The loss and its gradient together
+ * // f(w) = w1^2 + w2^2, with gradient 2w.
+ * print(valueAndGrad((w) => sum(square(w)))(tensor([1, 2])))
  */
 export function valueAndGrad<A extends unknown[]>(
   f: (...args: A) => Value,
@@ -176,7 +224,28 @@ export function valueAndGrad<A extends unknown[]>(f: (...args: A) => Value, { ar
  * `grad(f)` is the gradient of a scalar function: `grad(f)(...args)` has the structure of argument `argnums`
  * (default 0). See `valueAndGrad` for the conventions. Nest it for higher derivatives: `grad(grad(f))`.
  *
- * @example grad((x: Value) => mul(x, sin(x)))(1) // sin 1 + cos 1
+ * @param f The scalar function to differentiate, of any number of arguments.
+ * @param options Which arguments to differentiate with respect to; see `GradOptions`.
+ * @returns A function of f's arguments returning the gradient.
+ *
+ * @example First and second derivatives of $x \sin x$
+ * const f = (x) => mul(x, sin(x))
+ * print("f'(1) =", grad(f)(1), '= sin 1 + cos 1 =', Math.sin(1) + Math.cos(1))
+ * print("f''(1) =", grad(grad(f))(1), '= 2 cos 1 - sin 1 =', 2 * Math.cos(1) - Math.sin(1))
+ *
+ * @example Several arguments, and a pytree
+ * // L(w, x) = sum((w x - 1)^2): dL/dw = sum(2 (w x - 1) x), dL/dx = 2 (w x - 1) w.
+ * const loss = (w, x) => sum(square(sub(mul(w, x), 1)))
+ * print('dL/dw =', grad(loss)(2, tensor([1, 2])))
+ * print('[dL/dw, dL/dx] =', grad(loss, { argnums: [0, 1] })(2, tensor([1, 2])))
+ * print('of a tree:', grad((p) => add(sum(square(p.w)), mul(p.b, p.b)))({ w: tensor([1, 2]), b: 3 }))
+ *
+ * @example Only scalar functions have a gradient
+ * try {
+ *   grad((x) => mul(x, tensor([1, 2])))(3)
+ * } catch (e) {
+ *   print(e.name, ':', e.message)
+ * }
  */
 export function grad<A extends unknown[]>(f: (...args: A) => Value): (...args: A) => Lifted<A[0]>
 export function grad<A extends unknown[], N extends number>(
@@ -203,8 +272,22 @@ export type VjpResult<X, Y> = {
 }
 
 /**
- * The value of f at x and its pullback u ↦ uᵀJ, where J is the Jacobian of f at x. x and f(x) are numbers, tensors or
- * pytrees of them. One forward pass, recorded; each call of `pullback` is one reverse sweep over the record.
+ * The value of f at x and its pullback $\uvec \mapsto \uvec^\top\Jmat$, where $\Jmat$ is the Jacobian of f at x.
+ * x and $f(\xvec)$ are numbers, tensors or pytrees of them. One forward pass, recorded; each call of `pullback` is
+ * one reverse sweep over the record. `pullback` throws `ShapeError` for a cotangent whose structure or leaf shapes
+ * differ from the output's.
+ *
+ * @param f The function, of one argument (a pytree for several values).
+ * @param x The point at which to linearise f.
+ * @returns $f(\xvec)$ and the pullback, which maps a cotangent of the output's structure to one of x's.
+ *
+ * @example Rows of the Jacobian of a linear map
+ * // f(x) = A x, so u^T J = u^T A: the pullbacks of the unit vectors are the rows of A.
+ * const A = tensor([[1, 2, 3], [4, 5, 6]])
+ * const { value, pullback } = vjp((x) => matmul(A, x), tensor([1, 1, 1]))
+ * print('f(x) =', value)
+ * print('pullback([1, 0]) =', pullback(tensor([1, 0])))
+ * print('pullback([0, 1]) =', pullback(tensor([0, 1])))
  */
 export function vjp<X, Y>(f: (x: X) => Y, x: X): VjpResult<X, Y> {
   const rev = new ReverseInterpreter()
@@ -227,7 +310,15 @@ export function vjp<X, Y>(f: (x: X) => Y, x: X): VjpResult<X, Y> {
   }
 }
 
-/** Throw unless each direction leaf has the shape of its primal leaf (a number never stands for a whole vector). */
+/**
+ * Throw `ShapeError` unless each direction leaf has the shape of its primal leaf (a number never stands for a whole
+ * vector).
+ *
+ * @param where The caller's name for error messages.
+ * @param what What the directions are (`the tangent`, `the cotangent`), for the message.
+ * @param primals The leaves the directions belong to.
+ * @param directions One direction per primal leaf, in the same order.
+ */
 function sameShapes(where: string, what: string, primals: readonly Value[], directions: readonly Value[]): void {
   primals.forEach((p, i) => {
     const a = avalOf(p).shape
@@ -237,13 +328,30 @@ function sameShapes(where: string, what: string, primals: readonly Value[], dire
   })
 }
 
-/** The result of `jvp`: f's value and the directional derivative J·v, both of the structure of f(x). */
+/**
+ * The result of `jvp`: f's value and the directional derivative $\Jmat\vvec$, both of the structure of $f(\xvec)$.
+ */
 export type JvpResult<Y> = { value: Lifted<Y>; tangent: TreeOf<Y, Value> }
 
 /**
- * The value of f at x and the Jacobian–vector product J·v (the derivative of f at x in direction v), where v has the
- * structure of x and the tangent that of f(x). One forward pass with dual numbers: every primitive computes its value
- * and its tangent together.
+ * The value of f at x and the Jacobian–vector product $\Jmat\vvec$ (the derivative of f at x in direction
+ * $\vvec$), where $\vvec$ has the structure of x and the tangent that of $f(\xvec)$. One forward pass with dual
+ * numbers: every primitive computes its value and its tangent together. Throws `ShapeError` when v's structure or leaf
+ * shapes differ from x's.
+ *
+ * @param f The function, of one argument (a pytree for several values).
+ * @param x The point at which to differentiate.
+ * @param v The direction: the structure of x, with each leaf of its leaf's shape.
+ * @returns $f(\xvec)$ as `value` and $\Jmat\vvec$ as `tangent` (zeros for an output that does not depend on x).
+ *
+ * @example Columns of the Jacobian of a linear map
+ * // f(x) = A x, so J v = A v: the tangent along a unit vector is a column of A.
+ * const A = tensor([[1, 2, 3], [4, 5, 6]])
+ * print(jvp((x) => matmul(A, x), tensor([1, 1, 1]), tensor([1, 0, 0])))
+ *
+ * @example The derivative of $x \sin x$ at 1
+ * const { value, tangent } = jvp((x) => mul(x, sin(x)), 1, 1)
+ * print('f(1) =', value, "f'(1) =", tangent, '= sin 1 + cos 1 =', Math.sin(1) + Math.cos(1))
  */
 export function jvp<X, Y>(f: (x: X) => Y, x: X, v: X): JvpResult<Y> {
   const fwd = new ForwardInterpreter()
@@ -266,12 +374,22 @@ export function jvp<X, Y>(f: (x: X) => Y, x: X, v: X): JvpResult<Y> {
   }
 }
 
-/** The result of `linearize`: f's value and the linear map v ↦ J·v at x. */
+/** The result of `linearize`: f's value and the linear map $\vvec \mapsto \Jmat\vvec$ at x. */
 export type Linearized<X, Y> = { value: Lifted<Y>; jvp: (v: X) => TreeOf<Y, Value> }
 
 /**
- * f's value at x and its linearisation v ↦ J·v, the best linear approximation of f near x. Each call of `jvp` is one
- * forward pass (eager evaluation keeps no staged linear program, so the primal is recomputed alongside).
+ * f's value at x and its linearisation $\vvec \mapsto \Jmat\vvec$, the best linear approximation of f near x. Each
+ * call of `jvp` is one forward pass (eager evaluation keeps no staged linear program, so the primal is recomputed
+ * alongside).
+ *
+ * @param f The function, of one argument (a pytree for several values).
+ * @param x The point at which to linearise f.
+ * @returns $f(\xvec)$ as `value`, and `jvp`, which maps a direction of x's structure to $\Jmat\vvec$.
+ *
+ * @example The tangent line of $x^3$ at 2
+ * const { value, jvp: line } = linearize((x) => mul(mul(x, x), x), 2)
+ * print('f(2) =', value)
+ * print("f'(2) v for v = 1, 0.5:", line(1), line(0.5))
  */
 export function linearize<X, Y>(f: (x: X) => Y, x: X): Linearized<X, Y> {
   const out = treeFlatten(f(x))
@@ -282,9 +400,18 @@ export function linearize<X, Y>(f: (x: X) => Y, x: X): Linearized<X, Y> {
 }
 
 /**
- * The Hessian–vector product H·v of a scalar function f at x, where v has the structure of x and so has the result:
- * forward over reverse, the jvp of `grad(f)` in direction v (Pearlmutter, 1994). One forward-mode pass through one
- * gradient evaluation, without forming H.
+ * The Hessian–vector product $\Hmat\vvec$ of a scalar function f at x, where $\vvec$ has the structure of x and so
+ * has the result: forward over reverse, the jvp of `grad(f)` in direction $\vvec$ (Pearlmutter, 1994). One
+ * forward-mode pass through one gradient evaluation, without forming $\Hmat$.
+ *
+ * @param f The scalar function, of one argument (a pytree for several values).
+ * @param x The point at which the Hessian is taken.
+ * @param v The vector to multiply, of x's structure.
+ * @returns $\Hmat\vvec$, of x's structure.
+ *
+ * @example A column of a diagonal Hessian
+ * // f(x) = sum(x^3) has H = diag(6 x): at x = [1, 2], H [1, 0] = [6, 0].
+ * print('H v =', hvp((x) => sum(mul(mul(x, x), x)), tensor([1, 2]), tensor([1, 0])))
  */
 export function hvp<X>(f: (x: X) => Value, x: X, v: X): TreeOf<X, Value> {
   return jvp((y: X) => grad(f)(y) as unknown, x, v).tangent as TreeOf<X, Value>
@@ -307,9 +434,20 @@ export type VmapOptions = {
  * `vmap(f)` runs f, written for one example, on a batch: each argument carries one more axis (`inAxes`, default the
  * first), and every output leaf gains the batch axis at `outAxes`. Each primitive runs once on the whole batch by its
  * batching rule (a loop over examples where it has none). Arguments and outputs may be pytrees. Nest it with the
- * derivative transforms: `vmap(grad(loss))` gives per-example gradients.
+ * derivative transforms: `vmap(grad(loss))` gives per-example gradients. Throws `ShapeError` when batched arguments
+ * disagree on the batch size or lack the axis, and `AifnError` when no argument is batched.
  *
- * @example vmap((x: Value) => dot(x, x))(tensor([[1, 2], [3, 4]])) // [5, 25]
+ * @param f The function of one example, of any number of arguments.
+ * @param options Where the batch axis is in each argument and goes in each output; see `VmapOptions`.
+ * @returns A function of the batched arguments; an output that does not depend on the batch is broadcast to it.
+ *
+ * @example Squared norms of each row
+ * print(vmap((x) => dot(x, x))(tensor([[1, 2], [3, 4]])))
+ *
+ * @example A shared argument, and per-example gradients
+ * const rows = tensor([[1, 2], [3, 4]])
+ * print('x . w per row =', vmap((x, w) => dot(x, w), { inAxes: [0, null] })(rows, tensor([1, 1])))
+ * print('grad of sum(x^2) per row =', vmap(grad((x) => sum(square(x))))(rows))
  */
 export function vmap<A extends unknown[], R>(
   f: (...args: A) => R,
@@ -362,7 +500,13 @@ export function vmap<A extends unknown[], R>(
   }
 }
 
-/** Move axis 0 of `v` to position `to`. */
+/**
+ * Move axis 0 of `v` to position `to`.
+ *
+ * @param v The value, with the batch axis first.
+ * @param to The position the axis moves to; negative counts from the end.
+ * @returns `v` with its axes permuted (`v` itself when `to` is 0).
+ */
 function moveFront(v: Value, to: number): Value {
   const rank = avalOf(v).shape.length
   const at = to < 0 ? rank + to : to
@@ -384,9 +528,21 @@ export type JacobianOptions = {
 }
 
 /**
- * The Jacobian of f at x. For a single input and output leaf it is a tensor of shape [...shape of f(x), ...shape of
- * x] with entry [i, j] = ∂fᵢ/∂xⱼ (a number when both are numbers). For pytrees it is a tree of the structure of f(x)
- * whose leaves are trees of the structure of x (JAX's convention).
+ * The Jacobian of f at x. For a single input and output leaf it is a tensor of shape [...shape of $f(\xvec)$,
+ * ...shape of x] with entry $[i, j] = \partial f_i / \partial x_j$ (a number when both are numbers). For pytrees it
+ * is a tree of the structure of $f(\xvec)$ whose leaves are trees of the structure of x (JAX's convention).
+ *
+ * @param f The function, of one argument (a pytree for several values).
+ * @param options Forward or reverse mode; see `JacobianOptions`.
+ * @returns A function of x returning the Jacobian at x.
+ *
+ * @example An elementwise square has a diagonal Jacobian
+ * // f(x) = x^2 elementwise: J = diag(2x).
+ * print(jacobian((x) => mul(x, x))(tensor([1, 2, 3])))
+ *
+ * @example The same in reverse mode, and a scalar output
+ * print(jacobian((x) => mul(x, x), { mode: 'reverse' })(tensor([1, 2, 3])))
+ * print('of sum(x^2):', jacobian((x) => sum(mul(x, x)))(tensor([1, 2])))
  */
 export function jacobian<X, Y>(f: (x: X) => Y, options: JacobianOptions = {}): (x: X) => TreeOf<Y, TreeOf<X, Value>> {
   const { mode = 'auto' } = options
@@ -419,6 +575,17 @@ export function jacobian<X, Y>(f: (x: X) => Y, options: JacobianOptions = {}): (
   }
 }
 
+/**
+ * The Jacobian by forward mode: one jvp per input element, all at once under `vmap`, with the columns transposed into
+ * place.
+ *
+ * @param f The function, of one argument.
+ * @param x The point at which to differentiate.
+ * @param inFlat x flattened.
+ * @param inAvals The abstract value (shape and dtype) of each leaf of x.
+ * @param n The total number of entries of x.
+ * @returns The Jacobian, a tree of the output's structure whose leaves are trees of x's structure.
+ */
 function forwardJacobian<X, Y>(f: (x: X) => Y, x: X, inFlat: Flat, inAvals: readonly Aval[], n: number) {
   // Column block of input leaf i: the jvps along the basis tangents of its elements, all at once under vmap.
   const basis = inAvals.map((_, i) => basisBlock(inAvals, i, n))
@@ -447,6 +614,11 @@ function forwardJacobian<X, Y>(f: (x: X) => Y, x: X, inFlat: Flat, inAvals: read
 /**
  * The block of basis vectors for leaf `j` of a flat list of leaves with `total` elements: shape [total, ...shape of
  * leaf j], one-hot in the rows of leaf j's own elements.
+ *
+ * @param avals The abstract value of each leaf, in order.
+ * @param j The index of the leaf whose block is built.
+ * @param total The total number of entries over all the leaves.
+ * @returns The block: row $r$ is the unit vector of entry $r$ of the whole flattened tree, restricted to leaf `j`.
  */
 function basisBlock(avals: readonly Aval[], j: number, total: number): Tensor {
   let off = 0
@@ -461,6 +633,13 @@ function basisBlock(avals: readonly Aval[], j: number, total: number): Tensor {
  * One Jacobian entry from a block of rows [size of `lead`, ...shape of `trail`] (reverse mode) or of columns [size
  * of `lead`, ...shape of `trail`] to be transposed (forward mode): the result has shape [...out, ...in], and is a
  * number when both the output and the input are numbers.
+ *
+ * @param block The rows (or columns) of the Jacobian for one pair of output and input leaves.
+ * @param lead The abstract value of the leaf indexing the block's first axis: the output leaf in reverse mode, the
+ *   input leaf in forward mode.
+ * @param trail The abstract value of the other leaf, whose shape the block's remaining axes have.
+ * @param transposed True for a forward-mode block of columns, which is transposed into rows.
+ * @returns The Jacobian block of shape [...shape of the output leaf, ...shape of the input leaf].
  */
 function entry(block: Value, lead: Aval, trail: Aval, transposed: boolean): Value {
   const [out, inp] = transposed ? [trail, lead] : [lead, trail]
@@ -473,6 +652,18 @@ function entry(block: Value, lead: Aval, trail: Aval, transposed: boolean): Valu
 /**
  * The Hessian of a scalar function f at x: forward over reverse (the forward-mode Jacobian of the gradient). For a
  * single leaf x it has shape [...shape of x, ...shape of x]; for a pytree it is a tree of trees.
+ *
+ * @param f The scalar function, of one argument (a pytree for several values).
+ * @returns A function of x returning the Hessian at x.
+ *
+ * @example The Hessian of a cubic
+ * // f(x) = sum(x^3) has H = diag(6 x).
+ * print(hessian((x) => sum(mul(mul(x, x), x)))(tensor([1, 2])))
+ *
+ * @example Of a function of two variables
+ * // f(x, y) = x^2 y + y^2 has H = [[2y, 2x], [2x, 2]].
+ * const f = ([x, y]) => add(mul(mul(x, x), y), mul(y, y))
+ * print(hessian(f)([1, 2]))
  */
 export function hessian<X>(f: (x: X) => Value): (x: X) => TreeOf<X, TreeOf<X, Value>> {
   return jacobian((y: X) => grad(f)(y) as unknown as X, { mode: 'forward' }) as (x: X) => TreeOf<X, TreeOf<X, Value>>
@@ -492,7 +683,17 @@ const stopGradientOp = definePrimitive<undefined>({
   test: { cases: (draw) => [{ inputs: [draw([2, 3])] }] },
 })
 
-/** x itself, treated as a constant by every derivative transform: its derivative is zero. Applies to each leaf. */
+/**
+ * x itself, treated as a constant by every derivative transform: its derivative is zero. Applies to each leaf.
+ *
+ * @param x A value or a pytree of them; untraced leaves are returned as they are.
+ * @returns x, with every traced leaf cut from the derivative.
+ *
+ * @example Differentiate one factor only
+ * // d/dx (c x) with c = x held constant is c = 3; without it, d/dx x^2 = 6.
+ * print(grad((x) => mul(stopGradient(x), x))(3))
+ * print(grad((x) => mul(x, x))(3))
+ */
 export function stopGradient<T>(x: T): T {
   const flat = treeFlatten(x)
   return treeUnflatten(

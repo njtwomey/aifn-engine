@@ -1,12 +1,12 @@
 /**
- * The associative scan (parallel prefix): every prefix combination y_k = x_0 ⊕ x_1 ⊕ … ⊕ x_k of a sequence under an
- * associative operation ⊕ (Blelloch, 1990, "Prefix sums and their applications"). Running sums, running products,
- * running maxima and the linear recurrence h_t = a_t·h_{t−1} + b_t (the core of state-space models and linear
- * attention) are all scans.
+ * The associative scan (parallel prefix): every prefix combination $y_k = x_0 \oplus x_1 \oplus \dots \oplus x_k$ of
+ * a sequence under an associative operation $\oplus$ (Blelloch, 1990, "Prefix sums and their applications"). Running
+ * sums, running products, running maxima and the linear recurrence $h_t = a_t h_{t-1} + b_t$ (the core of state-space
+ * models and linear attention) are all scans.
  *
  * - `associativeScan(op, elems, options)`: the scan as a composition of primitives (strided slices, `op` on whole
  *   tensors, `stack` and `reshape`), after JAX's `lax.associative_scan`: the odd–even recursion of Ladner and Fischer
- *   (1980), O(n) work in O(log n) rounds, each round one call of `op` on a whole tensor. Being a composition, it
+ *   (1980), $O(n)$ work in $O(\log n)$ rounds, each round one call of `op` on a whole tensor. Being a composition, it
  *   differentiates, batches and nests like any other function of primitives. Elements may be tuples of tensors (a
  *   pytree level), which `op` combines pairwise.
  * - `hillisSteeleScanSteps` and `blellochScanSteps`: the two textbook parallel scans as step-through algorithms, one
@@ -28,15 +28,32 @@ export type ScanElement = Value | readonly Value[]
 export type ScanOptions = {
   /** The scanned axis (default 0). */
   axis?: number
-  /** Scan from the end: y_k = x_k ⊕ x_{k+1} ⊕ … ⊕ x_{n−1} (the operand order is kept). Default false. */
+  /**
+   * Scan from the end: $y_k = x_k \oplus x_{k+1} \oplus \dots \oplus x_{n-1}$ (the operand order is kept). Default
+   * false.
+   */
   reverse?: boolean
 }
 
+/** The tensors of a scan element, as a flat list (one entry for a single tensor). */
 type Leaves = Value[]
 
+/**
+ * The leaves of a scan element: the tuple's entries, or the one tensor.
+ *
+ * @param e A tensor or a tuple of tensors.
+ * @returns A new array of the element's tensors.
+ */
 const leavesOf = (e: ScanElement): Leaves => (Array.isArray(e) ? [...(e as readonly Value[])] : [e as Value])
 
-/** The length of the leading axis of every leaf (they must agree). */
+/**
+ * The length of the leading axis of every leaf (they must agree). Throws `ShapeError` for a leaf of rank $0$ or
+ * leaves of different lengths.
+ *
+ * @param xs The leaves, each scanned along its first axis.
+ * @param where The caller's name, for error messages.
+ * @returns The common length, or $-1$ when there are no leaves.
+ */
 function lengthOf(xs: Leaves, where: string): Size {
   let n = -1
   for (const x of xs) {
@@ -48,7 +65,14 @@ function lengthOf(xs: Leaves, where: string): Size {
   return n
 }
 
-/** Even and odd positions interleaved: [e0, o0, e1, o1, …]; `even` has as many entries as `odd` or one more. */
+/**
+ * Even and odd positions interleaved along the first axis: `[e0, o0, e1, o1, ...]`; `even` has as many entries as
+ * `odd` or one more.
+ *
+ * @param even The entries for the even positions, along the first axis.
+ * @param odd The entries for the odd positions, with the same shape off the first axis.
+ * @returns The interleaved value, of length the sum of the two.
+ */
 function interleave(even: Value, odd: Value): Value {
   const ne = shapeOfValue(even)[0]
   const no = shapeOfValue(odd)[0]
@@ -58,7 +82,14 @@ function interleave(even: Value, odd: Value): Value {
   return ne > no ? concat([pairs, slice(even, [no, ne])], 0) : pairs
 }
 
-/** The inclusive scan along axis 0 by the odd–even recursion. */
+/**
+ * The inclusive scan along axis 0 by the odd–even recursion: scan the sums of neighbouring pairs, which gives the
+ * odd positions, then combine each with the next even input.
+ *
+ * @param op Combines two lists of leaves, element by element along the first axis.
+ * @param xs The leaves to scan, all of the same length along the first axis.
+ * @returns The scanned leaves, shaped like `xs`.
+ */
 function scanFront(op: (a: Leaves, b: Leaves) => Leaves, xs: Leaves): Leaves {
   const n = lengthOf(xs, 'associativeScan')
   if (n < 2) return xs
@@ -80,17 +111,36 @@ function scanFront(op: (a: Leaves, b: Leaves) => Leaves, xs: Leaves): Leaves {
 }
 
 /**
- * The inclusive scan of `elems` along `axis` under the associative operation `op`: y_k = x_0 ⊕ x_1 ⊕ … ⊕ x_k, with
- * `op(a, b)` = a ⊕ b applied to whole tensors of elements (it must broadcast over the leading axis, as elementwise
- * operations do). Elements are a tensor or a tuple of tensors (then `op` takes and returns tuples). With `reverse`,
- * y_k = x_k ⊕ … ⊕ x_{n−1}.
+ * The inclusive scan of `elems` along `axis` under the associative operation `op`:
+ * $y_k = x_0 \oplus x_1 \oplus \dots \oplus x_k$, with `op(a, b)` $= a \oplus b$ applied to whole tensors of
+ * elements (it must broadcast over the leading axis, as elementwise operations do). Elements are a tensor or a tuple of
+ * tensors (then `op` takes and returns tuples). With `reverse`, $y_k = x_k \oplus \dots \oplus x_{n-1}$.
  *
  * A composition of primitives (strided slices, `op`, `stack`, `reshape`), so its gradient is exact through `grad`, and
- * `op` may itself be any differentiable function. O(n) applications of ⊕ in ⌈log₂ n⌉ rounds; the result equals the
- * sequential scan up to rounding, and exactly when ⊕ is exact.
+ * `op` may itself be any differentiable function. $O(n)$ applications of $\oplus$ in $2\lfloor \log_2 n \rfloor - 1$
+ * calls of `op` (for $n \ge 2$), two per level of the recursion; the result equals the sequential scan up to rounding,
+ * and exactly when $\oplus$ is exact. Throws `AifnError` for an empty tuple and `ShapeError` for an axis out of range
+ * or leaves of different lengths.
  *
- * @example associativeScan(add, x)                          // cumulative sum
- * @example associativeScan(([a1, b1], [a2, b2]) => [mul(a1, a2), add(mul(a2, b1), b2)], [a, b]) // h_t = a_t h_{t−1} + b_t
+ * @param op The associative operation: `op(a, b)` combines earlier elements `a` with later ones `b`, entry by entry
+ *   along the leading axis, and returns an element of the same structure. It is given the elements with the scanned
+ *   axis moved first, so it should act elementwise along it.
+ * @param elems The sequence: a tensor, or a tuple of tensors of the same length along the scanned axis.
+ * @param options The scanned `axis` and the direction.
+ * @returns The inclusive scan, with the structure and shapes of `elems`.
+ *
+ * @example Running sums and running maxima
+ * const x = tensor([3, 1, 4, 1, 5])
+ * print('cumulative sum =', associativeScan(add, x))
+ * print('running max =', associativeScan(maximum, x))
+ * print('from the end =', associativeScan(add, x, { reverse: true }))
+ *
+ * @example A linear recurrence as a scan of pairs
+ * // h_t = a_t h_{t-1} + b_t from h_{-1} = 0: the pairs (a, b) compose as affine maps.
+ * const a = tensor([0.5, 0.5, 0.5, 0.5])
+ * const b = tensor([1, 1, 1, 1])
+ * const [, h] = associativeScan(([a1, b1], [a2, b2]) => [mul(a1, a2), add(mul(a2, b1), b2)], [a, b])
+ * print('h =', h)
  */
 export function associativeScan<E extends ScanElement>(op: (a: E, b: E) => E, elems: E, options: ScanOptions = {}): E {
   const tuple = Array.isArray(elems)
@@ -115,23 +165,36 @@ export function associativeScan<E extends ScanElement>(op: (a: E, b: E) => E, el
 
 // ── Step-through scans ───────────────────────────────────────────────────────────────────────────────────────────────
 
-/** An update of one round: position `to` becomes op(value at `from`, value at `to`) (or a copy for Blelloch's swap). */
+/**
+ * An update of one round: position `to` becomes `op(value at from, value at to)` (or a copy for Blelloch's swap).
+ * `from` and `to` are positions along the scanned axis.
+ */
 export type ScanMove = { readonly from: number; readonly to: number }
 
-/** The state of `hillisSteeleScanSteps` after t rounds. */
+/** The state of `hillisSteeleScanSteps` after $t$ rounds. */
 export interface HillisSteeleState extends Status {
-  /** The partial scans: position i holds x_{max(0, i − 2^t + 1)} ⊕ … ⊕ x_i. */
+  /** The partial scans: position $i$ holds $x_{\max(0,\, i - 2^t + 1)} \oplus \dots \oplus x_i$. */
   readonly values: Tensor
-  /** The distance combined in the next round, 2^t. */
+  /** The distance combined in the next round, $2^t$. */
   readonly offset: Size
-  /** The combinations made by the last round (none at t = 0). */
+  /** The combinations made by the last round (none at $t = 0$). */
   readonly moves: readonly ScanMove[]
-  /** Applications of ⊕ so far (the work: n log n in total). */
+  /**
+   * Applications of $\oplus$ so far (the work: $n \lceil \log_2 n \rceil - (2^{\lceil \log_2 n \rceil} - 1)$ in
+   * total).
+   */
   readonly work: Size
+  /** True once every position holds its inclusive prefix (from the start when $n \le 1$). */
   readonly terminated: boolean
 }
 
-/** Rows `ids` of x along axis 0 (a gather, so differentiable). */
+/**
+ * Rows `ids` of `x` along axis 0 (a gather, so differentiable).
+ *
+ * @param x A value of rank at least 1.
+ * @param ids The rows to take, in order; a row may appear more than once.
+ * @returns A new value with one row per entry of `ids`.
+ */
 function rows(x: Value, ids: readonly number[]): Value {
   const s = shapeOfValue(x)
   const w = s.slice(1).reduce((p, q) => p * q, 1)
@@ -142,7 +205,14 @@ function rows(x: Value, ids: readonly number[]): Value {
   return gather(x, flat, [ids.length, ...s.slice(1)])
 }
 
-/** x with rows `to` replaced by the rows of `values` (in order), by one gather from their concatenation. */
+/**
+ * `x` with rows `to` replaced by the rows of `values` (in order), by one gather from their concatenation.
+ *
+ * @param x The value whose rows are replaced; not modified.
+ * @param to The rows of `x` to replace, one per row of `values`.
+ * @param values The new rows, with the shape of `x` off the first axis.
+ * @returns A new tensor shaped like `x`.
+ */
 function replaceRows(x: Value, to: readonly number[], values: Value): Tensor {
   const n = shapeOfValue(x)[0]
   const source = Array.from({ length: n }, (_, i) => i)
@@ -150,14 +220,32 @@ function replaceRows(x: Value, to: readonly number[], values: Value): Tensor {
   return unwrap(rows(concat([x, values], 0), source)) as Tensor
 }
 
+/**
+ * A value as a plain tensor, unwrapping a traced value to the tensor it holds.
+ *
+ * @param x The value: a tensor, or a traced value whose tracing has ended.
+ * @returns The tensor it holds.
+ */
 const asTensor = (x: Value): Tensor => unwrap(x) as Tensor
 
 /**
- * The Hillis–Steele scan (Hillis and Steele, 1986) as a step-through algorithm: in round t every position i ≥ 2^t
- * combines with position i − 2^t at once, so after ⌈log₂ n⌉ rounds every position holds its inclusive prefix. It does
- * n⌈log₂ n⌉ − (2^⌈log₂ n⌉ − 1) applications of ⊕ (more than the n − 1 of a sequential scan) but has the fewest rounds.
- * `op` combines whole tensors of elements along axis 0, as in `associativeScan`; the final `values` equal
- * `associativeScan(op, x)`.
+ * The Hillis–Steele scan (Hillis and Steele, 1986) as a step-through algorithm: in round $t$ every position
+ * $i \ge 2^t$ combines with position $i - 2^t$ at once, so after $\lceil \log_2 n \rceil$ rounds every position holds
+ * its inclusive prefix. It does $n \lceil \log_2 n \rceil - (2^{\lceil \log_2 n \rceil} - 1)$ applications of
+ * $\oplus$ (more than the $n - 1$ of a sequential scan) but has the fewest rounds. `op` combines whole tensors of
+ * elements along axis 0, as in `associativeScan`; the final `values` equal `associativeScan(op, x)`. Throws
+ * `ShapeError` when `x` is a scalar.
+ *
+ * @param op The associative operation: `op(a, b)` combines earlier rows `a` with later rows `b`, row by row.
+ * @param x The sequence, scanned along its first axis (length $n$).
+ * @returns The algorithm; `init` takes no start, and each step is one round.
+ *
+ * @example Three rounds scan eight elements
+ * const x = tensor([1, 2, 3, 4, 5, 6, 7, 8])
+ * print('after round 1:', run(hillisSteeleScanSteps(add, x), undefined, 1).values)
+ * const final = run(hillisSteeleScanSteps(add, x), undefined, 10)
+ * print('final:', final.values)
+ * print('rounds =', final.t, ', work =', final.work)
  */
 export function hillisSteeleScanSteps(
   op: (a: Value, b: Value) => Value,
@@ -189,30 +277,47 @@ export type BlellochPhase = 'up-sweep' | 'clear' | 'down-sweep' | 'done'
 
 /** The state of `blellochScanSteps`. */
 export interface BlellochState extends Status {
-  /** The working array, padded with the identity to a power of two P. */
+  /** The working array, padded with the identity to a power of two $P$. */
   readonly values: Tensor
   /** The phase the next round belongs to. */
   readonly phase: BlellochPhase
-  /** The tree level of the next round (0 = the leaves' parents). */
+  /** The tree level of the next round ($0$ = the leaves' parents). */
   readonly level: Size
   /** The updates of the last round: `to` combined with `from` (up-sweep) or swapped with it (down-sweep). */
   readonly moves: readonly ScanMove[]
-  /** Applications of ⊕ so far (the work: about 2P). */
+  /**
+   * Applications of $\oplus$ so far (the work: $2(P - 1)$ in the two sweeps, and $n$ more for the inclusive scan at
+   * the end).
+   */
   readonly work: Size
-  /** The exclusive scan x_0 ⊕ … ⊕ x_{k−1} (identity at k = 0), once done. */
+  /** The exclusive scan $x_0 \oplus \dots \oplus x_{k-1}$ (the identity at $k = 0$), once done; null before. */
   readonly exclusive: Tensor | null
-  /** The inclusive scan, exclusive ⊕ x, once done: equal to `associativeScan(op, x)`. */
+  /** The inclusive scan, `exclusive` $\oplus$ `x`, once done: equal to `associativeScan(op, x)`. Null before. */
   readonly inclusive: Tensor | null
+  /** True once the down-sweep has finished and both scans are formed. */
   readonly terminated: boolean
 }
 
 /**
  * Blelloch's work-efficient scan (Blelloch, 1990) as a step-through algorithm. The input is padded to a power of two
- * P with `identity` (an element e with e ⊕ x = x ⊕ e = x, one row: shape [1, ...] or broadcastable to it). The
- * up-sweep builds a balanced tree of partial reductions in log₂ P rounds (the root holds the total); the root is set
- * to the identity; the down-sweep pushes prefixes back down in log₂ P rounds, each left child receiving its parent's
- * prefix and each right child the parent's prefix ⊕ its left sibling's sum. About 2P applications of ⊕ in 2 log₂ P
- * rounds. The result is the exclusive scan; the final step also forms the inclusive one.
+ * $P$ with `identity` (an element $e$ with $e \oplus x = x \oplus e = x$). The up-sweep builds a balanced tree of
+ * partial reductions in $\log_2 P$ rounds (the root holds the total); one step sets the root to the identity; the
+ * down-sweep pushes prefixes back down in $\log_2 P$ rounds, each left child receiving its parent's prefix and each
+ * right child the parent's prefix $\oplus$ its left sibling's sum. $2(P - 1)$ applications of $\oplus$ in
+ * $2 \log_2 P + 1$ steps. The result is the exclusive scan; the final step also forms the inclusive one (with $n$
+ * more applications). Throws `ShapeError` when `x` is a scalar or `identity` does not hold one element.
+ *
+ * @param op The associative operation: `op(a, b)` combines earlier rows `a` with later rows `b`, row by row.
+ * @param x The sequence, scanned along its first axis (length $n$).
+ * @param identity The identity of `op`, one element: as many values as one row of `x` (any shape; a number when the
+ *   rows are scalars). It is not broadcast.
+ * @returns The algorithm; `init` takes no start, and each step is one round of a sweep, or the clearing of the root.
+ *
+ * @example The exclusive and inclusive sums
+ * const final = run(blellochScanSteps(add, tensor([3, 1, 4, 1, 5]), 0), undefined, 20)
+ * print('exclusive:', final.exclusive)
+ * print('inclusive:', final.inclusive)
+ * print('steps =', final.t, ', work =', final.work)
  */
 export function blellochScanSteps(
   op: (a: Value, b: Value) => Value,
@@ -229,7 +334,7 @@ export function blellochScanSteps(
     throw new ShapeError('blellochScanSteps', 'blellochScanSteps: the identity must have one element’s shape')
   const padding = P - n
   const padded = padding === 0 ? x : asTensor(concat([x, rows(idRow, Array(padding).fill(0))], 0))
-  /** Positions of the left and right child roots at tree level d: (k + 2^d − 1, k + 2^{d+1} − 1). */
+  /** Positions of the left and right child roots at tree level $d$: $(k + 2^d - 1,\ k + 2^{d+1} - 1)$. */
   const pairsAt = (d: number) => {
     const left: number[] = []
     const right: number[] = []
@@ -302,6 +407,7 @@ export function blellochScanSteps(
 
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/** Registers this file's step-through scans in the algorithm registry, under `foundation/tensor`. */
 const algorithm = definer<AlgorithmInfo>('algorithm', 'foundation/tensor')
 
 algorithm(

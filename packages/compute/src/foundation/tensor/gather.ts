@@ -12,7 +12,15 @@ import { batchToFront, definePrimitive, type Op } from './primitive'
 import { shapeOfValue } from './structure'
 import type { Value } from './trace'
 
-/** Row-major float64 data of a raw value (no copy when already contiguous float64 at offset 0). */
+/**
+ * Row-major float64 data of a raw value (no copy when already contiguous float64 at offset 0). A number throws
+ * `AifnError`.
+ *
+ * @param x The raw value, which must be a tensor.
+ * @param where The caller's name, for the error message.
+ * @returns The elements in row-major order: the tensor's own storage when it is contiguous float64 at offset 0 (so
+ *   not to be modified), otherwise a copy.
+ */
 function f64(x: number | Tensor, where: string): Float64Array {
   if (typeof x === 'number') throw new AifnError(where, `${where}: expected a tensor, got a number`)
   if (x.dtype === 'float64' && isContiguous(x) && x.offset === 0 && x.data.length === sizeOf(x.shape)) {
@@ -21,17 +29,43 @@ function f64(x: number | Tensor, where: string): Float64Array {
   return Float64Array.from(toFlat(x))
 }
 
+/**
+ * The parameters of a gather or scatter: `indices`, the flat (row-major) index into the source of each element of the
+ * gathered tensor; `shape`, the gathered tensor's shape (with `indices.length` elements); and `source`, the shape of
+ * the tensor indexed.
+ */
 type GatherParams = { indices: Int32Array; shape: readonly number[]; source: readonly number[] }
 
+/**
+ * The dtype of a gather's or scatter's result: complex128 for a complex input, float64 otherwise.
+ *
+ * @param dtype The input's dtype.
+ * @returns `'complex128'` or `'float64'`.
+ */
 const floatOrComplex = (dtype: string) => (dtype === 'complex128' ? 'complex128' : 'float64')
 
-/** Apply a real kernel to a raw value, or to the real and imaginary views of a complex one and join the results. */
+/**
+ * Apply a real kernel to a raw value, or to the real and imaginary views of a complex one and join the results.
+ *
+ * @param x The raw value: a number or a tensor of any dtype.
+ * @param kernel The real kernel, applied to `x` itself or to each float64 part of a complex `x`.
+ * @returns The kernel's result, or for a complex `x` the complex128 tensor joined from its results on the two parts.
+ */
 function onParts(x: number | Tensor, kernel: (part: number | Tensor) => Tensor): Tensor {
   if (typeof x === 'number' || x.dtype !== 'complex128') return kernel(x)
   const [re, im] = splitComplex(x)
   return joinComplex(kernel(re), kernel(im!))
 }
 
+/**
+ * The forward rule of `gather`: `out[k] = data[indices[k]]`, with `data` the row-major elements of `x`.
+ *
+ * @param x The tensor read (a number throws `AifnError`).
+ * @param options The gather's parameters (`source` is not read).
+ * @param options.indices The flat index into `x` of each output element.
+ * @param options.shape The shape of the result.
+ * @returns A float64 tensor of shape `shape`.
+ */
 function gatherRaw(x: number | Tensor, { indices, shape }: GatherParams): Tensor {
   const data = f64(x, 'gather')
   const out = new Float64Array(indices.length)
@@ -39,6 +73,16 @@ function gatherRaw(x: number | Tensor, { indices, shape }: GatherParams): Tensor
   return fromData(out, shape)
 }
 
+/**
+ * The forward rule of `scatterAdd`: `out[indices[k]] += data[k]` into zeros, with `data` the row-major elements of
+ * `g`.
+ *
+ * @param g The values added, one per index (a number throws `AifnError`).
+ * @param options The scatter's parameters (`shape` is not read).
+ * @param options.indices The flat index into the result of each value of `g`.
+ * @param options.source The shape of the result.
+ * @returns A float64 tensor of shape `source`, zero where no index points.
+ */
 function scatterAddRaw(g: number | Tensor, { indices, source }: GatherParams): Tensor {
   const data = f64(g, 'scatterAdd')
   const out = new Float64Array(sizeOf(source))
@@ -47,8 +91,13 @@ function scatterAddRaw(g: number | Tensor, { indices, source }: GatherParams): T
 }
 
 /**
- * The parameters of a gather or scatter over a batch of `size` examples stacked along a new first axis: example b's
- * flat indices are shifted by b times the size of one example's source.
+ * The parameters of a gather or scatter over a batch of `size` examples stacked along a new first axis: the flat
+ * indices of example $b$ are shifted by $b$ times the size of one example's source.
+ *
+ * @param p The parameters for one example.
+ * @param size The number of examples in the batch.
+ * @returns The parameters for the whole batch: the shifted indices, and `shape` and `source` with a leading axis of
+ *   length `size`.
  */
 function batched(p: GatherParams, size: number): GatherParams {
   const n = p.indices.length
@@ -59,6 +108,7 @@ function batched(p: GatherParams, size: number): GatherParams {
 }
 
 // gather and scatterAdd are linear and each other's transpose, so each has derivatives of every order.
+/** The gather primitive: linear, with `scatterAddOp` as its transpose; batched by shifting each example's indices. */
 const gatherOp: Op<GatherParams> = definePrimitive<GatherParams>({
   id: 'foundation/tensor/gather',
   arity: 1,
@@ -78,6 +128,7 @@ const gatherOp: Op<GatherParams> = definePrimitive<GatherParams>({
   },
 })
 
+/** The scatter-add primitive: linear, with `gatherOp` as its transpose; batched by shifting each example's indices. */
 const scatterAddOp: Op<GatherParams> = definePrimitive<GatherParams>({
   id: 'foundation/tensor/scatterAdd',
   arity: 1,
@@ -97,6 +148,13 @@ const scatterAddOp: Op<GatherParams> = definePrimitive<GatherParams>({
   },
 })
 
+/**
+ * Throw `ShapeError` unless every index lies in $[0, n)$, $n$ the number of elements indexed.
+ *
+ * @param indices The flat indices to check.
+ * @param size The number $n$ of elements they index.
+ * @param where The caller's name, for the error message.
+ */
 function checkIndices(indices: Int32Array, size: number, where: string): void {
   for (let k = 0; k < indices.length; k++)
     if (indices[k] < 0 || indices[k] >= size)
@@ -104,8 +162,22 @@ function checkIndices(indices: Int32Array, size: number, where: string): void {
 }
 
 /**
- * out[k] = x.flat[indices[k]] (row-major flat indices), reshaped to `shape` (whose size must equal indices.length).
- * Differentiable in x: the cotangent is scattered back and summed where an index repeats.
+ * `out[k] = x.flat[indices[k]]` (row-major flat indices), reshaped to `shape` (whose size must equal
+ * `indices.length`). Differentiable in `x`: the cotangent is scattered back and summed where an index repeats. An index
+ * out of range, or a size that differs from `indices.length`, throws `ShapeError`.
+ *
+ * @param x The tensor read, in row-major order.
+ * @param indices The flat index into `x` of each element of the result.
+ * @param shape The shape of the result.
+ * @returns The gathered values, of shape `shape`: float64, or complex128 for a complex `x`.
+ *
+ * @example Read entries of a matrix by flat index
+ * const x = tensor([[1, 2, 3], [4, 5, 6]])
+ * print('gathered =', gather(x, Int32Array.of(0, 5, 5, 2), [2, 2]))
+ *
+ * @example The gradient adds up where an index repeats
+ * const f = (x) => sum(gather(x, Int32Array.of(0, 2, 2), [3]))
+ * print('gradient =', grad(f)(tensor([1, 2, 3])))
  */
 export function gather(x: Value, indices: Int32Array, shape: readonly number[]): Value {
   if (indices.length !== sizeOf(shape)) throw new ShapeError('gather', 'gather: indices and shape disagree')
@@ -116,7 +188,16 @@ export function gather(x: Value, indices: Int32Array, shape: readonly number[]):
 
 /**
  * The adjoint of `gather`: a tensor of shape `shape` holding, at each flat index, the sum of the values of `g` gathered
- * from it (out.flat[indices[k]] += g.flat[k]). `g` must have indices.length elements. Differentiable in g.
+ * from it (`out.flat[indices[k]] += g.flat[k]`). `g` must have `indices.length` elements. Differentiable in `g`. A
+ * size mismatch, or an index out of range, throws `ShapeError`.
+ *
+ * @param g The values to add, one per index, in row-major order.
+ * @param indices The flat index into the result of each value of `g`.
+ * @param shape The shape of the result.
+ * @returns A tensor of shape `shape`, zero where no index points: float64, or complex128 for a complex `g`.
+ *
+ * @example Count how often each index occurs
+ * print('counts =', scatterAdd(ones([5]), Int32Array.of(0, 2, 2, 1, 2), [3]))
  */
 export function scatterAdd(g: Value, indices: Int32Array, shape: readonly number[]): Value {
   const from = shapeOfValue(g)
@@ -126,8 +207,18 @@ export function scatterAdd(g: Value, indices: Int32Array, shape: readonly number
 }
 
 /**
- * The rows `indices` of x along its first axis: shape [...indices shape, ...x.shape.slice(1)]. An embedding lookup is
- * `take(table, ids)`. Indices are integers in [0, x.shape[0]); the gradient adds up over repeated rows.
+ * The rows `indices` of `x` along its first axis: shape `[...indices shape, ...x.shape.slice(1)]`. An embedding lookup
+ * is `take(table, ids)`. Indices are integers in `[0, x.shape[0])` (others throw `ShapeError`, as does a number `x`);
+ * the gradient adds up over repeated rows.
+ *
+ * @param x The table, of rank $\ge 1$, whose rows along the first axis are taken.
+ * @param indices The row indices: a tensor (whose shape leads the result's) or an array of numbers.
+ * @returns The rows, of shape `[...indices shape, ...x.shape.slice(1)]`.
+ *
+ * @example An embedding lookup
+ * const table = tensor([[0, 0], [1, 10], [2, 20]])
+ * print('rows 2, 0, 2 =', take(table, [2, 0, 2]))
+ * print('shape for a 2 × 2 grid of ids:', shapeOfValue(take(table, tensor([[1, 2], [0, 1]]))))
  */
 export function take(x: Value, indices: Tensor | ArrayLike<number>): Value {
   const shape = shapeOfValue(x)

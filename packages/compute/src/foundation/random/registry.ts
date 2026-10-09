@@ -1,6 +1,6 @@
 /**
- * The draws of `aifn-compute/foundation/random`, registered as functions with the notes they serve. (Stream plumbing and the
- * block helpers are infrastructure and are not registered.)
+ * The draws of `aifn-compute/foundation/random`, registered as functions with the notes they serve. (Stream plumbing
+ * and the block helpers are infrastructure and are not registered.)
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

@@ -1,3 +1,14 @@
+/**
+ * The runners of `aifn-compute/foundation/trace`, and the incremental builder behind the traces they record.
+ *
+ * `run`, `seek` and `live` keep no history: they step an `Algorithm` with the randomness of `protocol.ts` (step $t$
+ * draws from `child(root, 'step', t)`) and return states, so all three reach the same state at the same step. `trace`,
+ * `extend` and `timeSliced` share one builder, which appends each kept step's recordings to growable typed-array
+ * columns: a trace of a run in progress is a set of views of those columns, taken in $O(1)$, and a trace extended by
+ * $m$ steps equals one traced $m$ steps longer from the start. `decimate` thins a finished trace for drawing, and
+ * `profile` (with the clock `now`) times named phases inside a step. Errors are thrown as `AifnError` (a mismatched
+ * stream or recorder set) or `ShapeError` (a recording that changes shape).
+ */
 import type {
   Algorithm,
   Checkpoints,
@@ -17,7 +28,11 @@ import type { Tensor } from 'aifn-compute/foundation/tensor'
 import { initStream, rootKey, stepContext, stopReason } from './protocol'
 import { flattenRecorded, makeSeries, seriesData } from './series'
 
-/** A monotone clock in milliseconds: `performance.now()` where it exists (browsers, workers, Node), else `Date.now()`. */
+/**
+ * A clock in milliseconds: `performance.now()` where it exists (browsers, workers, Node), which is monotone, else
+ * `Date.now()`, which may step back when the system clock is set.
+ * The runners time steps and `profile` times phases with it.
+ */
 export const now: () => number =
   typeof globalThis.performance?.now === 'function' ? () => globalThis.performance.now() : () => Date.now()
 
@@ -29,7 +44,30 @@ let currentPhases: Record<string, number> | null = null
 
 /**
  * Times `fn` as the named phase of the current step: inside a traced step it adds the elapsed milliseconds to
- * `trace.timing.phases[name]`; elsewhere it only calls `fn`. Nested phases each count their own inclusive time.
+ * `trace.timing.phases[name]`; elsewhere it only calls `fn`. Nested phases each count their own inclusive time. A
+ * trace made with `timing: false` records no phases.
+ *
+ * @param name The phase's key in `trace.timing.phases`; the times of every call with this name add up.
+ * @param fn The work to time, called once with no arguments. Its time is counted even when it throws.
+ * @returns What `fn` returns.
+ *
+ * @example Time a phase inside each step
+ * const busy = {
+ *   name: 'busy',
+ *   init: () => ({ t: 0, total: 0 }),
+ *   step: (s) => {
+ *     const part = profile('sum', () => {
+ *       let z = 0
+ *       for (let i = 0; i < 1000; i++) z += i
+ *       return z
+ *     })
+ *     return { t: s.t + 1, total: s.total + part }
+ *   },
+ * }
+ * const tr = trace(busy, undefined, 20)
+ * print('phases timed:', Object.keys(tr.timing.phases))
+ * print('total after 20 steps:', tr.final.total)
+ * print('outside a trace it only calls fn:', profile('sum', () => 1 + 1))
  */
 export function profile<T>(name: string, fn: () => T): T {
   const phases = currentPhases
@@ -50,7 +88,38 @@ export type RunOptions = { stream?: Stream }
 
 /**
  * Runs `alg` for at most `n` steps and returns the final state. Stops early on a `Status` flag or `done`, so
- * `run(alg, start, n)` is the state a trace of `n` steps ends on.
+ * `run(alg, start, n)` is the state a trace of `n` steps ends on. Nothing is recorded or timed.
+ *
+ * @param alg The algorithm to run.
+ * @param start The starting point passed to `init`.
+ * @param n The largest number of steps to take; 0 returns the initial state.
+ * @param options The root stream that every draw derives from (only its key is used; default `stream(0)`).
+ * @returns The state where the run stopped: after `n` steps, or the first state flagged `diverged`, `converged` or
+ *   `terminated`, or for which `alg.done` holds.
+ *
+ * @example Newton's iteration for the square root of 2
+ * const newton = {
+ *   name: 'newton-sqrt2',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s) => {
+ *     const x = (s.x + 2 / s.x) / 2
+ *     return { t: s.t + 1, x, converged: Math.abs(x - s.x) < 1e-12 }
+ *   },
+ * }
+ * const final = run(newton, 1, 50)
+ * print('x =', final.x)
+ * print('steps taken =', final.t)
+ * print('converged =', final.converged)
+ *
+ * @example The root stream fixes every draw
+ * const walk = {
+ *   name: 'random-walk',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s, ctx) => ({ t: s.t + 1, x: s.x + normal(ctx.stream) }),
+ * }
+ * print('stream(1):', run(walk, 0, 10, { stream: stream(1) }).x)
+ * print('stream(1) again:', run(walk, 0, 10, { stream: stream(1) }).x)
+ * print('stream(2):', run(walk, 0, 10, { stream: stream(2) }).x)
  */
 export function run<Start, S extends Status>(
   alg: Algorithm<Start, S>,
@@ -67,7 +136,27 @@ export function run<Start, S extends Status>(
 /**
  * The state at step `i`, equal to `run(alg, start, i)` with the same root stream. With `checkpoints` (a trace, or
  * stored checkpoints), it starts from the latest stored state at or before step `i` rather than from `init`, so
- * scrubbing a long run is cheap; a trace also supplies its root key.
+ * scrubbing a long run is cheap; a trace also supplies its root key. A trace offers its checkpoints, its final state
+ * and, with `keep: 'all'`, the state at every kept step.
+ *
+ * @param alg The algorithm, the same one the trace or checkpoints came from.
+ * @param start The starting point passed to `init`, used only when no stored state is at or before step `i`.
+ * @param i The step number of the state wanted. A run that stops before step `i` returns the state it stopped at.
+ * @param options `checkpoints`, the stored states to start from: a `Trace` (whose key then becomes the root key) or
+ *   a `Checkpoints` record with ascending step numbers; and `stream`, the root stream (default: the trace's key, or
+ *   `stream(0)`), which with a trace must be the trace's own or `AifnError` is thrown.
+ * @returns The state at step `i`.
+ *
+ * @example Jump to a step of a long run from its checkpoints
+ * const walk = {
+ *   name: 'random-walk',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s, ctx) => ({ t: s.t + 1, x: s.x + normal(ctx.stream) }),
+ * }
+ * const tr = trace(walk, 0, 1000, { keep: 'checkpoints', checkpointEvery: 100 })
+ * print('stored steps:', tr.checkpoints.index)
+ * print('seek to 650:', seek(walk, 0, 650, { checkpoints: tr }).x)
+ * print('run to 650: ', run(walk, 0, 650).x)
  */
 export function seek<Start, S extends Status>(
   alg: Algorithm<Start, S>,
@@ -111,7 +200,24 @@ export function seek<Start, S extends Status>(
 
 /**
  * A generator of `{ step, state }` for play loops, starting at step 0. It ends after yielding a state that stops the
- * run (with `stopped` set); otherwise it runs for as long as it is pulled.
+ * run (with `stopped` set); otherwise it runs for as long as it is pulled. Each state is computed when it is pulled,
+ * and the states are those of `run` with the same root stream.
+ *
+ * @param alg The algorithm to step.
+ * @param start The starting point passed to `init`.
+ * @param options The root stream that every draw derives from (only its key is used; default `stream(0)`).
+ * @returns A generator of the step number, the state at that step and, on the last one, why the run stopped.
+ *
+ * @example Pull states one at a time
+ * const newton = {
+ *   name: 'newton-sqrt2',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s) => {
+ *     const x = (s.x + 2 / s.x) / 2
+ *     return { t: s.t + 1, x, converged: Math.abs(x - s.x) < 1e-12 }
+ *   },
+ * }
+ * for (const { step, state, stopped } of live(newton, 1)) print(step, state.x, stopped ?? '')
  */
 export function* live<Start, S extends Status>(
   alg: Algorithm<Start, S>,
@@ -137,17 +243,32 @@ export function* live<Start, S extends Status>(
 // handled by copy-on-write: a snapshot may show one provisional row past the committed rows (the final state off the
 // `every` grid), and the slot it used is copied away before it is overwritten.
 
+/** The typed-array constructors a column of rows is stored in. */
 type ArrayCtor = Float64ArrayConstructor | Int32ArrayConstructor
 
+/**
+ * A growable column of fixed-width rows in one typed array, which doubles when full. `view` lends out a view of the
+ * filled prefix; the slot of a provisional row a view has seen is copied away before it is overwritten.
+ */
 class Rows<A extends Float64Array | Int32Array> {
+  /** The buffer: row $k$ occupies entries `k * width` to `k * width + width - 1`; past `rows` it is spare. */
   data: A
+  /** The number of committed rows. */
   rows = 0
   /** Rows (committed or provisional) that some snapshot's view covers in the current buffer. */
   private lent = 0
 
+  /** The constructor of `data`, used to grow it. */
   private readonly make: ArrayCtor
+  /** The number of values in a row (the size of one recorded value). Set before the first row is pushed. */
   width: number
 
+  /**
+   * An empty column with room for 16 rows.
+   *
+   * @param make The typed array to store rows in (`Float64Array` for values, `Int32Array` for step numbers).
+   * @param width The number of values in a row.
+   */
   constructor(make: ArrayCtor, width: number) {
     this.make = make
     this.width = width
@@ -168,13 +289,23 @@ class Rows<A extends Float64Array | Int32Array> {
     }
   }
 
+  /**
+   * Appends a committed row.
+   *
+   * @param values The row's `width` values, copied in.
+   */
   push(values: ArrayLike<number>): void {
     this.prepare()
     this.data.set(values, this.rows * this.width)
     this.rows++
   }
 
-  /** A view of the committed rows, plus `extra` as one provisional row when given. */
+  /**
+   * A view of the committed rows, plus `extra` as one provisional row when given.
+   *
+   * @param extra The values of a provisional row to show after the committed ones, without committing it.
+   * @returns A view (not a copy) of the rows' values in row-major order; later pushes never change what it shows.
+   */
   view(extra?: ArrayLike<number>): A {
     let rows = this.rows
     if (extra) {
@@ -187,9 +318,21 @@ class Rows<A extends Float64Array | Int32Array> {
   }
 }
 
+/**
+ * One recorder's series while it is built: `valueShape` is the shape of one recorded value (null until the first
+ * recording), `rows` the recorded values, one row per kept step, and `finiteSeen` whether a finite value has been
+ * committed (after which a NaN counts as divergence).
+ */
 type Column = { valueShape: number[] | null; rows: Rows<Float64Array>; finiteSeen: boolean }
 
-/** A getter memoised on first read (and replaceable by assignment), so a snapshot copies no state arrays up front. */
+/**
+ * A getter memoised on first read (and replaceable by assignment), so a snapshot copies no state arrays up front.
+ *
+ * @param target The object to define the property on; modified in place.
+ * @param name The property's name. It is enumerable, so spreading `target` reads it.
+ * @param compute Makes the value, called at most once, on the first read (never when the property is assigned first).
+ * @returns `target`, now typed with the property.
+ */
 function lazy<T extends object, K extends string, V>(target: T, name: K, compute: () => V): T & Record<K, V> {
   let value: V | undefined
   let done = false
@@ -214,30 +357,55 @@ function lazy<T extends object, K extends string, V>(target: T, name: K, compute
 // ---------------------------------------------------------------------------------------------------------------------
 // The trace builder: one incremental engine behind `trace`, `extend` and `timeSliced`.
 
-/** Recorders a trace was made with, so `extend` can reuse them in the same thread. Functions are not part of a trace. */
+/**
+ * Recorders a trace was made with, so `extend` can reuse them in the same thread. Functions are not part of a trace.
+ */
 const madeWith = new WeakMap<object, Record<string, Recorder<never>>>()
 
+/** The incremental engine of a trace: it steps the algorithm, records kept steps and takes snapshots. */
 interface Builder<S> {
   /** Step until step `target`, a stop, or the clock passes `deadline` (at least one step per call). */
   advance(target: Size, deadline?: number): void
+  /** The step number of the current state. */
   readonly t: Size
+  /** Why the run has stopped, or null while it may go on. */
   readonly stopped: StopReason | null
   /** The trace so far, in O(1); the current state is included as the final kept step. Does not change the builder. */
   snapshot(): Trace<S>
 }
 
+/** What a builder resumes from to continue a trace (`extend`): the trace's committed rows and totals. */
 type Resume<S> = {
+  /** The series, without the provisional final row. */
   columns: Map<string, Column>
+  /** The step numbers of the committed kept steps. */
   index: Rows<Int32Array>
+  /** The wall-clock times of the committed kept steps (empty unless timed per step). */
   elapsed: Rows<Float64Array>
+  /** The time of every step computed so far. */
   stepMs: Rows<Float64Array>
+  /** The states of the committed kept steps (with `keep: 'all'`). */
   states: S[]
+  /** The stored checkpoints. */
   checkpoints: { index: Index[]; states: S[] }
+  /** The time per named phase so far. */
   phases: Record<string, number>
+  /** The total step time so far. */
   totalMs: number
+  /** The elapsed time at the last kept step, so the clock continues from it. */
   elapsedOffset: number
 }
 
+/**
+ * A builder that steps `alg` from a given state under the options of a trace. A fresh start (no `begin.resume`)
+ * records and checkpoints its first state at once; a resumed one continues the columns it is given.
+ *
+ * @param alg The algorithm; only `step`, `done` and `name` are used, since the first state is given.
+ * @param options How to record, keep, checkpoint and time, and whether a non-finite recording stops the run.
+ * @param begin Where to start: the `state` at step `t`, the `start` and root `key` to store in the metadata, the time
+ *   `init` took (`initMs`, recorded as the `init` phase), and for `extend` the `resume` data of the trace continued.
+ * @returns The builder, not yet advanced.
+ */
 function createBuilder<S extends Status>(
   alg: Algorithm<never, S>,
   options: TraceOptions<S>,
@@ -443,6 +611,14 @@ function createBuilder<S extends Status>(
   }
 }
 
+/**
+ * A builder for a new run: calls `init` with the root key's `init` stream, timing it with `timing: 'step'`.
+ *
+ * @param alg The algorithm.
+ * @param start The starting point passed to `init`.
+ * @param options The trace options; `stream` gives the root key and `timing` whether `init` is timed.
+ * @returns A builder at step 0, which has recorded the initial state.
+ */
 function freshBuilder<Start, S extends Status>(
   alg: Algorithm<Start, S>,
   start: Start,
@@ -460,6 +636,44 @@ function freshBuilder<Start, S extends Status>(
  * Runs `alg` for at most `n` steps and returns its trace: each recorder's values stacked over the kept steps (steps
  * divisible by `every`, and always the final step), the stored states (`keep`), timing (`timing`) and why it stopped:
  * `done` (a `converged` or `terminated` flag, or `done`), `limit`, or `diverged` (the flag, or a non-finite recording).
+ * A recorder whose value changes shape throws `ShapeError`.
+ *
+ * @param alg The algorithm to run.
+ * @param start The starting point passed to `init`, kept in `meta.start`.
+ * @param n The largest number of steps to take.
+ * @param options What to record and keep, and how to time it (see `TraceOptions`; every field has a default).
+ * @returns The trace. Its final state is `run(alg, start, n)` with the same root stream.
+ *
+ * @example Record the iterates of Newton's method
+ * const newton = {
+ *   name: 'newton-sqrt2',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s) => {
+ *     const x = (s.x + 2 / s.x) / 2
+ *     return { t: s.t + 1, x, converged: Math.abs(x - s.x) < 1e-12 }
+ *   },
+ * }
+ * const tr = trace(newton, 1, 50, { record: { x: (s) => s.x } })
+ * print('kept steps:', tr.index)
+ * print('x:', tr.series.x)
+ * print('stopped:', tr.meta.stopped, 'after', tr.meta.steps, 'steps')
+ *
+ * @example Keep every 10th step, and always the last
+ * const walk = {
+ *   name: 'random-walk',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s, ctx) => ({ t: s.t + 1, x: s.x + normal(ctx.stream) }),
+ * }
+ * const tr = trace(walk, 0, 35, { every: 10, record: { x: (s) => s.x } })
+ * print('kept steps:', tr.index)
+ * print('series shape:', tr.series.x.shape)
+ * print('stopped:', tr.meta.stopped)
+ *
+ * @example A recording that overflows stops the run as diverged
+ * const blowUp = { name: 'blow-up', init: (x) => ({ t: 0, x }), step: (s) => ({ t: s.t + 1, x: s.x * 1e100 }) }
+ * const tr = trace(blowUp, 1, 100, { record: { x: (s) => s.x } })
+ * print('stopped:', tr.meta.stopped, 'at step', tr.meta.steps)
+ * print('x:', tr.series.x)
  */
 export function trace<Start, S extends Status>(
   alg: Algorithm<Start, S>,
@@ -476,8 +690,28 @@ export function trace<Start, S extends Status>(
  * Continues a trace by `m` more steps from its final state, as though it had been traced for `meta.steps + m` steps
  * in the first place (same kept steps, series, states and checkpoints; the same root key, so the same draws). A trace
  * that stopped `done` or `diverged` is returned unchanged. The recorders are `options.record`, or those the trace was
- * made with in this thread; either way they must be the ones named in `meta.recorders`. `every`, `checkpointEvery`,
- * `keep`, `timing` and the stream always come from the trace.
+ * made with in this thread; either way they must be the ones named in `meta.recorders`, or `AifnError` is thrown.
+ * `every`, `checkpointEvery`, `keep`, `timing` and the stream always come from the trace.
+ *
+ * @param previous The trace to continue; it is not modified. Not a `decimate`d one.
+ * @param alg The algorithm the trace was made with.
+ * @param m How many more steps to take at most; 0 or fewer returns `previous` unchanged.
+ * @param options `record`, the recorders, needed when the trace was made in another thread (a worker), and by name
+ *   the same set as the trace's; and `stopOnNonFinite`, whether a non-finite recording stops the run as `diverged`
+ *   (default true, whatever the trace was made with).
+ * @returns A new trace of the whole run, from step 0 to at most `meta.steps + m`.
+ *
+ * @example Extending a trace equals tracing longer from the start
+ * const walk = {
+ *   name: 'random-walk',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s, ctx) => ({ t: s.t + 1, x: s.x + normal(ctx.stream) }),
+ * }
+ * const first = trace(walk, 0, 3, { record: { x: (s) => s.x } })
+ * const extended = extend(first, walk, 3)
+ * const direct = trace(walk, 0, 6, { record: { x: (s) => s.x } })
+ * print('extended:', extended.series.x)
+ * print('direct:  ', direct.series.x)
  */
 export function extend<S extends Status>(
   previous: Trace<S>,
@@ -552,7 +786,27 @@ export function extend<S extends Status>(
  * Runs a trace in slices of about `budgetMs` of work each, yielding the partial trace after every slice and the full
  * trace last. Between slices it waits on `schedule(resume)`, which the caller supplies (for example
  * `requestAnimationFrame` in a page); the default is `setTimeout(resume, 0)`. Stop early by breaking out of the loop.
- * Each partial trace is a valid trace of the steps so far (`meta.stopped` is `limit` until the run ends), taken in O(1).
+ * Each partial trace is a valid trace of the steps so far (`meta.stopped` is `limit` until the run ends), taken in
+ * $O(1)$. Every slice takes at least one step, however small the budget.
+ *
+ * @param alg The algorithm to run.
+ * @param start The starting point passed to `init`.
+ * @param n The largest number of steps to take over all slices.
+ * @param budgetMs The time a slice may spend stepping, in milliseconds; a slice ends at the first step that finishes
+ *   past it.
+ * @param options The options of `trace`, and `schedule`, called with a `resume` function to call when the next slice
+ *   may run.
+ * @returns An async generator of the partial traces, the last of which is the trace `trace` would return.
+ *
+ * @example An async generator to draw from between frames
+ * const walk = {
+ *   name: 'random-walk',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s, ctx) => ({ t: s.t + 1, x: s.x + normal(ctx.stream) }),
+ * }
+ * const slices = timeSliced(walk, 0, 1000, 5, { record: { x: (s) => s.x } })
+ * print('consumed with for await:', Symbol.asyncIterator in slices)
+ * // In a page: for await (const partial of slices) draw(partial.series.x), with schedule: requestAnimationFrame.
  */
 export async function* timeSliced<Start, S extends Status>(
   alg: Algorithm<Start, S>,
@@ -575,6 +829,22 @@ export async function* timeSliced<Start, S extends Status>(
  * A copy of a trace thinned to at most `maxPoints` kept steps, evenly spaced over the kept steps and always keeping
  * the first and last, for drawing. Series, `index`, stored states and `elapsedMs` are thinned together; `stepMs` and
  * the checkpoints are unchanged. Do not `extend` a decimated trace.
+ *
+ * @param t The trace to thin; it is not modified.
+ * @param maxPoints The largest number of kept steps wanted. Below 2 nothing is thinned.
+ * @returns A new trace, or `t` itself when it has no more than `maxPoints` kept steps (or `maxPoints` is below 2).
+ *
+ * @example Thin a long trace for drawing
+ * const walk = {
+ *   name: 'random-walk',
+ *   init: (x) => ({ t: 0, x }),
+ *   step: (s, ctx) => ({ t: s.t + 1, x: s.x + normal(ctx.stream) }),
+ * }
+ * const tr = trace(walk, 0, 1000, { record: { x: (s) => s.x } })
+ * const thin = decimate(tr, 6)
+ * print('kept steps:', tr.index.length, '->', thin.index.length)
+ * print('steps drawn:', thin.index)
+ * print('x at them:', thin.series.x)
  */
 export function decimate<S>(t: Trace<S>, maxPoints: Size): Trace<S> {
   const kept = t.index.length

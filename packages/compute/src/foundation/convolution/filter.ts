@@ -1,11 +1,15 @@
 /**
- * The linear constant-coefficient difference equation Σₖ aₖ y[t−k] = Σₖ bₖ x[t−k] as one primitive, `linearFilter`
- * (scipy.signal's `lfilter`). A recursive (IIR) filter is not a convolution: its output feeds back. The derivative
- * rules follow Forgione & Piga (2021), "dynoNet: a neural network architecture for learning dynamical systems", Int. J.
- * Adapt. Control Signal Process. 35(4): with v the anticausal filtering of the cotangent ḡ by 1/Ā (reverse, filter,
- * reverse), x̄ = the anticausal filtering of ḡ by B̄/Ā, b̄ₖ = Σₜ vₜ x̄[t−k] and āₖ = −Σₜ vₜ ȳ[t−k] (bars on signals are
- * complex conjugates, the ℝ² convention of design K §8.1). The jvp filters ẋ and the forcing Σ ḃₖ x[t−k] − Σ ȧₖ y[t−k]
- * through the same recursion. Every rule is written with `linearFilter` itself, so derivatives of every order exist.
+ * The linear constant-coefficient difference equation $\sum_k a_k y_{t-k} = \sum_k b_k x_{t-k}$ as one primitive,
+ * `linearFilter` (`scipy.signal.lfilter`). A recursive (IIR) filter is not a convolution: its output feeds back.
+ *
+ * The derivative rules follow Forgione and Piga (2021), "dynoNet: a neural network architecture for learning dynamical
+ * systems", Int. J. Adapt. Control Signal Process. 35(4). Write $A$ and $B$ for the polynomials with coefficients $a$
+ * and $b$, $\bar{y}$ for the cotangent of the output and $^*$ for the complex conjugate (the $\reals^2$ convention of
+ * design K §8.1). With $v$ the anticausal filtering of $\bar{y}$ by $1/A^*$ (reverse, filter, reverse), the cotangent
+ * $\bar{x}$ is the anticausal filtering of $\bar{y}$ by $B^* / A^*$, $\bar{b}_k = \sum_t v_t\, x^*_{t-k}$ and
+ * $\bar{a}_k = -\sum_t v_t\, y^*_{t-k}$. The jvp filters $\dot{x}$ and the forcing
+ * $\sum_k \dot{b}_k x_{t-k} - \sum_k \dot{a}_k y_{t-k}$ through the same recursion. Every rule is written with
+ * `linearFilter` itself, so derivatives of every order exist.
  */
 
 import {
@@ -37,11 +41,28 @@ import {
 import type { VectorLike } from 'aifn-compute/foundation/contracts'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
+/** Parameters of the `linearFilter` primitive: `axis`, the time axis of the signal (non-negative). */
 type FilterParams = { axis: number }
 
+/**
+ * A raw input as a tensor, a number becoming a vector of one value.
+ *
+ * @param v The raw input of the impl.
+ * @returns `v` as a tensor.
+ */
 const asVector = (v: Raw): Tensor => (typeof v === 'number' ? fromData(Float64Array.of(v), [1]) : v)
 
-/** The recursion along `axis` of x, on raw tensors: direct form, coefficients normalised by a₀. */
+/**
+ * The recursion along `axis` of $x$, on raw tensors, in direct form with the coefficients normalised by $a_0$:
+ * $y_t = \sum_k (b_k / a_0)\, x_{t-k} - \sum_{k \ge 1} (a_k / a_0)\, y_{t-k}$, starting at rest. Complex when any
+ * input is. Throws `DomainError` when $a_0 = 0$.
+ *
+ * @param bRaw The feedforward coefficients $b$, a vector (a number is one coefficient).
+ * @param aRaw The feedback coefficients $a$, a vector with $a_0 \neq 0$.
+ * @param xRaw The signals, of any shape; every line along `axis` is filtered independently.
+ * @param axis The time axis of `xRaw`, non-negative.
+ * @returns The outputs $y$, with the shape of `xRaw`; complex128 when any input is.
+ */
 function filterRaw(bRaw: Raw, aRaw: Raw, xRaw: Raw, axis: number): Tensor {
   const b = asVector(bRaw)
   const a = asVector(aRaw)
@@ -119,19 +140,38 @@ function filterRaw(bRaw: Raw, aRaw: Raw, xRaw: Raw, axis: number): Tensor {
   return fromData(Y, [...shape], 'complex128')
 }
 
-/** A slice spec selecting `range` along `axis` of a rank-`rank` value (null elsewhere). */
+/**
+ * A slice spec selecting a range along one axis and everything along the others.
+ *
+ * @param rank The rank of the value to slice.
+ * @param axis The axis the range applies to.
+ * @param range The `[start, stop, step]` spec for that axis.
+ * @returns One spec per axis: `range` at `axis`, null (all) elsewhere.
+ */
 function along(rank: number, axis: number, range: SliceSpec): SliceSpec[] {
   return Array.from({ length: rank }, (_, k) => (k === axis ? range : null))
 }
 
-/** x reversed along `axis`. */
+/**
+ * A value reversed along one axis (time reversal, for the anticausal filtering of the derivative rules).
+ *
+ * @param x The value.
+ * @param axis The axis to reverse.
+ * @returns `x` with its order along `axis` reversed (a slice, so differentiable).
+ */
 function reverse(x: Value, axis: number): Value {
   return slice(x, ...along(shapeOfValue(x).length, axis, [null, null, -1]))
 }
 
 /**
- * The lagged inner products cₖ = Σₜ conj(u[t−k]) v[t], k = 0 … K−1, summed over every line along `axis` (a [K]
- * vector): the cotangent of a coefficient vector.
+ * The lagged inner products $c_k = \sum_t u^*_{t-k}\, v_t$ for $k = 0, \dots, K - 1$, summed over every line along
+ * `axis`: the cotangent of a coefficient vector. Lags at or beyond the signal's length give 0.
+ *
+ * @param u The signal that is lagged and conjugated ($x$ or $y$ in the derivative rules).
+ * @param v The signal it is multiplied with, of the same shape (the filtered cotangent).
+ * @param K The number of lags, the length of the coefficient vector.
+ * @param axis The time axis of `u` and `v`.
+ * @returns The vector $c$ of length $K$, complex when `u` or `v` is.
  */
 function laggedProducts(u: Value, v: Value, K: number, axis: number): Value {
   const shape = shapeOfValue(u)
@@ -152,6 +192,12 @@ function laggedProducts(u: Value, v: Value, K: number, axis: number): Value {
   return concat(terms, 0)
 }
 
+/**
+ * The difference-equation primitive, with inputs $(b, a, x)$. Its derivative rules are those of the file comment: the
+ * vjp filters the time-reversed cotangent by $1/A^*$ and by $B^* / A^*$, and the jvp filters
+ * $\dot{x}$, $\dot{b}$ against $x$ and $-\dot{a}$ against $y$ through the same recursion. Batched along the signal's
+ * other axes when only $x$ is batched, and by a loop otherwise.
+ */
 const linearFilterOp: Op<FilterParams> = definePrimitive<FilterParams>({
   id: 'foundation/convolution/linearFilter',
   arity: 3,
@@ -210,16 +256,24 @@ const linearFilterOp: Op<FilterParams> = definePrimitive<FilterParams>({
 
 /** Options for `linearFilter`. */
 export type LinearFilterOptions = {
-  /** The time axis of x (default −1, the last). */
+  /** The time axis of `x` (default $-1$, the last); negative values count from the end. */
   axis?: number
   /**
-   * Initial conditions of the transposed direct form II state, as `scipy.signal.lfilter`'s `zi`: x's shape with the
-   * time axis of length max(|a|, |b|) − 1, for the coefficients normalised by a₀. Omitted: the filter starts at rest.
+   * Initial conditions of the transposed direct form II state, as `scipy.signal.lfilter`'s `zi`: `x`'s shape with the
+   * time axis of length $\max(\lvert a \rvert, \lvert b \rvert) - 1$, for the coefficients normalised by $a_0$.
+   * Omitted: the filter starts at rest.
    */
   zi?: Value
 }
 
-/** A coefficient vector as a rank-1 value (numbers and plain arrays become tensors). */
+/**
+ * A coefficient vector as a rank-1 value: numbers and plain arrays become tensors, and tensors and traced values pass
+ * through. Throws `ShapeError` when it is not rank-1 or is empty.
+ *
+ * @param c The coefficients: a number, an array of numbers, a tensor or a traced value.
+ * @param where The caller's name for error messages.
+ * @returns The coefficients as a non-empty rank-1 value.
+ */
 function coefficients(c: Value | VectorLike, where: string): Value {
   if (typeof c === 'number') return tensor([c])
   const v: Value = isTraced(c) || isTensor(c) ? (c as Value) : tensor(Array.from(c as ArrayLike<number>))
@@ -229,12 +283,34 @@ function coefficients(c: Value | VectorLike, where: string): Value {
 }
 
 /**
- * The output y of the difference equation Σₖ₌₀ aₖ y[t−k] = Σₖ₌₀ bₖ x[t−k] along `axis` of x, every other axis a batch
- * of independent signals (`scipy.signal.lfilter`). a₀ must be nonzero. With `zi`, the initial state d (of the
- * normalised equation) adds the forcing d[t], t < K − 1, so y = lfilter(b, a, x) + lfilter([a₀], a, d). Real or
- * complex; differentiable in b, a, x and zi (reverse and forward, every order) and batched by `vmap`.
+ * The output $y$ of the difference equation $\sum_{k \ge 0} a_k y_{t-k} = \sum_{k \ge 0} b_k x_{t-k}$ along `axis`
+ * of $x$, every other axis a batch of independent signals (`scipy.signal.lfilter`). With `zi`, the initial state $d$
+ * (of the equation normalised by $a_0$) adds the forcing $d_t$ for $t < K$, with
+ * $K = \max(\lvert a \rvert, \lvert b \rvert) - 1$, so $y$ is `linearFilter(b, a, x)` plus
+ * `linearFilter([a[0]], a, d)`. Real or complex; differentiable in $b$, $a$, $x$ and `zi` (reverse and forward, every
+ * order) and batched by `vmap`. Throws `DomainError` when $a_0 = 0$, and
+ * `ShapeError` for empty or non-vector coefficients, an $x$ without a time axis, an axis out of range or a `zi` of the
+ * wrong shape.
  *
- * @example linearFilter([1], [1, -0.9], x) // the leaky integrator y[t] = 0.9 y[t−1] + x[t]
+ * @param b The feedforward (numerator) coefficients $b_0, b_1, \dots$: a number, an array of numbers or a vector.
+ * @param a The feedback (denominator) coefficients $a_0, a_1, \dots$, in the same forms, with $a_0 \neq 0$. `[1]` makes
+ *   it an FIR filter.
+ * @param x The signal: any shape with a time axis (a number is a signal of one sample).
+ * @param options The time `axis` and the initial state `zi`; see `LinearFilterOptions`.
+ * @returns The filtered signal $y$, with the shape of $x$; complex when any input is.
+ *
+ * @example The impulse response of a leaky integrator
+ * // y[t] = 0.9 y[t - 1] + x[t]
+ * print('y =', linearFilter([1], [1, -0.9], tensor([1, 0, 0, 0, 0])))
+ *
+ * @example Each row filtered from its own initial state
+ * const x = tensor([[1, 1, 1], [0, 0, 0]])
+ * const zi = tensor([[0], [2]])
+ * print('y =', linearFilter([1], [1, -0.5], x, { zi }))
+ *
+ * @example The gradient in the feedback coefficients
+ * const x = tensor([1, 0, 0])
+ * print('d sum(y) / da =', grad((a) => sum(linearFilter([1], a, x)))(tensor([1, -0.5])))
  */
 export function linearFilter(
   b: Value | VectorLike,

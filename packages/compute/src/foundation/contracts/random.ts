@@ -23,8 +23,9 @@ export interface Key {
  * `position`; nothing else about a stream changes, and no draw depends on anything but `key` and `position`.
  */
 export interface Stream {
+  /** The key whose counter space the stream reads. */
   readonly key: Key
-  /** Words drawn so far; `randomBits(s, n)` advances it by n. */
+  /** Words drawn so far; `randomBits(s, n)` advances it by $n$. */
   position: Size
 }
 

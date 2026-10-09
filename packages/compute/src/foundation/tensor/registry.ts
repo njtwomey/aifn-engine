@@ -1,11 +1,11 @@
 /**
  * The registry of primitives: every operation defined with `definePrimitive` or `elementwise` (and so every one made
- * by the `defineOp` wrapper) is recorded here under its id,
- * `module/name` (`foundation/tensor/exp`, `numerics/special/erf`, `numerics/linalg/cholesky`). Registering an id twice throws, so "defined once" is
- * checked when modules load. `registry.list()` feeds the generated primitive tests and the lab's reference pages.
+ * by the `defineOp` wrapper) is recorded here under its id, `module/name` (`foundation/tensor/exp`,
+ * `numerics/special/erf`, `numerics/linalg/cholesky`). Registering an id twice throws, so "defined once" is checked
+ * when modules load. `registry.list()` feeds the generated primitive tests and the lab's reference pages.
  *
- * A name without a module prefix (`'softplus'` rather than `'nn/functional/softplus'`) defines a local primitive that is not
- * registered: per-call maps (`map`, `map2`), derived derivative primitives and one-off primitives in figures.
+ * A name without a module prefix (`'softplus'` rather than `'nn/functional/softplus'`) defines a local primitive that
+ * is not registered: per-call maps (`map`, `map2`), derived derivative primitives and one-off primitives in figures.
  */
 
 import type { Raw } from 'aifn-compute/foundation/contracts'
@@ -23,8 +23,9 @@ export type Op<P> = (inputs: readonly Value[], params: P) => Value
 /**
  * A primitive's reverse rule (vector–Jacobian product): `vjp(cotangent, inputs, output, params, needed)` returns one
  * cotangent per input (`null` for a zero cotangent). `params` are the primitive's non-differentiable arguments (axes,
- * shapes, options). `needed[i]` says whether input i is being differentiated; a rule may skip the others (returning
- * null) and must not raise an error for them. Written with primitives, so that it can be differentiated again.
+ * shapes, options). `needed[i]` says whether input $i$ is being differentiated; a rule may skip the others
+ * (returning null) and must not raise an error for them. Written with primitives, so that it can be differentiated
+ * again.
  */
 export type OpVjp<P> = (
   cotangent: Value,
@@ -36,8 +37,8 @@ export type OpVjp<P> = (
 
 /**
  * A primitive's forward rule (Jacobian–vector product): `jvp(tangents, inputs, output, params)` returns the tangent of
- * the output (same kind and shape as the output), or null for a zero tangent. `tangents[i]` is null where input i is a
- * constant. Written with primitives, so that it can be differentiated again.
+ * the output (same kind and shape as the output), or null for a zero tangent. `tangents[i]` is null where input $i$ is
+ * a constant. Written with primitives, so that it can be differentiated again.
  */
 export type OpJvp<P> = (
   tangents: readonly (Value | null)[],
@@ -53,7 +54,7 @@ export type OpJvp<P> = (
 export type OpTranspose<P> = (cotangent: Value, inputs: readonly Value[], which: number, params: P) => Value | null
 
 /**
- * A primitive's batching rule, for `vmap`: `values[i]` carries a batch axis at `axes[i]` (null when input i is not
+ * A primitive's batching rule, for `vmap`: `values[i]` carries a batch axis at `axes[i]` (null when input $i$ is not
  * batched; at least one is), and every example is `size` long along it. Returns the batched output and the position
  * of its batch axis. Written with primitives (values may be traced by enclosing transforms).
  */
@@ -64,7 +65,9 @@ export type OpBatch<P> = (
   size: number,
 ) => [Value, number]
 
-/** A primitive's shape rule (abstract evaluation): the output's shape, dtype and kind from its inputs', without data. */
+/**
+ * A primitive's shape rule (abstract evaluation): the output's shape, dtype and kind from its inputs', without data.
+ */
 export type ShapeRule<P> = (avals: readonly Aval[], params: P) => Aval
 
 /**
@@ -80,10 +83,10 @@ export type RuleSource = 'own' | 'derived' | 'missing'
  */
 export type DTypeRule = ResultRule
 
-/** An interval of test inputs for one argument: uniform on [lo, hi], or integers in it when `integer`. */
+/** An interval of test inputs for one argument: uniform from `lo` to `hi`, or the integers in it when `integer`. */
 export type Domain = { readonly lo: number; readonly hi: number; readonly integer?: boolean }
 
-/** Draws test tensors from a keyed stream: a tensor of `shape` with entries in `domain` (default [−2, 2]). */
+/** Draws test tensors from a keyed stream: a tensor of `shape` with entries in `domain` (default $[-2, 2]$). */
 export type Draw = (shape: readonly number[], domain?: Domain) => Tensor
 
 /** One test input of a general primitive: its inputs and parameters. */
@@ -91,7 +94,7 @@ export type PrimitiveCase = { readonly inputs: readonly Raw[]; readonly params?:
 
 /** What the generated tests need to exercise a primitive (design K §10.1). */
 export type PrimitiveTest = {
-  /** Elementwise primitives: the domain of each argument (one entry applies to all). Default [−2, 2]. */
+  /** Elementwise primitives: the domain of each argument (one entry applies to all). Default $[-2, 2]$. */
   readonly domain?: Domain | readonly Domain[]
   /** General primitives: inputs and parameters, drawn with `draw`. Without cases a general primitive is not tested. */
   readonly cases?: (draw: Draw) => readonly PrimitiveCase[]
@@ -101,8 +104,8 @@ export type PrimitiveTest = {
   readonly secondOrder?: boolean
   /**
    * The primitive accepts complex128 inputs: the generated checks also draw complex inputs (the domain bounds the real
-   * parts, imaginary parts in [−1, 1]) and differentiate by perturbing real and imaginary parts separately (the ℝ²
-   * convention, design K §8.1). Integer-domain arguments (conditions, indices) stay real.
+   * parts, imaginary parts in $[-1, 1]$) and differentiate by perturbing real and imaginary parts separately (the
+   * $\reals^2$ convention, design K §8.1). Integer-domain arguments (conditions, indices) stay real.
    */
   readonly complex?: boolean
 }
@@ -127,6 +130,10 @@ export interface Primitive<P = unknown> {
   readonly module: string
   /** The name used in error messages and graphs (the part of the id after the slash). */
   readonly name: string
+  /**
+   * `elementwise` for a primitive applied element by element with broadcasting (made by `elementwise`, or declared so),
+   * whose batching rule is then derived; `general` otherwise.
+   */
   readonly kind: 'elementwise' | 'general'
   /** Number of inputs; `variadic` for a list (concat, einsum). */
   readonly arity: number | 'variadic'
@@ -162,13 +169,23 @@ export interface Primitive<P = unknown> {
   readonly differentiable: readonly boolean[] | boolean
   /** The result dtype rule (declared by every tensor primitive; see `DTypeRule`). */
   readonly dtype?: DTypeRule
+  /** Its documentation, for the reference pages and the catalog. */
   readonly doc: PrimitiveDoc
+  /** What the generated tests need to exercise it. */
   readonly test: PrimitiveTest
 }
 
+/** The registered primitives by id. */
 const table = new Map<string, Primitive>()
 
-/** Split an id into module and name; null for a local (unprefixed) name. */
+/**
+ * Split an id into module and name at its last slash; null for a local (unprefixed) name. An id whose module is not a
+ * path of lower-case segments (letters, digits and hyphens, each starting with a letter), or whose name is empty, is an
+ * `AifnError`.
+ *
+ * @param id The primitive's id, `module/name` or a bare local name.
+ * @returns The module (everything before the last slash) and the name (everything after it), or null without a slash.
+ */
 export function parseId(id: string): { module: string; name: string } | null {
   const slash = id.lastIndexOf('/')
   if (slash < 0) return null
@@ -180,7 +197,12 @@ export function parseId(id: string): { module: string; name: string } | null {
   return { module, name }
 }
 
-/** Add a primitive to the registry; an id already registered throws. For `definePrimitive` and `elementwise`. */
+/**
+ * Add a primitive to the registry; an id already registered throws (`AifnError`). For `definePrimitive` and
+ * `elementwise`.
+ *
+ * @param p The primitive, recorded under `p.id`.
+ */
 export function register<P>(p: Primitive<P>): void {
   if (table.has(p.id)) {
     throw new AifnError(

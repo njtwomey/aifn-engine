@@ -3,11 +3,12 @@
  *
  * A forward tracer carries a primal value and a tangent (its directional derivative along the direction being pushed
  * forward). Each primitive computes its primal output from the primal inputs and its output tangent from the input
- * tangents by its jvp rule, in the same single pass (Griewank and Walther, 2008, §3.1; Wengert, 1964). A null tangent is
- * a symbolic zero: constants cost nothing.
+ * tangents by its jvp rule, in the same single pass (Griewank and Walther, 2008, §3.1; Wengert, 1964). A null tangent
+ * is a symbolic zero: constants cost nothing.
  *
  * A primitive without a jvp rule falls back, for that application alone, to the **transpose trick**: its vjp
- * u ↦ Jᵀu is linear in u, so J·t is the gradient in u of ⟨Jᵀu, t⟩, obtained by one reverse sweep over the one rule.
+ * $\uvec \mapsto \Jmat^\top\uvec$ is linear in $\uvec$, so $\Jmat\tvec$ is the gradient in $\uvec$ of
+ * $\langle \Jmat^\top\uvec, \tvec \rangle$, obtained by one reverse sweep over the one rule.
  *
  * Complex values are pairs of reals (design K §8.1): a tangent of a complex value is complex, and a tangent of a real
  * output is real.
@@ -33,11 +34,25 @@ import {
 } from 'aifn-compute/foundation/tensor'
 import { ReverseInterpreter } from './reverse'
 
-/** A value traced by a forward interpreter: a primal value (one level down) and its tangent (null for zero). */
+/**
+ * A value traced by a forward interpreter: a primal value (one level down) and its tangent (null for zero). A dual
+ * number $x + \dot{x}\varepsilon$, with the tangent $\dot{x}$ of the primal's shape.
+ *
+ * @example A dual number pushed through $x^2$
+ * const fwd = new ForwardInterpreter()
+ * const x = fwd.seed(3, 1)
+ * const y = mul(x, x)
+ * print('is a ForwardTracer:', y instanceof ForwardTracer)
+ * print('value =', y.value, 'tangent =', y.tangent)
+ */
 export class ForwardTracer extends Tracer {
+  /** The forward interpreter that owns this tracer. */
   readonly interpreter: ForwardInterpreter
+  /** The primal value, one level down. */
   readonly value: Value
+  /** The tangent, of the primal's shape; null for a zero tangent. */
   readonly tangent: Value | null
+  /** A tracer of `interpreter` for `value` moving in direction `tangent`. */
   constructor(interpreter: ForwardInterpreter, value: Value, tangent: Value | null) {
     super()
     this.interpreter = interpreter
@@ -57,8 +72,17 @@ export class ForwardTracer extends Tracer {
 }
 
 /**
- * J·t for a primitive with a vjp but no jvp, by the transpose trick: ⟨vjp(u), t⟩ is linear in u, and its gradient in u
- * (at any u, here zero) is J·t. One reverse sweep of this one rule.
+ * $\Jmat\tvec$ for a primitive with a vjp but no jvp, by the transpose trick:
+ * $\langle \mathrm{vjp}(\uvec), \tvec \rangle$ is linear in $\uvec$, and its gradient in $\uvec$ (at any
+ * $\uvec$, here zero) is $\Jmat\tvec$. One reverse sweep of this one rule. Throws `NotDifferentiableError` when the
+ * primitive has no vjp either.
+ *
+ * @param p The primitive applied.
+ * @param tangents The tangent of each input, null for a constant input.
+ * @param inputs The primal inputs, one level down.
+ * @param out The primal output already computed from `inputs`.
+ * @param params The primitive's parameters for this application.
+ * @returns The output's tangent, or null when it does not depend on any tangent.
  */
 function jvpByTranspose(
   p: Primitive<unknown>,
@@ -90,11 +114,26 @@ function jvpByTranspose(
   return rev.backward([s], [1], [u]).cotangents[0]
 }
 
-/** The forward interpreter of one transform (one direction pushed forward). */
+/**
+ * The forward interpreter of one transform (one direction pushed forward). Each primitive applied to its tracers
+ * computes the primal output and its tangent in one pass. `jvp` creates one per call; using it directly shows the
+ * mechanism.
+ *
+ * @example The derivative of $x \sin x$ at 1 in one forward pass
+ * const fwd = new ForwardInterpreter()
+ * const x = fwd.seed(1, 1)
+ * const y = mul(x, sin(x))
+ * print('y =', fwd.primalOf(y))
+ * print("y' =", fwd.tangentOf(y))
+ * print('sin 1 + cos 1 =', Math.sin(1) + Math.cos(1))
+ */
 export class ForwardInterpreter implements Interpreter {
+  /** This interpreter's level, above every interpreter created before it. */
   readonly level = nextLevel()
+  /** The kind of interpreter. */
   readonly kind = 'forward'
 
+  /** True when `x` is a tracer of this interpreter. */
   owns(x: unknown): x is ForwardTracer {
     return x instanceof ForwardTracer && x.interpreter === this
   }
@@ -114,6 +153,10 @@ export class ForwardInterpreter implements Interpreter {
     return this.owns(x) ? x.tangent : null
   }
 
+  /**
+   * Apply primitive `p` to `inputs` (some of them this interpreter's tracers): the primal output, and its tangent by
+   * the primitive's jvp rule (or the transpose trick). A constant output is returned untraced.
+   */
   process(p: Primitive<unknown>, inputs: readonly Value[], params: unknown): Value {
     const primals = inputs.map((x) => this.primalOf(x))
     const out = apply(p, primals, params)

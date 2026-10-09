@@ -1,6 +1,6 @@
 /**
- * The transforms of `aifn-compute/foundation/autodiff`, registered as functions with the notes they serve. (`stopGradient` is
- * a primitive and is listed in the primitive table.)
+ * The transforms of `aifn-compute/foundation/autodiff`, registered as functions with the notes they serve.
+ * (`stopGradient` is a primitive and is listed in the primitive table.)
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

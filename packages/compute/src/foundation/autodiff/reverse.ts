@@ -11,8 +11,8 @@
  * nested. The sweep runs the vjp rules on those lowered values, so the backward computation of an inner `grad` is
  * itself traced by the enclosing transform, and a first-order sweep computes on raw values and records nothing.
  *
- * Complex values are pairs of reals (design K §8.1): the cotangent of z = x + iy is x̄ + iȳ, and a real value that
- * receives a complex cotangent keeps its real part.
+ * Complex values are pairs of reals (design K §8.1): the cotangent of $z = x + iy$ is $\bar{x} + i\bar{y}$, and a
+ * real value that receives a complex cotangent keeps its real part.
  */
 
 import { NotDifferentiableError } from 'aifn-compute/foundation/errors'
@@ -33,10 +33,11 @@ import {
 export type TapeRecord = {
   /** The primitive applied; null for an input leaf. */
   readonly primitive: Primitive<unknown> | null
+  /** The primitive's parameters for this application (undefined for an input leaf). */
   readonly params: unknown
   /** The inputs, lowered (this interpreter's tracers replaced by their values). */
   readonly inputs: readonly Value[]
-  /** For each input, the record it came from (this interpreter's tracer), or −1 for a constant. */
+  /** For each input, the record it came from (this interpreter's tracer), or $-1$ for a constant. */
   readonly sources: readonly number[]
   /** The output, lowered. */
   readonly output: Value
@@ -44,11 +45,23 @@ export type TapeRecord = {
   readonly label?: string
 }
 
-/** A value traced by a reverse interpreter: `value` (one level down) and the record that produced it. */
+/**
+ * A value traced by a reverse interpreter: `value` (one level down) and the record that produced it.
+ *
+ * @example A tracer and its record
+ * const rev = new ReverseInterpreter()
+ * const y = mul(rev.input(3, 'x'), 2)
+ * print('is a ReverseTracer:', y instanceof ReverseTracer)
+ * print('value =', y.value, 'from record', y.record)
+ */
 export class ReverseTracer extends Tracer {
+  /** The reverse interpreter that owns this tracer. */
   readonly interpreter: ReverseInterpreter
+  /** The value it stands for, one level down. */
   readonly value: Value
+  /** The index in `interpreter.records` of the record that produced it. */
   readonly record: number
+  /** A tracer of `interpreter` for `value`, produced by record `record`. */
   constructor(interpreter: ReverseInterpreter, value: Value, record: number) {
     super()
     this.interpreter = interpreter
@@ -75,10 +88,24 @@ export type Backward = {
   all: Map<number, Value>
 }
 
-/** The reverse interpreter of one transform: its records and its backward sweep. */
+/**
+ * The reverse interpreter of one transform: its records and its backward sweep. `grad`, `vjp` and `traceGraph` create
+ * one per call; using it directly shows the mechanism: mark the inputs, compute, then sweep back from the output.
+ *
+ * @example Record $y = x^2$ and pull a cotangent back
+ * const rev = new ReverseInterpreter()
+ * const x = rev.input(3, 'x')
+ * const y = mul(x, x)
+ * print('records:', rev.records.map((r) => (r.primitive ? r.primitive.name : 'input ' + r.label)))
+ * print('y =', rev.lower(y))
+ * print('dy/dx =', rev.backward([y], [1], [x]).cotangents[0])
+ */
 export class ReverseInterpreter implements Interpreter {
+  /** This interpreter's level, above every interpreter created before it. */
   readonly level = nextLevel()
+  /** The kind of interpreter. */
   readonly kind = 'reverse'
+  /** The tape: input leaves and primitive applications, in evaluation order. */
   readonly records: TapeRecord[] = []
 
   /** True when `x` is a tracer of this interpreter. */
@@ -97,6 +124,10 @@ export class ReverseInterpreter implements Interpreter {
     return new ReverseTracer(this, value, this.records.length - 1)
   }
 
+  /**
+   * Apply primitive `p` to `inputs` (some of them this interpreter's tracers) on their lowered values, and record the
+   * application. A primitive with a zero derivative is not recorded, and its output is returned untraced.
+   */
   process(p: Primitive<unknown>, inputs: readonly Value[], params: unknown): Value {
     const lowered = inputs.map((x) => this.lower(x))
     const output = apply(p, lowered, params)
@@ -110,8 +141,8 @@ export class ReverseInterpreter implements Interpreter {
   /**
    * Pull `seeds` (one cotangent per output, of the output's kind and shape) back to the input leaves `wrt`. Records
    * are visited from the last output backwards; each rule runs on lowered values, so it is traced by any enclosing
-   * transform and by nothing here. A primitive without a derivative on a path to an output is an error, never a
-   * silent zero.
+   * transform and by nothing here. A primitive without a derivative on a path to an output is an error
+   * (`NotDifferentiableError`), never a silent zero. With `keepAll`, every record's cotangent is kept in `all`.
    */
   backward(
     outputs: readonly Value[],
@@ -154,7 +185,7 @@ export class ReverseInterpreter implements Interpreter {
 
   /**
    * Pull a cotangent `g` of record `id` back through that record's rule alone: one entry per input, null for a
-   * constant input or where the rule gives none. With g = 1 on a scalar record this is its local partial derivative
+   * constant input or where the rule gives none. With $g = 1$ on a scalar record this is its local partial derivative
    * with respect to each input. For inspection (`traceGraph`).
    */
   pullback(id: number, g: Value): (Value | null)[] {

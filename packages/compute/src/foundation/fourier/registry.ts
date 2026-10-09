@@ -1,6 +1,6 @@
 /**
- * The functions of `aifn-compute/foundation/fourier` that are not primitives (`fft`, `ifft`, `rfft`, `irfft` are listed in
- * the primitive table), registered with the notes they serve.
+ * The functions of `aifn-compute/foundation/fourier` that are not primitives, registered with the notes they serve
+ * (`fft`, `ifft`, `rfft` and `irfft` are listed in the primitive table).
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

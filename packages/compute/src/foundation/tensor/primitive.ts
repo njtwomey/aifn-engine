@@ -3,12 +3,14 @@
  * (design K §4.2, §5). A primitive accepts numbers, tensors and traced values and returns the same kind: `exp(2)` is a
  * number, `exp(t)` a tensor, and `exp(tracer)` a tracer of the transform in progress.
  *
- * | Kind         | The author writes                                   | Derived here                                     |
- * | ------------ | --------------------------------------------------- | ------------------------------------------------ |
- * | elementwise  | scalar `f` and one derivative per argument          | vjp g·∂ᵢ, jvp Σ tᵢ·∂ᵢ, batch by broadcasting, shape |
- * | linear       | `transpose` (the adjoint map), `linear`             | vjp = transpose; jvp = the primitive on tangents |
- * | other        | `vjp` and `jvp` (and optionally `batch`, `shape`)   | —                                                |
- * | no derivative| `vjp: null`, or `zeroDerivative` if piecewise const | —                                                |
+ * What the author of each kind of primitive writes, and what is derived here:
+ *
+ * - Elementwise: a scalar `f` and one derivative $\partial_i$ per argument. Derived: the vjp $g\,\partial_i$, the jvp
+ *   $\sum_i t_i\,\partial_i$, batching by broadcasting, and the shape rule.
+ * - Linear: `transpose` (the adjoint map) and `linear`. Derived: the vjp is the transpose, and the jvp is the primitive
+ *   applied to the tangents.
+ * - Other: `vjp` and `jvp` (and optionally `batch`, `shape`). Nothing is derived.
+ * - No derivative: `vjp: null`, or `zeroDerivative` if piecewise constant. Nothing is derived.
  *
  * A missing jvp is not an error: forward mode falls back to the transpose trick on the vjp for that primitive alone.
  * A missing batch rule falls back to a loop over the batch (both in `aifn-compute/foundation/autodiff`).
@@ -68,7 +70,8 @@ export type PrimitiveSpec<P> = {
   readonly transpose?: OpTranspose<P>
   /**
    * `linear`: linear in all inputs jointly (add, reshape, sum, slice, concat), so its jvp is the primitive applied to
-   * the tangents. `multilinear`: linear in each input separately (matmul, einsum), so its jvp is Σᵢ p(…, tᵢ, …).
+   * the tangents. `multilinear`: linear in each input separately (matmul, einsum), so its jvp is
+   * $\sum_i p(\dots, t_i, \dots)$, the primitive with input $i$ replaced by its tangent $t_i$, summed over $i$.
    */
   readonly linear?: 'linear' | 'multilinear'
   /** The batching rule for `vmap` (see `OpBatch`). Elementwise primitives get one by broadcasting. */
@@ -79,36 +82,75 @@ export type PrimitiveSpec<P> = {
   readonly zeroDerivative?: boolean
   /** Which inputs the rule differentiates (default: all when a derivative exists). */
   readonly differentiable?: readonly boolean[] | boolean
+  /**
+   * `elementwise` for a primitive applied entry by entry with broadcasting, which gets a batching rule by broadcasting;
+   * `general` (the default) otherwise.
+   */
   readonly kind?: 'elementwise' | 'general'
   /** The result dtype rule (`same`, `float`, `bool`, `real`, `index`, `complex`; design K §3.2). */
   readonly dtype?: DTypeRule
+  /** The registry's documentation of the primitive: summary, formula, note (see `PrimitiveDoc`). */
   readonly doc?: PrimitiveDoc
+  /** What the generated tests of the primitive draw: domains, cases, complex and second-order checks. */
   readonly test?: PrimitiveTest
 }
 
 /** Rules derived by a definer (e.g. `elementwise`) rather than written in the spec. */
 type Derived<P> = {
+  /** The derived reverse rule, used when the spec gives none and the primitive is not linear. */
   vjp?: OpVjp<P>
+  /** The derived forward rule, used when the spec gives none and the primitive is not linear. */
   jvp?: OpJvp<P>
+  /** The derived shape rule, used when the spec gives none. */
   shape?: ShapeRule<P>
 }
 
-/** A zero of the kind and shape of an abstract value: 0 for a number, else a tensor of zeros (complex128 or float64). */
+/**
+ * A zero of the kind and shape of an abstract value: 0 for a number, else a tensor of zeros (complex128 for a complex
+ * value, float64 for any real dtype).
+ *
+ * @param aval The abstract value: its shape, dtype and whether it is a number (as `avalOf` gives it).
+ * @returns 0, or a tensor of zeros of the shape of `aval`.
+ *
+ * @example Zeros like a number and like a matrix
+ * print('like 3:', zerosOf(avalOf(3)))
+ * print('like a 2 × 2 matrix:', zerosOf(avalOf(eye(2))))
+ */
 export function zerosOf(aval: Aval): Raw {
   return aval.number ? 0 : zeros(aval.shape, aval.dtype === 'complex128' ? 'complex128' : 'float64')
 }
 
 /**
  * A complex cotangent or tangent `v` projected onto a real value of dtype `dtype`: its real part (design K §8.1). A
- * real input embedded in ℂ as x + 0i has, in the ℝ² convention, the cotangent Re(z̄) of the complex cotangent z̄.
+ * real input embedded in $\complex$ as $x + 0i$ has, in the $\reals^2$ convention, the cotangent
+ * $\operatorname{Re}(\bar{z})$ of the complex cotangent $\bar{z}$.
+ *
+ * @param v The cotangent or tangent, complex or real.
+ * @param dtype The dtype of the value `v` belongs to.
+ * @returns The real part of `v` when `v` is complex and `dtype` is not; otherwise `v` itself.
+ *
+ * @example A complex cotangent of a real input keeps its real part
+ * const ct = complex(tensor([1, 2]), tensor([3, 4]))
+ * print('for a float64 input:', projectReal(ct, 'float64'))
+ * print('for a complex128 input, as (re, im) pairs:', projectReal(ct, 'complex128'))
  */
 export function projectReal(v: Value, dtype: DType): Value {
   return dtype !== 'complex128' && avalOf(v).dtype === 'complex128' ? realPart(v) : v
 }
 
 /**
- * `v` (a cotangent or tangent) made of the kind, shape and field of `aval`: broadcast up, a rank-0 tensor to a
- * number, a complex value to its real part when `aval` is real, and a real value to a complex one when it is complex.
+ * `v` (a cotangent or tangent) made of the kind, shape and field of `aval`: broadcast up to a tensor, summed to a
+ * number when `aval` is a number, a complex value to its real part when `aval` is real, and a real value to a complex
+ * one when it is complex.
+ *
+ * @param v The cotangent or tangent to fit; its shape must broadcast to that of `aval` unless `aval` is a number.
+ * @param aval The abstract value it must match: shape, dtype, and whether it is a number.
+ * @returns `v` of the kind, shape and field of `aval`.
+ *
+ * @example Broadcast up, summed down, embedded in the complex numbers
+ * print('1 fitted to 2 × 3:', fitTo(1, avalOf(zeros([2, 3]))))
+ * print('[1, 2, 3] fitted to a number:', fitTo(tensor([1, 2, 3]), avalOf(0)))
+ * print('[1, 2] fitted to complex, as (re, im) pairs:', fitTo(tensor([1, 2]), avalOf(zeros([2], 'complex128'))))
  */
 export function fitTo(v: Value, aval: Aval): Value {
   const from = avalOf(v)
@@ -121,7 +163,16 @@ export function fitTo(v: Value, aval: Aval): Value {
   return broadcastTo(w, aval.shape)
 }
 
-/** Build the primitive object of a spec (and register it when its id has a module). */
+/**
+ * Build the primitive object of a spec (and register it when its id has a module). The spec's own rules come first,
+ * then those derived from `linear` and `transpose`, then `derived`. Throws `AifnError` for a linear primitive without a
+ * transpose rule.
+ *
+ * @param spec The primitive's specification.
+ * @param derived Rules a definer derived (the vjp, jvp and shape rule of `elementwise`), used where the spec and its
+ *   linearity give none (default none).
+ * @returns The primitive object, registered when its id has a module.
+ */
 function build<P>(spec: PrimitiveSpec<P>, derived: Derived<P> = {}): Primitive<P> {
   const parsed = parseId(spec.id)
   const kind = spec.kind ?? 'general'
@@ -212,12 +263,22 @@ function build<P>(spec: PrimitiveSpec<P>, derived: Derived<P> = {}): Primitive<P
 /**
  * Define a primitive: its forward rule `impl` and its rules for the transforms (see `PrimitiveSpec`), registered under
  * `id` (design K §5). The result applies the primitive to a list of inputs (numbers, tensors or traced values) and its
- * parameters: untraced inputs go straight to `impl`, traced ones to the interpreter of the innermost transform.
+ * parameters: untraced inputs go straight to `impl`, traced ones to the interpreter of the innermost transform. A
+ * second registration of the same `id` throws, and so does a linear primitive without a transpose.
  *
- * @example
- * const cubeOp = definePrimitive({ id: 'demo/cube', arity: 1, impl: ([x]) => ...,
- *   vjp: (g, [x]) => [mul(g, mul(3, square(x)))], jvp: ([t], [x]) => mul(t, mul(3, square(x))) })
- * cubeOp([t], undefined)
+ * @param spec The primitive: its `id`, forward rule `impl`, and the rules the transforms need.
+ * @returns The primitive, applied as `op(inputs, params)`.
+ *
+ * @example A cube primitive with its reverse rule
+ * // A bare id defines a local primitive, which is not registered.
+ * const cube = definePrimitive({
+ *   id: 'cube',
+ *   arity: 1,
+ *   impl: ([x]) => map(x, (v) => v ** 3),
+ *   vjp: (g, [x]) => [mul(g, mul(3, square(x)))],
+ * })
+ * print('cube([1, 2, 3]) =', cube([tensor([1, 2, 3])], undefined))
+ * print('d/dx x^3 at 2 =', grad((x) => cube([x], undefined))(2))
  */
 export function definePrimitive<P = undefined>(spec: PrimitiveSpec<P>): Op<P> {
   return build(spec).apply
@@ -230,9 +291,17 @@ export type PrimitiveMeta = { readonly doc?: PrimitiveDoc; readonly test?: Primi
  * Define a general primitive from its forward rule and vjp (a thin wrapper over `definePrimitive`); `rules` may add a
  * jvp, a batching rule, a shape rule and metadata. Pass `vjp: null` for an operation without a derivative.
  *
- * @example
- * const cube = defineOp('demo/cube', ([x]) => ..., (g, [x]) => [mul(g, mul(3, square(x)))])
- * cube([t], undefined)
+ * @param name The primitive's id: `module/name` to register it, or a bare name for a local primitive.
+ * @param forward The forward rule on untraced inputs (numbers and tensors), given the parameters.
+ * @param vjp The reverse rule, written with primitives so that it can be differentiated again; `null` when the
+ *   operation has no derivative.
+ * @param rules The rest of the spec: `arity`, a jvp, a batching rule, a shape rule, linearity, dtype and metadata.
+ * @returns The primitive, applied as `op(inputs, params)`.
+ *
+ * @example A cube from its forward rule and vjp
+ * const cube = defineOp('cube', ([x]) => map(x, (v) => v ** 3), (g, [x]) => [mul(g, mul(3, square(x)))])
+ * print('cube([1, 2, 3]) =', cube([tensor([1, 2, 3])], undefined))
+ * print('gradient of the sum =', grad((x) => sum(cube([x], undefined)))(tensor([1, 2, 3])))
  */
 export function defineOp<P = undefined>(
   name: string,
@@ -248,6 +317,14 @@ export function defineOp<P = undefined>(
 /**
  * A batched value with its batch axis moved to the front and `pad` axes of length 1 inserted after it, so that it
  * broadcasts (NumPy rules, aligned from the right) against unbatched values of higher rank.
+ *
+ * @param v The batched value.
+ * @param axis The index of its batch axis.
+ * @param pad The number of axes of length 1 to insert after the batch axis (default none).
+ * @returns `v` with the batch axis first and `pad` axes of length 1 after it.
+ *
+ * @example Move batch axis 1 to the front and pad one axis
+ * print('shape:', shapeOfValue(batchToFront(zeros([3, 5]), 1, 1)))
  */
 export function batchToFront(v: Value, axis: number, pad = 0): Value {
   const rank = avalOf(v).shape.length
@@ -266,6 +343,20 @@ export function batchToFront(v: Value, axis: number, pad = 0): Value {
 /**
  * Batch a broadcasting primitive: move every batch axis to the front, pad each batched value to the rank of the
  * largest example so the batch axes line up, and apply the primitive once. Elementwise primitives batch this way.
+ *
+ * @param p The primitive to apply.
+ * @param values Its inputs, each batched or not.
+ * @param axes The batch axis of each input, or null for an unbatched one.
+ * @param params The primitive's parameters.
+ * @returns The batched result and its batch axis, which is always 0.
+ *
+ * @example A batch of two vectors plus one unbatched vector
+ * const addPrimitive = registry.get('foundation/tensor/add')
+ * // Batch axis 1 of a 3 × 2 tensor: the examples are its columns.
+ * const xs = tensor([[1, 10], [2, 20], [3, 30]])
+ * const [out, axis] = broadcastBatch(addPrimitive, [xs, tensor([100, 200, 300])], [1, null], undefined)
+ * print('out =', out)
+ * print('batch axis', axis)
  */
 export function broadcastBatch<P>(
   p: Primitive<P>,
@@ -286,7 +377,18 @@ export function broadcastBatch<P>(
 
 /**
  * Reduce a cotangent `v` (shaped like a broadcast result) to the kind and shape of `like`: summed over broadcast axes,
- * and summed to a number when `like` is a number.
+ * and summed to a number when `like` is a number. A number `v` is broadcast up to a tensor `like`, and a complex `v`
+ * of a real `like` keeps its real part.
+ *
+ * @param v The cotangent, of the broadcast shape of the operation's arguments.
+ * @param like The argument it is the cotangent of, whose kind, shape and field the result takes.
+ * @returns `v` summed back to the kind and shape of `like`.
+ *
+ * @example The cotangent of a broadcast row, column and number
+ * const g = ones([2, 3])
+ * print('to a row:', sumLike(g, zeros([3])))
+ * print('to a column:', sumLike(g, zeros([2, 1])))
+ * print('to a number:', sumLike(g, 0))
  */
 export function sumLike(v: Value, like: Value): Value {
   const target = avalOf(like)
@@ -320,9 +422,10 @@ export type ElementwiseSpec = {
   /** The scalar rule. Its arity (1, 2 or 3) is the primitive's. */
   readonly f: (...x: number[]) => number
   /**
-   * One derivative per argument, ∂y/∂xᵢ as a function of the arguments and the output y, written with primitives so
-   * that it can be differentiated again. `'zero'` where y is piecewise constant in that argument (a comparison, a
-   * condition); `null` where the primitive is not differentiable in it (doing so throws `NotDifferentiableError`).
+   * One derivative per argument, $\partial y/\partial x_i$ as a function of the arguments and the output $y$, written
+   * with primitives so that it can be differentiated again. `'zero'` where $y$ is piecewise constant in that argument
+   * (a comparison, a condition); `null` where the primitive is not differentiable in it (doing so throws
+   * `NotDifferentiableError`).
    */
   readonly derivative: readonly (ElementwiseDerivative | 'zero' | null)[]
   /**
@@ -336,21 +439,29 @@ export type ElementwiseSpec = {
    */
   readonly complex?: ComplexRule
   /**
-   * The function is holomorphic, so the derivatives are complex derivatives f′(z), and the derived vjp conjugates them
-   * (ḡ·conj(f′), the ℝ² convention of design K §8.1) while the jvp is ż·f′. Required with `complex`.
+   * The function is holomorphic, so the derivatives are complex derivatives $f'(z)$, and the derived vjp conjugates
+   * them ($\bar{g} \operatorname{conj}(f')$, the $\reals^2$ convention of design K §8.1) while the jvp is
+   * $\dot{z} f'$. Required with `complex`.
    */
   readonly holomorphic?: boolean
   /** An arithmetic operation with a dedicated kernel loop (see `Arithmetic` in kernels.ts). Binary only. */
   readonly kernel?: Arithmetic
   /** A forward rule on raw arguments replacing the scalar loop (e.g. `where`). */
   readonly impl?: (args: Raw[]) => Raw
+  /** The registry's documentation of the primitive: summary, formula, note (see `PrimitiveDoc`). */
   readonly doc?: PrimitiveDoc
+  /** What the generated tests draw, merged over the defaults (second order when differentiable, complex when given). */
   readonly test?: PrimitiveTest
 }
 
 /**
- * The result dtype of an elementwise rule: tensors' dtypes promote, numbers are weak scalars (as in `binaryDType`),
- * and an int32 result becomes float64 unless the rule maps integers to integers.
+ * The result dtype of an elementwise rule: tensors' dtypes promote, numbers are weak scalars (as in `binaryDType`; an
+ * abstract number counts as a non-integer), and an int32 result becomes float64 unless the rule maps integers to
+ * integers. With no tensor among the arguments, the rule is applied to float64.
+ *
+ * @param args The arguments, raw values or abstract values.
+ * @param rule The primitive's dtype rule (see `ResultRule`).
+ * @returns The dtype of the result.
  */
 export function elementwiseDType(args: readonly (Raw | Aval)[], rule: DTypeRule): DType {
   let dtype: DType | null = null
@@ -373,7 +484,17 @@ export function elementwiseDType(args: readonly (Raw | Aval)[], rule: DTypeRule)
 
 /**
  * Apply a scalar rule of any arity elementwise to broadcast raw arguments: numbers give a number (a rank-0 complex
- * tensor for a complex result). A complex result uses the complex rule, which a real-only primitive lacks.
+ * tensor for a complex result). A complex result uses the complex rule, which a real-only primitive lacks: it then
+ * throws `DTypeError`. More than three arguments throw `AifnError`.
+ *
+ * @param name The primitive's name, for error messages.
+ * @param args The raw arguments (numbers and tensors), broadcast together.
+ * @param f The scalar rule, applied to real arguments.
+ * @param rule The dtype rule of the result.
+ * @param kernel An arithmetic operation with a dedicated loop, for two arguments; left out, `f` is called per element.
+ * @param complex The complex scalar rule, used when the result is complex128.
+ * @returns A number when every argument is a number (and the result is real), otherwise a tensor of the broadcast
+ *   shape.
  */
 function elementwiseRaw(
   name: string,
@@ -400,8 +521,13 @@ function elementwiseRaw(
 }
 
 /**
- * g·d, skipping the multiplication when either factor is the number 1 (a seed, or the derivative of add) or d is −1.
- * A number g means a number output, whose arguments are all numbers, so d already has the right kind.
+ * $g \cdot d$, skipping the multiplication when either factor is the number 1 (a seed, or the derivative of add) or
+ * $d$ is $-1$ (negating instead). A number $g$ means a number output, whose arguments are all numbers, so $d$ already
+ * has the right kind.
+ *
+ * @param g The cotangent or tangent.
+ * @param d The derivative it is multiplied by.
+ * @returns $g \cdot d$.
  */
 function scale(g: Value, d: Value): Value {
   if (g === 1) return d
@@ -411,8 +537,16 @@ function scale(g: Value, d: Value): Value {
 }
 
 /**
- * The rules of an elementwise primitive derived from its derivatives (design K §4.2): vjp gᵢ = sumLike(g·∂ᵢ, xᵢ),
- * jvp ṫ = Σᵢ tᵢ·∂ᵢ (broadcast to the output), and the shape rule of broadcasting.
+ * The rules of an elementwise primitive derived from its derivatives (design K §4.2): the vjp of argument $x_i$ is
+ * $g\,\partial_i$ ($g \operatorname{conj}(\partial_i)$ when holomorphic) summed back to the shape of $x_i$ by
+ * `sumLike`, the jvp is $\sum_i t_i\,\partial_i$ (fitted to the output), and the shape rule is that of broadcasting.
+ *
+ * @param name The primitive's name, for error messages.
+ * @param derivative One derivative per argument: a rule of the arguments and the output, `'zero'`, or `null`, where
+ *   differentiating throws `NotDifferentiableError`.
+ * @param rule The dtype rule of the result, for the shape rule.
+ * @param holomorphic Whether the derivatives are complex derivatives, which the vjp conjugates.
+ * @returns The derived vjp, jvp and shape rule.
  */
 function elementwiseRules(
   name: string,
@@ -457,10 +591,24 @@ function elementwiseRules(
 /**
  * Define an elementwise primitive from its scalar rule and **one** derivative per argument (design K §4.2): the vjp,
  * the jvp, the batching rule and the shape rule are all derived from them, and it is differentiable to any order
- * because the derivatives are primitives. Numbers give numbers and tensors broadcast (NumPy rules).
+ * because the derivatives are primitives. Numbers give numbers and tensors broadcast (NumPy rules). Throws
+ * `AifnError` unless there are 1 to 3 derivatives, at least as many as `f` takes arguments, and unless a complex rule
+ * comes with `holomorphic`.
  *
- * @example
- * const cube = elementwise({ id: 'demo/cube', f: (x) => x ** 3, derivative: [(x) => mul(3, square(x))] })
+ * @param spec The primitive: its `id`, scalar rule `f`, one derivative per argument, and optionally a dtype rule, a
+ *   complex rule, a forward rule on raw values and metadata.
+ * @returns The primitive as a function of 1, 2 or 3 broadcast arguments (as many as there are derivatives).
+ *
+ * @example Softplus with its derivative, differentiable twice
+ * // A bare id defines a local primitive, which is not registered.
+ * const softplus = elementwise({
+ *   id: 'softplus',
+ *   f: (x) => Math.log1p(Math.exp(x)),
+ *   derivative: [(x) => div(1, add(1, exp(neg(x))))],
+ * })
+ * print('softplus([0, 1]) =', softplus(tensor([0, 1])))
+ * print('slope at 0 =', grad(softplus)(0))
+ * print('curvature at 0 =', grad(grad(softplus))(0))
  */
 export function elementwise(spec: ElementwiseSpec & { readonly f: (x: number) => number }): Unary
 export function elementwise(spec: ElementwiseSpec & { readonly f: (a: number, b: number) => number }): Binary

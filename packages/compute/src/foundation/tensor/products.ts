@@ -1,7 +1,12 @@
 /**
- * Products: batched matrix multiplication, dot and outer products, and a small `einsum`. Each is a primitive (or a
- * composition of primitives) with its derivative rule: for C = AB the cotangents are Ḡ Bᵀ and Aᵀ Ḡ (Giles, 2008,
- * "Collected matrix derivative results for forward and reverse mode algorithmic differentiation", §2.2).
+ * Products: batched matrix multiplication, dot and outer products, a small `einsum`, and fused linear combinations.
+ * Each is a primitive (or a composition of primitives) with its derivative rule: for $\Cmat = \Amat\Bmat$ the
+ * cotangents are $\bar{\Cmat}\Bmat^\top$ and $\Amat^\top\bar{\Cmat}$ (Giles, 2008, "Collected matrix derivative
+ * results for forward and reverse mode algorithmic differentiation", §2.2).
+ *
+ * The products are multilinear, so each primitive gives only its transpose in each operand and the reverse and
+ * forward rules are derived from it. For complex operands the transpose conjugates the other operands (the adjoint of
+ * the map on $\reals^2$ pairs), which costs nothing for real ones.
  */
 
 import { AifnError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -18,7 +23,12 @@ import { scatterAdd } from './gather'
 import { avalOf, type Value } from './trace'
 import { broadcastShapes } from './views'
 
-/** Swap the last two axes. */
+/**
+ * Swap the last two axes: the transpose of each matrix in a stack.
+ *
+ * @param x A value of rank at least 2.
+ * @returns A view of `x` with its last two axes exchanged.
+ */
 function swapLast(x: Value): Value {
   const rank = shapeOfValue(x).length
   const axes = Array.from({ length: rank }, (_, k) => k)
@@ -26,15 +36,27 @@ function swapLast(x: Value): Value {
   return permute(x, axes)
 }
 
+/**
+ * A raw operand as a tensor, refusing a number with `AifnError`.
+ *
+ * @param x The operand, a number or a tensor.
+ * @param where The caller's name, for error messages.
+ * @returns `x`, when it is a tensor.
+ */
 function tensorInput(x: Raw, where: string): Tensor {
   if (!isTensor(x)) throw new AifnError(where, `${where}: expected a tensor, got a number`)
   return x
 }
 
-// A worked example of a multilinear primitive (design K §4.2): C = AB is linear in A and in B separately. The author
-// writes the transpose in each argument (Ā = C̄ Bᵀ, B̄ = Aᵀ C̄; Giles, 2008, §2.2), the shape rule and the batching rule;
-// the vjp and the jvp (Ȧ B + A Ḃ) are derived. For complex operands the ℝ² adjoint conjugates: Ā = C̄ Bᴴ, B̄ = Aᴴ C̄
-// (conj is the identity on real values, so real matrices pay nothing).
+/**
+ * The matrix-product primitive, a worked example of a multilinear primitive (design K §4.2): $\Cmat = \Amat\Bmat$
+ * is linear in $\Amat$ and in $\Bmat$ separately. The author writes the transpose in each argument
+ * ($\bar{\Amat} = \bar{\Cmat}\Bmat^\top$, $\bar{\Bmat} = \Amat^\top\bar{\Cmat}$; Giles, 2008, §2.2), the shape
+ * rule and the batching rule; the vjp and the jvp ($\dot{\Amat}\Bmat + \Amat\dot{\Bmat}$) are derived. For complex
+ * operands the adjoint on $\reals^2$ pairs conjugates: $\bar{\Amat} = \bar{\Cmat}\Bmat^{\mathsf{H}}$,
+ * $\bar{\Bmat} = \Amat^{\mathsf{H}}\bar{\Cmat}$ (`conj` is the identity on real values, so real matrices pay
+ * nothing).
+ */
 const matmulOp: Op<undefined> = definePrimitive<undefined>({
   id: 'foundation/tensor/matmul',
   dtype: 'same',
@@ -80,6 +102,12 @@ const matmulOp: Op<undefined> = definePrimitive<undefined>({
  * `dense` kernels on zero-copy views (`readonlyData`), without the views and the primitive dispatch that dominate for
  * the small matrices of filters and other per-step recursions. Concrete tensors are constants to every transform, so
  * the result is the value the primitive gives. Null for any other operands (the general path handles them).
+ *
+ * @param a The left operand: taken only when it is an $m \times k$ float64 matrix whose data can be read in place.
+ * @param b The right operand: taken only when it is a float64 vector of $k$ values or a $k \times n$ matrix, readable
+ *   in place.
+ * @returns The product, a new vector of $m$ values or $m \times n$ matrix, or null when either operand does not
+ *   qualify.
  */
 function matmulDirect(a: Tensor, b: Tensor): Tensor | null {
   const rb = b.shape.length
@@ -95,10 +123,27 @@ function matmulDirect(a: Tensor, b: Tensor): Tensor | null {
 }
 
 /**
- * Matrix product with NumPy's `matmul` rules. Rank-2 operands multiply as matrices ([m, k] × [k, n] → [m, n]). Higher
- * ranks are stacks of matrices whose leading (batch) axes broadcast. A rank-1 left operand is a row vector and a
- * rank-1 right operand a column vector, and the added axis is removed from the result (vector · vector gives a rank-0
- * tensor; use `dot` for a number).
+ * Matrix product with NumPy's `matmul` rules. Rank-2 operands multiply as matrices (an $m \times k$ matrix times a
+ * $k \times n$ one gives an $m \times n$ one). Higher ranks are stacks of matrices whose leading (batch) axes
+ * broadcast. A rank-1 left operand is a row vector and a rank-1 right operand a column vector, and the added axis is
+ * removed from the result (vector times vector gives a rank-0 tensor; use `dot` for a number). Differentiable in both
+ * operands. Throws `ShapeError` for a number or rank-0 operand and for inner lengths that differ.
+ *
+ * @param a The left operand: a tensor or traced value of rank at least 1, whose last axis has length $k$.
+ * @param b The right operand: a tensor or traced value of rank at least 1, whose second-to-last axis (its only axis,
+ *   for a vector) has length $k$.
+ * @returns The product, with the promoted dtype of the operands.
+ *
+ * @example A matrix times a matrix, and times a vector
+ * const A = tensor([[1, 2], [3, 4]])
+ * print('A B =', matmul(A, tensor([[1, 0], [1, 1]])))
+ * print('A x =', matmul(A, tensor([1, 1])))
+ *
+ * @example A stack of matrices times one matrix
+ * const stackOf = tensor([[[1, 0], [0, 1]], [[2, 0], [0, 2]]])
+ * const out = matmul(stackOf, tensor([[1, 2], [3, 4]]))
+ * print('shape =', shapeOfValue(out))
+ * print('out =', out)
  */
 export function matmul<A extends Value, B extends Value>(a: A, b: B): Result2<A, B, Tensor> {
   if (isTensor(a) && isTensor(b)) {
@@ -116,7 +161,18 @@ export function matmul<A extends Value, B extends Value>(a: A, b: B): Result2<A,
   return out as Result2<A, B, Tensor>
 }
 
-/** The dot product Σᵢ aᵢbᵢ of two vectors of equal length, as a number. */
+/**
+ * The dot product $\sum_i a_i b_i$ of two vectors of equal length, as a number. A composition of `mul` and `sum`, so
+ * differentiable; complex vectors are not conjugated, and give a rank-0 complex tensor. Throws `ShapeError` unless
+ * both operands are vectors of the same length.
+ *
+ * @param a The first vector $\avec$: a tensor or a traced value.
+ * @param b The second vector $\bvec$, of the same length.
+ * @returns The dot product (a traced scalar when either operand is traced).
+ *
+ * @example Two vectors
+ * print('a · b =', dot(tensor([1, 2, 3]), tensor([4, 5, 6])))
+ */
 export function dot<A extends Value, B extends Value>(a: A, b: B): Result2<A, B, number> {
   const sa = shapeOfValue(a)
   const sb = shapeOfValue(b)
@@ -130,17 +186,38 @@ export function dot<A extends Value, B extends Value>(a: A, b: B): Result2<A, B,
   return sum(mul(a, b)) as Result2<A, B, number>
 }
 
-/** The outer product abᵀ of two vectors (other ranks are flattened first), shape [len a, len b]. */
+/**
+ * The outer product $\avec\bvec^\top$ of two vectors (other ranks are flattened first), an $m \times n$ matrix with
+ * $m$ and $n$ the numbers of elements of `a` and `b`. A composition of `reshape` and `mul`, so differentiable.
+ *
+ * @param a The first vector $\avec$, whose elements index the rows.
+ * @param b The second vector $\bvec$, whose elements index the columns.
+ * @returns The matrix with entries $a_i b_j$.
+ *
+ * @example Rows scaled by the first vector
+ * print('a bᵀ =', outer(tensor([1, 2]), tensor([1, 10, 100])))
+ */
 export function outer<A extends Value, B extends Value>(a: A, b: B): Result2<A, B, Tensor> {
   return mul(reshape(a, [-1, 1]), reshape(b, [1, -1])) as Result2<A, B, Tensor>
 }
 
 // ── einsum ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** A parsed einsum specification: the labels of each operand and of the output. */
+/**
+ * A parsed einsum specification: `inputs`, the labels of each operand (one letter per axis), and `output`, the labels
+ * of the output's axes.
+ */
 type EinsumSpec = { inputs: string[]; output: string }
 
-/** Parse "ij,jk->ik" (explicit) or "ij,jk" (implicit: labels used once, in alphabetical order). */
+/**
+ * Parse "ij,jk->ik" (explicit) or "ij,jk" (implicit: labels used once, in alphabetical order with capitals first).
+ * Whitespace is ignored. Throws `AifnError` for an ellipsis, more than one `->`, a non-letter label or a repeated
+ * output label, and `ShapeError` for the wrong number of operands or an output label in no operand.
+ *
+ * @param spec The specification, as `einsum` takes it.
+ * @param count The number of operands given, which the specification must name.
+ * @returns The labels of each operand and of the output.
+ */
 function parseEinsum(spec: string, count: number): EinsumSpec {
   const clean = spec.replace(/\s+/g, '')
   if (clean.includes('.')) throw new AifnError('einsum', `einsum: ellipsis ("...") is not supported in "${spec}"`)
@@ -173,7 +250,12 @@ function parseEinsum(spec: string, count: number): EinsumSpec {
 
 /**
  * Forward einsum on any dtypes: einsum is linear in each operand, so a complex operand splits into its real and
- * imaginary parts, einsum(…, x + iy, …) = einsum(…, x, …) + i·einsum(…, y, …), down to real kernels.
+ * imaginary parts, $E(\dots, \xvec + i\yvec, \dots) = E(\dots, \xvec, \dots) + i\,E(\dots, \yvec, \dots)$ with $E$
+ * the einsum, down to real kernels.
+ *
+ * @param spec The parsed specification.
+ * @param ts The operands, one per entry of `spec.inputs`; not modified.
+ * @returns A new tensor with the output's shape, complex128 when any operand is complex.
  */
 function einsumAny(spec: EinsumSpec, ts: Tensor[]): Tensor {
   const j = ts.findIndex((t) => t.dtype === 'complex128')
@@ -193,7 +275,14 @@ function einsumAny(spec: EinsumSpec, ts: Tensor[]): Tensor {
   })
 }
 
-/** Forward einsum: a loop over every combination of labels, output labels outermost (real dtypes). */
+/**
+ * Forward einsum: a loop over every combination of labels, output labels outermost (real dtypes). Throws
+ * `ShapeError` when an operand's rank differs from its number of labels or a label has two lengths.
+ *
+ * @param spec The parsed specification.
+ * @param ts The real operands, one per entry of `spec.inputs`, read through their strides; not modified.
+ * @returns A new contiguous tensor with the output's shape and the promoted dtype of the operands.
+ */
 function einsumKernel(spec: EinsumSpec, ts: Tensor[]): Tensor {
   const sizes = new Map<string, number>()
   spec.inputs.forEach((labels, i) => {
@@ -238,7 +327,14 @@ function einsumKernel(spec: EinsumSpec, ts: Tensor[]): Tensor {
   return fromData(out, outShape)
 }
 
-/** The length of each label, checked to agree wherever the label occurs. */
+/**
+ * The length of each label, checked to agree wherever the label occurs (`ShapeError` otherwise, or when an operand's
+ * rank differs from its number of labels).
+ *
+ * @param spec The parsed specification.
+ * @param shapes The shapes of the operands, one per entry of `spec.inputs`.
+ * @returns The length of the axes each label names.
+ */
 function labelSizes(spec: EinsumSpec, shapes: readonly (readonly number[])[]): Map<string, number> {
   const sizes = new Map<string, number>()
   spec.inputs.forEach((labels, i) => {
@@ -259,6 +355,11 @@ function labelSizes(spec: EinsumSpec, shapes: readonly (readonly number[])[]): M
 /**
  * The flat row-major positions, in an array of shape `shape` labelled `labels` (with repeats), of the elements whose
  * repeated labels agree, listed in row-major order of the distinct labels `unique`: where a diagonal sits.
+ *
+ * @param labels One label per axis of the array, some repeated (`'ii'` for a square matrix's diagonal).
+ * @param unique The distinct labels of `labels`, in order of first occurrence.
+ * @param shape The shape of the array.
+ * @returns One position per combination of the distinct labels.
  */
 function diagonalPositions(labels: string, unique: string, shape: readonly number[]): Int32Array {
   const sizes = [...unique].map((c) => shape[labels.indexOf(c)])
@@ -282,10 +383,13 @@ function diagonalPositions(labels: string, unique: string, shape: readonly numbe
   return out
 }
 
-// einsum is multilinear: linear in each operand with the others fixed. The transpose in operand i contracts the output
-// cotangent with the other operands over the labels operand i shares with them; labels only operand i has were summed
-// away, so the cotangent is constant along them (broadcast back); a label repeated in operand i (a diagonal) puts the
-// cotangent on that diagonal and zeros elsewhere (a scatterAdd). The jvp Σᵢ einsum(…, ẋᵢ, …) is derived.
+/**
+ * The einsum primitive. einsum is multilinear: linear in each operand with the others fixed. The transpose in operand
+ * $i$ contracts the output cotangent with the other operands over the labels operand $i$ shares with them; labels only
+ * operand $i$ has were summed away, so the cotangent is constant along them (broadcast back); a label repeated in
+ * operand $i$ (a diagonal) puts the cotangent on that diagonal and zeros elsewhere (a `scatterAdd`). The jvp
+ * $\sum_i E(\dots, \dot{\xvec}_i, \dots)$, with $E$ the einsum, is derived.
+ */
 const einsumOp: Op<EinsumSpec> = definePrimitive<EinsumSpec>({
   id: 'foundation/tensor/einsum',
   dtype: 'same',
@@ -352,9 +456,27 @@ const einsumOp: Op<EinsumSpec> = definePrimitive<EinsumSpec>({
 /**
  * Einstein summation over letter-labelled axes, e.g. `einsum('ij,jk->ik', a, b)` (matrix product),
  * `einsum('ij->ji', a)`, `einsum('i,i->', a, b)`, `einsum('bij,bjk->bik', a, b)`, `einsum('ii->', a)` (trace) or
- * `einsum('ii->i', a)` (diagonal). Without `->` the output is the labels used once, in alphabetical order. Labels
- * must have equal lengths wherever they occur (no broadcasting) and ellipses are not supported. The loop runs over
- * every label combination, so it suits small contractions; use `matmul` for large products.
+ * `einsum('ii->i', a)` (diagonal). Without `->` the output is the labels used once, in alphabetical order (capitals
+ * first). Labels must have equal lengths wherever they occur (no broadcasting) and ellipses are not supported. The
+ * loop runs over every label combination, so it suits small contractions; use `matmul` for large products.
+ * Differentiable in every operand. A malformed specification throws `AifnError`, operands that do not fit it
+ * `ShapeError`.
+ *
+ * @param spec The labels of each operand's axes, separated by commas, then optionally `->` and the output's labels.
+ *   Labels are single letters; whitespace is ignored.
+ * @param operands The tensors (or traced values) to combine, one per comma-separated group of labels; numbers are
+ *   refused.
+ * @returns A tensor whose axes are the output labels; a label left out of the output is summed over. An empty output
+ *   gives a rank-0 tensor.
+ *
+ * @example A matrix product, a transpose and a trace
+ * const A = tensor([[1, 2], [3, 4]])
+ * print('A A =', einsum('ij,jk->ik', A, A))
+ * print('Aᵀ =', einsum('ij->ji', A))
+ * print('trace =', einsum('ii->', A))
+ *
+ * @example The implicit output keeps labels used once
+ * print('shape =', shapeOfValue(einsum('ij,jk', ones([2, 3]), ones([3, 4]))))
  */
 export function einsum(spec: string, ...operands: Tensor[]): Tensor
 export function einsum(spec: string, ...operands: Value[]): Value
@@ -366,9 +488,10 @@ export function einsum(spec: string, ...operands: Value[]): Value {
 // ── Linear combinations ──────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Σᵢ cᵢ xᵢ over inputs of one shape with fixed real coefficients, in one pass: the update of an explicit Runge–Kutta
- * stage (x + h Σ aᵢⱼ kⱼ) or of an optimiser step, which as `add`s and `mul`s would cost two primitives per term. Linear,
- * so its derivatives are derived from the transpose, cᵢ·ct in input i.
+ * $\sum_i c_i \xvec_i$ over inputs of one shape with fixed real coefficients, in one pass: the update of an explicit
+ * Runge–Kutta stage ($\xvec + h \sum_j a_{ij} \kvec_j$) or of an optimiser step, which as `add`s and `mul`s would
+ * cost two primitives per term. Linear, so its derivatives are derived from the transpose, $c_i \bar{\yvec}$ in input
+ * $i$ (summed to a number for a number input).
  */
 const linearCombinationOp: Op<readonly number[]> = definePrimitive<readonly number[]>({
   id: 'foundation/tensor/linearCombination',
@@ -453,9 +576,21 @@ const linearCombinationOp: Op<readonly number[]> = definePrimitive<readonly numb
 })
 
 /**
- * Σᵢ cᵢ xᵢ for same-shaped real inputs (numbers, tensors or traced values) and fixed coefficients c, in one primitive.
+ * $\sum_i c_i \xvec_i$ for same-shaped real inputs (numbers, tensors or traced values) and fixed coefficients
+ * $c_i$, in one primitive. A number input counts as that value in every position. Accumulated in float64; the result
+ * is float32 only when every tensor input is. Differentiable in the inputs, not the coefficients. Throws `ShapeError`
+ * when the counts or the shapes differ and `AifnError` for a complex input.
  *
- * @example linearCombination([x, k1, k2], [1, h / 2, h / 2]) // x + h(k1 + k2)/2
+ * @param xs The inputs $\xvec_i$: tensors of one shape, traced values or numbers.
+ * @param coefficients The real coefficients $c_i$, one per input, held fixed.
+ * @returns The combination, shaped like the tensor inputs (a number when every input is a number).
+ *
+ * @example A Heun step, x + h (k1 + k2) / 2
+ * const x = tensor([1, 2])
+ * const k1 = tensor([1, 0])
+ * const k2 = tensor([3, 2])
+ * const h = 0.1
+ * print('x next =', linearCombination([x, k1, k2], [1, h / 2, h / 2]))
  */
 export function linearCombination(xs: readonly Value[], coefficients: readonly number[]): Value {
   return linearCombinationOp(xs, coefficients)

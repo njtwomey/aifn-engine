@@ -24,7 +24,15 @@ import {
 } from './core'
 import { broadcastShapes, broadcastView, permuteView } from './views'
 
-/** Apply `f` to every element, writing a new tensor of dtype `dtype`. */
+/**
+ * Apply `f` to every element, writing a new tensor of dtype `dtype`. A contiguous input takes a tight loop; any other
+ * is walked through its strides.
+ *
+ * @param x The tensor, read and not modified.
+ * @param f The scalar function.
+ * @param dtype The dtype of the result.
+ * @returns A new contiguous tensor of the shape of `x`.
+ */
 export function unaryKernel(x: Tensor, f: (v: number) => number, dtype: DType): Tensor {
   const n = size(x)
   const out = allocate(dtype, n)
@@ -48,8 +56,20 @@ export function unaryKernel(x: Tensor, f: (v: number) => number, dtype: DType): 
 export type Arithmetic = 'add' | 'sub' | 'mul' | 'div'
 
 /**
- * out[at + j] = f(a[ia + j·sa], b[ib + j·sb]) for j < n: one run of a binary kernel, with stride 0 for a repeated
- * operand. `op` selects a dedicated loop for the arithmetic operations.
+ * `out[at + j] = f(a[ia + j * sa], b[ib + j * sb])` for $0 \le j < n$: one run of a binary kernel, with stride 0 for a
+ * repeated operand. `op` selects a dedicated loop for the arithmetic operations.
+ *
+ * @param op The arithmetic operation with a dedicated loop, or undefined to call `f` per element.
+ * @param f The scalar function, used only when `op` is undefined.
+ * @param out The output array: entries `at` to `at + n - 1` are written.
+ * @param at The first index of `out` written.
+ * @param a The first operand's storage.
+ * @param ia The index in `a` of the run's first element.
+ * @param sa The step between the run's elements in `a` (0 repeats one element).
+ * @param b The second operand's storage.
+ * @param ib The index in `b` of the run's first element.
+ * @param sb The step between the run's elements in `b` (0 repeats one element).
+ * @param n The length $n$ of the run.
  */
 function binaryRun(
   op: Arithmetic | undefined,
@@ -82,7 +102,16 @@ function binaryRun(
   }
 }
 
-/** `f(x, c)` for every element x of a tensor and a constant c (the scalar fast path of `binaryKernel`). */
+/**
+ * `f(x, c)` for every element `x` of a tensor and a constant `c` (the path of `binaryKernel` for a non-contiguous
+ * tensor and a number).
+ *
+ * @param a The tensor, read through its strides.
+ * @param c The constant second argument.
+ * @param f The scalar function.
+ * @param dtype The dtype of the result.
+ * @returns A new contiguous tensor of the shape of `a`.
+ */
 function withRightScalar(a: Tensor, c: number, f: (x: number, y: number) => number, dtype: DType): Tensor {
   const n = size(a)
   const out = allocate(dtype, n)
@@ -94,7 +123,16 @@ function withRightScalar(a: Tensor, c: number, f: (x: number, y: number) => numb
   return fromData(out, a.shape)
 }
 
-/** `f(c, y)` for a constant c and every element y of a tensor. */
+/**
+ * `f(c, y)` for a constant `c` and every element `y` of a tensor (the path of `binaryKernel` for a number and a
+ * non-contiguous tensor).
+ *
+ * @param c The constant first argument.
+ * @param b The tensor, read through its strides.
+ * @param f The scalar function.
+ * @param dtype The dtype of the result.
+ * @returns A new contiguous tensor of the shape of `b`.
+ */
 function withLeftScalar(c: number, b: Tensor, f: (x: number, y: number) => number, dtype: DType): Tensor {
   const n = size(b)
   const out = allocate(dtype, n)
@@ -106,12 +144,23 @@ function withLeftScalar(c: number, b: Tensor, f: (x: number, y: number) => numbe
   return fromData(out, b.shape)
 }
 
+/**
+ * Whether two shapes are equal.
+ *
+ * @param a The first shape.
+ * @param b The second shape.
+ * @returns True when they have the same rank and the same length on every axis.
+ */
 const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
   a.length === b.length && a.every((d, k) => d === b[k])
 
 /**
- * The length m of the trailing block that `small` repeats when broadcast to `shape`, or 0 when it is not such a row:
+ * The length $m$ of the trailing block that `small` repeats when broadcast to `shape`, or 0 when it is not such a row:
  * `small`'s shape without its leading 1s must equal the last axes of `shape` (`[n, d] + [d]`, `[b, n, d] + [1, n, d]`).
+ *
+ * @param small The shape of the operand that is broadcast.
+ * @param shape The broadcast shape.
+ * @returns $m$, the number of elements of `small`, when it repeats as a row; otherwise 0.
  */
 function rowLength(small: readonly number[], shape: readonly number[]): number {
   let lead = 0
@@ -130,6 +179,13 @@ function rowLength(small: readonly number[], shape: readonly number[]): number {
  * Apply `f` elementwise to two broadcast operands, writing dtype `dtype`. A plain number broadcasts as a scalar.
  * Contiguous operands take tight loops: same shapes, a scalar, and a row repeated over leading axes (`[n, d] + [d]`,
  * design K §3.5); other layouts walk their strides. `op` names an arithmetic operation with a dedicated loop.
+ *
+ * @param a The first operand: a tensor (read, not modified), or a number broadcast as a scalar.
+ * @param b The second operand, likewise.
+ * @param f The scalar function of one element of each.
+ * @param dtype The dtype of the result: the kernel does not promote (see `binaryDType`).
+ * @param op An arithmetic operation with a dedicated loop; left out, `f` is called per element.
+ * @returns A new contiguous tensor of the broadcast shape (rank 0 for two numbers).
  */
 export function binaryKernel(
   a: Tensor | number,
@@ -192,6 +248,13 @@ export function binaryKernel(
 /**
  * Apply `f` elementwise to three broadcast operands, writing dtype `dtype`. Plain numbers broadcast as scalars; three
  * numbers give a rank-0 tensor. Operands are read in place through their (broadcast) strides, never copied.
+ *
+ * @param a The first operand: a tensor, or a number broadcast as a scalar.
+ * @param b The second operand, likewise.
+ * @param c The third operand, likewise.
+ * @param f The scalar function of one element of each.
+ * @param dtype The dtype of the result.
+ * @returns A new contiguous tensor of the broadcast shape.
  */
 export function ternaryKernel(
   a: Tensor | number,
@@ -262,7 +325,14 @@ export function ternaryKernel(
   return fromData(out, shape)
 }
 
-/** The dtype of a binary operation's result, before any operation-specific rule (e.g. division gives floats). */
+/**
+ * The dtype of a binary operation's result, before any operation-specific rule (e.g. division gives floats): two
+ * tensors promote, a number next to a tensor is a weak scalar (`weakType`), and two numbers give float64.
+ *
+ * @param a The first operand.
+ * @param b The second operand.
+ * @returns The promoted dtype.
+ */
 export function binaryDType(a: Tensor | number, b: Tensor | number): DType {
   if (typeof a === 'number' && typeof b === 'number') return 'float64'
   if (typeof a === 'number') return scalarDType(a, (b as Tensor).dtype)
@@ -270,7 +340,14 @@ export function binaryDType(a: Tensor | number, b: Tensor | number): DType {
   return promote(a.dtype, b.dtype)
 }
 
-/** Shape bookkeeping for a reduction over `axes` (sorted, normalised). */
+/**
+ * Shape bookkeeping for a reduction over `axes` (sorted, normalised).
+ *
+ * @param shape The shape of the tensor reduced.
+ * @param axes The reduced axes, as non-negative indices.
+ * @param keepDims Keep each reduced axis with length 1 instead of dropping it.
+ * @returns The shape of the result.
+ */
 export function reducedShape(shape: readonly number[], axes: readonly number[], keepDims: boolean): number[] {
   return keepDims ? shape.map((d, k) => (axes.includes(k) ? 1 : d)) : shape.filter((_, k) => !axes.includes(k))
 }
@@ -284,8 +361,16 @@ export type GroupReducer = (values: ArrayLike<number>, start: number, width: num
 
 /**
  * Reduce over `axes`: for every output position, `fn` folds that group's elements (a range of one array, see
- * `GroupReducer`). A float64 or int32 input whose reduced axes are already innermost and contiguous is read in place;
- * otherwise its elements are copied once, with the reduced axes moved last. Returns a tensor of dtype `dtype`.
+ * `GroupReducer`). An input whose reduced axes are already innermost and contiguous is read in place; otherwise its
+ * elements are copied once into float64, with the reduced axes moved last. Returns a tensor of dtype `dtype`.
+ *
+ * @param x The real tensor to reduce.
+ * @param axis The axis or axes to reduce (negative counts from the end); null or undefined reduces every axis.
+ *   Repeated or out-of-range axes throw `ShapeError`.
+ * @param keepDims Keep each reduced axis with length 1 instead of dropping it.
+ * @param fn The reduction of one group's elements.
+ * @param dtype The dtype of the result.
+ * @returns One value of `fn` per group, in the reduced shape.
  */
 export function reduceKernel(
   x: Tensor,
@@ -323,8 +408,14 @@ export function reduceKernel(
 const PAIRWISE_BLOCK = 128
 
 /**
- * Σ values[start … start + width), by pairwise summation above 128 terms (rounding error O(ε log n) rather than O(ε n),
- * as NumPy's `sum`; Higham, "Accuracy and Stability of Numerical Algorithms", 2nd ed., §4.2).
+ * The sum of `values[start … start + width)`, by pairwise summation above 128 terms (rounding error
+ * $O(\varepsilon \log n)$ rather than $O(\varepsilon n)$, as NumPy's `sum`; Higham, "Accuracy and Stability of
+ * Numerical Algorithms", 2nd ed., §4.2). It is a `GroupReducer`.
+ *
+ * @param values The array holding the terms.
+ * @param start The index of the first term.
+ * @param width The number of terms.
+ * @returns Their sum.
  */
 export function pairwiseSum(values: ArrayLike<number>, start: number, width: number): number {
   if (width <= PAIRWISE_BLOCK) {
@@ -338,7 +429,12 @@ export function pairwiseSum(values: ArrayLike<number>, start: number, width: num
 
 /**
  * Sum `x` down to `shape`, the inverse of broadcasting `shape` up to `x.shape`: leading axes are summed away and axes
- * where `shape` has length 1 are summed with the length kept.
+ * where `shape` has length 1 are summed with the length kept. A shape that does not broadcast to `x.shape` throws
+ * `ShapeError`.
+ *
+ * @param x The tensor to sum; a complex128 one has its real and imaginary parts summed separately.
+ * @param shape The target shape.
+ * @returns A tensor of shape `shape`: int32 for an int32 `x`, complex128 for a complex one, float64 otherwise.
  */
 export function sumToKernel(x: Tensor, shape: readonly number[]): Tensor {
   const lead = x.shape.length - shape.length
@@ -364,8 +460,13 @@ export function sumToKernel(x: Tensor, shape: readonly number[]): Tensor {
 }
 
 /**
- * Batched matrix product for rank ≥ 2 operands: the last two axes multiply as matrices ([…, m, k] × […, k, n]) and the
- * leading (batch) axes broadcast.
+ * Batched matrix product for operands of rank $\ge 2$: the last two axes multiply as matrices
+ * ($[\dots, m, k] \times [\dots, k, n]$) and the leading (batch) axes broadcast. Complex operands are multiplied
+ * through the real products of their parts. A lower rank, or inner dimensions that differ, throws `ShapeError`.
+ *
+ * @param a The left operand, of shape $[\dots, m, k]$.
+ * @param b The right operand, of shape $[\dots, k, n]$.
+ * @returns The product, of shape $[\dots, m, n]$ with the broadcast batch axes, and the promoted dtype.
  */
 export function matmulKernel(a: Tensor, b: Tensor): Tensor {
   if (a.dtype === 'complex128' || b.dtype === 'complex128') {
@@ -437,13 +538,34 @@ export function matmulKernel(a: Tensor, b: Tensor): Tensor {
 /**
  * The real and imaginary parts of a tensor as float64 views: for complex128 the zero-copy views of its storage
  * (`complexPartView`), for a real tensor the tensor itself and null (a zero imaginary part).
+ *
+ * @param z The tensor to split.
+ * @returns The pair `[re, im]`, where `im` is null for a real tensor.
+ *
+ * @example Split a complex vector without copying, and a real one
+ * const [re, im] = splitComplex(complex(tensor([1, 2]), tensor([3, 4])))
+ * print('re =', re)
+ * print('im =', im)
+ * print('a real tensor:', splitComplex(tensor([5, 6])))
  */
 export function splitComplex(z: Tensor): [Tensor, Tensor | null] {
   if (z.dtype !== 'complex128') return [z, null]
   return [complexPartView(z, 0), complexPartView(z, 1)]
 }
 
-/** A complex128 tensor from real and imaginary parts of one shape (any real dtypes, any strides). Copies. */
+/**
+ * A complex128 tensor from real and imaginary parts of one shape (any real dtypes, any strides). Copies.
+ *
+ * @param re The real parts.
+ * @param im The imaginary parts, of the shape of `re` (not checked).
+ * @returns A new contiguous complex128 tensor of the shape of `re`.
+ *
+ * @example Join two real vectors, and split them again
+ * const z = joinComplex(tensor([1, 2]), tensor([3, 4]))
+ * print('z as (re, im) pairs:', z)
+ * print('dtype:', z.dtype)
+ * print('parts:', splitComplex(z))
+ */
 export function joinComplex(re: Tensor, im: Tensor): Tensor {
   const n = size(re)
   const out = new Float64Array(2 * n)
@@ -457,15 +579,30 @@ export function joinComplex(re: Tensor, im: Tensor): Tensor {
 }
 
 /**
- * A complex scalar rule: `z` holds the arguments as (re, im) pairs in order (z[0], z[1] the first; a real argument
- * has im = 0), and the rule writes the result's real part to out[0] and imaginary part to out[1].
+ * A complex scalar rule: `z` holds the arguments as (re, im) pairs in order (`z[0]`, `z[1]` the first; a real argument
+ * has imaginary part 0), and the rule writes the result's real part to `out[0]` and imaginary part to `out[1]`.
  */
 export type ComplexRule = (out: Float64Array, z: Float64Array) => void
 
 /**
  * Apply a complex scalar rule elementwise to broadcast operands (tensors of any dtype, or JS numbers, which are real).
- * The result is complex128, or float64 with `real` (the rule then writes only out[0], e.g. |z|). Operands are read in
- * place through their broadcast strides, two slots per complex element.
+ * The result is complex128, or float64 with `real` (the rule then writes only `out[0]`, e.g. $\lvert z \rvert$).
+ * Operands are read in place through their broadcast strides, two slots per complex element.
+ *
+ * @param args The operands, broadcast together: complex128 tensors are read as (re, im) pairs, other tensors and
+ *   numbers as real values.
+ * @param rule The complex scalar rule, given one (re, im) pair per operand.
+ * @param real Whether the result is real: float64, from the real part the rule writes (default complex128).
+ * @returns A new contiguous tensor of the broadcast shape.
+ *
+ * @example Conjugate a complex vector, and take its modulus
+ * const z = complex(tensor([3, 5]), tensor([4, 12]))
+ * const conjugate = (o, w) => {
+ *   o[0] = w[0]
+ *   o[1] = -w[1]
+ * }
+ * print('conj as (re, im) pairs:', complexKernel([z], conjugate))
+ * print('modulus:', complexKernel([z], (o, w) => (o[0] = Math.hypot(w[0], w[1])), true))
  */
 export function complexKernel(args: readonly (Tensor | number)[], rule: ComplexRule, real = false): Tensor {
   const shape = broadcastShapes(...args.map((v) => (typeof v === 'number' ? [] : v.shape)))
