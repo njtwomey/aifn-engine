@@ -1,7 +1,8 @@
 /**
- * The algorithms of `aifn-compute/graph/traversal`, registered with what each factory takes (`problem`) and the roles of its
- * state's fields (`state`: iterate, objective, grad, stepSize, and the `Status` flags it sets), so a generic trace
- * view picks default series and a worker can address an algorithm by key (design S §2.3).
+ * The algorithms of `aifn-compute/graph/traversal`, registered with what each factory takes (`problem`) and the
+ * roles of its state's fields (`state`: iterate, objective, grad, stepSize, and the `Status` flags it sets), so a
+ * generic trace view picks default series and a worker can address an algorithm by key (design S §2.3). The module's
+ * functions are registered too, with their role and the notes that use them.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

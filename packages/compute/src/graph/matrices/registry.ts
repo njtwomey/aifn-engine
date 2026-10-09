@@ -1,4 +1,7 @@
-/** The functions of `aifn-compute/graph/matrices`, registered with the notes they serve. */
+/**
+ * The functions of `aifn-compute/graph/matrices`, registered with their display names, roles and the notes they serve,
+ * so a worker or a note can address each by key.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as matrices from './matrices'

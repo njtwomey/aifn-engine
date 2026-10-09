@@ -4,6 +4,9 @@
  * "Neural message passing for quantum chemistry", ICML; Kipf & Welling 2017, "Semi-supervised classification with
  * graph convolutional networks", ICLR). Built only from `take`, `gather`, `scatterAdd` and elementwise primitives, so
  * gradients reach the node features and whatever the edge function closes over, to any order.
+ *
+ * Features are matrices with one row per node ($V \times F$) and messages one row per directed edge ($E \times G$).
+ * An undirected edge carries a message each way, and each edge's weight (1 when unset) is passed to the edge function.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -25,26 +28,46 @@ import {
 } from 'aifn-compute/foundation/tensor'
 import { isDirected, weightOf, type Graph } from '../graph'
 
-/** How messages arriving at a node are combined. */
+/**
+ * How messages arriving at a node are combined: `'sum'`, `'mean'` over the incoming edges, or `'max'` of each
+ * feature.
+ */
 export type Aggregation = 'sum' | 'mean' | 'max'
 
 /**
- * An edge function: the messages (E × G) from the source features (E × F), the destination features (E × F) and the
- * edge weights (a float64 column, E × 1), one row per directed edge.
+ * An edge function: the messages ($E \times G$) from the source features (`source`, $E \times F$), the destination
+ * features (`destination`, $E \times F$) and the edge weights (`weight`, a float64 column, $E \times 1$), one row per
+ * directed edge. It must return a matrix with one row per edge; $G$ may differ from $F$.
  */
 export type EdgeFunction = (source: Value, destination: Value, weight: Tensor) => Value
 
 /** Options of {@link propagate}. */
 export interface PropagateOptions {
-  /** Default `sum`. */
+  /** How the messages at each node are combined (default `'sum'`). */
   aggregate?: Aggregation
-  /** The edge function; default the weighted source features, w_{uv} h_u. */
+  /** The edge function; default the weighted source features, $w_{uv} \hvec_u$. */
   message?: EdgeFunction
   /** Also pass a message from every node to itself (weight 1), as in a graph convolution. Default false. */
   selfLoops?: boolean
 }
 
-/** The directed edges message passing uses: both directions of an undirected edge (a self-loop once). */
+/**
+ * The directed edges message passing uses: each edge in its own direction, then (in an undirected graph) the reverse,
+ * except for a self-loop, which is used once; with `selfLoops`, an edge from every node to itself after them.
+ *
+ * @param g The graph. Edges keep their order, and an undirected edge's reverse follows it directly.
+ * @param selfLoops Whether to append an edge $v \to v$ of weight 1 for every node, as a graph convolution does. It is
+ *   added even when the graph already has a self-loop at $v$.
+ * @returns The `source` and `destination` node of each directed edge ($E$ entries each) and its `weight`, a float64
+ *   $E \times 1$ column (1 where the edge has none).
+ *
+ * @example An undirected path, with self-loops
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1, weight: 2 }, { from: 1, to: 2 }], directed: false }
+ * const { source, destination, weight } = messageEdges(g, true)
+ * print('source:', source)
+ * print('destination:', destination)
+ * print('weight:', weight)
+ */
 export function messageEdges(
   g: Graph,
   selfLoops = false,
@@ -75,13 +98,25 @@ export function messageEdges(
   }
 }
 
+/**
+ * The concrete tensor under a value, traced or not, for reading its entries; throws `AifnError` when it is a scalar.
+ *
+ * @param x The messages or scores, a matrix.
+ * @returns The tensor of its values.
+ */
 const raw = (x: Value): Tensor => {
   const v = unwrap(x)
   if (typeof v === 'number') throw new AifnError('propagate', 'propagate: messages must be a matrix')
   return v
 }
 
-/** Flat indices of rows `rows` of a (· × width) matrix, row-major. */
+/**
+ * Flat indices of rows `rows` of a row-major matrix with `width` columns: the entries of each listed row in turn.
+ *
+ * @param rows The row numbers, in the order wanted; a row may repeat.
+ * @param width The number of columns of the matrix.
+ * @returns `rows.length * width` indices: entry $k \cdot w + j$ is `rows[k] * width + j` ($w$ = `width`).
+ */
 function rowIndices(rows: Int32Array, width: Size): Int32Array {
   const out = new Int32Array(rows.length * width)
   for (let k = 0; k < rows.length; k++) for (let j = 0; j < width; j++) out[k * width + j] = rows[k] * width + j
@@ -89,9 +124,31 @@ function rowIndices(rows: Int32Array, width: Size): Int32Array {
 }
 
 /**
- * Combine per-edge rows (E × G) at their destination nodes: out_v = ⊕_{k: destination_k = v} m_k, by `sum`, `mean` (over
- * the incoming edges) or `max` (each feature's largest; its gradient goes to that row only, ties to the first edge). A
+ * Combine per-edge rows ($E \times G$) at their destination nodes,
+ * $\ovec_v = \bigoplus_{k : d_k = v} \mvec_k$ ($d_k$ the destination of edge $k$), by `sum`, `mean` (over the
+ * incoming edges) or `max` (each feature's largest; its gradient goes to that row only, ties to the first edge). A
  * node with no incoming edge gets zeros. The segment reduction behind {@link propagate}, attention and pooling.
+ * Differentiable in `messages`. Throws `AifnError` unless `messages` is a matrix with one row per entry of
+ * `destination`.
+ *
+ * @param messages The per-edge rows $\mvec_k$, an $E \times G$ matrix (traced or not).
+ * @param destination The destination node of each row, $E$ entries in $0, \dots, V - 1$.
+ * @param nodes The number of nodes $V$, the number of rows of the result.
+ * @param aggregate How the rows arriving at a node are combined (default `'sum'`).
+ * @returns The $V \times G$ matrix of combined rows.
+ *
+ * @example Sum, mean and max at each destination
+ * // Rows 0 and 1 arrive at node 0, row 2 at node 1; nothing arrives at node 2.
+ * const m = tensor([[1, 10], [5, 0], [2, 3]])
+ * const destination = Int32Array.from([0, 0, 1])
+ * print('sum:', aggregateEdges(m, destination, 3))
+ * print('mean:', aggregateEdges(m, destination, 3, 'mean'))
+ * print('max:', aggregateEdges(m, destination, 3, 'max'))
+ *
+ * @example The gradient of max reaches only the winning row
+ * const destination = Int32Array.from([0, 0, 1])
+ * const g = grad((m) => sum(aggregateEdges(m, destination, 2, 'max')))
+ * print('d/dm:', g(tensor([[1], [5], [2]])))
  */
 export function aggregateEdges(
   messages: Value,
@@ -143,9 +200,20 @@ export function aggregateEdges(
 }
 
 /**
- * The softmax of edge scores (E × H, one column per head) over each destination's incoming edges:
- * α_k = exp(e_k) / Σ_{k′ → same destination} exp(e_k′). The per-destination maximum is subtracted first (a constant, so
- * gradients are unchanged). Differentiable in the scores.
+ * The softmax of edge scores ($E \times H$, one column per head) over each destination's incoming edges:
+ * $\alpha_k = \exp(e_k) / \sum_{k' : d_{k'} = d_k} \exp(e_{k'})$, $d_k$ the destination of edge $k$. The
+ * per-destination maximum is subtracted first (a constant, so gradients are unchanged). Differentiable in the scores.
+ * Throws `AifnError` unless `scores` is a matrix with one row per entry of `destination`.
+ *
+ * @param scores The edge scores $e_k$, an $E \times H$ matrix with a column per attention head (traced or not).
+ * @param destination The destination node of each edge, $E$ entries in $0, \dots, V - 1$.
+ * @param nodes The number of nodes $V$.
+ * @returns The weights $\alpha_k$, $E \times H$: in each column, the weights of the edges into one node sum to 1.
+ *
+ * @example Attention weights over the edges into each node
+ * // Edges 0 and 1 enter node 0 with scores 0 and log 3; edge 2 is the only edge into node 1.
+ * const scores = tensor([[0], [Math.log(3)], [5]])
+ * print('alpha:', edgeSoftmax(scores, Int32Array.from([0, 0, 1]), 2))
  */
 export function edgeSoftmax(scores: Value, destination: Int32Array, nodes: Size): Value {
   const shape = shapeOfValue(scores)
@@ -165,9 +233,36 @@ export function edgeSoftmax(scores: Value, destination: Int32Array, nodes: Size)
 }
 
 /**
- * One round of message passing: node features h (V × F) → aggregated messages (V × G), with
- * m_{uv} = message(h_u, h_v, w_{uv}) on every directed edge u → v and out_v = ⊕_{u → v} m_{uv} ({@link aggregateEdges}).
- * Differentiable in h and in everything `message` closes over.
+ * One round of message passing, from node features $\Hmat$ ($V \times F$) to aggregated messages ($V \times G$):
+ * $\mvec_{uv} = \mathrm{message}(\hvec_u, \hvec_v, w_{uv})$ on every directed edge $u \to v$ (see
+ * {@link messageEdges}) and $\ovec_v = \bigoplus_{u \to v} \mvec_{uv}$ ({@link aggregateEdges}).
+ * Differentiable in $\Hmat$ and in everything `message` closes over. Throws `AifnError` when `h` is not
+ * $V \times F$ or the edge function does not return one row per edge.
+ *
+ * @param g The graph, with $V$ nodes; an undirected edge passes a message each way.
+ * @param h The node features $\Hmat$, a $V \times F$ matrix with row $v$ the features of node $v$ (traced or not).
+ * @param options The aggregation (default `'sum'`), the edge function (default the weighted source features) and
+ *   whether every node also sends itself a message.
+ * @returns The $V \times G$ matrix of aggregated messages; a node that receives none gets a zero row.
+ *
+ * @example Sum, mean and max over a path's neighbours
+ * // The path 0 - 1 - 2 with features 1, 2, 3: node 1 hears from 0 and 2, the ends from node 1 only.
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const h = tensor([[1], [2], [3]])
+ * print('sum:', propagate(g, h))
+ * print('mean:', propagate(g, h, { aggregate: 'mean' }))
+ * print('max:', propagate(g, h, { aggregate: 'max' }))
+ *
+ * @example A graph convolution step: self-loops, mean, and its gradient
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const layer = (h) => propagate(g, h, { aggregate: 'mean', selfLoops: true })
+ * print('out:', layer(tensor([[1], [2], [3]])))
+ * print('d sum(out) / dh:', grad((h) => sum(layer(h)))(tensor([[1], [2], [3]])))
+ *
+ * @example An edge function: differences to the neighbour
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const message = (source, destination) => sub(source, destination)
+ * print('sum of h_u - h_v:', propagate(g, tensor([[1], [2], [4]]), { message }))
  */
 export function propagate(g: Graph, h: Value, options: PropagateOptions = {}): Value {
   const shape = shapeOfValue(h)

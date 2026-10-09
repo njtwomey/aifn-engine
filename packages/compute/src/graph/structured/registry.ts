@@ -1,4 +1,7 @@
-/** The functions of `aifn-compute/graph/structured`: intentional graphs with roles, plates and templates. */
+/**
+ * The functions of `aifn-compute/graph/structured` (intentional graphs with roles, plates and templates), registered
+ * with their display names, roles and the notes they serve.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as build from './build'

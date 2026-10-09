@@ -2,7 +2,11 @@
  * Flows: maximum flow and minimum cut by Edmonds–Karp (Edmonds and Karp, 1972, "Theoretical improvements in
  * algorithmic efficiency for network flow problems", JACM 19(2); the max-flow min-cut theorem of Ford and Fulkerson,
  * 1956), and minimum-cost flow by successive shortest paths with potentials (Ahuja, Magnanti and Orlin, 1993, "Network
- * Flows", §9.7). Both are traceable.
+ * Flows", §9.7). Both are traceable: `edmondsKarpSteps` and `minCostFlowSteps` are algorithms for the runners, and
+ * `maxFlow` and `minCostFlow` run them to the end.
+ *
+ * Augmenting paths are written as residual moves: $k \ge 0$ is arc $k$ used forwards (adding flow) and $-k-1$ is arc
+ * $k$ used backwards (cancelling flow). A residual capacity counts only above $10^{-12}$.
  */
 
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -19,7 +23,9 @@ const EPS = 1e-12
 
 /** Options of Edmonds–Karp: edge weights are capacities (an undirected edge has that capacity in each direction). */
 export interface MaxFlowOptions {
+  /** The node the flow leaves. */
   source: number
+  /** The node the flow enters; must differ from `source`. */
   sink: number
 }
 
@@ -27,9 +33,14 @@ export interface MaxFlowOptions {
 export interface EdmondsKarpState extends Status {
   /** The directed arcs (an undirected edge gives two), with `weight` the capacity and `edge` the edge index. */
   arcs: readonly DirectedArc[]
-  /** Residual moves at each node, in arc order: k ≥ 0 uses arc k forwards, −k−1 uses arc k backwards (cancelling). */
+  /**
+   * Residual moves at each node, in arc order: $k \ge 0$ uses arc $k$ forwards, $-k-1$ uses arc $k$ backwards
+   * (cancelling).
+   */
   residual: readonly (readonly number[])[]
+  /** The source node. */
   source: number
+  /** The sink node. */
   sink: number
   /** Flow on each arc; float64, one per arc. */
   flow: Tensor
@@ -46,7 +57,9 @@ export interface EdmondsKarpState extends Status {
    * side of a minimum cut.
    */
   reached: Tensor
+  /** Augmenting paths found so far. */
   iteration: number
+  /** True once the search no longer reaches the sink (the flow is maximum), or the flow became unbounded. */
   done: boolean
 }
 
@@ -131,10 +144,27 @@ const edmondsKarp = {
 }
 
 /**
- * Edmonds–Karp as a traceable algorithm. Options: `{ source, sink }` with non-negative capacities as edge
- * weights. Each step runs breadth-first search in the residual graph from the source; if it reaches the sink, the
- * shortest augmenting path is saturated by its bottleneck. When it cannot, the flow is maximum and the reached nodes
- * form the source side of a minimum cut.
+ * Edmonds–Karp as a traceable algorithm. Each step runs breadth-first search in the residual graph from the source;
+ * if it reaches the sink, the shortest augmenting path (fewest arcs) is saturated by its bottleneck. When it cannot,
+ * the flow is maximum and the reached nodes form the source side of a minimum cut. `init` throws `ShapeError` when
+ * the source is the sink and `DomainError` on a negative capacity.
+ *
+ * @param graph The network: edge weights are capacities (1 when unset), and an undirected edge has that capacity in
+ *   each direction (two arcs).
+ * @param options The `source` and `sink` nodes.
+ * @returns The algorithm: `init` takes nothing, and each `step` augments along one path or finishes.
+ *
+ * @example One augmenting path per step
+ * const edges = [
+ *   { from: 0, to: 1, weight: 3 }, { from: 0, to: 2, weight: 2 }, { from: 1, to: 2, weight: 1 },
+ *   { from: 1, to: 3, weight: 2 }, { from: 2, to: 3, weight: 3 },
+ * ]
+ * const steps = edmondsKarpSteps({ kind: 'graph', nodes: 4, edges }, { source: 0, sink: 3 })
+ * for (const t of [1, 2, 3]) {
+ *   const s = run(steps, undefined, t)
+ *   print(`step ${t}: path`, s.pathNodes, 'bottleneck', s.bottleneck, 'value', s.value)
+ * }
+ * print('done after', run(steps, undefined, 10).t, 'steps')
  */
 export function edmondsKarpSteps(graph: Graph, options: MaxFlowOptions): Algorithm<void, EdmondsKarpState> {
   const problem: MaxFlowOptions & { graph: Graph } = { graph, ...options }
@@ -148,11 +178,11 @@ export function edmondsKarpSteps(graph: Graph, options: MaxFlowOptions): Algorit
 
 /** A maximum flow with a minimum cut. */
 export interface MaxFlowResult {
-  /** The flow value, equal to `cutCapacity`. */
+  /** The flow value, equal to `cutCapacity`; Infinity when unbounded (the cut is then empty, of capacity 0). */
   value: number
   /** Flow on each edge of `graph.edges` (for an undirected edge, the net flow from `from` to `to`, maybe negative). */
   flow: Tensor
-  /** 1 for nodes on the source side of the minimum cut; int32, length V. */
+  /** 1 for nodes on the source side of the minimum cut; int32, length $V$. */
   sourceSide: Tensor
   /** Edges crossing the cut from the source side to the sink side (indices into `graph.edges`); int32. */
   cut: Tensor
@@ -164,7 +194,31 @@ export interface MaxFlowResult {
 
 /**
  * Maximum flow from `source` to `sink` by Edmonds–Karp, with the minimum cut read off the last residual search.
- * Unbounded when a path of infinite-capacity edges joins them (`value` is then Infinity).
+ * Unbounded when a path of infinite-capacity edges joins them (`value` is then Infinity). Throws as
+ * `edmondsKarpSteps` does.
+ *
+ * @param graph The network: edge weights are capacities (1 when unset, non-negative), and an undirected edge has
+ *   that capacity in each direction.
+ * @param source The node the flow leaves.
+ * @param sink The node the flow enters.
+ * @returns The flow value and per-edge flow, the minimum cut and its capacity, and the number of augmenting paths.
+ *
+ * @example A small network: the cut at the source limits the flow
+ * const edges = [
+ *   { from: 0, to: 1, weight: 3 }, { from: 0, to: 2, weight: 2 }, { from: 1, to: 2, weight: 1 },
+ *   { from: 1, to: 3, weight: 2 }, { from: 2, to: 3, weight: 3 },
+ * ]
+ * const r = maxFlow({ kind: 'graph', nodes: 4, edges }, 0, 3)
+ * print('value =', r.value, 'cut capacity =', r.cutCapacity)
+ * print('flow per edge =', r.flow)
+ * print('cut edges =', r.cut)
+ *
+ * @example A chain is limited by its weakest edge
+ * const edges = [{ from: 0, to: 1, weight: 10 }, { from: 1, to: 2, weight: 1 }, { from: 2, to: 3, weight: 10 }]
+ * const r = maxFlow({ kind: 'graph', nodes: 4, edges }, 0, 3)
+ * print('value =', r.value)
+ * print('source side =', r.sourceSide)
+ * print('cut edges =', r.cut)
  */
 export function maxFlow(graph: Graph, source: number, sink: number): MaxFlowResult {
   const s = run(edmondsKarpSteps(graph, { source, sink }), undefined, Infinity)
@@ -199,16 +253,23 @@ export function maxFlow(graph: Graph, source: number, sink: number): MaxFlowResu
 
 /** An arc of a flow network. */
 export interface FlowArc {
+  /** The node the arc leaves. */
   from: number
+  /** The node the arc enters. */
   to: number
+  /** The most flow the arc can carry. */
   capacity: number
+  /** The cost per unit of flow; may be negative, as long as no cycle of arcs has negative total cost. */
   cost: number
 }
 
 /** A min-cost flow problem: send `supply[v]` (positive at sources, negative at sinks, summing to 0) at least cost. */
 export interface FlowNetwork {
+  /** The number of nodes. */
   nodes: number
+  /** The arcs, each with a capacity and a unit cost. */
   arcs: readonly FlowArc[]
+  /** Per node: what it sends (positive), receives (negative) or passes on (0); one entry per node. */
   supply: readonly number[]
 }
 
@@ -216,17 +277,27 @@ export interface FlowNetwork {
 export interface MinCostFlowState extends Status {
   /** Flow on each arc, length E. */
   flow: Tensor
-  /** Node potentials π, which keep reduced costs c − π(from) + π(to) non-negative on residual arcs. */
+  /**
+   * Node potentials $\pi$, which keep the reduced costs $c + \pi_{\text{from}} - \pi_{\text{to}}$ non-negative on
+   * residual arcs.
+   */
   potential: Tensor
   /** Supply not yet sent (positive) or demand not yet met (negative), per node. */
   excess: Tensor
-  /** The augmenting path of the last step as arc indices (a negative index −k−1 is arc k used backwards); int32. */
+  /**
+   * The augmenting path of the last step as arc indices (a negative index $-k-1$ is arc $k$ used backwards); int32.
+   */
   path: Tensor
   /** Flow sent along the last path. */
   sent: number
-  /** Total cost Σ cost · flow. */
+  /** Total cost $\sum_k c_k f_k$ of the current flow, over the arcs $k$. */
   cost: number
+  /**
+   * `'running'` while supply is left to send, `'optimal'` once every supply is met, `'infeasible'` when the source
+   * being served reaches no node with unmet demand.
+   */
   status: 'running' | 'optimal' | 'infeasible'
+  /** The problem being solved. */
   network: FlowNetwork
 }
 
@@ -330,10 +401,28 @@ const successiveShortestPaths = {
 }
 
 /**
- * Minimum-cost flow by successive shortest paths as a traceable algorithm. Options: a `FlowNetwork` whose arcs have no
- * negative-cost cycle. Initial potentials come from Bellman–Ford (so negative costs are allowed); each step runs
- * Dijkstra on reduced costs in the residual network from a node with excess to a node with demand and augments along
- * the path by as much as capacities, excess and demand allow. `infeasible` when some demand cannot be reached.
+ * Minimum-cost flow by successive shortest paths as a traceable algorithm. Initial potentials come from Bellman–Ford
+ * (so negative costs are allowed); each step runs Dijkstra on reduced costs in the residual network from the first
+ * node with excess to the nearest node with demand, and augments along the path by as much as capacities, excess and
+ * demand allow. `infeasible` when that node's excess can reach no demand. `init` throws `ShapeError` when `supply`
+ * does not have one entry per node and `DomainError` when the supplies do not sum to zero.
+ *
+ * @param network The nodes, the arcs with capacities and unit costs (no negative-cost cycle), and the supplies.
+ * @returns The algorithm: `init` takes nothing, and each `step` sends flow along one cheapest path.
+ *
+ * @example The cheap path fills first
+ * const network = {
+ *   nodes: 4,
+ *   arcs: [
+ *     { from: 0, to: 1, capacity: 2, cost: 1 }, { from: 0, to: 2, capacity: 2, cost: 3 },
+ *     { from: 1, to: 3, capacity: 1, cost: 1 }, { from: 2, to: 3, capacity: 2, cost: 1 },
+ *   ],
+ *   supply: [2, 0, 0, -2],
+ * }
+ * const first = run(minCostFlowSteps(network), undefined, 1)
+ * print('step 1: arcs', first.path, 'sent', first.sent, 'cost', first.cost)
+ * const second = run(minCostFlowSteps(network), undefined, 2)
+ * print('step 2: arcs', second.path, 'sent', second.sent, 'cost', second.cost, second.status)
  */
 export function minCostFlowSteps(network: FlowNetwork): Algorithm<void, MinCostFlowState> {
   const problem: FlowNetwork = network
@@ -346,8 +435,30 @@ export function minCostFlowSteps(network: FlowNetwork): Algorithm<void, MinCostF
 }
 
 /**
- * Solve a min-cost flow problem by successive shortest paths within `maxSteps` augmentations (default 100 000); returns
- * the final state (flow, cost, status; `t` is the number of augmenting steps).
+ * Solve a min-cost flow problem by successive shortest paths within `maxSteps` augmentations; returns the final state
+ * (flow, cost, status; `t` is the number of augmenting steps). The status is still `'running'` if `maxSteps` ran out.
+ * Throws as `minCostFlowSteps` does.
+ *
+ * @param network The nodes, the arcs with capacities and unit costs (no negative-cost cycle), and the supplies.
+ * @param options `maxSteps`, the most augmenting paths to take (default 100 000).
+ * @returns The last state of `minCostFlowSteps`.
+ *
+ * @example Two units from node 0 to node 3
+ * const network = {
+ *   nodes: 4,
+ *   arcs: [
+ *     { from: 0, to: 1, capacity: 2, cost: 1 }, { from: 0, to: 2, capacity: 2, cost: 3 },
+ *     { from: 1, to: 3, capacity: 1, cost: 1 }, { from: 2, to: 3, capacity: 2, cost: 1 },
+ *   ],
+ *   supply: [2, 0, 0, -2],
+ * }
+ * const s = minCostFlow(network)
+ * print('flow per arc =', s.flow)
+ * print('cost =', s.cost, 'status =', s.status)
+ *
+ * @example A demand no arc reaches is infeasible
+ * const network = { nodes: 3, arcs: [{ from: 0, to: 1, capacity: 5, cost: 1 }], supply: [1, 0, -1] }
+ * print('status =', minCostFlow(network).status)
  */
 export function minCostFlow(network: FlowNetwork, options: { maxSteps?: number } = {}): MinCostFlowState {
   return run(minCostFlowSteps(network), undefined, options.maxSteps ?? 100_000)

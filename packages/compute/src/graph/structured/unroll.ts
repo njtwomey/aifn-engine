@@ -11,16 +11,33 @@ import type { Group, StructuredGraph, StructuredNode } from './types'
 
 /**
  * Values of named sizes: a number, or for a group nested in another, one size per index of the enclosing group's
- * last axis (a ragged size). Or a function giving the size of a group's axis at the index of its enclosing copies.
+ * last axis (a ragged size). Or a function giving the size of a group's axis at the index of its enclosing copies,
+ * called for every axis whose size is a name.
  */
 export type SizeBindings =
   Readonly<Record<string, Size | readonly Size[]>> | ((group: Group, axis: Index, outer: readonly Index[]) => Size)
 
+/**
+ * Throw the module's error, an `AifnError` from `unroll`.
+ *
+ * @param message What is wrong, without the function's name (it is prefixed).
+ * @returns Never: it always throws.
+ */
 const fail = (message: string): never => {
   throw new AifnError('unroll', `unroll: ${message}`)
 }
 
-/** The size of one axis of a group at the index of its enclosing copies. */
+/**
+ * The size of one axis of a group at the index of its enclosing copies. Throws `AifnError` when the size is a name
+ * that `sizes` does not bind, or a ragged size with no entry for the enclosing index.
+ *
+ * @param group The group.
+ * @param axis Which of the group's sizes: 0, or 1 for a lattice's columns.
+ * @param outer The index of the enclosing copies, one entry per axis of the groups outside `group`, outermost first.
+ *   A ragged size is read at its last entry (0 when it is empty).
+ * @param sizes The bindings of the named sizes.
+ * @returns The number of copies along the axis (for a tree, its depth).
+ */
 function axisSize(group: Group, axis: Index, outer: readonly Index[], sizes: SizeBindings): Size {
   const spec = groupSizes(group)[axis]
   if (typeof spec === 'number') return spec
@@ -30,21 +47,46 @@ function axisSize(group: Group, axis: Index, outer: readonly Index[], sizes: Siz
   return s[outer[outer.length - 1] ?? 0] ?? fail(`size ${spec} has no entry for index ${outer.join(',')}`)
 }
 
-/** The number of nodes of a complete k-ary tree of depth d (the root alone at depth 0). */
+/**
+ * The number of nodes of a complete $k$-ary tree of depth $d$ (the root alone at depth 0):
+ * $(k^{d+1} - 1)/(k - 1)$, or $d + 1$ when $k = 1$.
+ *
+ * @param arity The number of children $k$ of each inner node.
+ * @param depth The depth $d$.
+ * @returns The node count.
+ */
 export const treeSize = (arity: Size, depth: Size): Size =>
   arity === 1 ? depth + 1 : (Math.pow(arity, depth + 1) - 1) / (arity - 1)
 
-/** The number of index axes a group adds (a lattice two, every other kind one). */
+/**
+ * The number of index axes a group adds (a lattice two, every other kind one).
+ *
+ * @param g The group.
+ * @returns 2 for a lattice, else 1.
+ */
 const axesOf = (g: Group): Size => (g.kind === 'lattice' ? 2 : 1)
 
-/** The copies of a group at the index of its enclosing copies: its axis sizes (a tree as one axis of all its nodes). */
+/**
+ * The copies of a group at the index of its enclosing copies: its axis sizes (a tree as one axis of all its nodes).
+ *
+ * @param group The group.
+ * @param outer The index of the enclosing copies, outermost first.
+ * @param sizes The bindings of the named sizes.
+ * @returns One count per axis: two for a lattice (rows, cols), one otherwise.
+ */
 function extents(group: Group, outer: readonly Index[], sizes: SizeBindings): Size[] {
   if (group.kind === 'lattice') return [axisSize(group, 0, outer, sizes), axisSize(group, 1, outer, sizes)]
   const n = axisSize(group, 0, outer, sizes)
   return [group.kind === 'tree' ? treeSize(group.arity!, n) : n]
 }
 
-/** Every index of a node inside the given groups, in row-major order. */
+/**
+ * Every index of a node inside the given groups, in row-major order.
+ *
+ * @param chain The groups holding the node, outermost first (as `groupChain` returns them).
+ * @param sizes The bindings of the named sizes.
+ * @returns One index per copy, each with one entry per axis of the groups; a single empty index for no groups.
+ */
 function copies(chain: readonly Group[], sizes: SizeBindings): Index[][] {
   const out: Index[][] = []
   const visit = (depth: number, index: Index[]) => {
@@ -57,20 +99,66 @@ function copies(chain: readonly Group[], sizes: SizeBindings): Index[][] {
   return out
 }
 
-/** The name of a copy: `z[2,5]`, or the compact name for a node in no group. */
+/**
+ * The name of a copy: `z[2,5]`, or the compact name for a node in no group.
+ *
+ * @param name The compact node's name.
+ * @param index The copy's index along each axis of its groups, outermost first.
+ * @returns The name `unroll` gives the copy.
+ *
+ * @example Copy names
+ * print(copyName('z', [2, 5]))
+ * print(copyName('mu', []))
+ */
 export const copyName = (name: string, index: readonly Index[]): string =>
   index.length ? `${name}[${index.join(',')}]` : name
 
+/**
+ * The TeX label of a copy: the compact label with the index as a subscript, `z_{2,5}`.
+ *
+ * @param label The compact node's TeX label.
+ * @param index The copy's index along each axis of its groups, outermost first; empty leaves the label as it is.
+ * @returns The label `unroll` gives the copy.
+ */
 const copyLabel = (label: string, index: readonly Index[]): string =>
   index.length ? `${label}_{${index.join(',')}}` : label
 
 /**
  * Expand a structured graph into one node per copy. Nodes come in the compact graph's order, each node's copies in
  * row-major index order, so a topological order of the compact graph (ignoring lags) stays one. A copy is named
- * `z[t]` (`z[i,j]` on a lattice, `θ[d]` in a plate), carries `source` and `index`, and keeps its group so a diagram
- * can draw the plate around the copies. An edge without a lag joins every pair of copies whose indices agree on the
- * groups both ends share; a lagged edge joins copy t − k to t on a chain (mod T when periodic), site (i − di, j − dj)
- * to (i, j) on a lattice (wrapped on a torus), and a tree node's parent to it. An unrolled graph is returned as it is.
+ * `z[t]` (`z[i,j]` on a lattice, `θ[d]` in a plate), labelled with the index as a TeX subscript, carries `source` and
+ * `index`, and keeps its group so a diagram can draw the plate around the copies. An edge without a lag joins every
+ * pair of copies whose indices agree on the groups both ends share; a lagged edge joins copy $t - k$ to $t$ on a chain
+ * (mod $T$ when periodic), site $(i - d_i, j - d_j)$ to $(i, j)$ on a lattice (wrapped on a torus), and a tree node's
+ * parent to it, skipping a copy that would link to itself. An unrolled graph, or one with no groups, is returned as it
+ * is. Throws `AifnError` when a named size is not bound.
+ *
+ * @param graph The compact graph.
+ * @param sizes The values of its named sizes (default none: every size must then be a number).
+ * @returns The explicit graph, with `unrolled: true` and no named sizes.
+ *
+ * @example A ragged plate: two documents of 2 and 1 words
+ * const lda = structured('ragged plates', (b) => {
+ *   const docs = b.plate('docs', 2)
+ *   const theta = docs.latent('theta')
+ *   b.edge(theta, docs.plate('words', 'N').observed('w'))
+ * })
+ * const explicit = unroll(lda, { N: [2, 1] })
+ * const name = (i) => explicit.attributes[i].name
+ * print('nodes:', explicit.attributes.map((n) => n.name))
+ * print('edges:', explicit.edges.map((e) => `${name(e.from)} -> ${name(e.to)}`))
+ *
+ * @example A periodic chain closes into a ring
+ * const ring = unroll(chainTemplate(3, { periodic: true }))
+ * const name = (i) => ring.attributes[i].name
+ * print('edges:', ring.edges.map((e) => `${name(e.from)} -> ${name(e.to)}`))
+ *
+ * @example An unbound size throws
+ * try {
+ *   unroll(chainTemplate('T'))
+ * } catch (e) {
+ *   print(e.message)
+ * }
  */
 export function unroll<D>(graph: StructuredGraph<D>, sizes: SizeBindings = {}): StructuredGraph<D> {
   if (graph.unrolled || graph.groups.length === 0) return graph
@@ -143,7 +231,19 @@ export function unroll<D>(graph: StructuredGraph<D>, sizes: SizeBindings = {}): 
   }
 }
 
-/** The indices of the copies of compact node `name` in an unrolled graph (the node itself in a compact graph). */
+/**
+ * The indices of the copies of compact node `name` in an unrolled graph (the node itself in a compact graph). Empty
+ * when there is no such node.
+ *
+ * @param graph The graph, unrolled or compact.
+ * @param name The compact node's name.
+ * @returns Ascending node indices.
+ *
+ * @example The copies of the observation in an unrolled HMM
+ * const hmm = unroll(chainTemplate('T', { observed: 'x' }), { T: 3 })
+ * print('copies of x:', copiesOf(hmm, 'x'))
+ * print('names:', copiesOf(hmm, 'x').map((i) => hmm.attributes[i].name))
+ */
 export function copiesOf(graph: StructuredGraph, name: string): Index[] {
   return graph.attributes.flatMap((n, i) => ((n.source ?? n.name) === name ? [i] : []))
 }

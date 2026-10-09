@@ -18,21 +18,25 @@ import type { Graph, Index, Size } from 'aifn-compute/foundation/contracts'
  */
 export type NodeRole = 'observed' | 'latent' | 'factor' | 'deterministic' | 'parameter'
 
-/** The roles that are random variables. */
+/** The roles that are random variables: `observed`, `latent` and `deterministic` (not factors or parameters). */
 export const VARIABLE_ROLES: readonly NodeRole[] = ['observed', 'latent', 'deterministic']
 
 /**
- * The attributes of one node (`graph.attributes[i]` for node i). `name` is unique in the graph; `group` is the
+ * The attributes of one node (`graph.attributes[i]` for node $i$). `name` is unique in the graph; `group` is the
  * innermost group holding the node (null for none); `data` is the caller's payload (a distribution, a table).
  * `source` and `index` are set by `unroll`: the compact node a copy came from and its index along each axis of its
  * groups, outermost first.
  */
 export interface StructuredNode<D = unknown> {
+  /** The node's name, unique in the graph; edges and queries refer to nodes by it. */
   name: string
+  /** What the node stands for. */
   role: NodeRole
+  /** The innermost group holding the node, or null for a node outside every group. */
   group: string | null
   /** TeX for display (default: the name). */
   label?: string
+  /** The caller's payload: a distribution, a table. */
   data?: D
   /** Set on copies made by `unroll`: the name of the compact node. */
   source?: string
@@ -41,16 +45,19 @@ export interface StructuredNode<D = unknown> {
 }
 
 /**
- * How an edge couples copies inside a template: `1` (or any k ≥ 1) joins copy t − k of `from` to copy t of `to` along
- * a chain; `[di, dj]` joins site (i − di, j − dj) to (i, j) on a lattice; `'parent'` joins a tree node's parent to it.
+ * How an edge couples copies inside a template: `1` (or any integer $k \ge 1$) joins copy $t - k$ of `from` to copy
+ * $t$ of `to` along a chain; `[di, dj]` joins site $(i - d_i, j - d_j)$ to $(i, j)$ on a lattice; `'parent'` joins a
+ * tree node's parent to it.
  */
 export type Lag = number | readonly number[] | 'parent'
 
 /** The extra fields of a structured edge: its direction, an optional lag inside a template and a label. */
 export interface StructuredEdge {
-  /** True for a conditional dependence (parent → child), false for a symmetric link (a factor or an MRF edge). */
+  /** True for a conditional dependence (parent to child), false for a symmetric link (a factor or an MRF edge). */
   directed: boolean
+  /** Inside a template, which copies the edge joins; left out, the edge joins copies at the same index. */
   lag?: Lag
+  /** A label to draw on the edge. */
   label?: string
 }
 
@@ -59,8 +66,8 @@ export type SizeSpec = Size | string
 
 /**
  * The kinds of group: a `plate` holds exchangeable copies with no links between them; a `chain` holds copies
- * 0 … T − 1 in order (a cycle when `periodic`); a `lattice` holds an m × n grid of sites (a torus when `periodic`);
- * a `tree` holds the nodes of a complete `arity`-ary tree of the given depth in level order.
+ * $0, \dots, T - 1$ in order (a cycle when `periodic`); a `lattice` holds an $m \times n$ grid of sites (a torus when
+ * `periodic`); a `tree` holds the nodes of a complete `arity`-ary tree of the given depth in level order.
  */
 export type GroupKind = 'plate' | 'chain' | 'lattice' | 'tree'
 
@@ -70,14 +77,19 @@ export type GroupKind = 'plate' | 'chain' | 'lattice' | 'tree'
  * Groups nest through `parent`: a nested plate's size may differ per index of its parent (a ragged size).
  */
 export interface Group {
+  /** The group's name, unique in the graph; nodes and nested groups refer to it. */
   name: string
+  /** A plate or a kind of template. */
   kind: GroupKind
+  /** One size (plate, chain), `[rows, cols]` (lattice) or the depth (tree); a number or a named size. */
   size: SizeSpec | readonly SizeSpec[]
+  /** The index symbol of each axis. */
   index: readonly string[]
+  /** The group this one is nested in, or null at the top level. */
   parent: string | null
   /** TeX for display (default: the size). */
   label?: string
-  /** Chain: a cycle (copy T − 1 links to copy 0); lattice: a torus. */
+  /** Chain: a cycle (copy $T - 1$ links to copy 0); lattice: a torus. */
   periodic?: boolean
   /** Lattice: 4 or 8 neighbours (informative: the lag edges carry the links). */
   neighbourhood?: 4 | 8
@@ -91,10 +103,15 @@ export interface Group {
  * so that a diagram can draw them around the copies.
  */
 export interface StructuredGraph<D = unknown> extends Graph<StructuredNode<D>, StructuredEdge> {
+  /** One record per node: its name, role, group and data. */
   attributes: readonly StructuredNode<D>[]
+  /** The plates and templates, in any order (nesting is by `parent`). */
   groups: readonly Group[]
+  /** The named sizes the groups use, bound by `unroll`. */
   sizes: readonly string[]
+  /** The model's name. */
   name?: string
+  /** True for a graph made by `unroll`: one node per copy. */
   unrolled?: boolean
 }
 
