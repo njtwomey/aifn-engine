@@ -1,11 +1,12 @@
 /**
  * Hamiltonian Monte Carlo (Duane et al., 1987; Neal, 2011) with the leapfrog integrator, and the No-U-Turn Sampler
  * (Hoffman & Gelman, 2014), with Stan's multinomial sampling (Betancourt, 2017) by default and the original slice
- * sampling (Hoffman & Gelman's Algorithm 3) as an option. Both expose the trajectory, the momenta and the energy along it, and both can
- * tune their step size during warmup by dual averaging (`adapt`; see `./adaptation`).
+ * sampling (Hoffman & Gelman's Algorithm 3) as an option. Both expose the trajectory, the momenta and the energy along
+ * it, and both can tune their step size during warmup by dual averaging (`adapt`; see `./adaptation`).
  *
- * Conventions: the potential is U(θ) = −log π(θ), the kinetic energy K(p) = ½ Σ pᵢ²/mᵢ for a diagonal mass matrix
- * M = diag(m), momenta are drawn p ~ N(0, M), and the Hamiltonian H = U + K is the energy.
+ * Conventions: the potential is $U(\thetavec) = -\log \pi(\thetavec)$, the kinetic energy
+ * $K(\pvec) = \frac{1}{2} \sum_i p_i^2/m_i$ for a diagonal mass matrix $\Mmat = \diag(\mvec)$, momenta are drawn
+ * $\pvec \sim \Gauss(\zeros, \Mmat)$, and the Hamiltonian $H = U + K$ is the energy.
  */
 
 import { child, uniform } from 'aifn-compute/foundation/random'
@@ -24,28 +25,50 @@ import type { AcceptRejectState, ChainStart, LogDensity } from './types'
 import { allFinite, data, logDensityAndGrad, mat, perCoordinate, standardNormals, toF64, vec, type F64 } from './util'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A leapfrog trajectory: positions and momenta at each of its L + 1 points, and H at each. */
+/**
+ * A leapfrog trajectory: positions and momenta at each of its $L + 1$ points (fewer when it stopped early), and $H$ at
+ * each.
+ */
 export type Leapfrog = {
+  /** The positions $\thetavec$, one row per point: $(L + 1) \times d$, the start first. */
   positions: Matrix
+  /** The momenta $\pvec$ at the same points, $(L + 1) \times d$. */
   momenta: Matrix
-  /** H(θ, p) at each point. */
+  /** $H(\thetavec, \pvec)$ at each point. */
   energies: Vector
-  /** log π at each point. */
+  /** $\log \pi$ at each point. */
   logDensities: Vector
-  /** The gradient ∇ log π at the last point. */
+  /** The gradient $\nabla \log \pi$ at the last point. */
   finalGrad: Vector
   /** False when a position, momentum or energy became non-finite (the trajectory stops there). */
   finite: boolean
 }
 
-/** Kinetic energy ½ Σ pᵢ²/mᵢ. */
+/**
+ * Kinetic energy $\frac{1}{2} \sum_i p_i^2/m_i$.
+ *
+ * @param p The momentum $\pvec$.
+ * @param mass The diagonal $\mvec$ of the mass matrix, one value per coordinate of `p`.
+ * @returns $K(\pvec)$.
+ */
 function kinetic(p: F64, mass: F64): number {
   let k = 0
   for (let i = 0; i < p.length; i++) k += (p[i] * p[i]) / mass[i]
   return 0.5 * k
 }
 
-/** One leapfrog step of size ε from (θ, p) with gradient g = ∇ log π(θ): half momentum, full position, half momentum. */
+/**
+ * One leapfrog step of size $\varepsilon$ from $(\thetavec, \pvec)$ with gradient
+ * $\gvec = \nabla \log \pi(\thetavec)$: half momentum, full position, half momentum. One gradient evaluation.
+ *
+ * @param target The target, whose log-density and gradient are evaluated at the new position.
+ * @param theta The position $\thetavec$ ($d$ values); not modified.
+ * @param p The momentum $\pvec$ ($d$ values); not modified.
+ * @param g The gradient $\nabla \log \pi(\thetavec)$ at `theta`, from the previous step.
+ * @param eps The step size $\varepsilon$; negative to integrate backwards in time.
+ * @param mass The diagonal $\mvec$ of the mass matrix ($d$ values).
+ * @returns The new position `theta` and momentum `p`, with $\log \pi$ (`logDensity`) and its gradient (`grad`) there.
+ */
 function leapfrogStep(target: LogDensity, theta: F64, p: F64, g: F64, eps: number, mass: F64) {
   const d = theta.length
   const pHalf = new Float64Array(d)
@@ -61,9 +84,41 @@ function leapfrogStep(target: LogDensity, theta: F64, p: F64, g: F64, eps: numbe
 }
 
 /**
- * Integrate Hamilton's equations with `steps` leapfrog steps of size `stepSize` from (θ₀, p₀) (Neal, 2011, eq. 5.18).
- * The leapfrog map is volume-preserving and reversible, and its energy error stays bounded for a stable step size
- * (ε below about 2/√(largest precision eigenvalue) for a Gaussian), which is why HMC accepts most proposals.
+ * Integrate Hamilton's equations with `steps` leapfrog steps of size `stepSize` from $(\thetavec_0, \pvec_0)$ (Neal,
+ * 2011, eqs. 5.18 to 5.20). The leapfrog map is volume-preserving and reversible, and its energy error stays bounded
+ * for a stable step size ($\varepsilon$ below about $2/\sqrt{\lambda_\text{max}}$, $\lambda_\text{max}$ the largest
+ * eigenvalue of the precision, for a Gaussian with unit mass), which is why HMC accepts most proposals. The trajectory
+ * stops early at the first point whose energy or position is not finite.
+ *
+ * @param target The target, through `logDensity`, `grad` (or autodiff) and `dim`.
+ * @param theta0 The start position $\thetavec_0$ ($d$ values).
+ * @param momentum0 The start momentum $\pvec_0$ ($d$ values).
+ * @param options `stepSize` $\varepsilon$ (negative integrates backwards), the number of leapfrog `steps` $L$, and the
+ *   `mass` diagonal $\mvec$ (one number or one per coordinate; default 1).
+ * @returns The trajectory: its positions, momenta, energies and log-densities at every point.
+ *
+ * @example A standard normal is a harmonic oscillator
+ * // H = (theta^2 + p^2) / 2: one period is 2 pi, about 63 steps of 0.1.
+ * const target = {
+ *   kind: 'log-density', dim: 1, normalised: false,
+ *   logDensity: (x) => mul(-0.5, sum(mul(x, x))),
+ *   grad: (x) => neg(x),
+ * }
+ * const path = leapfrog(target, [1], [0], { stepSize: 0.1, steps: 63 })
+ * print('end point =', path.positions.data[63], 'momentum', path.momenta.data[63])
+ * print('energy range =', min(path.energies), max(path.energies))
+ *
+ * @example An unstable step size
+ * // For the unit Gaussian the leapfrog map is stable only for a step below 2.
+ * const target = {
+ *   kind: 'log-density', dim: 1, normalised: false,
+ *   logDensity: (x) => mul(-0.5, sum(mul(x, x))),
+ *   grad: (x) => neg(x),
+ * }
+ * for (const stepSize of [1.9, 2.1]) {
+ *   const path = leapfrog(target, [1], [0], { stepSize, steps: 20 })
+ *   print(`step ${stepSize}: final energy =`, get(path.energies, 20))
+ * }
  */
 export function leapfrog(
   target: LogDensity,
@@ -110,15 +165,20 @@ export function leapfrog(
 /** The state of `hmc`. `proposal` is the trajectory's end point. */
 export type HmcState = AcceptRejectState &
   DualAveragingState & {
-    /** ∇ log π(x). */
+    /** $\nabla \log \pi(\xvec)$. */
     grad: Vector
-    /** The momentum drawn on the last step (zeros at t = 0). */
+    /** The momentum drawn on the last step (zeros at $t = 0$). */
     momentum: Vector
-    /** The last trajectory, (L + 1)×d, starting at the previous x; its momenta; H along it. */
+    /** The last trajectory, $(L + 1) \times d$, starting at the previous $\xvec$. */
     trajectory: Matrix
+    /** The momenta along the last trajectory, $(L + 1) \times d$. */
     trajectoryMomenta: Matrix
+    /** $H$ along the last trajectory (at $t = 0$, $-\log \pi(\xvec_0)$ alone). */
     energies: Vector
-    /** H(end) − H(start) of the last trajectory; the log acceptance ratio is its negative. */
+    /**
+     * $\Delta H = H(\text{end}) - H(\text{start})$ of the last trajectory ($\infty$ when it became non-finite); the log
+     * acceptance ratio is its negative.
+     */
     energyError: number
     /** True when the last trajectory's energy error exceeded `divergenceThreshold` or became non-finite. */
     divergent: boolean
@@ -132,41 +192,72 @@ export type HmcState = AcceptRejectState &
     gradientEvaluations: number
     /** The step size used on the last step (after jitter). */
     stepSize: number
-    /** The acceptance statistic of the last step, min(1, exp(−ΔH)), which adaptation steers towards its target. */
+    /**
+     * The acceptance statistic of the last step, $\min(1, \exp(-\Delta H))$, which adaptation steers towards its
+     * target.
+     */
     acceptStat: number
   }
 
 /** Options for `hmc`. */
 export type HmcOptions = {
-  /** Leapfrog step size ε. Default 0.1. */
+  /** Leapfrog step size $\varepsilon$. Default 0.1. */
   stepSize?: number
-  /** Leapfrog steps L per proposal. Default 20. */
+  /** Leapfrog steps $L$ per proposal. Default 20. */
   steps?: number
-  /** Diagonal of the mass matrix M (one number or one per coordinate). Default 1. */
+  /** Diagonal $\mvec$ of the mass matrix $\Mmat$ (one number or one per coordinate). Default 1. */
   mass?: number | ArrayLike<number>
-  /** Draw ε uniformly in [ε(1 − j), ε(1 + j)] each step, to avoid periodic trajectories (Neal, 2011, §5.4.2). Default 0. */
+  /**
+   * Draw the step uniformly in $[\varepsilon(1 - j), \varepsilon(1 + j)]$ each step, to avoid periodic trajectories
+   * (Neal, 2011, §5.4.2). Default 0.
+   */
   stepJitter?: number
   /** When a trajectory counts as divergent (see `DivergenceThreshold`). Default 1000, Stan's absolute threshold. */
   divergenceThreshold?: DivergenceThreshold
-  /** Tune ε by dual averaging during the first `warmup` steps, starting from `stepSize` (Algorithm 5). Default off. */
+  /**
+   * Tune $\varepsilon$ by dual averaging during the first `warmup` steps, starting from `stepSize` (Algorithm 5).
+   * Default off.
+   */
   adapt?: DualAveragingOptions
 }
 
 /**
- * When a trajectory counts as divergent: its energy error |ΔH| exceeds an absolute number (Stan's 1000), or
- * `{ relative: r }`, r·d for a target of dimension d. The kinetic energy of d coordinates has variance d/2, so a
- * relative threshold scales with the energy's own spread: it flags the divergences of a small model (a 2-D funnel's
- * errors of 50) that an absolute 1000 misses, and stays loose for a large one.
+ * When a trajectory counts as divergent: its energy error $\lvert \Delta H \rvert$ exceeds an absolute number
+ * (Stan's 1000), or `{ relative: r }`, $rd$ for a target of dimension $d$. The kinetic energy of $d$ coordinates has
+ * variance $d/2$, so a relative threshold scales with the energy's own spread: it flags the divergences of a small
+ * model (a 2-D funnel's errors of 50) that an absolute 1000 misses, and stays loose for a large one.
  */
 export type DivergenceThreshold = number | { readonly relative: number }
 
-/** The absolute energy-error limit of a threshold for dimension d (checked positive). */
+/**
+ * The absolute energy-error limit of a threshold for dimension $d$ (checked positive: `DomainError` otherwise).
+ *
+ * @param threshold An absolute limit, or `{ relative: r }` for $rd$.
+ * @param d The dimension of the target.
+ * @param name The caller's name for error messages.
+ * @returns The limit on $\lvert \Delta H \rvert$.
+ *
+ * @example Absolute and relative thresholds
+ * print('absolute =', divergenceLimit(1000, 2, 'hmc'))
+ * print('relative 10, d = 2 =', divergenceLimit({ relative: 10 }, 2, 'hmc'))
+ * print('relative 10, d = 500 =', divergenceLimit({ relative: 10 }, 500, 'hmc'))
+ */
 export function divergenceLimit(threshold: DivergenceThreshold, d: number, name: string): number {
   const limit = typeof threshold === 'number' ? threshold : threshold.relative * d
   if (!(limit > 0)) throw new DomainError(name, `${name}: the divergence threshold must be positive, got ${limit}`)
   return limit
 }
 
+/**
+ * The log-density, gradient and divergence flag at the start point of `hmc` and `nuts`. Throws `ShapeError` when
+ * $\xvec_0$ does not have `target.dim` values.
+ *
+ * @param target The target, evaluated once at $\xvec_0$.
+ * @param x0 The start point $\xvec_0$ as a working array; not modified.
+ * @param name The sampler's name, for error messages.
+ * @returns `value` $\log \pi(\xvec_0)$, its `grad`, and `diverged`, set when the value is NaN or $+\infty$ or
+ *   $\xvec_0$ is not finite.
+ */
 function hmcStart(target: LogDensity, x0: F64, name: string) {
   if (x0.length !== target.dim)
     throw new ShapeError(name, `${name}: x0 has ${x0.length} values for dimension ${target.dim}`)
@@ -175,9 +266,53 @@ function hmcStart(target: LogDensity, x0: F64, name: string) {
 }
 
 /**
- * Hamiltonian Monte Carlo (Duane et al., 1987; Neal, 2011, §5.3.2): draw p ~ N(0, M), run L leapfrog steps of size ε
- * from (x, p), and accept the end point with probability min(1, exp(−ΔH)). Step t draws the momentum from
- * `child(ctx.stream, 'momentum')` and the uniform from the step stream `ctx.stream` itself.
+ * Hamiltonian Monte Carlo (Duane et al., 1987; Neal, 2011, §5.3.2): draw $\pvec \sim \Gauss(\zeros, \Mmat)$, run $L$
+ * leapfrog steps of size $\varepsilon$ from $(\xvec, \pvec)$, and accept the end point with probability
+ * $\min(1, \exp(-\Delta H))$. Step $t$ draws the momentum from `child(ctx.stream, 'momentum')`, the jittered step
+ * from `child(ctx.stream, 'jitter')` and the uniform from the step stream `ctx.stream` itself. A trajectory that turns
+ * non-finite is rejected and counted as divergent. Throws `DomainError` for a step size or option out of range.
+ *
+ * @param target The target, through `logDensity`, `grad` (or autodiff of `logDensity`) and `dim`.
+ * @param options The step size, steps, mass, jitter, divergence threshold and adaptation.
+ * @returns The sampler as an algorithm: start it from `{ x0 }` and run it with `run`, `trace` or `sampleChains`.
+ *
+ * @example Moments of a correlated Gaussian
+ * const target = {
+ *   kind: 'log-density', dim: 2, normalised: false,
+ *   logDensity: (x) => {
+ *     const [a, b] = x.data
+ *     return -(a * a - 1.6 * a * b + b * b) / 0.72
+ *   },
+ *   grad: (x) => {
+ *     const [a, b] = x.data
+ *     return [-(a - 0.8 * b) / 0.36, -(b - 0.8 * a) / 0.36]
+ *   },
+ * }
+ * const { draws } = sampleChains(hmc(target, { stepSize: 0.25, steps: 10 }), { x0: [0, 0] }, {
+ *   chains: 2, steps: 200, stream: stream(1),
+ * })
+ * const x = reshape(draws, [-1, 2])
+ * print('mean =', mean(x, 0))
+ * print('second moments =', div(matmul(transpose(x), x), x.shape[0]))
+ * print('ESS =', effectiveSampleSize(draws))
+ *
+ * @example Tuning an unstable step size during warmup
+ * // Leapfrog is stable here only below 2 sqrt(1 - 0.8): the early steps of 1 diverge.
+ * const target = {
+ *   kind: 'log-density', dim: 2, normalised: false,
+ *   logDensity: (x) => {
+ *     const [a, b] = x.data
+ *     return -(a * a - 1.6 * a * b + b * b) / 0.72
+ *   },
+ *   grad: (x) => {
+ *     const [a, b] = x.data
+ *     return [-(a - 0.8 * b) / 0.36, -(b - 0.8 * a) / 0.36]
+ *   },
+ * }
+ * const s = run(hmc(target, { stepSize: 1, steps: 10, adapt: { warmup: 100 } }), { x0: [0, 0] }, 200)
+ * print('adapted step size =', s.stepSize)
+ * print('acceptance rate over all 200 steps =', s.acceptanceRate)
+ * print('divergent trajectories =', s.divergentCount)
  */
 export function hmc(target: LogDensity, options: HmcOptions = {}): Algorithm<ChainStart, HmcState> {
   const name = 'hmc'
@@ -275,76 +410,150 @@ export function hmc(target: LogDensity, options: HmcOptions = {}): Algorithm<Cha
 /** The state of `nuts`. */
 export type NutsState = AcceptRejectState &
   DualAveragingState & {
+    /** $\nabla \log \pi(\xvec)$. */
     grad: Vector
+    /** The momentum drawn on the last step (zeros at $t = 0$). */
     momentum: Vector
-    /** Every point the last tree visited, ordered by integration time (leftmost first), and their times (in steps). */
+    /** Every point the last tree visited, ordered by integration time (leftmost first), one row each. */
     trajectory: Matrix
+    /** The integration time of each trajectory point, in leapfrog steps from the start (negative backwards). */
     trajectoryTimes: Vector
-    /** H at each trajectory point. */
+    /** $H$ at each trajectory point. */
     energies: Vector
-    /** Depth of the last tree (2^depth leapfrog steps, fewer when it stopped early) and its leapfrog steps. */
+    /**
+     * The number of doublings of the last tree: a full tree of depth $j$ has $2^j$ points. Under `'multinomial'` a last
+     * doubling that diverged or turned is not counted.
+     */
     treeDepth: number
+    /** The leapfrog steps of the last tree, including those of a last doubling that was abandoned. */
     leapfrogSteps: number
-    /** True when the last tree hit an energy error above `divergenceThreshold` (Hoffman & Gelman's Δmax). */
+    /**
+     * True when the last tree hit an energy error above `divergenceThreshold` (Hoffman & Gelman's
+     * $\Delta_\text{max}$), or a non-finite energy.
+     */
     divergent: boolean
     /** Steps whose tree diverged so far. */
     divergentCount: number
     /** Steps that stayed at x without a divergence (no acceptable point other than x was drawn). */
     rejectedCount: number
-    /** The resolved Δmax. */
+    /** The resolved $\Delta_\text{max}$. */
     divergenceLimit: number
+    /** Gradient evaluations so far. */
     gradientEvaluations: number
     /** True when the last tree stopped at `maxDepth` rather than by a U-turn. */
     hitMaxDepth: boolean
     /** The step size used on the last step. */
     stepSize: number
     /**
-     * The acceptance statistic of the last step: the mean of min(1, exp(H₀ − H)) over every leapfrog point of the tree
-     * (Stan's `accept_stat`; Hoffman & Gelman's Algorithm 6 averages over the last doubling only).
+     * The acceptance statistic of the last step: the mean of $\min(1, \exp(H_0 - H))$ over every leapfrog point of the
+     * tree (Stan's `accept_stat`; Hoffman & Gelman's Algorithm 6 averages over the last doubling only).
      */
     acceptStat: number
   }
 
 /** Options for `nuts`. */
 export type NutsOptions = {
-  /** Leapfrog step size ε. Default 0.1. */
+  /** Leapfrog step size $\varepsilon$. Default 0.1. */
   stepSize?: number
-  /** Largest tree depth (at most 2^maxDepth leapfrog steps). Default 10. */
+  /** Largest tree depth (at most $2^{\text{maxDepth}} - 1$ leapfrog steps). Default 10. */
   maxDepth?: number
+  /** Diagonal $\mvec$ of the mass matrix $\Mmat$ (one number or one per coordinate). Default 1. */
   mass?: number | ArrayLike<number>
-  /** Δmax: stop building when the energy error passes this (see `DivergenceThreshold`). Default 1000. */
+  /**
+   * $\Delta_\text{max}$: stop building when the energy error passes this (see `DivergenceThreshold`). Default 1000.
+   */
   divergenceThreshold?: DivergenceThreshold
-  /** Tune ε by dual averaging during the first `warmup` steps, starting from `stepSize` (Algorithm 6). Default off. */
+  /**
+   * Tune $\varepsilon$ by dual averaging during the first `warmup` steps, starting from `stepSize` (Algorithm 6).
+   * Default off.
+   */
   adapt?: DualAveragingOptions
   /**
    * How the next point is drawn from the trajectory. `'multinomial'` (default; Stan since 2.10, Betancourt 2017,
-   * appendix A.3): each point is weighted by exp(−H), subtrees are merged by progressive sampling in proportion to their
-   * weights, a new doubling's sample replaces the current one with probability min(1, w_new/w_old) (biased progressive
-   * sampling, favouring points far from the start), and the U-turn criterion is the generalised one on the summed
-   * momentum ρ, with Stan's extra checks across merged subtrees. `'slice'`: Hoffman and Gelman's Algorithm 3, a slice
-   * variable u ~ U(0, e^{−H}) and a uniform draw from the points above it, with the end-point U-turn criterion.
+   * appendix A.3): each point is weighted by $\exp(-H)$, subtrees are merged by progressive sampling in proportion to
+   * their weights, a new doubling's sample replaces the current one with probability
+   * $\min(1, w_\text{new}/w_\text{old})$ (biased progressive sampling, favouring points far from the start), and the
+   * U-turn criterion is the generalised one on the summed momentum $\rhovec$, with Stan's extra checks across merged
+   * subtrees. `'slice'`: Hoffman and Gelman's Algorithm 3, a slice variable $u \sim \Unif(0, e^{-H})$ and a uniform
+   * draw from the points above it, with the end-point U-turn criterion.
    */
   variant?: 'multinomial' | 'slice'
 }
 
+/**
+ * A point of a NUTS trajectory: position `theta`, momentum `p`, and the gradient `grad` and `logDensity` at `theta`.
+ */
 type Point = { theta: F64; p: F64; grad: F64; logDensity: number }
+/** A subtree of the slice variant (Hoffman & Gelman's `BuildTree`). */
 type Tree = {
+  /** The leftmost point (earliest in integration time). */
   minus: Point
+  /** The rightmost point (latest in integration time). */
   plus: Point
+  /** The point drawn uniformly from the subtree's points inside the slice. */
   candidate: Point
+  /** How many of its points lie inside the slice. */
   n: number
+  /** False once the subtree diverged or made a U-turn. */
   keepGoing: boolean
+  /** True when its last-built leaf diverged. */
   divergent: boolean
 }
 
 /**
  * The No-U-Turn Sampler (Hoffman & Gelman, 2014): the trajectory doubles forwards or backwards at random until it
  * starts to turn back, and the next point is drawn from the whole trajectory. By default the draw is multinomial
- * (Stan's sampler; Betancourt, 2017): points are weighted by exp(H₀ − H), and the trajectory stops when the summed
- * momentum ρ satisfies ρ·M⁻¹p⁻ ≤ 0 or ρ·M⁻¹p⁺ ≤ 0 on any subtree. `variant: 'slice'` gives Hoffman and Gelman's
- * Algorithm 3 ("efficient NUTS"): a slice variable u ~ U(0, e^{−H}) picks the acceptable points, and the end-point
- * criterion (θ⁺ − θ⁻)·M⁻¹p < 0 stops the doubling. The step size is fixed, or tuned during warmup by dual averaging
- * with `adapt` (Algorithm 6). All draws of step t come from its step stream `ctx.stream`.
+ * (Stan's sampler; Betancourt, 2017): points are weighted by $\exp(H_0 - H)$, and the trajectory stops when the summed
+ * momentum $\rhovec$ satisfies $\rhovec^\top \Mmat^{-1}\pvec^- \le 0$ or $\rhovec^\top \Mmat^{-1}\pvec^+ \le 0$ on
+ * any subtree. `variant: 'slice'` gives Hoffman and Gelman's Algorithm 3 ("efficient NUTS"): a slice variable
+ * $u \sim \Unif(0, e^{-H})$ picks the acceptable points, and the end-point criterion
+ * $(\thetavec^+ - \thetavec^-)^\top \Mmat^{-1}\pvec < 0$ stops the doubling. The step size is fixed, or tuned during
+ * warmup by dual averaging with `adapt` (Algorithm 6). Step $t$ draws the momentum from `child(ctx.stream, 'momentum')`
+ * and every other draw from its step stream `ctx.stream`. Throws `DomainError` for a step size or option out of
+ * range.
+ *
+ * @param target The target, through `logDensity`, `grad` (or autodiff of `logDensity`) and `dim`.
+ * @param options The step size, largest depth, mass, divergence threshold, adaptation and `variant`.
+ * @returns The sampler as an algorithm: start it from `{ x0 }` and run it with `run`, `trace` or `sampleChains`.
+ *
+ * @example Moments of a correlated Gaussian
+ * const target = {
+ *   kind: 'log-density', dim: 2, normalised: false,
+ *   logDensity: (x) => {
+ *     const [a, b] = x.data
+ *     return -(a * a - 1.6 * a * b + b * b) / 0.72
+ *   },
+ *   grad: (x) => {
+ *     const [a, b] = x.data
+ *     return [-(a - 0.8 * b) / 0.36, -(b - 0.8 * a) / 0.36]
+ *   },
+ * }
+ * const { draws, traces } = sampleChains(nuts(target, { stepSize: 0.3 }), { x0: [0, 0] }, {
+ *   chains: 2, steps: 200, stream: stream(2),
+ * })
+ * const x = reshape(draws, [-1, 2])
+ * print('mean =', mean(x, 0))
+ * print('second moments =', div(matmul(transpose(x), x), x.shape[0]))
+ * print('ESS =', effectiveSampleSize(draws))
+ * print('gradient evaluations per draw =', traces[0].final.gradientEvaluations / 200)
+ *
+ * @example One step's tree
+ * const target = {
+ *   kind: 'log-density', dim: 2, normalised: false,
+ *   logDensity: (x) => {
+ *     const [a, b] = x.data
+ *     return -(a * a - 1.6 * a * b + b * b) / 0.72
+ *   },
+ *   grad: (x) => {
+ *     const [a, b] = x.data
+ *     return [-(a - 0.8 * b) / 0.36, -(b - 0.8 * a) / 0.36]
+ *   },
+ * }
+ * for (const variant of ['multinomial', 'slice']) {
+ *   const s = run(nuts(target, { stepSize: 0.3, variant }), { x0: [1, 1] }, 1)
+ *   print(`${variant}: depth`, s.treeDepth, 'leapfrog steps', s.leapfrogSteps, 'accept stat', s.acceptStat)
+ *   print('  integration times =', s.trajectoryTimes)
+ * }
  */
 export function nuts(target: LogDensity, options: NutsOptions = {}): Algorithm<ChainStart, NutsState> {
   const name = 'nuts'
@@ -361,7 +570,10 @@ export function nuts(target: LogDensity, options: NutsOptions = {}): Algorithm<C
     return s >= 0
   }
 
-  /** The generalised criterion (Betancourt, 2017): the trajectory has not turned while ρ·M⁻¹p > 0 at both ends. */
+  /**
+   * The generalised criterion (Betancourt, 2017): the trajectory has not turned while $\rhovec^\top \Mmat^{-1}\pvec > 0$
+   * at both ends.
+   */
   const sharp = (p: F64) => p.map((pi, i) => pi / mass[i])
   const dot = (a: F64, b: F64) => {
     let s = 0
@@ -501,9 +713,9 @@ export function nuts(target: LogDensity, options: NutsOptions = {}): Algorithm<C
       }
 
       /**
-       * Stan's transition (base_nuts.hpp): a subtree of 2^depth points from `from` in `direction`, returning its
-       * multinomial sample, log Σ exp(H₀ − H), summed momentum, the momenta at both ends (first and last integrated)
-       * and whether it is valid (no divergence, no U-turn on it or on any of its subtrees).
+       * Stan's transition (base_nuts.hpp): a subtree of $2^\text{depth}$ points from `from` in `direction`,
+       * returning its multinomial sample, $\log \sum \exp(H_0 - H)$, summed momentum, the momenta at both ends (first
+       * and last integrated) and whether it is valid (no divergence, no U-turn on it or on any of its subtrees).
        */
       type Subtree = {
         edge: Point

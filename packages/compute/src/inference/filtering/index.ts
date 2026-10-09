@@ -1,7 +1,25 @@
 /**
- * `aifn-compute/inference/filtering`: state-space filtering: linear-Gaussian models, simulation, the Kalman filter, the
- * Rauch–Tung–Striebel smoother (both also as step-through algorithms), the steady-state filter, the extended and unscented Kalman filters, and Bayesian online
- * changepoint detection (the run-length filter over conjugate segment models).
+ * `aifn-compute/inference/filtering`: sequential Bayesian inference over time series, from the Kalman filter to online
+ * changepoint detection.
+ *
+ * - Linear-Gaussian state-space models ($\zvec_t = \Amat\zvec_{t-1} + \wvec_t$, $\yvec_t = \Cmat\zvec_t + \vvec_t$):
+ *   `simulateStateSpace`, `kalmanFilter` and `rtsSmoother` over a whole series, `kalmanFilterSteps` and
+ *   `rtsSmootherSteps` to step through them, and `steadyStateKalman` for the limiting gain.
+ * - The single steps they share with EM (`aifn-methods/timeseries`): `parseModel`, `kalmanStep`, `filterAll`,
+ *   `packFilter`, `rtsStep` and `smoothAll`.
+ * - Nonlinear models: `extendedKalmanFilter` (Jacobians by autodiff, so $f$ and $h$ must be differentiable) and
+ *   `unscentedKalmanFilter` (sigma points; any $f$ and $h$).
+ * - Checking a filter: `normalisedInnovationSquared` (from the data alone) and `normalisedEstimationErrorSquared`
+ *   (against a simulated truth) for consistency, and `trackingMetrics` for lag, overshoot, error and band coverage.
+ * - Bayesian online changepoint detection: `bocpdInit` and `bocpdUpdate` to feed values one at a time, `bocpd` as an
+ *   algorithm, `detectChangepoints` over a whole series with `mapChangepoints`; the posterior read by `runLengthRow`
+ *   and `runLengthMass`, forecasts by `bocpdForecast` and `bocpdPredictiveDensity`; `constantHazard`; and the
+ *   conjugate segment models `normalKnownVariance`, `normalGamma`, `poissonGamma`, `betaBernoulli` and
+ *   `regressionNormalGamma` (with `laggedObservations` for autoregressions).
+ *
+ * Missing observations are NaN. Nothing throws for a singular matrix: the step is reported (`singular`,
+ * `singularSteps`) and filtering goes on. Shapes that disagree throw `ShapeError`, invalid parameters `DomainError`.
+ * Everything is deterministic except `simulateStateSpace`, which draws from the stream it is given.
  */
 
 export {

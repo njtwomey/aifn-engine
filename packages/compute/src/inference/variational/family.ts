@@ -1,12 +1,17 @@
 /**
- * Gaussian variational families with flat parameter vectors λ, as in ADVI (Kucukelbir et al., 2017, §2.4–2.5):
+ * Gaussian variational families over $\reals^d$ with flat parameter vectors $\lambdavec$, as in ADVI (Kucukelbir et
+ * al., 2017, §2.4–2.5):
  *
- * - mean field: λ = (μ, ω) with σ = exp(ω), q = N(μ, diag(σ²)), 2d parameters;
- * - full rank: λ = (μ, ℓ) with ℓ the lower triangle of L row by row, its diagonal stored as log Lᵢᵢ, q = N(μ, LLᵀ),
- *   d + d(d + 1)/2 parameters.
+ * - mean field: $\lambdavec = (\muvec, \omegavec)$ with $\sigmavec = \exp(\omegavec)$,
+ *   $q = \Gauss(\muvec, \diag(\sigmavec^2))$, $2d$ parameters;
+ * - full rank: $\lambdavec = (\muvec, \boldsymbol{\ell})$ with $\boldsymbol{\ell}$ the lower triangle of $\Lmat$ row
+ *   by row, its diagonal stored as $\log L_{ii}$, $q = \Gauss(\muvec, \Lmat\Lmat^\top)$, $d + d(d + 1)/2$
+ *   parameters.
  *
- * Both are reparameterised as x = μ + Lε with ε ~ N(0, I) (L = diag(σ) for mean field), which gives the pathwise
- * gradient, and have closed-form entropies and score functions ∇_λ log q.
+ * Both are reparameterised as $\xvec = \muvec + \Lmat\epsilonvec$ with $\epsilonvec \sim \Gauss(\zeros, \Imat)$
+ * ($\Lmat = \diag(\sigmavec)$ for mean field), which gives the pathwise gradient, and have closed-form entropies and
+ * score functions $\nabla_{\lambdavec} \log q$. The kernels work on plain float64 arrays and are what the estimators
+ * of `elbo.ts` call; the tensor-valued methods check the length of $\lambdavec$ and throw `ShapeError`.
  */
 
 import type { VectorLike } from 'aifn-compute/foundation/contracts'
@@ -19,54 +24,88 @@ export type { VectorLike } from 'aifn-compute/foundation/contracts'
 /** A float64 working array (`aifn-compute/foundation/tensor`'s `dense.F64`). */
 export type F64 = dense.F64
 
-/** A copy of a vector argument as a working array. */
+/**
+ * A copy of a vector argument as a working array.
+ *
+ * @param v The vector: a plain array, typed array or rank-1 tensor.
+ * @returns A new float64 array of its values.
+ */
 export const toF64 = (v: VectorLike): F64 => dense.toF64(v, 'variational')
 /** A working array wrapped as a rank-1 tensor (`dense.vec`). */
 export const { vec } = dense
 
 const LOG_2PI = Math.log(2 * Math.PI)
 
-/** A Gaussian variational family over ℝ^dim with a flat parameter vector of length `size`. */
+/** A Gaussian variational family over $\reals^d$ ($d$ = `dim`) with a flat parameter vector of length `size`. */
 export type GaussianFamily = {
+  /** Which family: diagonal covariance (`'mean-field'`) or a full lower-triangular scale (`'full-rank'`). */
   kind: 'mean-field' | 'full-rank'
+  /** The dimension $d$ of $\xvec$. */
   dim: number
-  /** The number of variational parameters. */
+  /** The number of variational parameters: $2d$ for mean field, $d + d(d + 1)/2$ for full rank. */
   size: number
-  /** λ for a given mean and standard deviation (a number, or one per coordinate; full rank: a diagonal L). */
+  /**
+   * $\lambdavec$ for a given mean and standard deviation (a number, or one per coordinate; default 1). Full rank: a
+   * diagonal $\Lmat$.
+   */
   parameters: (mean: VectorLike, sd?: number | ArrayLike<number>) => Vector
-  /** The mean μ of q_λ. */
+  /** The mean $\muvec$ of $q_{\lambdavec}$. */
   mean: (lambda: VectorLike) => Vector
-  /** The covariance LLᵀ of q_λ (d×d). */
+  /** The covariance $\Lmat\Lmat^\top$ of $q_{\lambdavec}$ ($d \times d$). */
   covariance: (lambda: VectorLike) => Matrix
-  /** The scale factor L (d×d, lower triangular; diagonal for mean field). */
+  /** The scale factor $\Lmat$ ($d \times d$, lower triangular; diagonal for mean field). */
   scale: (lambda: VectorLike) => Matrix
-  /** x = μ + Lε. */
+  /** $\xvec = \muvec + \Lmat\epsilonvec$: a standard normal draw $\epsilonvec$ mapped to a draw of $q_{\lambdavec}$. */
   transform: (lambda: VectorLike, eps: VectorLike) => Vector
-  /** log q_λ(x). */
+  /** $\log q_{\lambdavec}(\xvec)$. */
   logDensity: (lambda: VectorLike, x: VectorLike) => number
-  /** The entropy H[q_λ] = Σ log Lᵢᵢ + (d/2)(1 + log 2π). */
+  /** The entropy $\entropy[q_{\lambdavec}] = \sum_i \log L_{ii} + (d/2)(1 + \log 2\pi)$. */
   entropy: (lambda: VectorLike) => number
-  /** Internal kernels on working arrays (λ, ε, x); used by the estimators. */
+  /** Internal kernels on working arrays ($\lambdavec$, $\epsilonvec$, $\xvec$); used by the estimators. */
   kernels: FamilyKernels
 }
 
-/** Working-array kernels of a family. */
+/**
+ * Working-array kernels of a family. They take $\lambdavec$ as a float64 array of `size` values without checking its
+ * length, and return new arrays; gradients are with respect to the stored parameters (so for $\log L_{ii}$, not
+ * $L_{ii}$).
+ */
 export type FamilyKernels = {
-  /** L as a dense row-major d×d array. */
+  /** $\Lmat$ as a dense row-major $d \times d$ array. */
   scaleMatrix: (lambda: F64) => F64
+  /** $\xvec = \muvec + \Lmat\epsilonvec$. */
   transform: (lambda: F64, eps: F64) => F64
-  /** ε = L⁻¹(x − μ). */
+  /** $\epsilonvec = \Lmat^{-1}(\xvec - \muvec)$. */
   standardise: (lambda: F64, x: F64) => F64
+  /** $\log q_{\lambdavec}(\xvec)$. */
   logDensity: (lambda: F64, x: F64) => number
+  /** $\entropy[q_{\lambdavec}]$. */
   entropy: (lambda: F64) => number
-  /** ∇_λ H. */
+  /** $\nabla_{\lambdavec} \entropy$. */
   entropyGrad: (lambda: F64) => F64
-  /** ∇_λ f(μ + Lε) given g = ∇f at x = μ + Lε (the chain rule through the reparameterisation). */
+  /**
+   * $\nabla_{\lambdavec} f(\muvec + \Lmat\epsilonvec)$ given $\gvec = \nabla f$ at
+   * $\xvec = \muvec + \Lmat\epsilonvec$ (the chain rule through the reparameterisation).
+   */
   pathGrad: (lambda: F64, eps: F64, g: F64) => F64
-  /** ∇_λ log q_λ(x) at x = μ + Lε. */
+  /**
+   * $\nabla_{\lambdavec} \log q_{\lambdavec}(\xvec)$ at $\xvec = \muvec + \Lmat\epsilonvec$, with $\xvec$ held
+   * fixed.
+   */
   score: (lambda: F64, eps: F64) => F64
 }
 
+/**
+ * A family from its kernels: the tensor-valued methods of `GaussianFamily`, each checking that $\lambdavec$ has `size`
+ * values (else `ShapeError`).
+ *
+ * @param kind Which family, also used in error messages.
+ * @param dim The dimension $d$ of $\xvec$.
+ * @param size The length of $\lambdavec$.
+ * @param k The family's working-array kernels.
+ * @param params The family's `parameters` method, used as given.
+ * @returns The family.
+ */
 function wrap(
   kind: GaussianFamily['kind'],
   dim: number,
@@ -105,12 +144,40 @@ function wrap(
   }
 }
 
+/**
+ * A value per coordinate: a number repeated $d$ times, or a copy of the values given.
+ *
+ * @param v One number for every coordinate, or one per coordinate (not checked to have $d$ values).
+ * @param d The number of coordinates.
+ * @returns A new float64 array.
+ */
 const perCoordinate = (v: number | ArrayLike<number>, d: number) =>
   typeof v === 'number' ? new Float64Array(d).fill(v) : Float64Array.from(v)
 
 /**
- * The mean-field Gaussian family q(x) = Πᵢ N(xᵢ | μᵢ, σᵢ²) with λ = (μ, log σ) (Kucukelbir et al., 2017, §2.5).
- * Score: ∂ log q/∂μᵢ = εᵢ/σᵢ and ∂ log q/∂ωᵢ = εᵢ² − 1; path: ∂/∂μᵢ = gᵢ and ∂/∂ωᵢ = gᵢσᵢεᵢ.
+ * The mean-field Gaussian family $q(\xvec) = \prod_i \Gauss(x_i \mid \mu_i, \sigma_i^2)$ with
+ * $\lambdavec = (\muvec, \omegavec)$, $\omegavec = \log\sigmavec$ (Kucukelbir et al., 2017, §2.5). Score:
+ * $\partial \log q / \partial \mu_i = \epsilon_i / \sigma_i$ and
+ * $\partial \log q / \partial \omega_i = \epsilon_i^2 - 1$; path: $\partial / \partial \mu_i = g_i$ and
+ * $\partial / \partial \omega_i = g_i \sigma_i \epsilon_i$.
+ *
+ * @param dim The dimension $d$ of $\xvec$; $\lambdavec$ then has $2d$ values, the means then the log standard
+ *   deviations.
+ * @returns The family, its methods taking $\lambdavec$.
+ *
+ * @example Parameters, moments and entropy
+ * const q = meanFieldGaussian(2)
+ * const lambda = q.parameters([1, -1], [0.5, 2])
+ * print('λ =', lambda)
+ * print('mean =', q.mean(lambda))
+ * print('covariance =', q.covariance(lambda))
+ * print('entropy =', q.entropy(lambda), 'check', 1 + Math.log(2 * Math.PI))
+ *
+ * @example A draw is the mean moved by the scale times a standard normal
+ * const q = meanFieldGaussian(2)
+ * const lambda = q.parameters([1, -1], [0.5, 2])
+ * print('x for ε = (1, 1):', q.transform(lambda, [1, 1]))
+ * print('log q at the mean:', q.logDensity(lambda, [1, -1]), 'check', -Math.log(2 * Math.PI))
  */
 export function meanFieldGaussian(dim: number): GaussianFamily {
   const d = dim
@@ -166,9 +233,26 @@ export function meanFieldGaussian(dim: number): GaussianFamily {
 }
 
 /**
- * The full-rank Gaussian family q = N(μ, LLᵀ) with λ = (μ, lower triangle of L row by row, diagonal as log Lᵢᵢ)
- * (Kucukelbir et al., 2017, §2.5; Titsias & Lázaro-Gredilla, 2014). With ε = L⁻¹(x − μ) and v = L⁻ᵀε, the score is
- * ∂ log q/∂μ = v and ∂ log q/∂Lᵢⱼ = vᵢεⱼ − δᵢⱼ/Lᵢᵢ; the path gradient is ∂/∂Lᵢⱼ = gᵢεⱼ.
+ * The full-rank Gaussian family $q = \Gauss(\muvec, \Lmat\Lmat^\top)$ with $\lambdavec = (\muvec$, the lower
+ * triangle of $\Lmat$ row by row, its diagonal as $\log L_{ii})$ (Kucukelbir et al., 2017, §2.5; Titsias &
+ * Lázaro-Gredilla, 2014). With $\epsilonvec = \Lmat^{-1}(\xvec - \muvec)$ and $\vvec = \Lmat^{-\top}\epsilonvec$, the
+ * score is $\partial \log q / \partial \muvec = \vvec$ and
+ * $\partial \log q / \partial L_{ij} = v_i \epsilon_j - \delta_{ij} / L_{ii}$; the path gradient is
+ * $\partial / \partial L_{ij} = g_i \epsilon_j$. Both are multiplied by $L_{ii}$ on the diagonal, which is stored as
+ * its logarithm.
+ *
+ * @param dim The dimension $d$ of $\xvec$; $\lambdavec$ then has $d + d(d + 1)/2$ values: the mean, then
+ *   $L_{00}$ (as its log), $L_{10}$, $L_{11}$ (as its log), $L_{20}$, and so on.
+ * @returns The family, its methods taking $\lambdavec$.
+ *
+ * @example A correlated Gaussian from its scale factor
+ * // L = [[1, 0], [0.5, 2]], with the diagonal stored as logs.
+ * const q = fullRankGaussian(2)
+ * const lambda = [0, 0, Math.log(1), 0.5, Math.log(2)]
+ * print('size =', q.size)
+ * print('L =', q.scale(lambda))
+ * print('covariance =', q.covariance(lambda))
+ * print('log q at the mean:', q.logDensity(lambda, [0, 0]), 'check', -Math.log(2) - Math.log(2 * Math.PI))
  */
 export function fullRankGaussian(dim: number): GaussianFamily {
   const d = dim

@@ -1,15 +1,19 @@
 /**
- * Linear-Gaussian state-space models z_t = A z_{t−1} + w_t, y_t = C z_t + v_t, w_t ~ N(0, Q), v_t ~ N(0, R), with
- * z₀ ~ N(m₀, P₀): simulation, the Kalman filter, the Rauch–Tung–Striebel smoother, the steady-state filter, and the
- * filter and smoother as step-through `Algorithm`s.
+ * Linear-Gaussian state-space models $\zvec_t = \Amat\zvec_{t-1} + \wvec_t$, $\yvec_t = \Cmat\zvec_t + \vvec_t$,
+ * $\wvec_t \sim \Gauss(\zeros, \Qmat)$, $\vvec_t \sim \Gauss(\zeros, \Rmat)$, with
+ * $\zvec_0 \sim \Gauss(\mvec_0, \Pmat_0)$: simulation, the Kalman filter, the Rauch–Tung–Striebel smoother, the
+ * steady-state filter, the filter and smoother as step-through `Algorithm`s, and the consistency checks NIS and NEES.
  *
- * Convention: (m₀, P₀) describes z₀, which is not observed; the first observation y₁ is of z₁ = A z₀ + w₁, so the
- * filter predicts before its first update. NaN entries of y are missing: a step updates with its observed entries only,
- * and predicts through a row that is entirely NaN.
+ * Convention: $(\mvec_0, \Pmat_0)$ describes $\zvec_0$, which is not observed; the first observation $\yvec_1$ is of
+ * $\zvec_1 = \Amat\zvec_0 + \wvec_1$, so the filter predicts before its first update. NaN entries of $\yvec$ are
+ * missing: a step updates with its observed entries only, and predicts through a row that is entirely NaN. $n$ is the
+ * state dimension and $m$ the observation dimension throughout; per-step results are stacked along a first axis of
+ * length $T$.
  *
- * Everything is written on tensors (`aifn-compute/foundation/tensor` arithmetic, `aifn-compute/numerics/linalg` factorisations): one
- * filter step (`kalmanStep`) and one smoother step (`rtsStep`) are the definitions, and the batch functions, the
- * algorithms and EM (`aifn-methods/timeseries`) all call them.
+ * Everything is written on tensors (`aifn-compute/foundation/tensor` arithmetic, `aifn-compute/numerics/linalg`
+ * factorisations): one filter step (`kalmanStep`) and one smoother step (`rtsStep`) are the definitions, and the batch
+ * functions, the algorithms and EM (`aifn-methods/timeseries`) all call them. Neither throws for a singular matrix:
+ * the step is reported (`singular`, `singularSteps`) instead.
  */
 
 import type { Algorithm, Status } from 'aifn-compute/foundation/contracts'
@@ -45,26 +49,47 @@ import {
   type VectorLike,
 } from './gaussian'
 
-/** A linear-Gaussian state-space model. Scalars stand for 1×1 matrices (and a length-1 m₀). */
+/** A linear-Gaussian state-space model. Scalars stand for $1 \times 1$ matrices (and a length-1 $\mvec_0$). */
 export type StateSpaceModel = {
-  /** Transition A (n×n). */
+  /** Transition $\Amat$ ($n \times n$). */
   A: MatrixLike | number
-  /** Observation C (m×n). */
+  /** Observation $\Cmat$ ($m \times n$). */
   C: MatrixLike | number
-  /** Process-noise covariance Q (n×n, positive semi-definite; zero rows are allowed). */
+  /** Process-noise covariance $\Qmat$ ($n \times n$, positive semi-definite; zero rows are allowed). */
   Q: MatrixLike | number
-  /** Observation-noise covariance R (m×m, positive semi-definite; zero rows are allowed). */
+  /** Observation-noise covariance $\Rmat$ ($m \times m$, positive semi-definite; zero rows are allowed). */
   R: MatrixLike | number
-  /** Mean of z₀ (length n). */
+  /** Mean $\mvec_0$ of $\zvec_0$ (length $n$). */
   m0: VectorLike | number
-  /** Covariance of z₀ (n×n). */
+  /** Covariance $\Pmat_0$ of $\zvec_0$ ($n \times n$). */
   P0: MatrixLike | number
 }
 
-/** The model with every part a tensor: the form the filter, the smoother and EM share. */
+/**
+ * The model with every part a tensor: the form the filter, the smoother and EM share. The fields are those of
+ * `StateSpaceModel`: $\Amat$, $\Cmat$, $\Qmat$, $\Rmat$ and $\Pmat_0$ as matrices, $\mvec_0$ as a vector.
+ */
 export type Model = { A: Matrix; C: Matrix; Q: Matrix; R: Matrix; m0: Vector; P0: Matrix }
 
-/** Read a `StateSpaceModel` into tensors, checking that the shapes agree (throws `ShapeError` naming `where`). */
+/**
+ * Read a `StateSpaceModel` into tensors, checking that the shapes agree (throws `ShapeError` naming `where`). Tensor
+ * parts are used as they are, not copied; values are not checked (a covariance need not be positive semi-definite).
+ *
+ * @param model The model, with numbers, arrays or tensors for its parts.
+ * @param where The caller's name, for error messages.
+ * @returns The model with every part a tensor.
+ *
+ * @example Numbers stand for 1 × 1 matrices
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * print('A =', md.A, 'm0 =', md.m0)
+ *
+ * @example Shapes that disagree are reported
+ * try {
+ *   parseModel({ A: [[1, 1], [0, 1]], C: [[1, 0]], Q: 1, R: 1, m0: [0, 0], P0: [[1, 0], [0, 1]] }, 'example')
+ * } catch (e) {
+ *   print(e.message)
+ * }
+ */
 export function parseModel(model: StateSpaceModel, where: string): Model {
   const A = asMatrix(model.A, where)
   const C = asMatrix(model.C, where)
@@ -81,9 +106,27 @@ export function parseModel(model: StateSpaceModel, where: string): Model {
 }
 
 /**
- * Draw a trajectory of length T and its observations. Noise is drawn as S ε with S Sᵀ = Q (or R) from a symmetric
- * eigendecomposition, so covariances with deterministic components (zero rows) give exact zeros rather than NaN.
- * Returns z₁ … z_T ([T, n]) and y₁ … y_T ([T, m]) and the drawn z₀.
+ * Draw a trajectory of length $T$ and its observations. Noise is drawn as $\Smat\epsilonvec$ with
+ * $\Smat\Smat^\top = \Qmat$ (or $\Rmat$) from a symmetric eigendecomposition, so covariances with deterministic
+ * components (zero rows) give exact zeros rather than NaN. Returns $\zvec_1, \dots, \zvec_T$ (`[T, n]`) and
+ * $\yvec_1, \dots, \yvec_T$ (`[T, m]`) and the drawn $\zvec_0$.
+ *
+ * @param s The random stream; not advanced: each draw comes from its own child stream (`'initial'`, then `'state'`
+ *   and `'observation'` with the step index), so a longer simulation from the same stream extends a shorter one.
+ * @param model The model to simulate.
+ * @param T The number of steps to draw.
+ * @returns `states` ($T \times n$), `observations` ($T \times m$) and `initial`, the drawn $\zvec_0$.
+ *
+ * @example A seeded random walk
+ * // A scalar random walk z_t = z_{t-1} + w_t seen as y_t = z_t + v_t, unit noises, starting from z_0 = 0 exactly.
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const { states, observations } = simulateStateSpace(stream(0), walk, 5)
+ * print('states =', states)
+ * print('observations =', observations)
+ *
+ * @example A zero process noise keeps the state where it started
+ * const still = { A: 1, C: 1, Q: 0, R: 1, m0: 2, P0: 0 }
+ * print('states =', simulateStateSpace(stream(0), still, 4).states)
  */
 export function simulateStateSpace(
   s: Stream,
@@ -112,32 +155,58 @@ export function simulateStateSpace(
 
 /** One step of the Kalman filter: the prediction, the update and the step's log-likelihood term. */
 export type KalmanStep = {
-  /** μ_{t|t−1}. */
+  /** The predicted mean $\muvec_{t \mid t-1}$. */
   predictedMean: Vector
-  /** P_{t|t−1}. */
+  /** The predicted covariance $\Pmat_{t \mid t-1}$. */
   predictedCov: Matrix
-  /** μ_{t|t}. */
+  /** The filtered mean $\muvec_{t \mid t}$ (the predicted one when the update was skipped). */
   mean: Vector
-  /** P_{t|t}. */
+  /** The filtered covariance $\Pmat_{t \mid t}$ (the predicted one when the update was skipped). */
   cov: Matrix
-  /** K_t (n×m); zero for a missing or singular step, and in the columns of missing entries. */
+  /** $\Kmat_t$ ($n \times m$); zero for a missing or singular step, and in the columns of missing entries. */
   gain: Matrix
-  /** y_t − C μ_{t|t−1}; NaN in missing entries. */
+  /** $\yvec_t - \Cmat\muvec_{t \mid t-1}$; NaN in missing entries. */
   innovation: Vector
-  /** S_t = C P_{t|t−1} Cᵀ + R. */
+  /** $\Smat_t = \Cmat\Pmat_{t \mid t-1}\Cmat^\top + \Rmat$ (all $m$ rows, missing or not). */
   innovationCov: Matrix
-  /** log N(y_t; C μ_{t|t−1}, S_t); 0 when missing, NaN when S_t is singular. */
+  /**
+   * $\log \Gauss(\yvec_t; \Cmat\muvec_{t \mid t-1}, \Smat_t)$ over the observed entries; 0 when every entry is
+   * missing, NaN when $\Smat_t$ is singular.
+   */
   term: number
   /** True when S_t was singular (the update was skipped). */
   singular: boolean
 }
 
 /**
- * One step of the Kalman filter (Kalman, 1960) from (μ_{t−1|t−1}, P_{t−1|t−1}) and the observation y_t (NaN entries
- * are missing: the update then uses the observed rows of C and y and the observed block of R, and a step with every
- * entry missing is a prediction only). Predict μ⁻ = A μ, P⁻ = A P Aᵀ + Q; update with S = C P⁻ Cᵀ + R,
- * K = P⁻ Cᵀ S⁻¹ (solved as Kᵀ = S⁻¹ C P⁻), μ = μ⁻ + K(y − C μ⁻) and the covariance in Joseph form
- * (I − KC) P⁻ (I − KC)ᵀ + K R Kᵀ, which keeps P symmetric positive semi-definite in finite precision.
+ * One step of the Kalman filter (Kalman, 1960) from $(\muvec_{t-1 \mid t-1}, \Pmat_{t-1 \mid t-1})$ and the
+ * observation $\yvec_t$ (NaN entries are missing: the update then uses the observed rows of $\Cmat$ and $\yvec$ and
+ * the observed block of $\Rmat$, and a step with every entry missing is a prediction only). Predict
+ * $\muvec^- = \Amat\muvec$, $\Pmat^- = \Amat\Pmat\Amat^\top + \Qmat$; update with
+ * $\Smat = \Cmat\Pmat^-\Cmat^\top + \Rmat$, $\Kmat = \Pmat^-\Cmat^\top\Smat^{-1}$ (solved as
+ * $\Kmat^\top = \Smat^{-1}\Cmat\Pmat^-$), $\muvec = \muvec^- + \Kmat(\yvec - \Cmat\muvec^-)$ and the covariance in
+ * Joseph form $(\Imat - \Kmat\Cmat)\Pmat^-(\Imat - \Kmat\Cmat)^\top + \Kmat\Rmat\Kmat^\top$, which keeps
+ * $\Pmat$ symmetric positive semi-definite in finite precision. A singular $\Smat$ skips the update and is reported
+ * in `singular`, never thrown.
+ *
+ * @param md The model as tensors (`parseModel`). Its dense arrays are cached per model object, so reuse one object
+ *   across steps.
+ * @param mean The previous filtered mean $\muvec_{t-1 \mid t-1}$ (length $n$; $\mvec_0$ for the first step).
+ * @param cov The previous filtered covariance $\Pmat_{t-1 \mid t-1}$ ($n \times n$; $\Pmat_0$ for the first step).
+ * @param y The observation $\yvec_t$ as $m$ numbers, NaN where missing.
+ * @returns The step's prediction, update, gain, innovation and log-likelihood term.
+ *
+ * @example One step of a scalar random walk
+ * // z_0 = 0 exactly, Q = R = 1: predict variance 1, then the gain is 1 / (1 + 1) = 0.5.
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * const step = kalmanStep(md, md.m0, md.P0, [1])
+ * print('gain =', step.gain, 'mean =', step.mean, 'cov =', step.cov)
+ * print('log N(1; 0, 2) =', step.term)
+ *
+ * @example A missing observation is a prediction only
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * const step = kalmanStep(md, md.m0, md.P0, [NaN])
+ * print('mean =', step.mean, 'cov =', step.cov, 'term =', step.term)
  */
 export function kalmanStep(md: Model, mean: Vector, cov: Matrix, y: readonly number[]): KalmanStep {
   const d = denseModel(md)
@@ -156,10 +225,21 @@ export function kalmanStep(md: Model, mean: Vector, cov: Matrix, y: readonly num
   }
 }
 
-/** The model's matrices as row-major arrays (zero-copy views where contiguous), cached per model. */
+/** A float64 working array (`dense.F64`): the model's matrices as row-major arrays, zero-copy where contiguous. */
 type F64 = dense.F64
+/**
+ * The model on row-major arrays: the dimensions $n$ and $m$, $\Amat$, $\Cmat$, $\Qmat$, $\Rmat$ and the
+ * $n \times n$ identity `I`.
+ */
 type DenseModel = { n: number; m: number; A: F64; C: F64; Q: F64; R: F64; I: F64 }
 const denseModels = new WeakMap<Model, DenseModel>()
+/**
+ * The model's matrices as row-major arrays, made once per model object and cached (a `WeakMap`, so a dropped model is
+ * not kept alive).
+ *
+ * @param md The model as tensors.
+ * @returns Its dense form.
+ */
 function denseModel(md: Model): DenseModel {
   let d = denseModels.get(md)
   if (d === undefined) {
@@ -180,9 +260,16 @@ function denseModel(md: Model): DenseModel {
 }
 
 /**
- * `kalmanStep` on row-major arrays with `aifn-compute/foundation/tensor`'s `dense` kernels and `aifn-compute/numerics/linalg`'s
- * `solveDense` (the LU of the solve primitive): the per-step recursion runs inside likelihood optimisations (ARMA,
- * EM), where tensor dispatch on 2×2 matrices would dominate. One LU of S solves for Kᵀ and S⁻¹v together.
+ * `kalmanStep` on row-major arrays with `aifn-compute/foundation/tensor`'s `dense` kernels and
+ * `aifn-compute/numerics/linalg`'s `solveDense` (the LU of the solve primitive): the per-step recursion runs inside
+ * likelihood optimisations (ARMA, EM), where tensor dispatch on $2 \times 2$ matrices would dominate. One LU of
+ * $\Smat$ solves for $\Kmat^\top$ and $\Smat^{-1}\vvec$ together.
+ *
+ * @param d The model in dense form.
+ * @param mean The previous filtered mean, $n$ values (not modified).
+ * @param cov The previous filtered covariance, row-major $n \times n$ (not modified).
+ * @param y The observation, $m$ numbers with NaN where missing.
+ * @returns The fields of `KalmanStep` as row-major arrays (`gain` $n \times m$), with `term` and `singular`.
  */
 function stepDense(d: DenseModel, mean: F64, cov: F64, y: readonly number[]) {
   const { n, m, A, C, Q, R } = d
@@ -252,10 +339,26 @@ function stepDense(d: DenseModel, mean: F64, cov: F64, y: readonly number[]) {
   }
 }
 
-/** The filter over a whole series: every step, the total log-likelihood and the steps with a singular S_t. */
+/**
+ * The filter over a whole series: every step (`steps`), the total log-likelihood (`logLikelihood`, NaN when a step was
+ * singular) and the 0-based indices of the steps with a singular $\Smat_t$ (`singularSteps`).
+ */
 export type FilterRun = { steps: KalmanStep[]; logLikelihood: number; singularSteps: number[] }
 
-/** Run `kalmanStep` over the rows of `ys` (T rows of m observations, NaN entries missing) from (m₀, P₀). */
+/**
+ * Run `kalmanStep` over the rows of `ys` ($T$ rows of $m$ observations, NaN entries missing) from
+ * $(\mvec_0, \Pmat_0)$.
+ *
+ * @param md The model as tensors (`parseModel`).
+ * @param ys The observations, one row of $m$ numbers per step; the row lengths are not checked against $\Cmat$.
+ * @returns Every step, the summed log-likelihood and the singular steps.
+ *
+ * @example Filter a scalar random walk
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * const f = filterAll(md, [[1], [1], [1]])
+ * print('means =', f.steps.map((s) => s.mean))
+ * print('log-likelihood =', f.logLikelihood)
+ */
 export function filterAll(md: Model, ys: readonly (readonly number[])[]): FilterRun {
   let mean = md.m0
   let cov = md.P0
@@ -271,31 +374,47 @@ export function filterAll(md: Model, ys: readonly (readonly number[])[]): Filter
   return out
 }
 
-/** The Kalman filter's output, over t = 1 … T. */
+/** The Kalman filter's output, over $t = 1, \dots, T$ (row $t - 1$ of each tensor). */
 export type KalmanFilterResult = {
-  /** μ_{t|t−1} ([T, n]). */
+  /** $\muvec_{t \mid t-1}$ (`[T, n]`). */
   predictedMean: Matrix
-  /** P_{t|t−1} ([T, n, n]). */
+  /** $\Pmat_{t \mid t-1}$ (`[T, n, n]`). */
   predictedCov: Tensor
-  /** μ_{t|t} ([T, n]). */
+  /** $\muvec_{t \mid t}$ (`[T, n]`). */
   mean: Matrix
-  /** P_{t|t} ([T, n, n]). */
+  /** $\Pmat_{t \mid t}$ (`[T, n, n]`). */
   cov: Tensor
-  /** K_t ([T, n, m]); zero for a missing or singular step. */
+  /** $\Kmat_t$ (`[T, n, m]`); zero for a missing or singular step. */
   gain: Tensor
-  /** Innovations y_t − C μ_{t|t−1} ([T, m]); NaN for a missing step. */
+  /** Innovations $\yvec_t - \Cmat\muvec_{t \mid t-1}$ (`[T, m]`); NaN in missing entries. */
   innovation: Matrix
-  /** Innovation covariances S_t = C P_{t|t−1} Cᵀ + R ([T, m, m]). */
+  /** Innovation covariances $\Smat_t = \Cmat\Pmat_{t \mid t-1}\Cmat^\top + \Rmat$ (`[T, m, m]`). */
   innovationCov: Tensor
-  /** log p(y₁, …, y_T) = Σ log N(y_t; C μ_{t|t−1}, S_t) over observed steps. */
+  /**
+   * $\log p(\yvec_1, \dots, \yvec_T) = \sum_t \log \Gauss(\yvec_t; \Cmat\muvec_{t \mid t-1}, \Smat_t)$ over the
+   * observed entries.
+   */
   logLikelihood: number
   /** Each step's term of the log-likelihood (0 for a missing step). */
   logLikelihoodTerms: Tensor
-  /** Steps whose S_t was singular (the update was skipped and the step's likelihood term is NaN). */
+  /** Steps (0-based) whose $\Smat_t$ was singular (the update was skipped and the step's likelihood term is NaN). */
   singularSteps: number[]
 }
 
-/** The filter's steps stacked into the public `KalmanFilterResult` (n states, m observations). */
+/**
+ * The filter's steps stacked into the public `KalmanFilterResult` ($n$ states, $m$ observations).
+ *
+ * @param f The run of `filterAll`.
+ * @param n The state dimension, which shapes the empty result of a run with no steps.
+ * @param m The observation dimension, likewise.
+ * @returns The per-step moments, gains and innovations stacked along a first axis of length $T$.
+ *
+ * @example Stack a run into tensors
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * const result = packFilter(filterAll(md, [[1], [1], [1]]), 1, 1)
+ * print('mean =', result.mean)
+ * print('gain =', result.gain)
+ */
 export function packFilter(f: FilterRun, n: number, m: number): KalmanFilterResult {
   const col = <K extends keyof KalmanStep>(k: K) => f.steps.map((s) => s[k] as Tensor)
   return {
@@ -312,7 +431,14 @@ export function packFilter(f: FilterRun, n: number, m: number): KalmanFilterResu
   }
 }
 
-/** The observations of a model as rows, checked against C (throws naming `where`). */
+/**
+ * The observations of a model as rows, checked against $\Cmat$ (throws `ShapeError` naming `where`).
+ *
+ * @param md The model as tensors.
+ * @param y The observations: a vector of $T$ scalars (for $m = 1$) or a $T \times m$ matrix, NaN where missing.
+ * @param where The caller's name, for error messages.
+ * @returns $T$ rows of $m$ numbers.
+ */
 function observations(md: Model, y: VectorLike | MatrixLike, where: string): number[][] {
   const ys = asSeries(y, where)
   const [m] = md.C.shape
@@ -322,9 +448,27 @@ function observations(md: Model, y: VectorLike | MatrixLike, where: string): num
 }
 
 /**
- * The Kalman filter (Kalman, 1960) over a whole series: `kalmanStep` at every t. `y` is [T, m] (or a length-T vector
- * when m = 1). No Cholesky factor is taken, so Q or R with zero rows filter normally; a singular S is reported in
- * `singularSteps`, never turned into NaN states. `kalmanFilterSteps` steps through the same recursion.
+ * The Kalman filter (Kalman, 1960) over a whole series: `kalmanStep` at every $t$. No Cholesky factor is taken, so
+ * $\Qmat$ or $\Rmat$ with zero rows filter normally; a singular $\Smat$ is reported in `singularSteps`, never turned
+ * into NaN states. `kalmanFilterSteps` steps through the same recursion. Shapes that disagree throw `ShapeError`.
+ *
+ * @param model The state-space model.
+ * @param y The observations, `[T, m]` (or a length-$T$ vector when $m = 1$), NaN where missing.
+ * @returns The predicted and filtered moments, gains, innovations and log-likelihood of every step.
+ *
+ * @example Track a scalar random walk
+ * // A scalar random walk z_t = z_{t-1} + w_t seen as y_t = z_t + v_t, unit noises, starting from z_0 = 0 exactly.
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const f = kalmanFilter(walk, [1, 1, 1])
+ * print('filtered means =', f.mean)
+ * print('gains =', f.gain)
+ * print('log-likelihood =', f.logLikelihood)
+ *
+ * @example A missing observation widens the estimate
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const f = kalmanFilter(walk, [1, NaN, 1])
+ * print('filtered variances =', f.cov)
+ * print('likelihood terms =', f.logLikelihoodTerms)
  */
 export function kalmanFilter(model: StateSpaceModel, y: VectorLike | MatrixLike): KalmanFilterResult {
   const md = parseModel(model, 'kalmanFilter')
@@ -334,23 +478,44 @@ export function kalmanFilter(model: StateSpaceModel, y: VectorLike | MatrixLike)
 
 // ── One smoother step ────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** One backward step of the RTS smoother: the smoothed moments of z_t and the gain that produced them. */
+/** One backward step of the RTS smoother: the smoothed moments of $\zvec_t$ and the gain that produced them. */
 export type SmootherStep = {
-  /** μ_{t|T}. */
+  /** $\muvec_{t \mid T}$. */
   mean: Vector
-  /** P_{t|T}. */
+  /** $\Pmat_{t \mid T}$. */
   cov: Matrix
-  /** G_t = P_{t|t} Aᵀ P_{t+1|t}⁻¹. */
+  /** $\Gmat_t = \Pmat_{t \mid t}\Amat^\top\Pmat_{t+1 \mid t}^{-1}$. */
   gain: Matrix
-  /** True when P_{t+1|t} was singular and a ridge 1e-12·max diag was added to solve. */
+  /**
+   * True when $\Pmat_{t+1 \mid t}$ was singular and a ridge of $10^{-12}$ times its largest diagonal entry was added
+   * to solve (the gain is zero if that too failed).
+   */
   singular: boolean
 }
 
 /**
- * One step of the Rauch–Tung–Striebel smoother (Rauch, Tung & Striebel, 1965), from the filtered moments of z_t
- * (μ_{t|t}, P_{t|t}; the prior for z₀), the predicted moments of z_{t+1} (μ_{t+1|t}, P_{t+1|t}) and the smoothed ones
- * of z_{t+1}: G = P_{t|t} Aᵀ P_{t+1|t}⁻¹ (solved as Gᵀ = P_{t+1|t}⁻¹ A P_{t|t}), μ_{t|T} = μ_{t|t} + G(μ_{t+1|T} −
- * μ_{t+1|t}), P_{t|T} = P_{t|t} + G(P_{t+1|T} − P_{t+1|t})Gᵀ.
+ * One step of the Rauch–Tung–Striebel smoother (Rauch, Tung & Striebel, 1965), from the filtered moments of
+ * $\zvec_t$ ($\muvec_{t \mid t}$, $\Pmat_{t \mid t}$; the prior for $\zvec_0$), the predicted moments of
+ * $\zvec_{t+1}$ ($\muvec_{t+1 \mid t}$, $\Pmat_{t+1 \mid t}$) and the smoothed ones of $\zvec_{t+1}$:
+ * $\Gmat = \Pmat_{t \mid t}\Amat^\top\Pmat_{t+1 \mid t}^{-1}$ (solved as
+ * $\Gmat^\top = \Pmat_{t+1 \mid t}^{-1}\Amat\Pmat_{t \mid t}$),
+ * $\muvec_{t \mid T} = \muvec_{t \mid t} + \Gmat(\muvec_{t+1 \mid T} - \muvec_{t+1 \mid t})$,
+ * $\Pmat_{t \mid T} = \Pmat_{t \mid t} + \Gmat(\Pmat_{t+1 \mid T} - \Pmat_{t+1 \mid t})\Gmat^\top$.
+ *
+ * @param md The model as tensors (`parseModel`); only $\Amat$ is used.
+ * @param filtered The filtered mean and covariance of $\zvec_t$ (a `KalmanStep` will do).
+ * @param predicted The predicted mean and covariance of $\zvec_{t+1}$: the next step's `predictedMean` and
+ *   `predictedCov`.
+ * @param smoothed The smoothed mean and covariance of $\zvec_{t+1}$ (for the last step, its filtered moments).
+ * @returns The smoothed moments of $\zvec_t$, the gain, and whether the predicted covariance was singular.
+ *
+ * @example One step back from the last observation
+ * // After y = (1, 1): z_1 filtered N(0.5, 0.5), z_2 predicted N(0.5, 1.5) and filtered N(0.8, 0.6).
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * const [first, last] = filterAll(md, [[1], [1]]).steps
+ * const back = rtsStep(md, first, { mean: last.predictedMean, cov: last.predictedCov }, last)
+ * print('gain =', back.gain, 'exact', 0.5 / 1.5)
+ * print('smoothed mean =', back.mean, 'cov =', back.cov)
  */
 export function rtsStep(
   md: Model,
@@ -383,21 +548,46 @@ export function rtsStep(
   }
 }
 
-/** The smoother over a whole series: smoothed moments and gains for t = 1 … T, lag-one covariances, and z₀'s. */
+/**
+ * The smoother over a whole series: smoothed moments and gains for $t = 1, \dots, T$, lag-one covariances, and
+ * $\zvec_0$'s.
+ */
 export type SmootherRun = {
+  /** $\muvec_{t \mid T}$ for $t = 1, \dots, T$. */
   mean: Vector[]
+  /** $\Pmat_{t \mid T}$ for $t = 1, \dots, T$. */
   cov: Matrix[]
-  /** G_t for t = 1 … T (the last is zero). */
+  /** $\Gmat_t$ for $t = 1, \dots, T$ (the last is zero). */
   gain: Matrix[]
-  /** Cov(z_t, z_{t−1} | y) = P_{t|T} G_{t−1}ᵀ, with G₀ the gain of the step back to z₀. */
+  /**
+   * $\cov(\zvec_t, \zvec_{t-1} \mid \yvec) = \Pmat_{t \mid T}\Gmat_{t-1}^\top$, with $\Gmat_0$ the gain of the step
+   * back to $\zvec_0$.
+   */
   lag: Matrix[]
+  /** $\muvec_{0 \mid T}$. */
   initialMean: Vector
+  /** $\Pmat_{0 \mid T}$. */
   initialCov: Matrix
-  /** Steps whose P_{t+1|t} was singular (−1 for the step back to z₀). */
+  /** Steps (0-based) whose $\Pmat_{t+1 \mid t}$ was singular ($-1$ for the step back to $\zvec_0$). */
   singularSteps: number[]
 }
 
-/** The RTS smoother from the filter's steps: `rtsStep` from t = T − 1 back to z₀. */
+/**
+ * The RTS smoother from the filter's steps: `rtsStep` from $t = T - 1$ back to $\zvec_0$, then the lag-one
+ * covariances (de Jong, 1989; Shumway & Stoffer, 2017, Property 6.3). With no steps the result is empty and
+ * $\zvec_0$ keeps its prior.
+ *
+ * @param md The model as tensors (`parseModel`).
+ * @param f The run of `filterAll` on the same model.
+ * @returns The smoothed moments and gains of every step, the lag-one covariances, $\zvec_0$'s smoothed moments, and
+ *   the singular steps.
+ *
+ * @example Smooth a filtered random walk
+ * const md = parseModel({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, 'example')
+ * const s = smoothAll(md, filterAll(md, [[1], [1], [1]]))
+ * print('smoothed means =', s.mean)
+ * print('z_0 =', s.initialMean, 'with variance', s.initialCov)
+ */
 export function smoothAll(md: Model, f: FilterRun): SmootherRun {
   const T = f.steps.length
   const [n] = md.A.shape
@@ -442,27 +632,46 @@ export function smoothAll(md: Model, f: FilterRun): SmootherRun {
   return { mean, cov, gain, lag, initialMean: s0.mean, initialCov: s0.cov, singularSteps }
 }
 
-/** The RTS smoother's output: smoothed moments for t = 1 … T, and for z₀. */
+/** The RTS smoother's output: smoothed moments for $t = 1, \dots, T$, and for $\zvec_0$. */
 export type SmootherResult = {
-  /** μ_{t|T} ([T, n]). */
+  /** $\muvec_{t \mid T}$ (`[T, n]`). */
   mean: Matrix
-  /** P_{t|T} ([T, n, n]). */
+  /** $\Pmat_{t \mid T}$ (`[T, n, n]`). */
   cov: Tensor
-  /** Smoother gains G_t = P_{t|t} Aᵀ P_{t+1|t}⁻¹ ([T, n, n]; the last is zero). */
+  /** Smoother gains $\Gmat_t = \Pmat_{t \mid t}\Amat^\top\Pmat_{t+1 \mid t}^{-1}$ (`[T, n, n]`; the last is zero). */
   gain: Tensor
-  /** Cov(z_t, z_{t−1} | y) = P_{t|T} G_{t−1}ᵀ ([T, n, n]; entry t pairs z_t with z_{t−1}, z₀ for the first). */
+  /**
+   * $\cov(\zvec_t, \zvec_{t-1} \mid \yvec) = \Pmat_{t \mid T}\Gmat_{t-1}^\top$ (`[T, n, n]`; entry $t$ pairs
+   * $\zvec_t$ with $\zvec_{t-1}$, $\zvec_0$ for the first).
+   */
   lagOneCov: Tensor
-  /** μ_{0|T} and P_{0|T}. */
+  /** $\muvec_{0 \mid T}$. */
   initialMean: Tensor
+  /** $\Pmat_{0 \mid T}$. */
   initialCov: Matrix
-  /** Steps whose predicted covariance P_{t+1|t} was singular; a pseudo-solve (ridge 1e-12·scale) was used there. */
+  /**
+   * Steps (0-based; $-1$ for $\zvec_0$) whose predicted covariance $\Pmat_{t+1 \mid t}$ was singular; a pseudo-solve
+   * (a ridge of $10^{-12}$ times its largest diagonal entry) was used there.
+   */
   singularSteps: number[]
 }
 
 /**
  * The Rauch–Tung–Striebel smoother (Rauch, Tung & Striebel, 1965): the filter forwards, then `rtsStep` backwards from
- * the last filtered estimate. Also returns the lag-one covariances EM needs and the smoothed z₀.
- * `rtsSmootherSteps` steps through the backward pass.
+ * the last filtered estimate. Also returns the lag-one covariances EM needs and the smoothed $\zvec_0$.
+ * `rtsSmootherSteps` steps through the backward pass. Shapes that disagree throw `ShapeError`.
+ *
+ * @param model The state-space model.
+ * @param y The observations, `[T, m]` (or a length-$T$ vector when $m = 1$), NaN where missing.
+ * @returns The smoothed moments and gains of every step, the lag-one covariances, and $\zvec_0$'s smoothed moments.
+ *
+ * @example Smoothing uses the later observations too
+ * // A scalar random walk z_t = z_{t-1} + w_t seen as y_t = z_t + v_t, unit noises, starting from z_0 = 0 exactly.
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * print('filtered =', kalmanFilter(walk, [1, 1, 1]).mean)
+ * const s = rtsSmoother(walk, [1, 1, 1])
+ * print('smoothed =', s.mean)
+ * print('smoothed variances =', s.cov)
  */
 export function rtsSmoother(model: StateSpaceModel, y: VectorLike | MatrixLike): SmootherResult {
   const md = parseModel(model, 'rtsSmoother')
@@ -481,28 +690,42 @@ export function rtsSmoother(model: StateSpaceModel, y: VectorLike | MatrixLike):
 
 // ── The filter and smoother as algorithms ────────────────────────────────────────────────────────────────────────────
 
-/** The state of `kalmanFilterSteps` after t observations. */
+/** The state of `kalmanFilterSteps` after $t$ observations. */
 export type KalmanFilterState = Status & {
-  /** Observations absorbed so far (0 … T). */
+  /** Observations absorbed so far ($0, \dots, T$). */
   t: number
-  /** μ_{t|t} (m₀ at t = 0). */
+  /** $\muvec_{t \mid t}$ ($\mvec_0$ at $t = 0$). */
   mean: Vector
-  /** P_{t|t} (P₀ at t = 0). */
+  /** $\Pmat_{t \mid t}$ ($\Pmat_0$ at $t = 0$). */
   cov: Matrix
   /** The last step's prediction, gain, innovation and term (null at t = 0). */
   step: KalmanStep | null
-  /** log p(y₁, …, y_t). */
+  /** $\log p(\yvec_1, \dots, \yvec_t)$. */
   logLikelihood: number
-  /** Steps so far whose S was singular. */
+  /** Steps so far (0-based) whose $\Smat$ was singular. */
   singularSteps: readonly number[]
   /** True once every observation is absorbed. */
   terminated: boolean
 }
 
 /**
- * The Kalman filter as a step-through `Algorithm` (start: none): step t absorbs y_t by `kalmanStep`, so `run(alg,
- * undefined, T)` ends on the filtered moments `kalmanFilter` gives at T, and a trace records every step's moments,
- * gain and innovation. Terminates after the last observation.
+ * The Kalman filter as a step-through `Algorithm` (start: none): step $t$ absorbs $\yvec_t$ by `kalmanStep`, so
+ * `run(alg, undefined, T)` ends on the filtered moments `kalmanFilter` gives at $T$, and a trace records every step's
+ * moments, gain and innovation. Terminates after the last observation. The model and observations are read and
+ * checked when the algorithm is made (`ShapeError`).
+ *
+ * @param model The state-space model.
+ * @param y The observations, `[T, m]` (or a length-$T$ vector when $m = 1$), NaN where missing.
+ * @returns The algorithm; it takes no start and draws no random numbers.
+ *
+ * @example Absorb the observations one at a time
+ * // A scalar random walk z_t = z_{t-1} + w_t seen as y_t = z_t + v_t, unit noises, starting from z_0 = 0 exactly.
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const filter = kalmanFilterSteps(walk, [1, 1, 1])
+ * const after2 = run(filter, undefined, 2)
+ * print('t =', after2.t, 'mean =', after2.mean, 'cov =', after2.cov)
+ * const done = run(filter, undefined, 10)
+ * print('t =', done.t, 'mean =', done.mean, 'terminated =', done.terminated)
  */
 export function kalmanFilterSteps(
   model: StateSpaceModel,
@@ -537,28 +760,44 @@ export function kalmanFilterSteps(
   }
 }
 
-/** The state of `rtsSmootherSteps`: the smoothed moments of z_t, the backward pass's position. */
+/** The state of `rtsSmootherSteps`: the smoothed moments of $\zvec_t$, the backward pass's position. */
 export type RtsSmootherState = Status & {
-  /** Backward steps taken (0 … T). */
+  /** Backward steps taken ($0, \dots, T$). */
   t: number
-  /** The time index smoothed last: T − 1 (0-based) after init, down to −1 for z₀. */
+  /** The time index smoothed last: $T - 1$ (0-based) after init, down to $-1$ for $\zvec_0$. */
   index: number
-  /** μ_{t|T}. */
+  /** The smoothed mean of the state at `index`. */
   mean: Vector
-  /** P_{t|T}. */
+  /** The smoothed covariance of the state at `index`. */
   cov: Matrix
-  /** G_t of the last backward step (zero after init). */
+  /** The gain $\Gmat$ of the last backward step (zero after init). */
   gain: Matrix
-  /** Steps whose P_{t+1|t} was singular. */
+  /** Indices (0-based, $-1$ for $\zvec_0$) whose $\Pmat_{t+1 \mid t}$ was singular. */
   singularSteps: readonly number[]
-  /** True once z₀ is smoothed. */
+  /** True once $\zvec_0$ is smoothed. */
   terminated: boolean
 }
 
 /**
  * The RTS smoother's backward pass as a step-through `Algorithm` (start: none). The forward filter runs once when the
  * algorithm is made (pass `filtered`, the steps of `filterAll`, to reuse a run); init holds the last filtered
- * moments, which are already smoothed, and each step applies `rtsStep` one index back, ending at z₀ after T steps.
+ * moments, which are already smoothed, and each step applies `rtsStep` one index back, ending at $\zvec_0$ after $T$
+ * steps.
+ *
+ * @param model The state-space model.
+ * @param y The observations, `[T, m]` (or a length-$T$ vector when $m = 1$), NaN where missing. Not read when
+ *   `options.filtered` is given.
+ * @param options `filtered`, a run of `filterAll` on the same model to smooth instead of filtering `y` again.
+ * @returns The algorithm; it takes no start and draws no random numbers.
+ *
+ * @example Step back from the last observation to z_0
+ * // A scalar random walk z_t = z_{t-1} + w_t seen as y_t = z_t + v_t, unit noises, starting from z_0 = 0 exactly.
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const smoother = rtsSmootherSteps(walk, [1, 1, 1])
+ * const one = run(smoother, undefined, 1)
+ * print('index', one.index, 'mean =', one.mean)
+ * const done = run(smoother, undefined, 10)
+ * print('index', done.index, 'mean =', done.mean, 'terminated =', done.terminated)
  */
 export function rtsSmootherSteps(
   model: StateSpaceModel,
@@ -604,10 +843,26 @@ export function rtsSmootherSteps(
 // ── Steady state and consistency checks ──────────────────────────────────────────────────────────────────────────────
 
 /**
- * The steady-state Kalman filter: iterate the Riccati recursion P⁻ ← A (P⁻ − P⁻Cᵀ S⁻¹ C P⁻) Aᵀ + Q from P₀ until the
- * largest change is below `tolerance` relative to P, and return the limiting gain and covariances. `converged` is false
- * when `maxSteps` (default 10 000) ran out, e.g. for an undetectable unstable mode (Anderson & Moore, 1979,
- * "Optimal Filtering", §4.4).
+ * The steady-state Kalman filter: iterate the Riccati recursion
+ * $\Pmat^- \leftarrow \Amat(\Pmat^- - \Pmat^-\Cmat^\top\Smat^{-1}\Cmat\Pmat^-)\Amat^\top + \Qmat$ from
+ * $\Amat\Pmat_0\Amat^\top + \Qmat$ until the largest change of an entry is at most `tolerance` times
+ * $1 + \max_{ij} \lvert P^-_{ij} \rvert$, and return the limiting gain and covariances. `converged` is false when
+ * `maxSteps` ran out, e.g. for an undetectable unstable mode (Anderson & Moore, 1979, "Optimal Filtering", §4.4), or
+ * when $\Smat$ became singular.
+ *
+ * @param model The state-space model; $\mvec_0$ is not used.
+ * @param options The stopping rule.
+ * @param options.tolerance The relative change at which the recursion has converged (default $10^{-12}$).
+ * @param options.maxSteps The most iterations to run (default 10 000).
+ * @returns The gain $\Kmat$ ($n \times m$), the predicted covariance $\Pmat^-$ and the filtered covariance $\Pmat$
+ *   (both $n \times n$), the number of iterations, and whether it converged.
+ *
+ * @example The scalar random walk's steady gain is the golden ratio's inverse
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const { gain, predictedCov, cov, converged } = steadyStateKalman(walk)
+ * print('gain =', gain, 'exact', (Math.sqrt(5) - 1) / 2)
+ * print('predicted variance =', predictedCov, 'filtered variance =', cov)
+ * print('converged =', converged)
  */
 export function steadyStateKalman(
   model: StateSpaceModel,
@@ -645,7 +900,14 @@ export function steadyStateKalman(
   return result(maxSteps, false)
 }
 
-/** Rows of a [T, k] tensor and slices of a [T, k, k] tensor, checked (throws `ShapeError` naming `where`). */
+/**
+ * Rows of a `[T, k]` tensor and slices of a `[T, k, k]` tensor, checked (throws `ShapeError` naming `where`).
+ *
+ * @param t The stacked tensor.
+ * @param rank Its expected rank: 2 for rows, 3 for matrices.
+ * @param where The caller's name, for error messages.
+ * @returns $T$ new tensors, each of the shape of one slice.
+ */
 function rowsOf(t: Tensor, rank: 2 | 3, where: string): Tensor[] {
   if (t.shape.length !== rank)
     throw new ShapeError(where, `${where}: expected a rank-${rank} [T, …] tensor, got [${t.shape.join(', ')}]`)
@@ -655,7 +917,13 @@ function rowsOf(t: Tensor, rank: 2 | 3, where: string): Tensor[] {
   return Array.from({ length: T }, (_, i) => fromData(flat.slice(i * size, (i + 1) * size), rest))
 }
 
-/** eᵀ S⁻¹ e for each row, NaN where e has a NaN or S is singular. */
+/**
+ * $\evec^\top\Smat^{-1}\evec$ for each row, NaN where $\evec$ has a NaN or $\Smat$ is singular.
+ *
+ * @param e The vectors $\evec_t$.
+ * @param S The matrices $\Smat_t$, one per vector.
+ * @returns The $T$ quadratic forms.
+ */
 function quadForms(e: Tensor[], S: Tensor[]): Tensor {
   return tensor(
     e.map((v, t) => {
@@ -667,10 +935,23 @@ function quadForms(e: Tensor[], S: Tensor[]): Tensor {
 }
 
 /**
- * The normalised innovation squared NIS_t = v_tᵀ S_t⁻¹ v_t of a Kalman filter's innovations ([T]; NaN at missing
- * steps). For a consistent filter (the model matches the data) each NIS_t is χ² with m degrees of freedom, so its
- * average over T steps should lie within the χ²_{mT}/T band (Bar-Shalom, Li & Kirubarajan, 2001, "Estimation with
- * Applications to Tracking and Navigation", §5.4.2).
+ * The normalised innovation squared $\operatorname{NIS}_t = \vvec_t^\top\Smat_t^{-1}\vvec_t$ of a Kalman filter's
+ * innovations (`[T]`; NaN at a step with any entry missing or a singular $\Smat_t$). For a consistent filter (the
+ * model matches the data) each $\operatorname{NIS}_t$ is $\chi^2$ with $m$ degrees of freedom, so its average over $T$
+ * steps should lie within the $\chi^2_{mT}/T$ band (Bar-Shalom, Li & Kirubarajan, 2001, "Estimation with Applications
+ * to Tracking and Navigation", §5.4.2).
+ *
+ * @param filter The innovations (`[T, m]`) and innovation covariances (`[T, m, m]`), as `kalmanFilter` returns them.
+ * @returns The $T$ values of $\operatorname{NIS}_t$.
+ *
+ * @example A filter of the right model averages about m = 1
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const { observations } = simulateStateSpace(stream(0), walk, 200)
+ * const nis = normalisedInnovationSquared(kalmanFilter(walk, observations))
+ * print('mean NIS =', mean(nis))
+ * // The same data filtered with R ten times too large: the innovations look too small.
+ * const wrong = normalisedInnovationSquared(kalmanFilter({ ...walk, R: 10 }, observations))
+ * print('mean NIS, R too large =', mean(wrong))
  */
 export function normalisedInnovationSquared(filter: Pick<KalmanFilterResult, 'innovation' | 'innovationCov'>): Tensor {
   const where = 'normalisedInnovationSquared'
@@ -678,10 +959,25 @@ export function normalisedInnovationSquared(filter: Pick<KalmanFilterResult, 'in
 }
 
 /**
- * The normalised estimation error squared NEES_t = (z_t − μ_t)ᵀ P_t⁻¹ (z_t − μ_t) of estimates (μ_t, P_t) against the
- * true states z_t ([T]). Only a simulation knows z_t; for a consistent estimator each NEES_t is χ² with n degrees of
- * freedom (Bar-Shalom, Li & Kirubarajan, 2001, §5.4.2). `mean` and `truth` are [T, n], `cov` is [T, n, n]: pass the
- * filter's or the smoother's moments.
+ * The normalised estimation error squared
+ * $\operatorname{NEES}_t = (\zvec_t - \muvec_t)^\top\Pmat_t^{-1}(\zvec_t - \muvec_t)$ of estimates
+ * $(\muvec_t, \Pmat_t)$ against the true states $\zvec_t$ (`[T]`). Only a simulation knows $\zvec_t$; for a
+ * consistent estimator each $\operatorname{NEES}_t$ is $\chi^2$ with $n$ degrees of freedom (Bar-Shalom, Li &
+ * Kirubarajan, 2001, §5.4.2). Pass the filter's or the smoother's moments. A different number of estimates and true
+ * states throws `ShapeError`.
+ *
+ * @param mean The estimated means $\muvec_t$ (`[T, n]`).
+ * @param cov Their covariances $\Pmat_t$ (`[T, n, n]`), with as many slices as `mean` has rows.
+ * @param truth The true states $\zvec_t$ (`[T, n]`).
+ * @returns The $T$ values of $\operatorname{NEES}_t$ (NaN where $\Pmat_t$ is singular).
+ *
+ * @example The smoother's errors are consistent too
+ * const walk = { A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }
+ * const { states, observations } = simulateStateSpace(stream(0), walk, 200)
+ * const f = kalmanFilter(walk, observations)
+ * const s = rtsSmoother(walk, observations)
+ * print('mean NEES, filter =', mean(normalisedEstimationErrorSquared(f.mean, f.cov, states)))
+ * print('mean NEES, smoother =', mean(normalisedEstimationErrorSquared(s.mean, s.cov, states)))
  */
 export function normalisedEstimationErrorSquared(mean: Matrix, cov: Tensor, truth: Matrix): Tensor {
   const where = 'normalisedEstimationErrorSquared'

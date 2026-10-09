@@ -1,7 +1,9 @@
 /**
- * The algorithms of `aifn-compute/inference/exact`, registered with what each factory takes (`problem`) and the roles of its
- * state's fields (`state`: iterate, objective, grad, stepSize, and the `Status` flags it sets), so a generic trace
- * view picks default series and a worker can address an algorithm by key (design S §2.3).
+ * The algorithms and functions of `aifn-compute/inference/exact`, registered with the notes they serve. The stepped
+ * engines (enumeration, variable elimination, forward–backward, Viterbi, chain sum–product) are registered with what
+ * each factory takes (`problem`) and the roles of its state's fields (`state`: iterate, objective, grad, stepSize,
+ * and the `Status` flags it sets), so a generic trace view picks default series and a worker can address an algorithm
+ * by key (design S §2.3); the one-call functions with their role.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

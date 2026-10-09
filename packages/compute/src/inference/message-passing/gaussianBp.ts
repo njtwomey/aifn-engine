@@ -1,12 +1,17 @@
 /**
  * Gaussian belief propagation on a pairwise Gaussian Markov random field in information form,
- * p(x) ∝ exp(−½ xᵀJx + hᵀx), with scalar variables (Weiss & Freeman 2001, "Correctness of belief propagation in
- * Gaussian graphical models of arbitrary topology", Neural Computation 13(10); Bickson 2008, "Gaussian belief
- * propagation: theory and application", §2).
+ * $p(\xvec) \propto \exp(-\tfrac{1}{2} \xvec^\top \Jmat \xvec + \hvec^\top \xvec)$, with scalar variables (Weiss &
+ * Freeman 2001, "Correctness of belief propagation in Gaussian graphical models of arbitrary topology", Neural
+ * Computation 13(10); Bickson 2008, "Gaussian belief propagation: theory and application", §2).
  *
- * The message from i to j is a Gaussian in x_j with precision Λ_{i→j} and potential η_{i→j}:
- * Λ̂ = J_ii + Σ_{k∈N(i)\j} Λ_{k→i}, η̂ = h_i + Σ_{k∈N(i)\j} η_{k→i}, Λ_{i→j} = −J_ij²/Λ̂, η_{i→j} = −J_ij η̂/Λ̂.
- * At a fixed point the means are exact on any graph; the variances are exact on trees.
+ * The message from $i$ to $j$ is a Gaussian in $x_j$ with precision $\Lambda_{i \to j}$ and potential
+ * $\eta_{i \to j}$. With the cavity precision
+ * $\hat{\Lambda} = J_{ii} + \sum_{k \in N(i) \setminus j} \Lambda_{k \to i}$ and potential
+ * $\hat{\eta} = h_i + \sum_{k \in N(i) \setminus j} \eta_{k \to i}$, the update is
+ * $\Lambda_{i \to j} = -J_{ij}^2 / \hat{\Lambda}$ and $\eta_{i \to j} = -J_{ij} \hat{\eta} / \hat{\Lambda}$. The
+ * marginal of $x_i$ has precision $J_{ii} + \sum_k \Lambda_{k \to i}$ and potential $h_i + \sum_k \eta_{k \to i}$.
+ * At a fixed point the means are exact on any graph; the variances are exact on trees. Convergence is guaranteed when
+ * the model is walk-summable (Malioutov, Johnson & Willsky 2006), as a diagonally dominant $\Jmat$ is.
  */
 
 import type { MatrixLike, Size, Status, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -16,39 +21,66 @@ import { run, type Algorithm } from 'aifn-compute/foundation/trace'
 
 /** Options of {@link gaussianBeliefPropagationSteps}. */
 export interface GaussianBpOptions {
-  /** `flooding` (all messages from the previous sweep) or `sequential` (in edge order, newest messages). */
+  /**
+   * `'flooding'` (default; every message from those of the previous sweep) or `'sequential'` (in edge order, each
+   * from the newest messages).
+   */
   schedule?: 'flooding' | 'sequential'
-  /** Weight of the old message, in [0, 1). Default 0. */
+  /** Weight of the old message in each update, in $[0, 1)$ (not checked). Default 0. */
   damping?: number
+  /** A sweep that moves no message precision or potential by more than this has converged. Default 1e-10. */
   tolerance?: number
 }
 
 /**
  * The state of Gaussian BP; messages are indexed by directed edge (`from`, `to`). `t` counts sweeps; `diverged` means
- * a non-positive cavity precision Λ̂ appeared (the model is not walk-summable here) and the run stops.
+ * a non-positive cavity precision $\hat{\Lambda}$ appeared (the model is not walk-summable here) or a message became
+ * non-finite, and the run stops.
  */
 export interface GaussianBpState extends Status {
+  /** The number of variables. */
   n: Size
+  /** The precision matrix $\Jmat$, as rows. */
   J: number[][]
+  /** The potential vector $\hvec$. */
   h: number[]
+  /** The undirected graph of the non-zero off-diagonal entries of $\Jmat$. */
   graph: Graph
-  /** Directed edges: message k travels from[k] → to[k]. */
+  /** Directed edges: message $k$ travels from `from[k]` to `to[k]`; the two directions of an edge are adjacent. */
   from: Int32Array
+  /** The receiving variable of each directed edge. */
   to: Int32Array
+  /** The message schedule. */
   schedule: 'flooding' | 'sequential'
+  /** The weight of the old message in each update. */
   damping: number
+  /** The largest message change of a converged sweep. */
   tolerance: number
-  /** Λ_{i→j} and η_{i→j} per directed edge. */
+  /** $\Lambda_{i \to j}$ per directed edge. */
   messagePrecision: Tensor
+  /** $\eta_{i \to j}$ per directed edge. */
   messageShift: Tensor
-  /** Marginal means and variances from the current messages. */
+  /** Marginal means from the current messages (length $n$). */
   means: Tensor
+  /** Marginal variances from the current messages (length $n$). */
   variances: Tensor
+  /** The largest change of a message precision or potential in the last sweep ($\infty$ before the first). */
   change: number
+  /** Whether the last sweep changed no message by more than `tolerance`. */
   converged: boolean
+  /** Whether a cavity precision was not positive or a change was not finite. */
   diverged: boolean
 }
 
+/**
+ * The marginal means and variances from a set of messages: precision $J_{ii} + \sum_k \Lambda_{k \to i}$ and potential
+ * $h_i + \sum_k \eta_{k \to i}$ for each variable $i$.
+ *
+ * @param s The size, $\Jmat$, $\hvec$ and the receiving variable of each directed edge.
+ * @param lambda The message precisions $\Lambda$, one per directed edge.
+ * @param eta The message potentials $\eta$, one per directed edge.
+ * @returns The means (potential over precision) and variances (one over precision), each of length $n$.
+ */
 function marginals(s: Pick<GaussianBpState, 'n' | 'J' | 'h' | 'to'>, lambda: Float64Array, eta: Float64Array) {
   const P = s.J.map((row, i) => row[i])
   const H = [...s.h]
@@ -69,10 +101,31 @@ function marginals(s: Pick<GaussianBpState, 'n' | 'J' | 'h' | 'to'>, lambda: Flo
 }
 
 /**
- * Gaussian BP as a traceable algorithm on precision J (n × n symmetric; its off-diagonal non-zeros are the graph's
- * edges) and potential h = J μ (length n); each step is one sweep over every directed edge. Messages start at zero
- * (Λ = η = 0). The run converges when no message moves by more than `tolerance`, and stops as `diverged` when a
- * cavity precision Λ̂ is not positive.
+ * Gaussian BP as a traceable algorithm on the precision $\Jmat$ ($n \times n$ symmetric; its off-diagonal non-zeros
+ * are the graph's edges) and the potential $\hvec = \Jmat \muvec$ (length $n$); each step is one sweep over every
+ * directed edge. Messages start at zero ($\Lambda = \eta = 0$), so the first means are $h_i / J_{ii}$. The run
+ * converges when no message moves by more than `tolerance`, and stops as `diverged` when a cavity precision
+ * $\hat{\Lambda}$ is not positive or a message is not finite.
+ *
+ * @param precision The precision matrix $\Jmat$ ($n \times n$, symmetric, as a tensor or rows); the edges are the
+ *   non-zero entries above the diagonal.
+ * @param shift The potential $\hvec$ (length $n$), so that the mean $\muvec$ solves $\Jmat \muvec = \hvec$.
+ * @param o The schedule, damping and tolerance (see `GaussianBpOptions`).
+ * @returns The algorithm, to run with `run(alg, undefined, steps)`; `t` counts sweeps.
+ *
+ * @example A chain of three is exact after two sweeps
+ * // J is tridiagonal and h = J · [1, 1, 1], so the means are all 1.
+ * const J = tensor([[2, -1, 0], [-1, 2, -1], [0, -1, 2]])
+ * const alg = gaussianBeliefPropagationSteps(J, tensor([1, 0, 1]))
+ * for (const sweeps of [0, 1, 2, 3]) print(`after ${sweeps} sweeps: means`, run(alg, undefined, sweeps).means)
+ * const s = run(alg, undefined, 100)
+ * print('converged after', s.t, 'sweeps:', s.converged)
+ *
+ * @example A model that is not walk-summable diverges
+ * // Positive definite (eigenvalues 0.1, 0.1 and 2.8), but the partial correlations are too strong for BP.
+ * const J = tensor([[1, 0.9, 0.9], [0.9, 1, 0.9], [0.9, 0.9, 1]])
+ * const s = run(gaussianBeliefPropagationSteps(J, tensor([1, 1, 1])), undefined, 100)
+ * print('sweeps =', s.t, 'diverged =', s.diverged)
  */
 export function gaussianBeliefPropagationSteps(
   precision: MatrixLike,
@@ -164,7 +217,35 @@ export function gaussianBeliefPropagationSteps(
   }
 }
 
-/** Run Gaussian BP for at most `maxSteps` sweeps (default 500): marginal means and variances, and the flags. */
+/**
+ * Run Gaussian BP for at most `maxSteps` sweeps (default 500): marginal means and variances, and the flags. On a tree
+ * both are exact once converged; on a graph with loops the means are exact and the variances approximate.
+ *
+ * @param precision The precision matrix $\Jmat$ ($n \times n$, symmetric, as a tensor or rows).
+ * @param shift The potential $\hvec$ (length $n$), with $\Jmat \muvec = \hvec$.
+ * @param options The schedule, damping and tolerance of `gaussianBeliefPropagationSteps`, and `maxSteps`, the most
+ *   sweeps to run (default 500).
+ * @returns The marginal means and variances, the sweeps run, and whether the run converged or diverged.
+ *
+ * @example Exact on a chain
+ * // J is tridiagonal and h = J · [1, 1, 1]; the exact variances are the diagonal of J⁻¹.
+ * const J = tensor([[2, -1, 0], [-1, 2, -1], [0, -1, 2]])
+ * const r = gaussianBeliefPropagation(J, tensor([1, 0, 1]))
+ * print('means =', r.means)
+ * print('variances =', r.variances)
+ * print('sweeps =', r.sweeps, 'converged =', r.converged)
+ * const Jinv = div(tensor([[3, 2, 1], [2, 4, 2], [1, 2, 3]]), 4)
+ * print('J J⁻¹ =', matmul(J, Jinv))
+ * print('diagonal of J⁻¹ =', diagonal(Jinv))
+ *
+ * @example On a loop the means are exact, the variances not
+ * // J = 0.7 I + 0.3 · 1 1ᵀ and h = J · [1, 1, 1]. By Sherman–Morrison each variance is (1 − 0.3 / 1.6) / 0.7.
+ * const J = tensor([[1, 0.3, 0.3], [0.3, 1, 0.3], [0.3, 0.3, 1]])
+ * const r = gaussianBeliefPropagation(J, tensor([1.6, 1.6, 1.6]))
+ * print('means =', r.means)
+ * print('BP variances =', r.variances)
+ * print('exact variance =', (1 - 0.3 / 1.6) / 0.7)
+ */
 export function gaussianBeliefPropagation(
   precision: MatrixLike,
   shift: VectorLike,

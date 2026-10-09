@@ -1,9 +1,31 @@
 /**
- * `aifn-compute/inference/stochastic`: Monte Carlo inference: Metropolis–Hastings (random-walk, independence), Gibbs over
- * conditionals or blocks (block Gibbs) with Rao–Blackwellised estimates, slice sampling, Hamiltonian Monte Carlo and
- * NUTS, MALA and SGLD, batched short-run Langevin with persistent chains in a replay buffer, sequential Monte Carlo and the particle filter, multi-chain runs and diagnostics (R̂, ESS, MCSE;
- * the autocorrelation function is `aifn-compute/probability/stats`'s), and Gibbs sampling on discrete factor graphs
- * (`factorGraphGibbs`) and on model descriptions (`modelGibbs`, by enumeration and conjugate updates).
+ * `aifn-compute/inference/stochastic`: Monte Carlo inference, from Markov chain samplers to sequential Monte Carlo,
+ * with the diagnostics of their output.
+ *
+ * - Metropolis–Hastings: `metropolisHastings` (any proposal, with its log ratio), `randomWalkMetropolis` (Gaussian
+ *   steps) and `independenceMetropolis` (a fixed proposal that must cover the tails).
+ * - Gibbs sampling: `gibbs` over one conditional per coordinate or over `Block`s drawn jointly (block Gibbs), with the
+ *   Gaussian conditionals of any partition (`gaussianConditionals`, `bivariateGaussianConditionals`) and the
+ *   `conditionalMean` that `raoBlackwell` averages; `sliceSampler` for any target, with no step size to tune.
+ * - Discrete and model-based Gibbs: `factorGraphGibbs` on a discrete factor graph, with `gibbsMarginals`, and
+ *   `modelGibbs` on a model description, by enumeration and conjugate updates.
+ * - Gradient-based samplers: `hmc` and `nuts` (multinomial or slice), built on `leapfrog`, with dual-averaging step
+ *   size adaptation and divergence reports (`divergenceLimit`); `unadjustedLangevin` (biased by $O(h)$), `mala`
+ *   (exact) and `sgld` (minibatch gradients, no accept step).
+ * - Energy-based models: `langevinParticles` moves a batch of particles with one score evaluation per step, and
+ *   `persistentLangevin` keeps short-run chains alive in a `chainBuffer`.
+ * - Sequential Monte Carlo: `particleFilter` (bootstrap, adaptive resampling, log evidence), `temperedSmc` (a static
+ *   target and its evidence), and `resample` by each of the `resamplingSchemes`.
+ * - Several chains and their diagnostics: `sampleChains` runs $m$ chains into an $m \times n \times d$ tensor, which
+ *   `effectiveSampleSize`, `integratedAutocorrelationTime`, `splitRhat` ($\hat R$), `monteCarloStandardError` and
+ *   `summarise` read (the autocorrelation function is `aifn-compute/probability/stats`'s).
+ * - The registry entries of the module: `stochasticAlgorithms` and `stochasticFunctions`.
+ *
+ * Every sampler is an `Algorithm`, started from `{ x0 }` (or its own start) and run with `run`, `trace` or
+ * `sampleChains`; step $t$ draws only from its step stream, so a run is reproducible from its root stream and states
+ * are plain data. A target is a `LogDensity`: an unnormalised `logDensity` and its `dim`, with `grad` in closed form
+ * where the gradient-based samplers should not differentiate it. Failures are reported in the state (`diverged`,
+ * `divergent`) rather than thrown; misuse (a wrong shape, an option out of range) throws.
  */
 
 export {

@@ -1,9 +1,29 @@
 /**
- * `aifn-compute/inference/model`: the model description language on the structured graphs of `aifn-compute/graph/structured`
- * (`model`, `dist`, plates and chains as groups, parameters, deterministic nodes; `expandModel` on `unroll`,
- * `logJoint`, `sampleModel`), discrete factor graphs and their algebra (`discreteFactor`, `factorProduct`,
- * `factorMarginalise`, `factorReduce`) and gates (`gateFactor`), the model's factor graph as a structured graph (`toFactorGraph`), and diagram
- * data (`toPlateDiagram`, `toFactorDiagram`, both `toDiagram` of a structured graph).
+ * `aifn-compute/inference/model`: the model description language, and the discrete factor graphs that exact inference
+ * and message passing run on.
+ *
+ * - Describing a model: `model` declares named parameters, latent, observed and deterministic nodes on a builder, with
+ *   plates and chains as the groups of a structured graph of `aifn-compute/graph/structured`; `dist` gives the
+ *   conditional distributions. A model is plain, serialisable data; `nodeArgs`, `argRefs` and `plateChain` read it.
+ * - Expanding, scoring and sampling: `expandModel` unrolls the plates and chains against sizes, constants and data into
+ *   instances (keyed by `instanceKey`). `logJoint` and `instanceLogDensity` score values, `conditionalOf` gives an
+ *   instance's distribution given the rest, and `sampleModel` draws ancestrally (`nestedValues` turns the draws into
+ *   data). Beneath them: `environment` (the values by key, deterministic nodes computed on demand), `argValue`,
+ *   `resolveRef` (the instances an `at` reference may select), `distOf`, `realise` and `evaluateOp`.
+ * - Dependence between instances, looking through deterministic nodes: `stochasticParents`, `dependencyMaps` and
+ *   `modelMarkovBlanket`; `cardinalityOf` gives a discrete node's number of values.
+ * - A model's structures: `toFactorGraph` (one factor per stochastic instance, listed by `factorsOf`),
+ *   `toDiscreteFactorGraph` (tables over the latent variables with the data clamped, for the discrete engines), and
+ *   diagram data for plate notation and factor graphs (`toPlateDiagram`, `toFactorDiagram`).
+ * - Discrete factors: `discreteFactor`, `gateFactor` (a selector variable switching between factors, for mixtures and
+ *   model selection) and `discreteFactorGraph`; their algebra `factorProduct`, `factorProductAll`, `factorMarginalise`
+ *   (by sum or max), `factorReduce` (conditioning on evidence) and `normaliseFactor`; on a graph `logPotential`,
+ *   `factorGraphEdges`, `factorGraphNeighbours`, `bipartiteGraph`, `isTree` and `variableName`; and the row-major table
+ *   helpers `stridesOf`, `tableSize`, `valuesOf` and `forEachAssignment`.
+ * - `modelFunctions`: the module's functions as registry entries, keyed by name.
+ *
+ * A malformed model or factor throws `DomainError`, and a table of the wrong size `ShapeError`. Potentials are
+ * non-negative numbers, not logs, in row-major tables whose axes follow the factor's scope.
  */
 
 export {

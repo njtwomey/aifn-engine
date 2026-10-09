@@ -15,25 +15,47 @@ export type F64 = dense.F64
 /** The dense working-array helpers of `aifn-compute/foundation/tensor` (one definition), under their own names. */
 export const { allFinite, data, dot, mat, vec } = dense
 
-/** A copy of a vector argument; a number is a vector of length 1. */
+/**
+ * A copy of a vector argument; a number is a vector of length 1.
+ *
+ * @param v The vector: a number, an array of numbers or a rank-1 real tensor. It is copied, not modified.
+ * @param where The caller's name for error messages: a matrix or a non-vector throws `ShapeError` naming it.
+ * @returns A new working array of the values of `v`.
+ */
 export function toF64(v: VectorLike | number, where: string): F64 {
   return typeof v === 'number' ? Float64Array.of(v) : dense.toF64(v, where)
 }
 
-/** A number from a number, a one-element tensor or a traced value. */
+/**
+ * A number from a number, a one-element tensor or a traced value.
+ *
+ * @param v The value: a number, a tensor of one element, or a traced value wrapping either (unwrapped first).
+ * @returns Its single number; a tensor of more than one element throws in `item`.
+ */
 export function toNumber(v: Value): number {
   const raw = unwrap(v)
   return typeof raw === 'number' ? raw : item(raw)
 }
 
-/** The target's log-density at x as a number (−Infinity outside the support; NaN is reported as NaN). */
+/**
+ * The target's log-density at $\xvec$ as a number ($-\infty$ outside the support; NaN is reported as NaN).
+ *
+ * @param target The target whose `logDensity` is evaluated.
+ * @param x The point $\xvec$ as a working array of $d$ values; wrapped as a vector, not modified.
+ * @returns $\log \pi(\xvec)$, unnormalised as the target defines it.
+ */
 export function logDensityAt(target: LogDensity, x: F64): number {
   return toNumber(target.logDensity(dense.vec(x)))
 }
 
 /**
- * The log-density and its gradient at x: `target.grad` when given, otherwise reverse-mode autodiff of
- * `target.logDensity` (which must then be written with aifn primitives).
+ * The log-density and its gradient at $\xvec$: `target.grad` when given, otherwise reverse-mode autodiff of
+ * `target.logDensity` (which must then be written with aifn primitives). Throws `ShapeError` when `target.grad`
+ * returns other than $d$ values.
+ *
+ * @param target The target: its `logDensity`, and its `grad` when it has one.
+ * @param x The point $\xvec$ as a working array of $d$ values; not modified.
+ * @returns `value`, $\log \pi(\xvec)$, and `grad`, $\nabla \log \pi(\xvec)$ as a new working array of $d$ values.
  */
 export function logDensityAndGrad(target: LogDensity, x: F64): { value: number; grad: F64 } {
   if (target.grad) {
@@ -47,17 +69,36 @@ export function logDensityAndGrad(target: LogDensity, x: F64): { value: number; 
   return { value: toNumber(value as Value), grad: toF64(grad as Tensor, 'mcmc: autodiff gradient') }
 }
 
-/** n standard normal draws as a working array. */
+/**
+ * $n$ standard normal draws as a working array.
+ *
+ * @param s The stream the draws are taken from.
+ * @param n The number of draws.
+ * @returns $n$ independent $\Gauss(0, 1)$ values.
+ */
 export const standardNormals = (s: Stream, n: number): F64 => dense.data(normals(s, n))
 
-/** Per-coordinate values from a number or an array of length n. */
+/**
+ * Per-coordinate values from a number or an array of length $n$.
+ *
+ * @param v A number used for every coordinate, or one value per coordinate (copied).
+ * @param n The number of coordinates.
+ * @param where The caller's name for error messages: an array not of length $n$ throws `ShapeError` naming it.
+ * @returns A new working array of $n$ values.
+ */
 export function perCoordinate(v: number | ArrayLike<number>, n: number, where: string): F64 {
   if (typeof v === 'number') return new Float64Array(n).fill(v)
   if (v.length !== n) throw new ShapeError(where, `${where}: expected ${n} values, got ${v.length}`)
   return Float64Array.from(v)
 }
 
-/** Stack equal-length rows into an m×n tensor. */
+/**
+ * Stack equal-length rows into an $m \times n$ tensor.
+ *
+ * @param rows The $m$ rows, each of $n$ values; row `i` fills entries `i * n` to `i * n + n - 1`.
+ * @param n The length of every row (the number of columns), given so that $m = 0$ still has a shape.
+ * @returns A new $m \times n$ matrix.
+ */
 export function stackRows(rows: readonly ArrayLike<number>[], n: number): Tensor {
   const out = new Float64Array(rows.length * n)
   rows.forEach((r, i) => out.set(r, i * n))

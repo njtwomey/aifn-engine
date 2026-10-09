@@ -1,21 +1,22 @@
 /**
  * Bayesian online changepoint detection (Adams and MacKay, 2007, "Bayesian Online Changepoint Detection",
- * arXiv:0710.3742): the exact forward recursion over the run length rₜ, the number of observations since the last
+ * arXiv:0710.3742): the exact forward recursion over the run length $r_t$, the number of observations since the last
  * changepoint, for any segment model with a conjugate posterior.
  *
- * With a hazard H(τ) and each run's posterior predictive πₜ⁽ʳ⁾ = p(xₜ | rₜ₋₁ = r, x⁽ʳ⁾), every run either grows,
+ * With a hazard $H(\tau)$ and each run's posterior predictive $\pi_t^{(r)} = p(x_t \mid r_{t-1} = r, x^{(r)})$, every
+ * run either grows,
  *
- *   p(rₜ = r + 1, x₁:ₜ) = p(rₜ₋₁ = r, x₁:ₜ₋₁) πₜ⁽ʳ⁾ (1 − H(r + 1)),
+ * $p(r_t = r + 1, x_{1:t}) = p(r_{t-1} = r, x_{1:t-1})\, \pi_t^{(r)} (1 - H(r + 1))$,
  *
  * or all runs feed one changepoint,
  *
- *   p(rₜ = 0, x₁:ₜ) = Σᵣ p(rₜ₋₁ = r, x₁:ₜ₋₁) πₜ⁽ʳ⁾ H(r + 1),
+ * $p(r_t = 0, x_{1:t}) = \sum_r p(r_{t-1} = r, x_{1:t-1})\, \pi_t^{(r)} H(r + 1)$,
  *
- * and dividing by the evidence p(xₜ | x₁:ₜ₋₁) gives the run-length posterior. Everything is kept in log space. Each run
- * carries the statistics of its conjugate posterior (a count and running sums), updated by one term per observation;
- * the run at r = 0 starts from the prior. Run lengths whose posterior mass falls below a threshold, or beyond the
- * `maxRuns` most probable, are discarded and the rest renormalised, which bounds the cost per step (Adams and MacKay,
- * §2.4).
+ * and dividing by the evidence $p(x_t \mid x_{1:t-1})$ gives the run-length posterior. Everything is kept in log space.
+ * Each run carries the statistics of its conjugate posterior (a count and running sums), updated by one term per
+ * observation; the run at $r = 0$ starts from the prior, so the observation after a changepoint is the first of the
+ * new segment. Run lengths whose posterior mass falls below a threshold, or beyond the `maxRuns` most probable, are
+ * discarded and the rest renormalised, which bounds the cost per step (Adams and MacKay, §2.4).
  *
  * The segment models here are the conjugate families of the paper and its usual companions: a normal with known
  * variance (normal prior on the mean), a normal with unknown mean and precision (normal–gamma, Student t predictive),
@@ -49,11 +50,12 @@ export type RunStats = { readonly [name: string]: Tensor }
  * also holds what the next value is conditioned on (an autoregression's lags).
  */
 export interface ConjugatePredictive<O = number, S extends RunStats = RunStats> {
+  /** A readable name, for display (and in the name of `bocpd`'s algorithm). */
   readonly name: string
   /** The prior's statistics, as a single run (every field has a leading axis of length 1). */
   prior(): S
   /**
-   * The posterior predictive of the next observed value under each run: a batch of R. `x` supplies what the value is
+   * The posterior predictive of the next observed value under each run: a batch of $R$. `x` supplies what the value is
    * conditioned on, when the model needs it (lags); its own value is not used.
    */
   predictive(stats: S, x?: O): Univariate<Tensor>
@@ -64,12 +66,22 @@ export interface ConjugatePredictive<O = number, S extends RunStats = RunStats> 
 }
 
 /**
- * The hazard: a changepoint probability per step, constant (memoryless, geometric gaps with mean 1/H), or a function
- * of the run length τ = rₜ₋₁ + 1 giving H(τ) for each run.
+ * The hazard: a changepoint probability per step, constant (memoryless, geometric gaps with mean $1/H$), or a function
+ * of the run length $\tau = r_{t-1} + 1$ giving $H(\tau)$ for each run (a float64 tensor in, one of the same length
+ * out).
  */
 export type Hazard = number | ((tau: Tensor) => Tensor)
 
-/** The constant hazard of geometric gaps with mean `meanGap` λ: H = 1/λ (Adams and MacKay, §2.1). */
+/**
+ * The constant hazard of geometric gaps with mean `meanGap` $\lambda$: $H = 1/\lambda$ (Adams and MacKay, §2.1).
+ * A mean gap below 1 throws `DomainError`.
+ *
+ * @param meanGap The expected number of observations between changepoints $\lambda$, at least 1.
+ * @returns The probability $H$ of a changepoint at each step.
+ *
+ * @example A change every 250 steps on average
+ * print('H =', constantHazard(250))
+ */
 export function constantHazard(meanGap: number): number {
   if (!(meanGap >= 1))
     throw new DomainError('constantHazard', `constantHazard: the mean gap must be at least 1, got ${meanGap}`)
@@ -78,21 +90,21 @@ export function constantHazard(meanGap: number): number {
 
 // ── State ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The recursion's state after t observations. */
+/** The recursion's state after $t$ observations. */
 export interface BocpdState<S extends RunStats = RunStats> extends Status {
   /** Observations absorbed. */
   t: number
-  /** The run lengths still tracked, int32 [R] (ascending; not contiguous once pruning has removed some). */
+  /** The run lengths still tracked, int32 `[R]` (ascending; not contiguous once pruning has removed some). */
   runLengths: Tensor
-  /** log p(rₜ = runLengths[i] | x₁:ₜ), float64 [R], normalised. */
+  /** $\log p(r_t = \text{runLengths}[i] \mid x_{1:t})$, float64 `[R]`, normalised. */
   logPosterior: Tensor
   /** The conjugate statistics of each tracked run, aligned with `runLengths`. */
   stats: S
   /** The most probable run length. */
   map: number
-  /** log p(xₜ | x₁:ₜ₋₁), the one-step predictive log density of the last observation (0 at t = 0). */
+  /** $\log p(x_t \mid x_{1:t-1})$, the one-step predictive log density of the last observation (0 at $t = 0$). */
   logPredictive: number
-  /** log p(x₁:ₜ), summed over steps (the evidence, up to the mass discarded by pruning). */
+  /** $\log p(x_{1:t})$, summed over steps (the evidence, up to the mass discarded by pruning). */
   logEvidence: number
   /** Posterior mass discarded by pruning at the last step, before renormalising. */
   pruned: number
@@ -106,13 +118,25 @@ export interface BocpdOptions {
   hazard?: Hazard
   /** Drop run lengths whose posterior probability falls below this (default 0: exact). */
   threshold?: number
-  /** Keep at most this many run lengths, the most probable (default ∞). */
+  /** Keep at most this many run lengths, the most probable (default $\infty$). */
   maxRuns?: number
 }
 
-/** log Σ exp(vᵢ) of plain numbers, by the tensor reduction (one definition of the stable form). */
+/**
+ * $\log \sum_i \exp(v_i)$ of plain numbers, by the tensor reduction (one definition of the stable form).
+ *
+ * @param v The numbers $v_i$.
+ * @returns Their log-sum-exp ($-\infty$ for none).
+ */
 const logSumExp = (v: ArrayLike<number>): number => logsumexp(fromData(Float64Array.from(v))) as number
 
+/**
+ * The hazard of each run. A constant outside $[0, 1]$ throws `DomainError`; a function's values are not checked.
+ *
+ * @param hazard The constant hazard, or the function of the run length.
+ * @param tau The run length $\tau = r_{t-1} + 1$ of each run.
+ * @returns $H(\tau)$ for each run.
+ */
 function hazards(hazard: Hazard, tau: Float64Array): Float64Array {
   if (typeof hazard === 'number') {
     if (!(hazard >= 0 && hazard <= 1))
@@ -122,16 +146,39 @@ function hazards(hazard: Hazard, tau: Float64Array): Float64Array {
   return Float64Array.from(toFlat(hazard(fromData(tau))))
 }
 
+/**
+ * The statistics of the runs kept by pruning.
+ *
+ * @param stats The statistics of every run, each field with a leading axis of one entry per run.
+ * @param keep The indices of the runs to keep, ascending.
+ * @returns New statistics with only those runs, in that order.
+ */
 function takeRuns<S extends RunStats>(stats: S, keep: readonly number[]): S {
   const idx = fromData(Int32Array.from(keep))
   return Object.fromEntries(Object.entries(stats).map(([k, v]) => [k, take(v, idx) as Tensor])) as S
 }
 
+/**
+ * The statistics with the prior's run put first: the run of length 0 after a changepoint.
+ *
+ * @param prior The prior's statistics, one run.
+ * @param stats The statistics of the grown runs, with the same fields.
+ * @returns New statistics with one more run, the prior at index 0.
+ */
 function prepend<S extends RunStats>(prior: S, stats: S): S {
   return Object.fromEntries(Object.entries(prior).map(([k, v]) => [k, concat([v, stats[k]], 0)])) as S
 }
 
-/** The state before any observation: all mass at r₀ = 0, a changepoint just before x₁. */
+/**
+ * The state before any observation: all mass at $r_0 = 0$, a changepoint just before $x_1$.
+ *
+ * @param model The segment model, whose prior is the one run.
+ * @returns The initial state, with $t = 0$.
+ *
+ * @example One run of length 0, with all the mass
+ * const s = bocpdInit(normalKnownVariance())
+ * print('run lengths', s.runLengths, 'log posterior', s.logPosterior)
+ */
 export function bocpdInit<O, S extends RunStats>(model: ConjugatePredictive<O, S>): BocpdState<S> {
   return {
     t: 0,
@@ -148,7 +195,23 @@ export function bocpdInit<O, S extends RunStats>(model: ConjugatePredictive<O, S
 
 /**
  * One step of the recursion: absorb observation `x` into `state`. Pure; the lab calls it directly to feed values one
- * at a time (the algorithm `bocpd` steps through a fixed series with it).
+ * at a time (the algorithm `bocpd` steps through a fixed series with it). An invalid constant hazard throws
+ * `DomainError`.
+ *
+ * @param model The segment model.
+ * @param state The state before `x` (not modified).
+ * @param x The next observation.
+ * @param options The hazard (default 0.01) and the pruning (default none).
+ * @returns The state after `x`; `terminated` is false (the caller decides when a series ends).
+ *
+ * @example A jump starts a new run
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * let s = bocpdInit(model)
+ * for (const x of [0, 0.2, -0.1]) s = bocpdUpdate(model, s, x, { hazard: 0.1 })
+ * print('after three values near 0, MAP run length', s.map)
+ * const after = bocpdUpdate(model, s, 8, { hazard: 0.1 })
+ * print('after a jump to 8, MAP run length', after.map)
+ * print('p(r | x) for r =', after.runLengths, ':', exp(after.logPosterior))
  */
 export function bocpdUpdate<O, S extends RunStats>(
   model: ConjugatePredictive<O, S>,
@@ -219,8 +282,20 @@ export function bocpdUpdate<O, S extends RunStats>(
 }
 
 /**
- * Bayesian online changepoint detection over a fixed series, as an algorithm: step t absorbs `data[t]`, and the run
- * terminates after the last observation. `init` takes nothing.
+ * Bayesian online changepoint detection over a fixed series, as an algorithm: step $t$ absorbs `data[t]` by
+ * `bocpdUpdate`, and the run terminates after the last observation. `init` takes nothing.
+ *
+ * @param model The segment model.
+ * @param data The series, one observation per step.
+ * @param options The hazard (default 0.01) and the pruning, applied at every step.
+ * @returns The algorithm; it takes no start and draws no random numbers.
+ *
+ * @example Step through a series with one change
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * const data = [0, 0.1, -0.2, 5, 5.1, 4.9]
+ * const s = run(bocpd(model, data, { hazard: 0.1 }), undefined, 100)
+ * print('t =', s.t, 'terminated =', s.terminated)
+ * print('MAP run length', s.map, '(the last three values are one segment)')
  */
 export function bocpd<O, S extends RunStats>(
   model: ConjugatePredictive<O, S>,
@@ -237,7 +312,20 @@ export function bocpd<O, S extends RunStats>(
   }
 }
 
-/** The run-length posterior as a dense row p(rₜ = 0 … length − 1 | x₁:ₜ) (untracked run lengths are 0). */
+/**
+ * The run-length posterior as a dense row $p(r_t = 0, \dots, \text{length} - 1 \mid x_{1:t})$ (untracked run
+ * lengths are 0, and longer ones are left out).
+ *
+ * @param state The recursion's state.
+ * @param length The number of run lengths in the row, from 0.
+ * @returns A new array of `length` probabilities.
+ *
+ * @example The posterior after three observations
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * let s = bocpdInit(model)
+ * for (const x of [0, 0.1, 6]) s = bocpdUpdate(model, s, x, { hazard: 0.1 })
+ * print('p(r = 0 ... 4) =', runLengthRow(s, 5))
+ */
 export function runLengthRow(state: BocpdState, length: number): Float64Array {
   const out = new Float64Array(length)
   const r = toFlat(state.runLengths)
@@ -247,9 +335,20 @@ export function runLengthRow(state: BocpdState, length: number): Float64Array {
 }
 
 /**
- * The one-step forecast p(xₜ₊₁ | x₁:ₜ) = Σᵣ p(xₜ₊₁ | rₜ = r, x⁽ʳ⁾) p(rₜ = r | x₁:ₜ): its mean and variance (by the
- * law of total variance over the run-length mixture). `next` supplies what the next value is conditioned on, for
- * models that need it.
+ * The one-step forecast $p(x_{t+1} \mid x_{1:t}) = \sum_r p(x_{t+1} \mid r_t = r, x^{(r)})\, p(r_t = r \mid x_{1:t})$:
+ * its mean and variance (by the law of total variance over the run-length mixture). If the model's predictive throws
+ * (an autoregression given no regressors), the forecast is mean 0 and variance 1 rather than an error.
+ *
+ * @param model The segment model.
+ * @param state The recursion's state.
+ * @param next What the next value is conditioned on, for models that need it (its own value is not used).
+ * @returns The forecast's mean and variance.
+ *
+ * @example The forecast mixes the old level with the prior
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * let s = bocpdInit(model)
+ * for (const x of [2, 2.1, 1.9, 2]) s = bocpdUpdate(model, s, x, { hazard: 0.1 })
+ * print('forecast', bocpdForecast(model, s))
  */
 export function bocpdForecast<O, S extends RunStats>(
   model: ConjugatePredictive<O, S>,
@@ -274,10 +373,23 @@ export function bocpdForecast<O, S extends RunStats>(
 }
 
 /**
- * The one-step predictive density p(xₜ₊₁ = v | x₁:ₜ) = Σᵣ p(xₜ₊₁ = v | rₜ = r, x⁽ʳ⁾) p(rₜ = r | x₁:ₜ) at each value
- * v of `values`: the run-length mixture that `bocpdForecast` summarises by its mean and variance, for drawing. For a
- * count model the values should be integers (the result is then a probability mass). `next` supplies what the next
- * value is conditioned on, for models that need it.
+ * The one-step predictive density
+ * $p(x_{t+1} = v \mid x_{1:t}) = \sum_r p(x_{t+1} = v \mid r_t = r, x^{(r)})\, p(r_t = r \mid x_{1:t})$ at each value
+ * $v$ of `values`: the run-length mixture that `bocpdForecast` summarises by its mean and variance, for drawing. For a
+ * count model the values should be integers (the result is then a probability mass). If the model's predictive throws,
+ * the result is all zeros rather than an error.
+ *
+ * @param model The segment model.
+ * @param state The recursion's state.
+ * @param values The values $v$ at which to evaluate the density.
+ * @param next What the next value is conditioned on, for models that need it (its own value is not used).
+ * @returns A new array of the density at each value.
+ *
+ * @example A mixture of a narrow and a wide bump
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * let s = bocpdInit(model)
+ * for (const x of [2, 2.1, 1.9, 2]) s = bocpdUpdate(model, s, x, { hazard: 0.1 })
+ * print('p(x = -10, 0, 2, 10) =', bocpdPredictiveDensity(model, s, [-10, 0, 2, 10]))
  */
 export function bocpdPredictiveDensity<O, S extends RunStats>(
   model: ConjugatePredictive<O, S>,
@@ -301,7 +413,23 @@ export function bocpdPredictiveDensity<O, S extends RunStats>(
   }
 }
 
-/** The posterior probability P(lo ≤ rₜ < hi | x₁:ₜ) of a range of run lengths, e.g. of a change in the last w steps. */
+/**
+ * The posterior probability $\pr(\text{lo} \le r_t < \text{hi} \mid x_{1:t})$ of a range of run lengths, e.g. of a
+ * change in the last $w$ steps (`runLengthMass(state, 0, w)`).
+ *
+ * @param state The recursion's state.
+ * @param lo The smallest run length counted.
+ * @param hi The first run length not counted (default all above `lo`).
+ * @returns The probability, at most 1.
+ *
+ * @example How likely is a change in the last two steps?
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * let s = bocpdInit(model)
+ * for (const x of [0, 0.1, -0.1, 0]) s = bocpdUpdate(model, s, x, { hazard: 0.1 })
+ * print('before the jump:', runLengthMass(s, 0, 2))
+ * const after = bocpdUpdate(model, s, 6, { hazard: 0.1 })
+ * print('after the jump:', runLengthMass(after, 0, 2))
+ */
 export function runLengthMass(state: BocpdState, lo: number, hi = Infinity): number {
   const r = toFlat(state.runLengths)
   const lp = toFlat(state.logPosterior)
@@ -312,14 +440,18 @@ export function runLengthMass(state: BocpdState, lo: number, hi = Infinity): num
 
 /** The result of `detectChangepoints`. */
 export interface ChangepointDetection {
-  /** p(rₜ = r | x₁:ₜ) for t = 1 … n (rows) and r = 0 … maxRunLength (columns), float64 [n, maxRunLength + 1]. */
+  /**
+   * $p(r_t = r \mid x_{1:t})$ for $t = 1, \dots, n$ (rows) and $r = 0, \dots, \text{maxRunLength}$ (columns), float64
+   * `[n, maxRunLength + 1]`.
+   */
   posterior: Tensor
-  /** The most probable run length after each observation, int32 [n]. */
+  /** The most probable run length after each observation, int32 `[n]`. */
   map: Tensor
-  /** One-step forecasts of each observation from the ones before it: means and variances, float64 [n]. */
+  /** One-step forecast means of each observation from the ones before it, float64 `[n]`. */
   forecastMean: Tensor
+  /** One-step forecast variances, likewise. */
   forecastVariance: Tensor
-  /** log p(x₁:ₙ). */
+  /** $\log p(x_{1:n})$. */
   logEvidence: number
   /**
    * Estimated changepoints: indices t (0-based) where a segment begins, by backtracking the MAP run lengths
@@ -330,7 +462,21 @@ export interface ChangepointDetection {
 
 /**
  * Run the recursion over a whole series and collect the dense run-length posterior, the MAP run lengths, the one-step
- * forecasts and the changepoints they imply. `maxRunLength` (default n) caps the posterior's columns.
+ * forecasts and the changepoints they imply.
+ *
+ * @param model The segment model.
+ * @param data The series.
+ * @param options The hazard and pruning, as `bocpdUpdate` takes them, and `maxRunLength`, the largest run length kept
+ *   in the dense posterior (default $n$; it only caps the columns, not the recursion).
+ * @returns The dense posterior, the MAP run lengths, the forecasts, the log evidence and the changepoints.
+ *
+ * @example A shift in the mean is found where it happens
+ * const model = normalKnownVariance({ priorSd: 10 })
+ * const data = [0, 0.1, -0.2, 0.1, 5, 5.2, 4.9, 5.1]
+ * const d = detectChangepoints(model, data, { hazard: 0.1 })
+ * print('changepoints', d.changepoints)
+ * print('MAP run lengths', d.map)
+ * print('forecast means', d.forecastMean)
  */
 export function detectChangepoints<O, S extends RunStats>(
   model: ConjugatePredictive<O, S>,
@@ -363,10 +509,18 @@ export function detectChangepoints<O, S extends RunStats>(
 }
 
 /**
- * Changepoints read from the MAP run lengths after observations 0 … n − 1 (rₜ counts xₜ itself), by backtracking:
- * the last segment begins at s = n − map[n − 1], the one before it ends at s − 1 and begins at s − map[s − 1], and so
- * on. Transient dips of the MAP run length that later runs overrule leave no changepoint. Returns the segment starts
- * after 0, ascending.
+ * Changepoints read from the MAP run lengths after observations $0, \dots, n - 1$ ($r_t$ counts $x_t$ itself), by
+ * backtracking: the last segment begins at $s = n - \text{map}[n - 1]$, the one before it ends at $s - 1$ and begins
+ * at $s - \text{map}[s - 1]$, and so on. Transient dips of the MAP run length that later runs overrule leave no
+ * changepoint. Returns the segment starts after 0, ascending.
+ *
+ * @param map The MAP run length after each observation, as `detectChangepoints` or the states' `map` give it.
+ * @returns The 0-based indices where a segment begins, ascending, without 0.
+ *
+ * @example Backtrack the segments
+ * print('starts', mapChangepoints([1, 2, 3, 1, 2, 3]))
+ * // A dip at index 3 that the final run length of 6 overrules:
+ * print('starts', mapChangepoints([1, 2, 3, 1, 5, 6]))
  */
 export function mapChangepoints(map: ArrayLike<number>): number[] {
   const starts: number[] = []
@@ -382,16 +536,48 @@ export function mapChangepoints(map: ArrayLike<number>): number[] {
 
 // ── Conjugate segment models ─────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Numbers as a float64 vector.
+ *
+ * @param v The numbers, copied.
+ * @returns A new rank-1 tensor.
+ */
 const vec = (v: ArrayLike<number>): Tensor => fromData(Float64Array.from(v))
+/**
+ * One number as a length-1 vector: a statistic of the single prior run.
+ *
+ * @param v The number.
+ * @returns A rank-1 tensor of length 1.
+ */
 const one = (v: number): Tensor => vec([v])
 
+/**
+ * Throws `DomainError` unless `v` is positive and finite.
+ *
+ * @param what The parameter's name with its model's, for the error message.
+ * @param v The value to check.
+ */
 function positive(what: string, v: number): void {
   if (!(v > 0 && Number.isFinite(v))) throw new DomainError('positive', `${what} must be positive and finite, got ${v}`)
 }
 
 /**
- * A normal segment with known standard deviation σ and a normal prior μ ~ N(μ₀, σ₀²) on its mean. A run's posterior
- * is N(mean, 1/precision); the predictive is N(mean, 1/precision + σ²).
+ * A normal segment with known standard deviation $\sigma$ and a normal prior $\mu \sim \Gauss(\mu_0, \sigma_0^2)$ on
+ * its mean. A run's posterior is $\Gauss(\text{mean}, 1/\text{precision})$; the predictive is
+ * $\Gauss(\text{mean}, 1/\text{precision} + \sigma^2)$. A non-positive standard deviation throws `DomainError`.
+ *
+ * @param options The prior and the noise.
+ * @param options.mean The prior mean $\mu_0$ of a segment's level (default 0).
+ * @param options.priorSd The prior standard deviation $\sigma_0$ of a segment's level (default 1).
+ * @param options.sd The known noise standard deviation $\sigma$ within a segment (default 1).
+ * @returns The segment model; its statistics are each run's posterior `mean` and `precision`.
+ *
+ * @example One observation halves the uncertainty
+ * const m = normalKnownVariance({ mean: 0, priorSd: 1, sd: 1 })
+ * const s = m.update(m.prior(), 2)
+ * print('posterior mean', s.mean, 'precision', s.precision)
+ * const next = m.predictive(s)
+ * print('predictive mean', next.mean(), 'variance', next.variance())
  */
 export function normalKnownVariance({
   mean = 0,
@@ -423,9 +609,24 @@ export function normalKnownVariance({
 }
 
 /**
- * A normal segment with unknown mean and precision under a normal–gamma prior: λ ~ Gamma(α₀, β₀) (rate β₀), μ | λ ~
- * N(μ₀, 1/(κ₀λ)). The predictive is Student t with 2α degrees of freedom, location μ and scale √(β(κ + 1)/(ακ))
- * (Murphy, 2007, "Conjugate Bayesian analysis of the Gaussian distribution", §3.6).
+ * A normal segment with unknown mean and precision under a normal–gamma prior:
+ * $\lambda \sim \operatorname{Gamma}(\alpha_0, \beta_0)$ (rate $\beta_0$),
+ * $\mu \mid \lambda \sim \Gauss(\mu_0, 1/(\kappa_0\lambda))$. The predictive is Student t with $2\alpha$ degrees of
+ * freedom, location $\mu$ and scale $\sqrt{\beta(\kappa + 1)/(\alpha\kappa)}$ (Murphy, 2007, "Conjugate Bayesian
+ * analysis of the Gaussian distribution", §3.6). A non-positive `kappa`, `alpha` or `beta` throws `DomainError`.
+ *
+ * @param options The prior.
+ * @param options.mean The prior mean $\mu_0$ (default 0).
+ * @param options.kappa The prior's pseudo-count for the mean, $\kappa_0$ (default 1).
+ * @param options.alpha The shape $\alpha_0$ of the gamma prior on the precision (default 1).
+ * @param options.beta The rate $\beta_0$ of the gamma prior on the precision (default 1).
+ * @returns The segment model; its statistics are each run's `mean`, `kappa`, `alpha` and `beta`.
+ *
+ * @example One observation updates all four statistics
+ * const m = normalGamma()
+ * const s = m.update(m.prior(), 2)
+ * print('mean', s.mean, 'kappa', s.kappa, 'alpha', s.alpha, 'beta', s.beta)
+ * print('predictive mean', m.predictive(s).mean())
  */
 export function normalGamma({
   mean = 0,
@@ -469,9 +670,21 @@ export function normalGamma({
 }
 
 /**
- * Poisson counts with a gamma prior on the rate, λ ~ Gamma(shape, rate). A run with count sum s over r observations has
- * posterior Gamma(shape + s, rate + r); the predictive is negative binomial with r = shape and p = rate/(rate + 1),
- * counting failures.
+ * Poisson counts with a gamma prior on the rate, $\lambda \sim \operatorname{Gamma}(a, b)$ ($a$ = `shape`, $b$ =
+ * `rate`). A run with count sum $s$ over $n$ observations has posterior $\operatorname{Gamma}(a + s, b + n)$; the
+ * predictive is negative binomial with $r$ the posterior shape and success probability $p$ = rate/(rate + 1) of the
+ * posterior, counting failures (mean shape/rate). A non-positive `shape` or `rate` throws `DomainError`.
+ *
+ * @param options The prior.
+ * @param options.shape The shape $a$ of the gamma prior on the rate (default 1).
+ * @param options.rate The rate $b$ of the gamma prior on the rate (default 1).
+ * @returns The segment model; its statistics are each run's posterior `shape` and `rate`.
+ *
+ * @example A count of 3 moves the rate's mean from 1 to 2
+ * const m = poissonGamma({ shape: 1, rate: 1 })
+ * const s = m.update(m.prior(), 3)
+ * print('shape', s.shape, 'rate', s.rate)
+ * print('predictive mean', m.predictive(s).mean())
  */
 export function poissonGamma({ shape = 1, rate = 1 }: { shape?: number; rate?: number } = {}): ConjugatePredictive<
   number,
@@ -494,7 +707,21 @@ export function poissonGamma({ shape = 1, rate = 1 }: { shape?: number; rate?: n
   }
 }
 
-/** Bernoulli trials (0 or 1) with a beta prior p ~ Beta(α, β); the predictive is Bernoulli(α/(α + β)). */
+/**
+ * Bernoulli trials (0 or 1) with a beta prior $p \sim \operatorname{Beta}(\alpha, \beta)$; the predictive is
+ * $\Bern(\alpha/(\alpha + \beta))$. A non-positive `alpha` or `beta` throws `DomainError`.
+ *
+ * @param options The prior.
+ * @param options.alpha The prior count of ones, $\alpha$ (default 1).
+ * @param options.beta The prior count of zeros, $\beta$ (default 1).
+ * @returns The segment model; its statistics are each run's posterior `alpha` and `beta`.
+ *
+ * @example Two ones and a zero
+ * const m = betaBernoulli()
+ * let s = m.prior()
+ * for (const x of [1, 1, 0]) s = m.update(s, x)
+ * print('alpha', s.alpha, 'beta', s.beta, 'p(next = 1)', m.predictive(s).mean())
+ */
 export function betaBernoulli({ alpha = 1, beta = 1 }: { alpha?: number; beta?: number } = {}): ConjugatePredictive<
   number,
   { alpha: Tensor; beta: Tensor }
@@ -519,14 +746,25 @@ export function betaBernoulli({ alpha = 1, beta = 1 }: { alpha?: number; beta?: 
 
 /** One observation of an autoregression: the value `y` and its regressors `z` (lags, and 1 for an intercept). */
 export interface Regressed {
+  /** The observed value. */
   readonly y: number
+  /** Its regressors: the lags, newest first, then 1 for an intercept. */
   readonly z: readonly number[]
 }
 
 /**
- * A series as autoregression observations: for t ≥ p, y = x[t] and z = (x[t − 1], …, x[t − p]), with a trailing 1
- * when `intercept` is true (default). The first p values have no full lag vector and are dropped, so observation i is
- * x[i + p].
+ * A series as autoregression observations: for $t \ge p$, $y = x[t]$ and $\zvec = (x[t - 1], \dots, x[t - p])$, with a
+ * trailing 1 when `intercept` is true (default). The first $p$ values have no full lag vector and are dropped, so
+ * observation $i$ is $x[i + p]$.
+ *
+ * @param x The series.
+ * @param p The autoregressive order: the number of lags.
+ * @param options Whether to add an intercept.
+ * @param options.intercept Append a 1 to every regressor vector (default true).
+ * @returns The $\max(0, T - p)$ observations, each with $p$ (or $p + 1$) regressors.
+ *
+ * @example Two lags and an intercept
+ * print(laggedObservations([1, 2, 3, 4], 2))
  */
 export function laggedObservations(x: VectorLike, p: number, { intercept = true } = {}): Regressed[] {
   const v = isTensor(x) ? toFlat(x) : Array.from(x)
@@ -540,11 +778,30 @@ export function laggedObservations(x: VectorLike, p: number, { intercept = true 
 }
 
 /**
- * A linear-Gaussian regression segment, y = zᵀw + ε, ε ~ N(0, σ²), with the normal–inverse-gamma prior w | σ² ~
- * N(0, σ² V₀), V₀ = priorScale² I, and σ² ~ InvGamma(α, β). With lagged values as regressors (`laggedObservations`)
- * it detects switches between autoregressive regimes. Each run keeps the posterior mean w and scaled covariance V by
- * recursive least squares; the predictive is Student t with 2α degrees of freedom, location zᵀw and scale
- * √(β(1 + zᵀVz)/α) (Bishop, 2006, "Pattern Recognition and Machine Learning", §3.3 and exercise 3.12).
+ * A linear-Gaussian regression segment, $y = \zvec^\top\wvec + \varepsilon$, $\varepsilon \sim \Gauss(0, \sigma^2)$,
+ * with the normal–inverse-gamma prior $\wvec \mid \sigma^2 \sim \Gauss(\zeros, \sigma^2\Vmat_0)$,
+ * $\Vmat_0 = s^2\Imat$ ($s$ = `priorScale`), and $\sigma^2 \sim \operatorname{InvGamma}(\alpha, \beta)$. With lagged
+ * values as regressors (`laggedObservations`) it detects switches between autoregressive regimes. Each run keeps the
+ * posterior mean $\wvec$ and scaled covariance $\Vmat$ by recursive least squares; the predictive is Student t with
+ * $2\alpha$ degrees of freedom, location $\zvec^\top\wvec$ and scale $\sqrt{\beta(1 + \zvec^\top\Vmat\zvec)/\alpha}$
+ * (Bishop, 2006, "Pattern Recognition and Machine Learning", §3.3 and exercise 3.12). The predictive needs the next
+ * observation's regressors (it throws `TypeError` without them). Invalid options throw `DomainError`.
+ *
+ * @param options The size of the regression and its prior.
+ * @param options.dimension The number of regressors per observation (lags, plus one for an intercept); a positive
+ *   integer.
+ * @param options.priorScale The prior standard deviation $s$ of each weight, in units of the noise (default 1).
+ * @param options.alpha The shape $\alpha$ of the inverse-gamma prior on the noise variance (default 1).
+ * @param options.beta The scale $\beta$ of the inverse-gamma prior on the noise variance (default 1).
+ * @returns The segment model; its statistics are each run's `w` (`[R, p]`), `V` (`[R, p, p]`), `alpha` and `beta`.
+ *
+ * @example Learn a doubling series' coefficient
+ * // x[t] = 2 x[t - 1]: one lag and an intercept, so the weights should approach (2, 0).
+ * const m = regressionNormalGamma({ dimension: 2, priorScale: 10 })
+ * let s = m.prior()
+ * for (const o of laggedObservations([1, 2, 4, 8, 16, 32], 1)) s = m.update(s, o)
+ * print('w =', s.w)
+ * print('predictive mean after 32:', m.predictive(s, { y: NaN, z: [32, 1] }).mean())
  */
 export function regressionNormalGamma({
   dimension,

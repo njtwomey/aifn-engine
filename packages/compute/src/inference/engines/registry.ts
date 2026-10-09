@@ -1,5 +1,6 @@
 /**
- * The functions of `aifn-compute/inference/engines`.
+ * The functions of `aifn-compute/inference/engines`, registered with the notes they serve: `infer`, the automatic
+ * choice of an inference engine for a model.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

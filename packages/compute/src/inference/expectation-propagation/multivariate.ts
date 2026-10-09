@@ -1,21 +1,30 @@
 /**
- * Expectation propagation for a vector parameter θ ∈ ℝᵈ with a Gaussian prior N(μ₀, Σ₀) and n factors that each depend
- * on one linear projection, fᵢ(θ) = gᵢ(aᵢᵀθ): Gaussian process classification (aᵢ = eᵢ, θ the latent function at the
- * training inputs), Bayesian probit regression (aᵢ = xᵢ), and paired comparisons (aᵢ = e_winner − e_loser). Each site
- * is a scalar Gaussian in aᵢᵀθ, t̃ᵢ(θ) ∝ exp(−½ τ̃ᵢ (aᵢᵀθ)² + ν̃ᵢ aᵢᵀθ), so
+ * Expectation propagation for a vector parameter $\thetavec \in \reals^d$ with a Gaussian prior
+ * $\Gauss(\muvec_0, \Sigmamat_0)$ and $n$ factors that each depend on one linear projection,
+ * $f_i(\thetavec) = g_i(\avec_i^\top \thetavec)$: Gaussian process classification ($\avec_i = \evec_i$, $\thetavec$
+ * the latent function at the training inputs), Bayesian probit regression ($\avec_i = \xvec_i$), and paired
+ * comparisons ($\avec_i = \evec_\text{winner} - \evec_\text{loser}$). Each site is a scalar Gaussian in
+ * $u_i = \avec_i^\top \thetavec$,
+ * $\tilde{t}_i(\thetavec) \propto \exp(-\tfrac{1}{2} \tilde{\tau}_i u_i^2 + \tilde{\nu}_i u_i)$, so
  *
- *   q(θ) = N(μ, Σ),  Σ = (Σ₀⁻¹ + Aᵀ T̃ A)⁻¹,  μ = Σ(Σ₀⁻¹μ₀ + Aᵀν̃),  T̃ = diag(τ̃).
+ * $q(\thetavec) = \Gauss(\muvec, \Sigmamat)$, $\Sigmamat = (\Sigmamat_0^{-1} + \Amat^\top \tilde{\Tmat} \Amat)^{-1}$,
+ * $\muvec = \Sigmamat(\Sigmamat_0^{-1}\muvec_0 + \Amat^\top \tilde{\nuvec})$, $\tilde{\Tmat} = \diag(\tilde{\tauvec})$.
  *
- * A site update needs only the marginal of aᵢᵀθ under q, N(aᵢᵀμ, aᵢᵀΣaᵢ): the cavity, the tilted moments (the same
- * scalar `TiltedFn` as `expectationPropagation`, e.g. `probitTilted`) and the new site are the scalar algebra, and the
- * posterior moves by a rank-one update, Σ ← Σ − c (Σaᵢ)(Σaᵢ)ᵀ with c = Δτ̃/(1 + Δτ̃ aᵢᵀΣaᵢ) (Rasmussen & Williams,
- * 2006, Algorithm 3.5; Minka, 2001). At the end of every sweep Σ and μ are recomputed from the sites, which removes
- * the rounding the rank-one updates accumulate, by the push-through form
+ * A site update needs only the marginal of $\avec_i^\top \thetavec$ under $q$,
+ * $\Gauss(\avec_i^\top \muvec, \avec_i^\top \Sigmamat \avec_i)$: the cavity, the tilted moments (the same scalar
+ * `TiltedFn` as `expectationPropagation`, e.g. `probitTilted`) and the new site are the scalar algebra, and the
+ * posterior moves by a rank-one update,
+ * $\Sigmamat \leftarrow \Sigmamat - c (\Sigmamat \avec_i)(\Sigmamat \avec_i)^\top$ with
+ * $c = \Delta\tilde{\tau} / (1 + \Delta\tilde{\tau}\, \avec_i^\top \Sigmamat \avec_i)$ (Rasmussen & Williams, 2006,
+ * Algorithm 3.5; Minka, 2001). At the end of every sweep $\Sigmamat$ and $\muvec$ are recomputed from the sites,
+ * which removes the rounding the rank-one updates accumulate, by the push-through form
  *
- *   Σ = Σ₀ − Σ₀Aᵀ M⁻¹ T̃ A Σ₀,  M = I + T̃ A Σ₀ Aᵀ,
+ * $\Sigmamat = \Sigmamat_0 - \Sigmamat_0 \Amat^\top \Mmat^{-1} \tilde{\Tmat} \Amat \Sigmamat_0$,
+ * $\Mmat = \Imat + \tilde{\Tmat} \Amat \Sigmamat_0 \Amat^\top$,
  *
- * which needs neither Σ₀⁻¹ (a GP Gram matrix is often numerically singular) nor τ̃ ≥ 0. With α = 1 the run also
- * reports EP's log evidence (Minka 2001, eq. 3.30; R&W eq. 3.65), using |Σ|/|Σ₀| = 1/|M|.
+ * which needs neither $\Sigmamat_0^{-1}$ (a GP Gram matrix is often numerically singular) nor $\tilde{\tau} \ge 0$.
+ * With $\alpha = 1$ the run also reports EP's log evidence (Minka 2001, eq. 3.30; R&W eq. 3.65), using
+ * $\lvert \Sigmamat \rvert / \lvert \Sigmamat_0 \rvert = 1 / \lvert \Mmat \rvert$.
  */
 
 import type { Algorithm, Status } from 'aifn-compute/foundation/contracts'
@@ -30,17 +39,23 @@ type F64 = dense.F64
 
 /** The problem and options of {@link multivariateExpectationPropagation}. */
 export interface MvEpOptions {
-  /** The Gaussian prior N(μ₀, Σ₀) of θ, d-dimensional. */
+  /**
+   * The Gaussian prior $\Gauss(\muvec_0, \Sigmamat_0)$ of $\thetavec$, $d$-dimensional. A non-zero mean needs an
+   * invertible covariance (`ShapeError` otherwise).
+   */
   prior: { mean: Vector; covariance: Matrix }
-  /** Row i is the projection aᵢ that factor i depends on, [n, d]. Default: the identity (factor i depends on θᵢ). */
+  /**
+   * Row $i$ is the projection $\avec_i$ that factor $i$ depends on, $n \times d$. Default: the identity (factor $i$
+   * depends on $\theta_i$, and $n = d$).
+   */
   projections?: Matrix
-  /** Tilted moments of factor i (raised to `power`) against the cavity of aᵢᵀθ. */
+  /** Tilted moments of factor $i$ (raised to `power`) against the cavity of $\avec_i^\top \thetavec$. */
   tilted: TiltedFn
-  /** Weight of the old site in each update, in [0, 1). Default 0. */
+  /** Weight of the old site in each update, in $[0, 1)$. Default 0; outside $[0, 1)$ throws `DomainError`. */
   damping?: number
-  /** α for power EP. Default 1. */
+  /** $\alpha$ for power EP. Default 1. */
   power?: number
-  /** The order sites are visited within a sweep (default 0 … n − 1). */
+  /** The order sites are visited within a sweep (default $0, \dots, n - 1$). */
   order?: readonly number[]
   /** A sweep in which no site parameter moves more than this has converged. Default 1e-8. */
   tolerance?: number
@@ -48,54 +63,89 @@ export interface MvEpOptions {
 
 /** The state of multivariate EP after `t` site updates. */
 export interface MvEpState extends Status {
-  /** Site precisions τ̃ and shifts ν̃, [n]. */
+  /** Site precisions $\tilde{\tau}_i$ (length $n$). */
   sitePrecision: Tensor
+  /** Site shifts $\tilde{\nu}_i$ (length $n$). */
   siteShift: Tensor
-  /** log Z of each site's last tilted distribution and that update's cavity (natural parameters of aᵢᵀθ), [n]. */
+  /** $\log Z_i$ of each site's last tilted distribution, for the evidence (length $n$). */
   siteLogZ: Tensor
+  /** The cavity precision of $\avec_i^\top \thetavec$ at each site's last update (length $n$; 0 before it). */
   cavityPrecision: Tensor
+  /** The cavity shift of $\avec_i^\top \thetavec$ at each site's last update (length $n$). */
   cavityShift: Tensor
-  /** q(θ) = N(mean, covariance). */
+  /** The mean $\muvec$ of $q(\thetavec)$ (length $d$). */
   mean: Vector
+  /** The covariance $\Sigmamat$ of $q(\thetavec)$ ($d \times d$). */
   covariance: Matrix
-  /** The site updated last (−1 at the start), the cavity of aᵢᵀθ and the tilted moments that set it. */
+  /** The site visited last ($-1$ at the start). */
   site: number
+  /** The cavity of $\avec_i^\top \thetavec$ at the last update (NaN when it was improper). */
   cavity: GaussianMoments
+  /** The tilted moments of the last update (NaN when the cavity was improper). */
   tiltedMoments: Tilted
   /** False when the last cavity had non-positive precision or improper tilted moments (the update was skipped). */
   ok: boolean
+  /** Completed sweeps. */
   sweep: number
+  /** Position in `order` of the next site to update (0 at the start of a sweep). */
   position: number
-  /** Largest change of a site parameter in the last update, in this sweep, and in the last full sweep. */
+  /** Largest change of a site parameter in the last update. */
   change: number
+  /** Largest change of a site parameter in this sweep so far. */
   sweepChange: number
+  /** Largest change of a site parameter in the last full sweep ($\infty$ before the first). */
   lastSweepChange: number
-  /** Updates skipped in this sweep and in total. */
+  /** Updates skipped in this sweep. */
   skipped: number
+  /** Updates skipped in total. */
   totalSkipped: number
-  /** EP's log evidence as of the start or the last sweep's end (α = 1 and every site updated; NaN otherwise). */
+  /**
+   * EP's log evidence as of the last sweep's end ($\alpha = 1$ and every site updated; NaN otherwise, and before the
+   * first sweep ends).
+   */
   logEvidence: number
+  /** Whether the last full sweep moved no site parameter by more than `tolerance` and skipped none. */
   converged: boolean
 }
 
 /** The model as row-major arrays. */
 type Problem = {
+  /** The dimension $d$ of $\thetavec$. */
   d: number
+  /** The number of factors $n$. */
   n: number
+  /** The prior mean $\muvec_0$ (length $d$). */
   mu0: F64
+  /** The prior covariance $\Sigmamat_0$ ($d \times d$). */
   S0: F64
-  /** Projections [n, d], or null for the identity. */
+  /** Projections $\Amat$ ($n \times d$), or null for the identity. */
   A: F64 | null
-  /** Σ₀⁻¹μ₀ (null when μ₀ = 0), for the evidence. */
+  /** $\Sigmamat_0^{-1}\muvec_0$ (null when $\muvec_0 = \zeros$), for the evidence. */
   priorShift: F64 | null
-  /** ½ μ₀ᵀΣ₀⁻¹μ₀. */
+  /** $\tfrac{1}{2} \muvec_0^\top \Sigmamat_0^{-1} \muvec_0$. */
   priorQuad: number
 }
 
-/** log ∫ exp(−½ τ x² + ν x) dx = ν²/(2τ) + ½ log(2π/τ). */
+/**
+ * The Gaussian log-normaliser
+ * $\log \int \exp(-\tfrac{1}{2} \tau x^2 + \nu x)\,dx = \nu^2/(2\tau) + \tfrac{1}{2} \log(2\pi/\tau)$.
+ *
+ * @param tau The precision $\tau$ (positive).
+ * @param nu The shift $\nu$.
+ * @returns The log-normaliser.
+ */
 const logNormaliser = (tau: number, nu: number) => (nu * nu) / (2 * tau) + 0.5 * Math.log((2 * Math.PI) / tau)
 
-/** Σa and aᵀΣa, aᵀμ for projection i. */
+/**
+ * $\Sigmamat \avec_i$, $\avec_i^\top \Sigmamat \avec_i$ and $\avec_i^\top \muvec$ for projection $i$: the marginal of
+ * $\avec_i^\top \thetavec$ under $q$, and the direction of the rank-one update.
+ *
+ * @param p The problem, for $d$ and the projections.
+ * @param Sigma The current covariance $\Sigmamat$ (row-major, $d \times d$); not modified.
+ * @param mu The current mean $\muvec$ (length $d$).
+ * @param i The factor's index.
+ * @returns `Sa` ($\Sigmamat \avec_i$, a copy), `v` (the variance) and `m` (the mean).
+ */
 function marginal(p: Problem, Sigma: F64, mu: F64, i: number): { Sa: F64; v: number; m: number } {
   const { d, A } = p
   if (A === null) {
@@ -108,8 +158,16 @@ function marginal(p: Problem, Sigma: F64, mu: F64, i: number): { Sa: F64; v: num
 }
 
 /**
- * Σ, μ and log|M| from the sites by the push-through form (module notes). With G = AΣ₀ (n×d) and M = I + T̃ G Aᵀ:
- * Σ = Σ₀ − Gᵀ M⁻¹ T̃ G and μ = μ₀ − Gᵀ M⁻¹ T̃ A μ₀ + Σ Aᵀ ν̃. Null when M is singular.
+ * $\Sigmamat$, $\muvec$ and $\log \lvert \Mmat \rvert$ from the sites by the push-through form (the file comment).
+ * With $\Gmat = \Amat\Sigmamat_0$ ($n \times d$) and $\Mmat = \Imat + \tilde{\Tmat} \Gmat \Amat^\top$:
+ * $\Sigmamat = \Sigmamat_0 - \Gmat^\top \Mmat^{-1} \tilde{\Tmat} \Gmat$ and
+ * $\muvec = \muvec_0 - \Gmat^\top \Mmat^{-1} \tilde{\Tmat} \Amat \muvec_0 + \Sigmamat \Amat^\top \tilde{\nuvec}$.
+ * Null when $\Mmat$ is singular.
+ *
+ * @param p The problem.
+ * @param tau The site precisions $\tilde{\tau}$ (length $n$).
+ * @param nu The site shifts $\tilde{\nu}$ (length $n$).
+ * @returns The covariance (symmetrised), the mean and $\log \lvert \det \Mmat \rvert$, or null.
  */
 function refresh(p: Problem, tau: F64, nu: F64): { Sigma: F64; mu: F64; logDetM: number } | null {
   const { d, n, S0, mu0, A } = p
@@ -147,9 +205,22 @@ function refresh(p: Problem, tau: F64, nu: F64): { Sigma: F64; mu: F64; logDetM:
 }
 
 /**
- * EP's log evidence log ∫ p₀(θ) Πᵢ fᵢ(θ) dθ for α = 1: Σᵢ [log Zᵢ + A(cavityᵢ) − A(cavityᵢ · siteᵢ)] + A(q) − A(p₀),
- * A the Gaussian log-normaliser, with A(q) − A(p₀) = ½ μᵀ(Σ₀⁻¹μ₀ + Aᵀν̃) − ½ μ₀ᵀΣ₀⁻¹μ₀ − ½ log|M|. NaN until every site
- * has been updated with a proper cavity.
+ * EP's log evidence $\log \int p_0(\thetavec) \prod_i f_i(\thetavec)\,d\thetavec$ for $\alpha = 1$:
+ * $\sum_i [\log Z_i + A(q^{\setminus i}) - A(q^{\setminus i} \tilde{t}_i)] + A(q) - A(p_0)$, $A$ the Gaussian
+ * log-normaliser, with
+ * $A(q) - A(p_0) = \tfrac{1}{2} (\muvec^\top \hat{\nuvec} - \muvec_0^\top \hat{\nuvec}_0 - \log \lvert \Mmat \rvert)$,
+ * where $\hat{\nuvec}_0 = \Sigmamat_0^{-1}\muvec_0$ and $\hat{\nuvec} = \hat{\nuvec}_0 + \Amat^\top \tilde{\nuvec}$.
+ * NaN until every site has been updated with a proper cavity.
+ *
+ * @param p The problem, for the projections and the prior terms.
+ * @param mu The posterior mean $\muvec$ (from `refresh`).
+ * @param nu The site shifts $\tilde{\nu}$.
+ * @param tau The site precisions $\tilde{\tau}$.
+ * @param logZ Each site's last $\log Z_i$.
+ * @param ct Each site's last cavity precision.
+ * @param cn Each site's last cavity shift.
+ * @param logDetM $\log \lvert \det \Mmat \rvert$ (from `refresh`).
+ * @returns The log evidence, or NaN.
  */
 function logEvidenceOf(p: Problem, mu: F64, nu: F64, tau: F64, logZ: F64, ct: F64, cn: F64, logDetM: number): number {
   const { d, n, A } = p
@@ -165,10 +236,44 @@ function logEvidenceOf(p: Problem, mu: F64, nu: F64, tau: F64, logZ: F64, ct: F6
 }
 
 /**
- * Multivariate EP with rank-one sites as a traceable `Algorithm` (module notes): one site update per step, Σ and μ
- * recomputed at the end of every sweep, `converged` once a full sweep moves no site parameter by more than `tolerance`
- * and skips none. Improper cavities are skipped and counted, never hidden. `init` takes optional starting sites (a warm
- * start); by default every site is 1 (τ̃ = ν̃ = 0), so the first sweep is ADF.
+ * Multivariate EP with rank-one sites as a traceable `Algorithm` (see the file comment): one site update per step,
+ * $\Sigmamat$ and $\muvec$ recomputed at the end of every sweep, `converged` once a full sweep moves no site parameter
+ * by more than `tolerance` and skips none. Improper cavities are skipped and counted, never hidden; a singular
+ * $\Mmat$ when recomputing stops the run as `diverged`. `init` takes optional starting sites (a warm start); by
+ * default every site is 1 ($\tilde{\tau} = \tilde{\nu} = 0$), so the first sweep is ADF. Throws `ShapeError` for
+ * mismatched shapes (or a non-zero prior mean with a singular covariance) and `DomainError` for a `damping` outside
+ * $[0, 1)$.
+ *
+ * @param o The prior, the projections, the tilted-moment function, and the damping, power, order and tolerance.
+ * @returns The algorithm, to run with `run(alg, start, steps)`, `start` being `undefined` or the warm-start sites
+ *   `{ sitePrecision, siteShift }` (each of length $n$); a sweep is $n$ steps.
+ *
+ * @example A paired comparison: one site is exact
+ * // Skills θ ~ N(0, I) and player 0 beat player 1: one probit site on θ₀ − θ₁, Φ(θ₀ − θ₁) with no noise. With a
+ * // single site EP is the exact moment match, and the evidence is p(θ₀ > θ₁).
+ * const tilted = (i, c) => probitTilted(c.mean, c.variance, 1, { noiseVariance: 1e-12 })
+ * const alg = multivariateExpectationPropagation({
+ *   prior: { mean: tensor([0, 0]), covariance: tensor([[1, 0], [0, 1]]) },
+ *   projections: tensor([[1, -1]]),
+ *   tilted,
+ * })
+ * const s = run(alg, undefined, 10)
+ * print('mean =', s.mean)
+ * print('covariance =', s.covariance)
+ * print('evidence =', Math.exp(s.logEvidence))
+ *
+ * @example GP-style classification of three points
+ * // A correlated prior over the latent function at three inputs, with labels +1, +1, -1 through a probit.
+ * const y = [1, 1, -1]
+ * const K = tensor([[1, 0.8, 0.3], [0.8, 1, 0.5], [0.3, 0.5, 1]])
+ * const alg = multivariateExpectationPropagation({
+ *   prior: { mean: tensor([0, 0, 0]), covariance: K },
+ *   tilted: (i, c) => probitTilted(c.mean, c.variance, y[i]),
+ * })
+ * const s = run(alg, undefined, 300)
+ * print('latent means =', s.mean)
+ * print('sweeps =', s.sweep, 'converged =', s.converged)
+ * print('log evidence =', s.logEvidence)
  */
 export function multivariateExpectationPropagation(
   o: MvEpOptions,

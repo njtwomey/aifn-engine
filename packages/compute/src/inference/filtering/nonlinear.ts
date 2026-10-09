@@ -1,7 +1,13 @@
 /**
- * Nonlinear state-space filters for z_t = f(z_{t−1}) + w_t, y_t = h(z_t) + v_t with Gaussian noise: the extended
- * Kalman filter (linearise f and h by their Jacobians, from `aifn-compute/foundation/autodiff`) and the unscented Kalman filter
- * (propagate sigma points through f and h). Both return the linear filter's result shape and share its tensor algebra.
+ * Nonlinear state-space filters for $\zvec_t = f(\zvec_{t-1}) + \wvec_t$, $\yvec_t = h(\zvec_t) + \vvec_t$ with
+ * Gaussian noise $\wvec_t \sim \Gauss(\zeros, \Qmat)$, $\vvec_t \sim \Gauss(\zeros, \Rmat)$ and
+ * $\zvec_0 \sim \Gauss(\mvec_0, \Pmat_0)$: the extended Kalman filter (linearise $f$ and $h$ by their Jacobians, from
+ * `aifn-compute/foundation/autodiff`) and the unscented Kalman filter (propagate sigma points through $f$ and $h$).
+ *
+ * Both return the linear filter's `KalmanFilterResult` and share its tensor algebra and its conventions: $\zvec_0$ is
+ * not observed, so each step predicts before it updates, and a singular innovation covariance skips the update and is
+ * reported in `singularSteps`. Unlike the linear filter, a step whose observation has any NaN entry is a prediction
+ * only, and the shapes of $\Qmat$, $\Rmat$ and $\Pmat_0$ are not checked against each other.
  */
 
 import { jacobian } from 'aifn-compute/foundation/autodiff'
@@ -39,26 +45,47 @@ import {
 } from './gaussian'
 
 /**
- * A nonlinear state-space model. `f` and `h` take the state as a length-n vector and return a vector (n and m long).
- * For the extended filter they must be written with `aifn-compute/foundation/tensor` primitives so that `aifn-compute/foundation/autodiff` can
- * differentiate them (e.g. `stack([add(get(z, 0), get(z, 1)), sin(get(z, 0))])`).
+ * A nonlinear state-space model. `f` and `h` take the state as a length-$n$ vector and return a vector ($n$ and $m$
+ * long; a number counts as length 1). For the extended filter they must be written with
+ * `aifn-compute/foundation/tensor` primitives so that `aifn-compute/foundation/autodiff` can differentiate them (e.g.
+ * `stack([add(get(z, 0), get(z, 1)), sin(get(z, 0))])`).
  */
 export type NonlinearStateSpaceModel = {
+  /** The transition $f$: the mean of $\zvec_t$ given $\zvec_{t-1}$. */
   f: (z: Vector) => Value
+  /** The observation function $h$: the mean of $\yvec_t$ given $\zvec_t$. */
   h: (z: Vector) => Value
+  /** Process-noise covariance $\Qmat$ ($n \times n$). */
   Q: MatrixLike | number
+  /** Observation-noise covariance $\Rmat$ ($m \times m$). */
   R: MatrixLike | number
+  /** Mean $\mvec_0$ of $\zvec_0$ (length $n$; it sets $n$). */
   m0: VectorLike | number
+  /** Covariance $\Pmat_0$ of $\zvec_0$ ($n \times n$). */
   P0: MatrixLike | number
 }
 
-/** f(z) or h(z) as a float64 vector. */
+/**
+ * $f(\zvec)$ or $h(\zvec)$ as a float64 vector: a number becomes length 1 and a tensor of any rank is flattened.
+ * Anything else throws `ShapeError`.
+ *
+ * @param v What `f` or `h` returned.
+ * @param where The caller's name, for error messages.
+ * @returns The output as a vector.
+ */
 const asOutput = (v: Value, where: string): Vector => {
   if (typeof v === 'number') return tensor([v]) as Vector
   if (!isTensor(v)) throw new ShapeError(where, `${where}: f and h must return numbers or tensors`)
   return reshape(v, [-1]) as Vector
 }
 
+/**
+ * The model's covariances and initial mean as tensors (shapes not checked against each other).
+ *
+ * @param model The nonlinear model.
+ * @param where The caller's name, for error messages.
+ * @returns $\Qmat$, $\Rmat$, $\mvec_0$ and $\Pmat_0$ as tensors.
+ */
 function parse(model: NonlinearStateSpaceModel, where: string) {
   return {
     Q: asMatrix(model.Q, where),
@@ -69,9 +96,22 @@ function parse(model: NonlinearStateSpaceModel, where: string) {
 }
 
 /**
- * The update shared by both filters, given the predicted moments, the predicted observation ŷ, its covariance S and
- * the state–observation cross-covariance Σ_zy: K = Σ_zy S⁻¹ (solved as Kᵀ = S⁻¹ Σ_zyᵀ), μ = μ⁻ + K(y − ŷ),
- * P = P⁻ − K S Kᵀ. Appends the step to `out`.
+ * The update shared by both filters, given the predicted moments, the predicted observation $\hat\yvec$, its covariance
+ * $\Smat$ and the state–observation cross-covariance $\Sigmamat_{zy}$: $\Kmat = \Sigmamat_{zy}\Smat^{-1}$ (solved as
+ * $\Kmat^\top = \Smat^{-1}\Sigmamat_{zy}^\top$), $\muvec = \muvec^- + \Kmat(\yvec - \hat\yvec)$,
+ * $\Pmat = \Pmat^- - \Kmat\Smat\Kmat^\top$. Appends the step to `out`. An observation with any NaN entry skips
+ * the update (the step is the prediction, with term 0); a singular $\Smat$ skips it too, with term NaN.
+ *
+ * @param out The run so far; the step is appended to its `steps`, its term added to `logLikelihood`, and `t` to
+ *   `singularSteps` when $\Smat$ is singular. Modified in place.
+ * @param t The index of the step (0-based), recorded when $\Smat$ is singular.
+ * @param y The observation, $m$ numbers.
+ * @param predictedMean The predicted mean $\muvec^-$ (length $n$).
+ * @param predictedCov The predicted covariance $\Pmat^-$ ($n \times n$).
+ * @param yHat The predicted observation $\hat\yvec$ (length $m$).
+ * @param innovationCov The innovation covariance $\Smat$ ($m \times m$).
+ * @param cross The cross-covariance $\Sigmamat_{zy}$ ($n \times m$).
+ * @returns The step, as appended.
  */
 function update(
   out: FilterRun,
@@ -119,12 +159,32 @@ function update(
   return step
 }
 
+/** An empty run, for the filters to append their steps to. */
 const empty = (): FilterRun => ({ steps: [], logLikelihood: 0, singularSteps: [] })
 
 /**
- * The extended Kalman filter (Jazwinski, 1970; Särkkä, 2013, Algorithm 5.4): predict μ⁻ = f(μ), P⁻ = F P Fᵀ + Q with
- * F = ∂f/∂z at μ; update with H = ∂h/∂z at μ⁻, S = H P⁻ Hᵀ + R, K = P⁻ Hᵀ S⁻¹. Jacobians come from
- * `aifn-compute/foundation/autodiff`'s `jacobian`. The log-likelihood is that of the linearised model.
+ * The extended Kalman filter (Jazwinski, 1970; Särkkä, 2013, Algorithm 5.4): predict $\muvec^- = f(\muvec)$,
+ * $\Pmat^- = \Fmat\Pmat\Fmat^\top + \Qmat$ with $\Fmat = \partial f / \partial \zvec$ at $\muvec$; update with
+ * $\Hmat = \partial h / \partial \zvec$ at $\muvec^-$, $\Smat = \Hmat\Pmat^-\Hmat^\top + \Rmat$,
+ * $\Kmat = \Pmat^-\Hmat^\top\Smat^{-1}$. Jacobians come from `aifn-compute/foundation/autodiff`'s `jacobian`. The
+ * log-likelihood is that of the linearised model. For linear $f$ and $h$ it is the Kalman filter.
+ *
+ * @param model The model; `f` and `h` must be differentiable (written with tensor primitives).
+ * @param y The observations, `[T, m]` (or a length-$T$ vector when $m = 1$); a row with any NaN is skipped.
+ * @returns The predicted and filtered moments, gains, innovations and log-likelihood of every step, as
+ *   `kalmanFilter` returns them.
+ *
+ * @example On a linear model it is the Kalman filter
+ * const walk = { f: (z) => z, h: (z) => z, Q: 1, R: 1, m0: 0, P0: 0 }
+ * print('extended =', extendedKalmanFilter(walk, [1, 1, 1]).mean)
+ * print('kalman   =', kalmanFilter({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, [1, 1, 1]).mean)
+ *
+ * @example A state seen through its square
+ * // z grows by about 0.1 a step from 1, and is seen as y = z^2 + noise.
+ * const model = { f: (z) => add(z, 0.1), h: (z) => mul(z, z), Q: 0.001, R: 0.01, m0: 1, P0: 0.01 }
+ * const y = [1.25, 1.4, 1.72]
+ * print('filtered z =', extendedKalmanFilter(model, y).mean)
+ * print('sqrt(y) =', y.map(Math.sqrt))
  */
 export function extendedKalmanFilter(model: NonlinearStateSpaceModel, y: VectorLike | MatrixLike): KalmanFilterResult {
   const where = 'extendedKalmanFilter'
@@ -150,14 +210,43 @@ export function extendedKalmanFilter(model: NonlinearStateSpaceModel, y: VectorL
   return packFilter(out, n, R.shape[0])
 }
 
-/** Options of the unscented transform (Wan & van der Merwe, 2000): spread α, prior-knowledge β and secondary κ. */
+/**
+ * Options of the unscented transform (Wan & van der Merwe, 2000): `alpha`, the spread $\alpha$ of the sigma points
+ * (default 1); `beta`, the prior-knowledge parameter $\beta$ (default 2, optimal for a Gaussian); and `kappa`, the
+ * secondary scaling $\kappa$ (default 0).
+ */
 export type UnscentedOptions = { alpha?: number; beta?: number; kappa?: number }
 
 /**
- * The unscented Kalman filter (Julier & Uhlmann, 1997; Wan & van der Merwe, 2000): 2n + 1 sigma points
- * μ, μ ± √(n + λ) S_i with S Sᵀ = P and λ = α²(n + κ) − n, pushed through f (predict) and h (update), with mean
- * weights W₀ = λ/(n + λ), covariance weight W₀ + 1 − α² + β and 1/(2(n + λ)) for the rest. Defaults α = 1, β = 2,
- * κ = 0 (positive weights). The square root is a symmetric eigen-root, which exists for singular P.
+ * The unscented Kalman filter (Julier & Uhlmann, 1997; Wan & van der Merwe, 2000): $2n + 1$ sigma points
+ * $\muvec$, $\muvec \pm \sqrt{n + \lambda}\,\svec_i$ with $\svec_i$ the columns of $\Smat$, $\Smat\Smat^\top = \Pmat$
+ * and $\lambda = \alpha^2(n + \kappa) - n$, pushed through $f$ (predict) and, redrawn from the predicted moments,
+ * through $h$ (update), with mean weights $W_0 = \lambda/(n + \lambda)$, covariance weight
+ * $W_0 + 1 - \alpha^2 + \beta$ and $1/(2(n + \lambda))$ for the rest. Defaults $\alpha = 1$, $\beta = 2$,
+ * $\kappa = 0$ (non-negative weights). The square root is a symmetric eigen-root, which exists for singular $\Pmat$.
+ * `f` and `h` need not be differentiable.
+ *
+ * @param model The model.
+ * @param y The observations, `[T, m]` (or a length-$T$ vector when $m = 1$); a row with any NaN is skipped.
+ * @param options The unscented transform's parameters.
+ * @param options.alpha The spread $\alpha$ of the sigma points around the mean (default 1).
+ * @param options.beta The prior-knowledge parameter $\beta$, added to the centre point's covariance weight (default
+ *   2, optimal for a Gaussian).
+ * @param options.kappa The secondary scaling $\kappa$ (default 0).
+ * @returns The predicted and filtered moments, gains, innovations and log-likelihood of every step, as
+ *   `kalmanFilter` returns them.
+ *
+ * @example On a linear model it is the Kalman filter
+ * const walk = { f: (z) => z, h: (z) => z, Q: 1, R: 1, m0: 0, P0: 0 }
+ * print('unscented =', unscentedKalmanFilter(walk, [1, 1, 1]).mean)
+ * print('kalman    =', kalmanFilter({ A: 1, C: 1, Q: 1, R: 1, m0: 0, P0: 0 }, [1, 1, 1]).mean)
+ *
+ * @example A state seen through its square
+ * // z grows by about 0.1 a step from 1, and is seen as y = z^2 + noise.
+ * const model = { f: (z) => add(z, 0.1), h: (z) => mul(z, z), Q: 0.001, R: 0.01, m0: 1, P0: 0.01 }
+ * const y = [1.25, 1.4, 1.72]
+ * print('filtered z =', unscentedKalmanFilter(model, y).mean)
+ * print('sqrt(y) =', y.map(Math.sqrt))
  */
 export function unscentedKalmanFilter(
   model: NonlinearStateSpaceModel,
@@ -200,7 +289,12 @@ export function unscentedKalmanFilter(
   return packFilter(out, n, R.shape[0])
 }
 
-/** The rows of a matrix as vectors. */
+/**
+ * The rows of a matrix as vectors.
+ *
+ * @param a A matrix, $r \times c$.
+ * @returns $r$ new vectors of length $c$.
+ */
 function toRowsOf(a: Tensor): Vector[] {
   const [r, c] = a.shape
   const flat = toFlat(a)

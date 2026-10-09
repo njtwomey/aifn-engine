@@ -14,23 +14,32 @@ import type { ChainStart, ChainState, LogDensity, VectorLike } from './types'
 import { allFinite, data, logDensityAt, mat, standardNormals, toF64, vec, type F64 } from './util'
 import { DomainError, NumericalError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A full conditional: a draw of coordinate i given the current point x (whose coordinate i is ignored). */
+/**
+ * A full conditional: a draw of coordinate $i$ given the current point $\xvec$ (whose coordinate $i$ is ignored), from
+ * the stream it is given.
+ */
 export type Conditional = (x: Vector, s: Stream) => number
 
 /**
- * A block of a Gibbs sampler: the coordinates B it updates, a joint draw x_B ~ π(x_B | x₋B) (the values of x at B are
- * ignored), and optionally the conditional mean E[x_B | x₋B], which Rao–Blackwellised estimates average
- * (`conditionalMean`).
+ * A block of a Gibbs sampler: the coordinates $B$ it updates, a joint draw
+ * $\xvec_B \sim \pi(\xvec_B \mid \xvec_{-B})$ (the values of $\xvec$ at $B$ are ignored), and optionally the
+ * conditional mean $\expect[\xvec_B \mid \xvec_{-B}]$, which Rao–Blackwellised estimates average (`conditionalMean`).
  */
 export type Block = {
+  /** The indices of the coordinates in $B$, in the order `draw` and `mean` return their values. */
   readonly coordinates: readonly number[]
+  /** Draws $\xvec_B$ given the current point, one value per coordinate of $B$, from the stream it is given. */
   readonly draw: (x: Vector, s: Stream) => ArrayLike<number>
+  /** $\expect[\xvec_B \mid \xvec_{-B}]$ at the current point, one value per coordinate of $B$. */
   readonly mean?: (x: Vector) => ArrayLike<number>
 }
 
 /** The state of `gibbs`. `logDensity` is NaN: Gibbs never evaluates the joint. */
 export type GibbsState = ChainState & {
-  /** The path within the last step: the point before and after each block update, (updates + 1)×d. */
+  /**
+   * The path within the last step: the point before and after each block update, $(u + 1) \times d$ for $u$ updates
+   * per step.
+   */
   moves: Matrix
   /** The block updated at each move of the last step (int32; with one conditional per coordinate, the coordinate). */
   blocks: Tensor
@@ -40,20 +49,35 @@ export type GibbsState = ChainState & {
 
 /** Options for `gibbs`. */
 export type GibbsOptions = {
-  /** `systematic` updates blocks 0, 1, …, b − 1 in order; `random` picks each uniformly. Default systematic. */
+  /**
+   * `systematic` updates blocks $0, 1, \dots, b - 1$ in order (carrying on across steps where the last one stopped);
+   * `random` picks each uniformly. Default systematic.
+   */
   scan?: 'systematic' | 'random'
   /** Block updates per step (a sweep). Default the number of blocks. */
   updatesPerStep?: number
 }
 
-/** Blocks from conditionals: a function at index i is the conditional of coordinate i, a block of one. */
+/**
+ * Blocks from conditionals: a function at index $i$ is the conditional of coordinate $i$, a block of one.
+ *
+ * @param conditionals Conditionals and blocks, which may be mixed; a block is kept as it is.
+ * @returns One block per entry, in order.
+ */
 function asBlocks(conditionals: readonly Conditional[] | readonly Block[]): Block[] {
   return conditionals.map((c, i) =>
     typeof c === 'function' ? { coordinates: [i], draw: (x: Vector, s: Stream) => [(c as Conditional)(x, s)] } : c,
   )
 }
 
-/** The dimension the blocks cover, checking every coordinate below it is updated by some block. */
+/**
+ * The dimension the blocks cover, checking every coordinate below it is updated by some block. Throws `DomainError`
+ * for an empty block, a coordinate that is not a non-negative integer, or a coordinate no block updates.
+ *
+ * @param blocks The blocks to check.
+ * @param name The caller's name for error messages.
+ * @returns $d$, one more than the largest coordinate of any block (0 with no blocks).
+ */
 function blockDimension(blocks: readonly Block[], name: string): number {
   const d = Math.max(-1, ...blocks.flatMap((b) => b.coordinates)) + 1
   const covered = new Uint8Array(d)
@@ -71,11 +95,31 @@ function blockDimension(blocks: readonly Block[], name: string): number {
 
 /**
  * Gibbs sampling (Geman & Geman, 1984): replace one coordinate, or one block of coordinates, at a time by a draw from
- * its full conditional π(x_B | x₋B). Each update leaves π invariant, so both scans do; the random scan is also
- * reversible. Pass one `Conditional` per coordinate, or `Block`s: drawing strongly correlated coordinates jointly
- * (block Gibbs; Liu, Wong and Kong, 1994) removes the slow zig-zag of one-at-a-time updates. One step is one sweep of
- * `updatesPerStep` updates, and `moves` holds the path it traced. Update k of step t draws from
- * `child(ctx.stream, k)`.
+ * its full conditional $\pi(\xvec_B \mid \xvec_{-B})$. Each update leaves $\pi$ invariant, so both scans do; the
+ * random scan is also reversible. Pass one `Conditional` per coordinate, or `Block`s: drawing strongly correlated
+ * coordinates jointly (block Gibbs; Liu, Wong and Kong, 1994) removes the slow zig-zag of one-at-a-time updates. One
+ * step is one sweep of `updatesPerStep` updates, and `moves` holds the path it traced. Update $k$ of step $t$ draws
+ * from `child(ctx.stream, k)`. Throws `DomainError` when the blocks do not cover coordinates $0, \dots, d - 1$, and
+ * `ShapeError` when $\xvec_0$ or a block's draw has the wrong length.
+ *
+ * @param conditionals One `Conditional` per coordinate (entry $i$ draws coordinate $i$), or `Block`s whose coordinates
+ *   together cover $0, \dots, d - 1$.
+ * @param options The `scan` order and the number of `updatesPerStep`.
+ * @returns The sampler as an algorithm: start it from `{ x0 }` and run it with `run`, `trace` or `sampleChains`.
+ *
+ * @example One coordinate at a time on a correlated Gaussian
+ * const { draws } = sampleChains(gibbs(bivariateGaussianConditionals(0.8)), { x0: [0, 0] }, {
+ *   chains: 2, steps: 300, stream: stream(1),
+ * })
+ * const x = reshape(draws, [-1, 2])
+ * print('mean =', mean(x, 0))
+ * print('second moments =', div(matmul(transpose(x), x), x.shape[0]))
+ *
+ * @example The path of one sweep, and a joint block
+ * const one = run(gibbs(bivariateGaussianConditionals(0.95)), { x0: [1, 1] }, 1)
+ * print('coordinate-wise moves =', one.moves)
+ * const both = run(gibbs(gaussianConditionals([0, 0], [[1, 0.95], [0.95, 1]], [[0, 1]])), { x0: [1, 1] }, 1)
+ * print('block moves =', both.moves)
  */
 export function gibbs(
   conditionals: readonly Conditional[] | readonly Block[],
@@ -137,10 +181,25 @@ export function gibbs(
 }
 
 /**
- * The conditional mean of every coordinate, x ↦ (E[x_B | x₋B] for each block B), from blocks that all give `mean` (a
- * coordinate in several blocks takes the first). Averaged over a chain's draws (`raoBlackwell` in `./chains`), it is
- * the Rao–Blackwellised estimate of E[x] (Gelfand and Smith, 1990): unbiased like the plain average, and never of
- * larger variance for independent draws, since Var E[x_B | x₋B] ≤ Var x_B.
+ * The conditional mean of every coordinate, $\xvec \mapsto (\expect[\xvec_B \mid \xvec_{-B}]$ for each block
+ * $B)$, from blocks that all give `mean` (a coordinate in several blocks takes the first). Averaged over a chain's
+ * draws (`raoBlackwell` in `./chains`), it is the Rao–Blackwellised estimate of $\expect[\xvec]$ (Gelfand and Smith,
+ * 1990): unbiased like the plain average, and never of larger variance for independent draws, since
+ * $\var \expect[\xvec_B \mid \xvec_{-B}] \le \var \xvec_B$. Throws `DomainError` when a block has no `mean` or
+ * the blocks do not cover every coordinate.
+ *
+ * @param blocks Blocks covering coordinates $0, \dots, d - 1$, each with its `mean`.
+ * @returns A function from a point $\xvec$ ($d$ values) to the vector of conditional means ($d$ values).
+ *
+ * @example The conditional mean at a point
+ * const blocks = gaussianConditionals([0, 0], [[1, 0.8], [0.8, 1]])
+ * print('conditional means at x = (1, 2) =', conditionalMean(blocks)(tensor([1, 2])))
+ *
+ * @example A Rao–Blackwellised estimate of the mean
+ * const blocks = gaussianConditionals([1, -1], [[1, 0.8], [0.8, 1]])
+ * const { draws } = sampleChains(gibbs(blocks), { x0: [0, 0] }, { chains: 2, steps: 200, stream: stream(4) })
+ * print('plain average =', mean(reshape(draws, [-1, 2]), 0))
+ * print('Rao-Blackwellised =', raoBlackwell(draws, conditionalMean(blocks)).mean)
  */
 export function conditionalMean(blocks: readonly Block[]): (x: Vector) => Vector {
   const d = blockDimension(blocks, 'conditionalMean')
@@ -164,11 +223,38 @@ export function conditionalMean(blocks: readonly Block[]): (x: Vector) => Vector
 }
 
 /**
- * The full conditionals of N(μ, Σ) for a partition of the coordinates into blocks (default: one block per
- * coordinate). With Λ = Σ⁻¹, x_B | x₋B ~ N(μ_B − Λ_BB⁻¹ Λ_B,₋B (x₋B − μ₋B), Λ_BB⁻¹) (Bishop, 2006, eqs. 2.73 and 2.75
- * in precision form); each block gives its conditional mean too. For a bivariate Gaussian with correlation ρ and unit
- * variances the single-coordinate conditionals are x₁ | x₂ ~ N(ρx₂, 1 − ρ²): the closer |ρ| is to 1, the shorter each
- * zig-zag step and the slower the chain, unless both coordinates share a block.
+ * The full conditionals of $\Gauss(\muvec, \Sigmamat)$ for a partition of the coordinates into blocks (default: one
+ * block per coordinate). With $\Lambdamat = \Sigmamat^{-1}$,
+ * $\xvec_B \mid \xvec_{-B} \sim \Gauss(\mvec_B, \Lambdamat_{BB}^{-1})$ with
+ * $\mvec_B = \muvec_B - \Lambdamat_{BB}^{-1} \Lambdamat_{B,-B} (\xvec_{-B} - \muvec_{-B})$ (Bishop, 2006, eqs. 2.73
+ * and 2.75 in precision form); each block gives its conditional mean $\mvec_B$ too. For a bivariate
+ * Gaussian with correlation $\rho$ and unit variances the single-coordinate conditionals are
+ * $x_1 \mid x_2 \sim \Gauss(\rho x_2, 1 - \rho^2)$: the closer $\lvert \rho \rvert$ is to 1, the shorter each
+ * zig-zag step and the slower the chain, unless both coordinates share a block. $\Sigmamat$ is inverted once; a
+ * singular one throws from `inverse`, and a block whose precision $\Lambdamat_{BB}$ is not positive definite throws
+ * `NumericalError`.
+ *
+ * @param mean The mean $\muvec$ ($d$ values).
+ * @param covariance The covariance $\Sigmamat$ ($d \times d$), as a matrix or as rows.
+ * @param partition The blocks, each a list of coordinate indices; left out, each coordinate is a block of its own.
+ *   It is not checked to cover every coordinate here (`gibbs` checks).
+ * @returns One `Block` per part, with `draw` and `mean`, for `gibbs` and `conditionalMean`.
+ *
+ * @example A conditional mean by eye
+ * // With unit variances and correlation 0.8, E[x1 | x2] = 0.8 x2.
+ * const [first] = gaussianConditionals([0, 0], [[1, 0.8], [0.8, 1]])
+ * print('E[x1 | x2 = 1] =', first.mean(tensor([0, 1])))
+ * print('E[x1 | x2 = -2] =', first.mean(tensor([0, -2])))
+ *
+ * @example Coordinates, or one joint block
+ * // With one block covering both coordinates, each Gibbs step is an independent draw.
+ * const covariance = [[1, 0.95], [0.95, 1]]
+ * for (const partition of [undefined, [[0, 1]]]) {
+ *   const { draws } = sampleChains(gibbs(gaussianConditionals([0, 0], covariance, partition)), { x0: [0, 0] }, {
+ *     chains: 2, steps: 200, stream: stream(5),
+ *   })
+ *   print(partition ? 'one block:' : 'coordinates:', 'ESS =', effectiveSampleSize(draws))
+ * }
  */
 export function gaussianConditionals(
   mean: VectorLike,
@@ -218,7 +304,22 @@ export function gaussianConditionals(
   })
 }
 
-/** The full conditionals of the standard bivariate Gaussian with correlation ρ (unit variances, zero means). */
+/**
+ * The full conditionals of the standard bivariate Gaussian with correlation $\rho$ (unit variances, zero means):
+ * $x_1 \mid x_2 \sim \Gauss(\rho x_2, 1 - \rho^2)$ and the same with the coordinates swapped. Throws `DomainError`
+ * unless $\lvert \rho \rvert < 1$.
+ *
+ * @param rho The correlation $\rho$ between the two coordinates.
+ * @returns The two conditionals, of coordinate 0 and of coordinate 1, for `gibbs`.
+ *
+ * @example Strong correlation slows the chain
+ * for (const rho of [0, 0.5, 0.95]) {
+ *   const { draws } = sampleChains(gibbs(bivariateGaussianConditionals(rho)), { x0: [0, 0] }, {
+ *     chains: 2, steps: 200, stream: stream(6),
+ *   })
+ *   print(`rho = ${rho}: ESS of 400 draws =`, effectiveSampleSize(draws))
+ * }
+ */
 export function bivariateGaussianConditionals(rho: number): Conditional[] {
   if (!(Math.abs(rho) < 1))
     throw new DomainError('bivariateGaussianConditionals', 'bivariateGaussianConditionals: |ρ| must be below 1')
@@ -231,11 +332,13 @@ export function bivariateGaussianConditionals(rho: number): Conditional[] {
 
 /** The state of `sliceSampler`. */
 export type SliceState = ChainState & {
-  /** log y, the slice level drawn for each coordinate on the last sweep. */
+  /** $\log y$, the slice level drawn for each coordinate on the last sweep. */
   levels: Vector
-  /** The final bracket [L, R] (after stepping out and shrinking) for each coordinate on the last sweep, d×2. */
+  /**
+   * The final bracket $[L, R]$ (after stepping out and shrinking) for each coordinate on the last sweep, $d \times 2$.
+   */
   intervals: Matrix
-  /** The bracket after stepping out and before shrinking, d×2. */
+  /** The bracket after stepping out and before shrinking, $d \times 2$. */
   steppedOut: Matrix
   /** Shrinkage steps on the last sweep, per coordinate. */
   shrinks: Vector
@@ -245,17 +348,42 @@ export type SliceState = ChainState & {
 
 /** Options for `sliceSampler`. */
 export type SliceOptions = {
-  /** Initial bracket width w (one number or one per coordinate). Default 1. */
+  /** Initial bracket width $w$ (one number or one per coordinate). Default 1. */
   width?: number | ArrayLike<number>
-  /** Largest number of stepping-out steps m (Neal, 2003, Fig. 3). Default 32. */
+  /**
+   * Largest size $m$ of the stepped-out bracket, in widths (Neal, 2003, Fig. 3): at most $m - 1$ steps, split at
+   * random between the two ends. Default 32.
+   */
   maxSteps?: number
 }
 
 /**
  * Univariate slice sampling in turn along each coordinate (Neal, 2003, §4, stepping out and shrinkage, Figs. 3 and 5):
- * draw a level log y = log π(x) + log u, place a bracket of width w at random around xᵢ, step it out until both ends
- * leave the slice, then draw uniformly in it, shrinking towards xᵢ on each rejection. It needs no step-size tuning
- * beyond w and is exact. One step is one sweep; sweep t, coordinate i draws from `child(ctx.stream, i)`.
+ * draw a level $\log y = \log \pi(\xvec) + \log u$, place a bracket of width $w$ at random around $x_i$, step it
+ * out until both ends leave the slice, then draw uniformly in it, shrinking towards $x_i$ on each rejection. It needs
+ * no step-size tuning beyond $w$ and is exact. One step is one sweep; sweep $t$, coordinate $i$ draws from
+ * `child(ctx.stream, i)`. The start must lie in the support (`DomainError` otherwise).
+ *
+ * @param target The target $\pi$, through its (possibly unnormalised) `logDensity` and `dim`.
+ * @param options The bracket `width` $w$ and the stepping-out limit `maxSteps`.
+ * @returns The sampler as an algorithm: start it from `{ x0 }` and run it with `run`, `trace` or `sampleChains`.
+ *
+ * @example A standard normal
+ * const target = { kind: 'log-density', dim: 1, normalised: false, logDensity: (x) => mul(-0.5, sum(mul(x, x))) }
+ * const { draws, traces } = sampleChains(sliceSampler(target, { width: 2 }), { x0: [0] }, {
+ *   chains: 2, steps: 200, stream: stream(7),
+ * })
+ * print('mean =', mean(draws))
+ * print('variance =', variance(draws))
+ * print('evaluations per step =', traces[0].final.evaluations / 200)
+ *
+ * @example One sweep's bracket
+ * const target = { kind: 'log-density', dim: 1, normalised: false, logDensity: (x) => mul(-0.5, sum(mul(x, x))) }
+ * const s = run(sliceSampler(target, { width: 0.5 }), { x0: [0] }, 1)
+ * print('level log y =', s.levels)
+ * print('stepped out =', s.steppedOut)
+ * print('after shrinking =', s.intervals)
+ * print('new point =', s.x)
  */
 export function sliceSampler(target: LogDensity, options: SliceOptions = {}): Algorithm<ChainStart, SliceState> {
   const name = 'slice'

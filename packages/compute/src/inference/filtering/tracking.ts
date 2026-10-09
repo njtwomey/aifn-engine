@@ -1,7 +1,8 @@
 /**
  * How well a sequence of estimates tracks a known truth, and how quickly it follows a step: the lag to cover a fraction
  * of the step, the overshoot and the noise once settled, the root-mean-square error before and after the change, and
- * the coverage of an uncertainty band. For any filter or smoother run against simulated truth.
+ * the coverage of an uncertainty band. For any filter or smoother run against simulated truth. Non-finite errors are
+ * left out of the root-mean-square errors, and a metric with nothing to measure is NaN.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -12,7 +13,7 @@ export interface TrackingOptions {
   change?: number
   /** The fraction of the step that counts as followed (default 0.9). */
   level?: number
-  /** The band ±z·sd whose coverage is reported (default 1.96: a nominal 95 % band). */
+  /** The band $\pm z \cdot \text{sd}$ whose coverage is reported (default 1.96: a nominal 95 % band). */
   z?: number
   /** Indices before this are ignored by the errors and the coverage (default 0). */
   burnIn?: number
@@ -22,21 +23,36 @@ export interface TrackingOptions {
 export interface TrackingMetrics {
   /**
    * Values from the change until the estimate first covers `level` of the step, counting the first value after the
-   * change as 1: the smallest k ≥ 1 with (estimate[change + k − 1] − truth[change − 1])/Δ ≥ level, Δ the step. NaN
-   * without a change or when never reached.
+   * change as 1: the smallest $k \ge 1$ with $(\text{estimate}[c + k - 1] - \text{truth}[c - 1])/\Delta \ge$ `level`,
+   * $c$ the change and $\Delta$ the step. NaN without a change, for a step of 0, or when never reached.
    */
   lag: number
-  /** The largest excess of the estimate beyond the new truth, in the step's direction, from the lag on (≥ 0). */
+  /**
+   * The largest excess of the estimate beyond the truth, in the step's direction, from the value that reached `level`
+   * on ($\ge 0$; NaN when `lag` is).
+   */
   overshoot: number
-  /** The root-mean-square error once settled: from change + lag to the end. */
+  /** The root-mean-square error once settled: from $c + \text{lag}$ to the end (NaN when `lag` is). */
   noise: number
-  /** The root-mean-square error before the change (from `burnIn`) and from the change on. */
+  /** The root-mean-square error before the change, from `burnIn` (over every value from `burnIn` without a change). */
   rmseBefore: number
+  /** The root-mean-square error from the change on (NaN without a change). */
   rmseAfter: number
-  /** The fraction of values from `burnIn` whose truth lies within estimate ± z·sd (NaN without sds). */
+  /**
+   * The fraction of values from `burnIn` whose truth lies within $\text{estimate} \pm z \cdot \text{sd}$, over the
+   * values with a finite estimate and sd (NaN without sds).
+   */
   coverage: number
 }
 
+/**
+ * The root-mean-square of the finite entries of `e` in a range.
+ *
+ * @param e The errors.
+ * @param from The first index (clamped at 0).
+ * @param to The index after the last.
+ * @returns The root-mean-square, or NaN when the range has no finite entry.
+ */
 const rms = (e: Float64Array, from: number, to: number) => {
   let s = 0
   let n = 0
@@ -50,7 +66,18 @@ const rms = (e: Float64Array, from: number, to: number) => {
 
 /**
  * Lag, overshoot, settled noise, errors before and after a change, and band coverage of `estimate` (with optional
- * standard deviations `sd`) against `truth`, all of one length.
+ * standard deviations `sd`) against `truth`, all of one length (else `DomainError`).
+ *
+ * @param estimate The estimates, one per time step (e.g. a filter's means).
+ * @param truth The true values, as many.
+ * @param sd The estimates' standard deviations, for the coverage; null (default) leaves `coverage` NaN.
+ * @param options Where the step change is, what counts as following it, the band and the burn-in.
+ * @returns The metrics.
+ *
+ * @example A step from 0 to 1 at index 3, followed in two values
+ * const truth = [0, 0, 0, 1, 1, 1, 1, 1]
+ * const estimate = [0, 0.1, -0.1, 0.5, 0.95, 1.1, 1, 1]
+ * print(trackingMetrics(estimate, truth, new Array(8).fill(0.1), { change: 3 }))
  */
 export function trackingMetrics(
   estimate: ArrayLike<number>,

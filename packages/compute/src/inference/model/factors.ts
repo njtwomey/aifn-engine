@@ -3,8 +3,10 @@
  * marginalisation by sum or max, conditioning on evidence and normalisation (Koller & Friedman 2009, "Probabilistic
  * Graphical Models", §4.2 and §9.3; Kschischang, Frey & Loeliger 2001, "Factor graphs and the sum-product algorithm").
  *
- * A factor's table is a float64 tensor whose axes follow its scope: `table[a₀, a₁, …]` is the potential at
- * `x[scope[0]] = a₀, x[scope[1]] = a₁, …`. Potentials are non-negative (not logs).
+ * Variables are numbered $0, \dots, V - 1$, and variable $v$ takes the values $0, \dots, K_v - 1$, with $K_v$ its
+ * entry of the graph's `cardinalities`. A factor's table is a float64 tensor whose axes follow its scope: its entry at
+ * $(a_0, a_1, \dots)$ is the potential at $x_{s_0} = a_0, x_{s_1} = a_1, \dots$, where $s_i$ is `scope[i]`. Potentials
+ * are non-negative (not logs), and tables are read in row-major order.
  */
 
 import { shape, structuredGraph, type StructuredGraph } from 'aifn-compute/graph/structured'
@@ -13,31 +15,46 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** A potential over a few discrete variables; `table` has shape `scope.map((v) => cardinalities[v])`. */
 export interface DiscreteFactor {
+  /** The variables the factor depends on, in the order of the table's axes, without repeats. */
   scope: readonly number[]
+  /** The non-negative potentials, one axis per variable of `scope`. */
   table: Tensor
-  /** For display, e.g. `ψ₁₂`. */
+  /** A name for display, such as `p(x)` or `\psi_{12}`; `bipartiteGraph` uses it as the factor's label. */
   name?: string
 }
 
 /**
- * A discrete factor graph: variables 0 … V − 1 with the given cardinalities, and factors over them. The joint is
- * p(x) = (1/Z) Πₐ fₐ(x_{scope(a)}).
+ * A discrete factor graph: variables $0, \dots, V - 1$ with the given cardinalities, and factors over them. The joint
+ * is $p(\xvec) = \frac{1}{Z} \prod_a f_a(\xvec_{\text{scope}(a)})$.
  */
 export interface DiscreteFactorGraph {
+  /** The number of values of each variable, $K_v$ for variable $v$. */
   cardinalities: readonly number[]
+  /** The factors, each over variables of the graph. */
   factors: readonly DiscreteFactor[]
-  /** Variable names for display (default `x0`, `x1`, …). */
+  /** Variable names for display (default `x0`, `x1`, ...). */
   names?: readonly string[]
 }
 
 /** One edge of a factor graph: between variable `variable` and factor `factor`, at `position` in its scope. */
 export interface FactorGraphEdge {
+  /** The variable's index in the graph. */
   variable: number
+  /** The factor's index in the graph's `factors`. */
   factor: number
+  /** Where the variable sits in the factor's `scope`, which is the axis of its table. */
   position: number
 }
 
-/** Row-major strides of a table with these axis sizes. */
+/**
+ * Row-major strides of a table with these axis sizes: the step in the flat index for one step along each axis.
+ *
+ * @param shape The size of each axis of the table.
+ * @returns One stride per axis; the last is 1, and each other is the product of the sizes after it.
+ *
+ * @example The strides of a $2 \times 3 \times 4$ table
+ * print('strides:', stridesOf([2, 3, 4]))
+ */
 export function stridesOf(shape: readonly number[]): number[] {
   const strides = new Array<number>(shape.length)
   let s = 1
@@ -48,16 +65,47 @@ export function stridesOf(shape: readonly number[]): number[] {
   return strides
 }
 
-/** The number of entries of a table with these axis sizes. */
+/**
+ * The number of entries of a table with these axis sizes.
+ *
+ * @param shape The size of each axis of the table.
+ * @returns The product of the sizes: 1 for no axes (a constant factor).
+ *
+ * @example A $2 \times 3 \times 4$ table, and a table with no axes
+ * print('2 × 3 × 4:', tableSize([2, 3, 4]))
+ * print('no axes:', tableSize([]))
+ */
 export const tableSize = (shape: readonly number[]): number => shape.reduce((a, b) => a * b, 1)
 
-/** Contiguous float64 values of a table (a copy when the tensor is a strided view). */
+/**
+ * Contiguous float64 values of a table, in row-major order. The tensor's own storage is returned (so it must not be
+ * modified) when it is float64, starts at offset 0 and holds exactly one value per entry; its strides are not checked.
+ * Otherwise the entries are copied out in row-major order.
+ *
+ * @param t The table: a tensor of any shape.
+ * @returns Its entries in row-major order.
+ *
+ * @example The entries of a $2 \times 2$ table
+ * print(valuesOf(tensor([[1, 2], [3, 4]])))
+ */
 export const valuesOf = (t: Tensor): Float64Array =>
   t.data instanceof Float64Array && t.offset === 0 && t.data.length === tableSize(t.shape)
     ? t.data
     : Float64Array.from(toFlat(t))
 
-/** Visit every assignment of variables with these cardinalities in row-major order. */
+/**
+ * Visit every assignment of variables with these cardinalities in row-major order (the last variable changes
+ * fastest).
+ *
+ * @param shape The number of values of each variable, as the axis sizes of the table being visited.
+ * @param fn Called once per assignment with the assignment (one value per variable) and its flat row-major index. The
+ *   assignment array is reused and changed after each call: copy it to keep it.
+ *
+ * @example The six assignments of two variables with 2 and 3 values
+ * const seen = []
+ * forEachAssignment([2, 3], (a, flat) => seen.push(`${flat}: (${a[0]}, ${a[1]})`))
+ * print(seen)
+ */
 export function forEachAssignment(shape: readonly number[], fn: (assignment: Int32Array, flat: number) => void): void {
   const n = tableSize(shape)
   const a = new Int32Array(shape.length)
@@ -72,7 +120,34 @@ export function forEachAssignment(shape: readonly number[], fn: (assignment: Int
 
 /**
  * Build a factor from a scope, the graph's cardinalities and its values (a tensor, a flat array in row-major order, or
- * a function of the assignment). Throws on a negative or NaN potential.
+ * a function of the assignment). Throws `ShapeError` when the number of values does not match the table, and
+ * `DomainError` on a negative or NaN potential.
+ *
+ * @param scope The variables the factor is over, in the order of the table's axes.
+ * @param cardinalities The number of values of every variable of the graph, indexed by variable (not by position in
+ *   `scope`).
+ * @param values The potentials: a tensor or array whose entries, read in row-major order, fill the table, or a function
+ *   called with each assignment of the scope's variables (in `scope` order) that returns its potential. The values
+ *   are copied.
+ * @param name A name for display; left out, the factor has none.
+ * @returns The factor, its table of shape `scope.map((v) => cardinalities[v])`.
+ *
+ * @example A conditional probability table $p(x_1 \mid x_0)$
+ * const f = discreteFactor([0, 1], [2, 2], [0.9, 0.1, 0.2, 0.8], 'p(x1 | x0)')
+ * print('scope:', f.scope)
+ * print('table:', f.table)
+ *
+ * @example Potentials from a function of the assignment
+ * // An agreement potential over three values: 2 when the variables are equal, 1 otherwise.
+ * const f = discreteFactor([0, 1], [3, 3], (a) => (a[0] === a[1] ? 2 : 1))
+ * print('table:', f.table)
+ *
+ * @example A negative potential throws
+ * try {
+ *   discreteFactor([0], [2], [0.5, -0.5])
+ * } catch (e) {
+ *   print(e.message)
+ * }
  */
 export function discreteFactor(
   scope: readonly number[],
@@ -97,11 +172,30 @@ export function discreteFactor(
 }
 
 /**
- * A gate (Minka and Winn, 2008): a selector variable c with K values switches between K factors, so the gated factor is
- * φ(c = k, x) = fₖ(x) over c and the union of the cases' scopes (a case's potential is constant along variables it does
- * not touch). A gate makes mixtures, model selection and context-specific independence explicit in the factor graph,
- * and message passing through it is the usual sum–product. With `selector` given as an evidence-free variable, the
- * marginal of c is the posterior probability of each case.
+ * A gate (Minka and Winn, 2008, "Gates"): a selector variable $c$ with $K$ values switches between $K$ factors, so the
+ * gated factor is $\phi(c = k, \xvec) = f_k(\xvec)$ over $c$ and the union of the cases' scopes (a case's potential is
+ * constant along variables it does not touch). A gate makes mixtures, model selection and context-specific
+ * independence explicit in the factor graph, and message passing through it is the usual sum-product. With `selector`
+ * given as an evidence-free variable, the marginal of $c$ is the posterior probability of each case. Throws
+ * `ShapeError` when the number of cases is not the selector's number of values, and `DomainError` when a case depends
+ * on the selector.
+ *
+ * @param selector The variable $c$ that picks the case: case $k$ applies when $c = k$.
+ * @param cases The factors $f_0, \dots, f_{K-1}$, one per value of the selector, none of them over the selector.
+ * @param cardinalities The number of values of every variable of the graph, indexed by variable.
+ * @param name A name for display (default `gate`).
+ * @returns The gated factor, over the selector first and then the cases' variables in ascending order.
+ *
+ * @example Two cases of $p(x \mid c)$, and the posterior of the case given $x = 1$
+ * const cards = [2, 2] // variable 0 is the selector c, variable 1 is x
+ * const f0 = discreteFactor([1], cards, [0.9, 0.1])
+ * const f1 = discreteFactor([1], cards, [0.2, 0.8])
+ * const gate = gateFactor(0, [f0, f1], cards)
+ * print('scope:', gate.scope)
+ * print('table:', gate.table)
+ * const prior = discreteFactor([0], cards, [0.5, 0.5])
+ * const joint = factorReduce(factorProduct(prior, gate, cards), new Map([[1, 1]]))
+ * print('p(c | x = 1):', normaliseFactor(joint).factor.table)
  */
 export function gateFactor(
   selector: number,
@@ -132,7 +226,33 @@ export function gateFactor(
   )
 }
 
-/** Check a factor graph's scopes and table shapes; returns it unchanged. */
+/**
+ * A discrete factor graph from its cardinalities, factors and names, after checking every factor against the
+ * cardinalities. Throws `DomainError` when a factor names a variable out of range or repeats one in its scope, and
+ * `ShapeError` when a table's axis does not have its variable's number of values.
+ *
+ * @param cardinalities The number of values of each variable; its length is the number of variables. Copied.
+ * @param factors The factors, each over variables $0, \dots, V - 1$. Kept as given, not copied.
+ * @param names Display names, one per variable (copied); left out, variables are shown as `x0`, `x1`, ...
+ * @returns The graph.
+ *
+ * @example Two binary variables, $p(\text{rain})\,p(\text{wet} \mid \text{rain})$
+ * const cards = [2, 2]
+ * const g = discreteFactorGraph(
+ *   cards,
+ *   [discreteFactor([0], cards, [0.6, 0.4]), discreteFactor([0, 1], cards, [0.9, 0.1, 0.2, 0.8])],
+ *   ['rain', 'wet'],
+ * )
+ * print('cardinalities:', g.cardinalities)
+ * print('scopes:', g.factors.map((f) => f.scope))
+ *
+ * @example A table that does not match the cardinalities throws
+ * try {
+ *   discreteFactorGraph([2, 3], [discreteFactor([0, 1], [2, 2], [1, 1, 1, 1])])
+ * } catch (e) {
+ *   print(e.message)
+ * }
+ */
 export function discreteFactorGraph(
   cardinalities: readonly number[],
   factors: readonly DiscreteFactor[],
@@ -154,18 +274,52 @@ export function discreteFactorGraph(
   return { cardinalities: [...cardinalities], factors, ...(names ? { names: [...names] } : {}) }
 }
 
-/** The display name of variable v. */
+/**
+ * The display name of variable $v$: its entry of the graph's `names`, or `x<v>` when it has none.
+ *
+ * @param g The factor graph.
+ * @param v The variable's index.
+ * @returns The name.
+ *
+ * @example Named and unnamed variables
+ * const named = discreteFactorGraph([2, 2], [], ['rain', 'wet'])
+ * const plain = discreteFactorGraph([2, 2], [])
+ * print('named:', variableName(named, 1))
+ * print('plain:', variableName(plain, 1))
+ */
 export const variableName = (g: DiscreteFactorGraph, v: number): string => g.names?.[v] ?? `x${v}`
 
-/** Every (variable, factor) edge, grouped by factor in scope order. */
+/**
+ * Every (variable, factor) edge, grouped by factor in scope order.
+ *
+ * @param g The factor graph.
+ * @returns One edge per variable of each factor's scope: factor 0's first, in its scope's order, then factor 1's, and
+ *   so on.
+ *
+ * @example The edges of a chain $x_0 - f_0 - x_1 - f_1 - x_2$
+ * const c = [2, 2, 2]
+ * const g = discreteFactorGraph(c, [discreteFactor([0, 1], c, [1, 2, 2, 1]), discreteFactor([1, 2], c, [1, 2, 2, 1])])
+ * print(factorGraphEdges(g).map((e) => `x${e.variable} - f${e.factor} (position ${e.position})`))
+ */
 export function factorGraphEdges(g: DiscreteFactorGraph): FactorGraphEdge[] {
   return g.factors.flatMap((f, factor) => f.scope.map((variable, position) => ({ variable, factor, position })))
 }
 
 /**
- * The factor graph as a structured graph: nodes 0 … V − 1 are the variables (role `latent`, named `x<v>`, labelled
- * with their display names) and V … V + F − 1 the factors (role `factor`, named `f<k>`, labelled with their names);
- * edge k, undirected, is `factorGraphEdges(g)[k]`.
+ * The factor graph as a structured graph: nodes $0, \dots, V - 1$ are the variables (role `latent`, named `x<v>`,
+ * labelled with their display names) and $V, \dots, V + F - 1$ the factors (role `factor`, named `f<k>`, labelled with
+ * their names, or $f_k$ for a factor with none); edge $k$, undirected, is `factorGraphEdges(g)[k]`. No node is in a
+ * group.
+ *
+ * @param g The factor graph, with $V$ variables and $F$ factors.
+ * @returns The bipartite structured graph, whose node data holds the `variable` or `factor` index it stands for.
+ *
+ * @example Two variables joined by one factor
+ * const c = [2, 2]
+ * const g = discreteFactorGraph(c, [discreteFactor([0, 1], c, [1, 2, 2, 1], 'psi')], ['a', 'b'])
+ * const b = bipartiteGraph(g)
+ * print('nodes:', b.attributes.map((n) => `${n.name} (${n.role}, ${n.label})`))
+ * print('edges:', b.edges.map((e) => `${e.from} - ${e.to}`))
  */
 export function bipartiteGraph(g: DiscreteFactorGraph): StructuredGraph<{ variable?: number; factor?: number }> {
   return structuredGraph<{ variable?: number; factor?: number }>({
@@ -189,13 +343,41 @@ export function bipartiteGraph(g: DiscreteFactorGraph): StructuredGraph<{ variab
   })
 }
 
-/** True when the factor graph has no cycles (it is a tree or a forest), so sum-product is exact on it. */
+/**
+ * True when the factor graph has no cycles (it is a tree or a forest), so sum-product is exact on it. The test is on
+ * the bipartite graph of variables and factors (`bipartiteGraph`), so two factors sharing two variables make a cycle.
+ *
+ * @param g The factor graph.
+ * @returns Whether the variable-factor graph is acyclic.
+ *
+ * @example A chain is a tree; a triangle of pairwise factors is not
+ * const c = [2, 2, 2]
+ * const pair = (u, v) => discreteFactor([u, v], c, [2, 1, 1, 2])
+ * print('chain:', isTree(discreteFactorGraph(c, [pair(0, 1), pair(1, 2)])))
+ * print('triangle:', isTree(discreteFactorGraph(c, [pair(0, 1), pair(1, 2), pair(0, 2)])))
+ */
 export function isTree(g: DiscreteFactorGraph): boolean {
   const s = shape(bipartiteGraph(g))
   return s === 'chain' || s === 'tree'
 }
 
-/** The product of two factors, over the union of their scopes (a's variables first). */
+/**
+ * The product of two factors, over the union of their scopes (a's variables first): its potential at an assignment is
+ * the product of the two factors' potentials there. The result has no name.
+ *
+ * @param a The first factor; its variables come first in the result's scope.
+ * @param b The second factor; its variables not in `a` follow, in its own order.
+ * @param cardinalities The number of values of every variable of the graph, indexed by variable.
+ * @returns The product factor.
+ *
+ * @example The joint $p(x_0, x_1) = p(x_0)\,p(x_1 \mid x_0)$
+ * const cards = [2, 2]
+ * const prior = discreteFactor([0], cards, [0.6, 0.4])
+ * const likelihood = discreteFactor([0, 1], cards, [0.9, 0.1, 0.2, 0.8])
+ * const joint = factorProduct(prior, likelihood, cards)
+ * print('scope:', joint.scope)
+ * print('table:', joint.table)
+ */
 export function factorProduct(a: DiscreteFactor, b: DiscreteFactor, cardinalities: readonly number[]): DiscreteFactor {
   const scope = [...a.scope, ...b.scope.filter((v) => !a.scope.includes(v))]
   const shape = scope.map((v) => cardinalities[v])
@@ -218,7 +400,23 @@ export function factorProduct(a: DiscreteFactor, b: DiscreteFactor, cardinalitie
   return { scope, table: fromData(out, shape) }
 }
 
-/** The product of several factors; an empty list gives the constant factor 1. */
+/**
+ * The product of several factors, multiplied in order with `factorProduct`; an empty list gives the constant factor 1
+ * (empty scope).
+ *
+ * @param factors The factors to multiply; the result's scope lists their variables in order of first appearance.
+ * @param cardinalities The number of values of every variable of the graph, indexed by variable.
+ * @returns The product factor.
+ *
+ * @example Three factors of a chain, and the empty product
+ * // x0 is a fair coin, and x1 and x2 copy it.
+ * const c = [2, 2, 2]
+ * const copy = (u, v) => discreteFactor([u, v], c, [1, 0, 0, 1])
+ * const all = factorProductAll([discreteFactor([0], c, [0.5, 0.5]), copy(0, 1), copy(1, 2)], c)
+ * print('scope:', all.scope)
+ * print('table:', all.table)
+ * print('empty product:', factorProductAll([], c).table)
+ */
 export function factorProductAll(factors: readonly DiscreteFactor[], cardinalities: readonly number[]): DiscreteFactor {
   let out: DiscreteFactor = { scope: [], table: fromData(new Float64Array([1]), []) }
   for (const f of factors) out = factorProduct(out, f, cardinalities)
@@ -227,7 +425,18 @@ export function factorProductAll(factors: readonly DiscreteFactor[], cardinaliti
 
 /**
  * Sum (or maximise) the given variables out of a factor. With `mode: 'max'` the result is a max-marginal
- * (max-product).
+ * (max-product). The result has no name.
+ *
+ * @param f The factor.
+ * @param variables The variables to remove; any not in the factor's scope are ignored.
+ * @param mode `'sum'` adds the potentials over the removed variables' values, `'max'` keeps the largest.
+ * @returns A factor over the remaining variables, in their order in `f`.
+ *
+ * @example The marginal and the max-marginal of $x_1$
+ * const cards = [2, 2]
+ * const joint = discreteFactor([0, 1], cards, [0.54, 0.06, 0.08, 0.32])
+ * print('sum over x0:', factorMarginalise(joint, [0]).table)
+ * print('max over x0:', factorMarginalise(joint, [0], 'max').table)
  */
 export function factorMarginalise(
   f: DiscreteFactor,
@@ -248,7 +457,22 @@ export function factorMarginalise(
   return { scope, table: fromData(out, shape) }
 }
 
-/** Condition a factor on evidence (variable → observed value): the observed variables leave its scope. */
+/**
+ * Condition a factor on evidence: the observed variables leave its scope, and the table keeps the slice at their
+ * observed values. Not normalised (see `normaliseFactor`). The factor keeps its name.
+ *
+ * @param f The factor.
+ * @param evidence The observed value of each observed variable, keyed by variable; variables not in the factor's scope
+ *   are ignored. Values are not range-checked.
+ * @returns The reduced factor, or `f` itself when no observed variable is in its scope.
+ *
+ * @example Observe $x_1 = 1$ in $p(x_0, x_1)$, then normalise for $p(x_0 \mid x_1 = 1)$
+ * const joint = discreteFactor([0, 1], [2, 2], [0.54, 0.06, 0.08, 0.32])
+ * const reduced = factorReduce(joint, new Map([[1, 1]]))
+ * print('scope:', reduced.scope)
+ * print('p(x0, x1 = 1):', reduced.table)
+ * print('p(x0 | x1 = 1):', normaliseFactor(reduced).factor.table)
+ */
 export function factorReduce(f: DiscreteFactor, evidence: ReadonlyMap<number, number>): DiscreteFactor {
   const keep = f.scope.map((v, i) => (evidence.has(v) ? -1 : i)).filter((i) => i >= 0)
   if (keep.length === f.scope.length) return f
@@ -268,7 +492,20 @@ export function factorReduce(f: DiscreteFactor, evidence: ReadonlyMap<number, nu
   return { scope: keep.map((i) => f.scope[i]), table: fromData(out, shape), ...(f.name ? { name: f.name } : {}) }
 }
 
-/** A factor scaled to sum to one, with the log of the sum it had (−∞ for an all-zero factor, which stays zero). */
+/**
+ * A factor scaled to sum to one, with the log of the sum it had ($-\infty$ for an all-zero factor, which is returned
+ * as it is).
+ *
+ * @param f The factor; not modified.
+ * @returns `factor`, the scaled factor (with `f`'s scope and name), and `logNormaliser`, $\log Z$ for $Z$ the sum of
+ *   `f`'s potentials.
+ *
+ * @example Scale to sum to one, and an all-zero factor
+ * const { factor, logNormaliser } = normaliseFactor(discreteFactor([0], [2], [1, 3]))
+ * print('factor:', factor.table)
+ * print('log Z:', logNormaliser, '= log 4:', Math.log(4))
+ * print('all zero:', normaliseFactor(discreteFactor([0], [2], [0, 0])).logNormaliser)
+ */
 export function normaliseFactor(f: DiscreteFactor): { factor: DiscreteFactor; logNormaliser: number } {
   const v = valuesOf(f.table)
   let z = 0
@@ -286,14 +523,42 @@ export function normaliseFactor(f: DiscreteFactor): { factor: DiscreteFactor; lo
   }
 }
 
-/** The variables sharing a factor with v (its Markov blanket in the factor graph), ascending. */
+/**
+ * The variables sharing a factor with $v$ (its Markov blanket in the factor graph), ascending.
+ *
+ * @param g The factor graph.
+ * @param v The variable's index.
+ * @returns The other variables of every factor whose scope holds $v$, without repeats.
+ *
+ * @example The middle of a chain $x_0 - x_1 - x_2$ and its end
+ * const c = [2, 2, 2]
+ * const g = discreteFactorGraph(c, [discreteFactor([0, 1], c, [1, 2, 2, 1]), discreteFactor([1, 2], c, [1, 2, 2, 1])])
+ * print('neighbours of x1:', factorGraphNeighbours(g, 1))
+ * print('neighbours of x0:', factorGraphNeighbours(g, 0))
+ */
 export function factorGraphNeighbours(g: DiscreteFactorGraph, v: number): number[] {
   const out = new Set<number>()
   for (const f of g.factors) if (f.scope.includes(v)) for (const u of f.scope) if (u !== v) out.add(u)
   return [...out].sort((a, b) => a - b)
 }
 
-/** The unnormalised log-probability Σₐ log fₐ(x) of a full assignment. */
+/**
+ * The unnormalised log-probability $\sum_a \log f_a(\xvec_{\text{scope}(a)})$ of a full assignment: $-\infty$ when a
+ * factor is zero there. Values are not range-checked.
+ *
+ * @param g The factor graph.
+ * @param assignment A value for every variable, indexed by variable.
+ * @returns The sum of the logs of the factors' potentials at the assignment.
+ *
+ * @example $\log p(\text{rain} = 0, \text{wet} = 1) = \log(0.6 \times 0.1)$
+ * const cards = [2, 2]
+ * const g = discreteFactorGraph(cards, [
+ *   discreteFactor([0], cards, [0.6, 0.4]),
+ *   discreteFactor([0, 1], cards, [0.9, 0.1, 0.2, 0.8]),
+ * ])
+ * print('log potential:', logPotential(g, [0, 1]))
+ * print('log 0.06:', Math.log(0.06))
+ */
 export function logPotential(g: DiscreteFactorGraph, assignment: ArrayLike<number>): number {
   let total = 0
   for (const f of g.factors) {

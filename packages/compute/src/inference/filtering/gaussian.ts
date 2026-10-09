@@ -1,8 +1,11 @@
 /**
- * The Gaussian algebra the state-space filters share, on tensors: reading model arguments as matrices and vectors,
- * the products A B Aᵀ and (A + Aᵀ)/2, a solve that reports a singular system instead of throwing (with log |det|), the
- * positive semi-definite square root, and stacking per-step results. Arithmetic is `aifn-compute/foundation/tensor`'s and
- * factorisations are `aifn-compute/numerics/linalg`'s, so nothing here is a second definition.
+ * Internal helpers: the Gaussian algebra the state-space filters share, on tensors.
+ *
+ * They read model arguments as matrices and vectors, form the products $\Amat\Bmat\Amat^\top$ and
+ * $(\Amat + \Amat^\top)/2$, solve a system reporting a singular one instead of throwing (with
+ * $\log\lvert\det\Amat\rvert$), take the positive semi-definite square root, and stack per-step results.
+ * Arithmetic is `aifn-compute/foundation/tensor`'s and factorisations are `aifn-compute/numerics/linalg`'s, so nothing
+ * here is a second definition.
  */
 
 import type { MatrixLike, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -28,7 +31,14 @@ import { eigh, luFactor, luSolve } from 'aifn-compute/numerics/linalg'
 
 export type { MatrixLike, VectorLike } from 'aifn-compute/foundation/contracts'
 
-/** A matrix argument as a float64 [r, c] tensor; a number or a scalar tensor is 1×1. */
+/**
+ * A matrix argument as a float64 `[r, c]` tensor; a number or a scalar tensor is $1 \times 1$. A matrix tensor is
+ * returned as it is, not copied. Throws `ShapeError` for a tensor of rank above 2 or a vector, and for ragged rows.
+ *
+ * @param a The matrix: a number, a tensor, or an array of rows.
+ * @param where The caller's name, for error messages.
+ * @returns The matrix as a tensor.
+ */
 export function asMatrix(a: MatrixLike | number, where: string): Matrix {
   if (typeof a === 'number') return tensor([[a]]) as Matrix
   if (isTensor(a)) {
@@ -42,7 +52,14 @@ export function asMatrix(a: MatrixLike | number, where: string): Matrix {
   return fromData(Float64Array.from(rows.flat()), [rows.length, rows[0]?.length ?? 0]) as Matrix
 }
 
-/** A vector argument as a float64 [n] tensor; a number is length 1. */
+/**
+ * A vector argument as a float64 `[n]` tensor; a number or a scalar tensor has length 1. Throws `ShapeError` for a
+ * tensor of rank above 1.
+ *
+ * @param v The vector: a number, a tensor or an array of numbers.
+ * @param where The caller's name, for error messages.
+ * @returns The vector as a tensor (a rank-1 tensor is returned as it is).
+ */
 export function asVector(v: VectorLike | number, where: string): Vector {
   if (typeof v === 'number') return tensor([v]) as Vector
   if (isTensor(v)) {
@@ -53,7 +70,15 @@ export function asVector(v: VectorLike | number, where: string): Vector {
   return fromData(Float64Array.from(v as ArrayLike<number>)) as Vector
 }
 
-/** Observations as T rows of m numbers: a vector is T scalar observations, a matrix is T×m. NaN marks a missing value. */
+/**
+ * Observations as $T$ rows of $m$ numbers: a vector is $T$ scalar observations, a matrix is $T \times m$. NaN marks
+ * a missing value, and is kept. Ragged rows throw `ShapeError`.
+ *
+ * @param y The series: a vector (one scalar per step) or a matrix, as a tensor or nested arrays, with one row per
+ *   time step.
+ * @param where The caller's name, for error messages.
+ * @returns A new array of $T$ rows, each an array of $m$ numbers.
+ */
 export function asSeries(y: VectorLike | MatrixLike, where: string): number[][] {
   if (isTensor(y)) {
     if (y.shape.length === 1) return toFlat(y).map((v) => [v])
@@ -68,15 +93,31 @@ export function asSeries(y: VectorLike | MatrixLike, where: string): number[][] 
   return rows
 }
 
-/** (A + Aᵀ)/2, to remove the asymmetry rounding leaves in a covariance. */
+/**
+ * $(\Amat + \Amat^\top)/2$, to remove the asymmetry rounding leaves in a covariance.
+ *
+ * @param a A square matrix $\Amat$.
+ * @returns Its symmetric part, a new tensor.
+ */
 export const symmetrise = (a: Tensor): Tensor => mul(0.5, add(a, transpose(a))) as Tensor
 
-/** A B Aᵀ. */
+/**
+ * $\Amat\Bmat\Amat^\top$: a covariance $\Bmat$ carried through the linear map $\Amat$.
+ *
+ * @param a The map $\Amat$ ($r \times n$).
+ * @param b The matrix $\Bmat$ ($n \times n$).
+ * @returns The $r \times r$ product.
+ */
 export const sandwich = (a: Tensor, b: Tensor): Tensor => matmul(matmul(a, b), transpose(a)) as Tensor
 
 /**
- * X with A X = B and log |det A| by one LU factorisation (`aifn-compute/numerics/linalg`), or null when A is singular to
- * working precision (a pivot at most n·ε·max|A|): the caller reports it rather than dividing by zero.
+ * $\Xmat$ with $\Amat\Xmat = \Bmat$ and $\log\lvert\det\Amat\rvert$ by one LU factorisation
+ * (`aifn-compute/numerics/linalg`), or null when $\Amat$ is singular to working precision (a pivot at most
+ * $n \varepsilon \max_{ij}\lvert A_{ij}\rvert$): the caller reports it rather than dividing by zero.
+ *
+ * @param a The square matrix $\Amat$ ($n \times n$).
+ * @param b The right-hand side $\Bmat$: a vector of $n$ values or an $n \times r$ matrix.
+ * @returns `x`, the solution with the shape of `b`, and `logAbsDet`; or null for a singular $\Amat$.
  */
 export function solveOrNull(a: Tensor, b: Tensor): { x: Tensor; logAbsDet: number } | null {
   const f = luFactor(a)
@@ -86,10 +127,13 @@ export function solveOrNull(a: Tensor, b: Tensor): { x: Tensor; logAbsDet: numbe
 }
 
 /**
- * A square root S with S Sᵀ = A for a symmetric positive semi-definite A, from the symmetric eigendecomposition:
- * S = V diag(√max(λ, 0)). Unlike a Cholesky factor it exists for singular A (a noise covariance with a deterministic
- * component), so sampling such noise gives exact zeros rather than NaN. `negative` is the most negative eigenvalue
- * found (0 for a valid covariance).
+ * A square root $\Smat$ with $\Smat\Smat^\top = \Amat$ for a symmetric positive semi-definite $\Amat$, from the
+ * symmetric eigendecomposition: $\Smat = \Vmat \diag(\sqrt{\max(\lambda_i, 0)})$. Unlike a Cholesky factor it exists
+ * for singular $\Amat$ (a noise covariance with a deterministic component), so sampling such noise gives exact zeros
+ * rather than NaN. `negative` is the most negative eigenvalue found (0 for a valid covariance).
+ *
+ * @param a The matrix $\Amat$ ($n \times n$); its symmetric part is used.
+ * @returns `S`, the square root ($n \times n$, not triangular), and `negative`, the most negative eigenvalue or 0.
  */
 export function sqrtPsd(a: Tensor): { S: Matrix; negative: number } {
   const n = a.shape[0]
@@ -101,13 +145,25 @@ export function sqrtPsd(a: Tensor): { S: Matrix; negative: number } {
   return { S: mul(vectors, roots) as Matrix, negative }
 }
 
-/** aᵀb of two vectors as a number. */
+/**
+ * $\avec^\top\bvec$ of two vectors as a number.
+ *
+ * @param a The vector $\avec$.
+ * @param b The vector $\bvec$, of the same length.
+ * @returns The inner product.
+ */
 export function quadratic(a: Tensor, b: Tensor): number {
   const v = dot(a, b)
   return typeof v === 'number' ? v : toFlat(v as Tensor)[0]
 }
 
-/** T per-step tensors of shape `shape` stacked into [T, ...shape] (an empty [0, ...shape] when T = 0). */
+/**
+ * $T$ per-step tensors of shape `shape` stacked into `[T, ...shape]` (an empty `[0, ...shape]` when $T = 0$).
+ *
+ * @param list The per-step tensors, in time order, each of shape `shape`.
+ * @param shape The shape of one step, used only to shape the empty result.
+ * @returns The stacked tensor.
+ */
 export function stackSteps(list: readonly Tensor[], shape: readonly number[]): Tensor {
   if (list.length === 0) return fromData(new Float64Array(0), [0, ...shape])
   return stack(list, 0) as Tensor

@@ -1,23 +1,27 @@
 /**
- * Expectation propagation over a model of the model language (`aifn-compute/inference/model`) whose latent variables are
- * linear-Gaussian, with interval constraints and Gaussian observations as evidence: the message passing of TrueSkill
- * and Infer.NET (Minka 2001, "Expectation propagation for approximate Bayesian inference", UAI; Herbrich, Minka &
- * Graepel 2007, "TrueSkill", NIPS, §2.3; Minka et al. 2018, Infer.NET).
+ * Expectation propagation over a model of the model language (`aifn-compute/inference/model`) whose latent variables
+ * are linear-Gaussian, with interval constraints and Gaussian observations as evidence: the message passing of
+ * TrueSkill and Infer.NET (Minka 2001, "Expectation propagation for approximate Bayesian inference", UAI; Herbrich,
+ * Minka & Graepel 2007, "TrueSkill", NIPS, §2.3; Minka et al. 2018, Infer.NET).
  *
- * The model is compiled into factors on latent scalar instances z, each a function of one linear form u = wᵀz:
+ * The model is compiled into factors on latent scalar instances $\zvec$, each a function of one linear form
+ * $u = \wvec^\top \zvec$:
  *
- * - a latent `Normal(mean, sd)` whose mean is an affine form cᵀz + b of other latents: ψ(z_i − cᵀz) = N(·; b, sd²)
- *   (a latent with a constant mean is its own Gaussian prior, not a factor);
- * - an observed `Normal(mean, sd)` with data y: ψ(aᵀz) = N(·; y − b, sd²);
- * - an observed `Bernoulli` of an `interval` node with data 1: ψ(aᵀz) = 𝟙(lower − b < aᵀz < upper − b) (0 states the
+ * - a latent `Normal(mean, sd)` whose mean is an affine form $\cvec^\top \zvec + b$ of other latents:
+ *   $\psi(z_i - \cvec^\top \zvec) = \Gauss(\cdot; b, \text{sd}^2)$ (a latent with a constant mean is its own Gaussian
+ *   prior, not a factor);
+ * - an observed `Normal(mean, sd)` with data $y$: $\psi(\avec^\top \zvec) = \Gauss(\cdot; y - b, \text{sd}^2)$;
+ * - an observed `Bernoulli` of an `interval` node with data 1:
+ *   $\psi(\avec^\top \zvec) = \indicator(l - b < \avec^\top \zvec < u - b)$, $l$ and $u$ the bounds (0 states the
  *   complement, allowed when one bound is infinite).
  *
- * Deterministic `sum`, `difference`, `product` (by constants), `linear` and constant `index` nodes are folded into the
- * linear forms. The approximation is fully factorised, q(z) = Πᵢ N(zᵢ; mᵢ, vᵢ), with one Gaussian site per (factor,
- * variable) pair. A Gaussian factor sends its exact message (belief propagation): to z_j, N(w_j z_j; μ − Σ_{i≠j} wᵢmᵢ,
- * s² + Σ_{i≠j} wᵢ²vᵢ) from the cavities. An interval factor moment-matches: with the cavity of u, N(m_u, v_u), and the
- * truncated-normal moments (m̂, v̂) of u, each z_i's tilted marginal has mean mᵢ + wᵢvᵢ(m̂ − m_u)/v_u and variance
- * vᵢ + (wᵢvᵢ)²(v̂ − v_u)/v_u², and the site is that marginal divided by the cavity.
+ * Deterministic `sum`, `difference`, `product` (by constants) and constant `index` nodes are folded into the linear
+ * forms. The approximation is fully factorised, $q(\zvec) = \prod_i \Gauss(z_i; m_i, v_i)$, with one Gaussian site
+ * per (factor, variable) pair. A Gaussian factor sends its exact message (belief propagation): to $z_j$,
+ * $\Gauss(w_j z_j; \mu - \sum_{i \ne j} w_i m_i, s^2 + \sum_{i \ne j} w_i^2 v_i)$ from the cavities. An interval factor
+ * moment-matches: with the cavity of $u$, $\Gauss(m_u, v_u)$, and the truncated-normal moments $(\hat{m}, \hat{v})$
+ * of $u$, each $z_i$'s tilted marginal has mean $m_i + w_i v_i (\hat{m} - m_u)/v_u$ and variance
+ * $v_i + (w_i v_i)^2 (\hat{v} - v_u)/v_u^2$, and the site is that marginal divided by the cavity.
  *
  * Schedule: each step is one sweep. For every evidence factor in model order, the Gaussian factors of the latents in
  * its scope pass messages in, the evidence factor updates, and those Gaussian factors pass messages out (TrueSkill's
@@ -45,15 +49,24 @@ import {
 import { intervalTilted } from './tilted'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** An affine form Σ coefficients[k]·z_k + constant over latent indices. */
+/**
+ * An affine form $\sum_k c_k z_k + b$ over latent indices: `terms` maps a latent's index $k$ to its coefficient $c_k$,
+ * and `constant` is $b$.
+ */
 type Affine = { terms: Map<number, number>; constant: number }
 
-/** One compiled factor: ψ(wᵀz_scope), Gaussian N(·; mean, variance) or an interval indicator. */
+/**
+ * One compiled factor: $\psi(\wvec^\top \zvec_\text{scope})$, Gaussian $\Gauss(\cdot; \text{mean}, \text{variance})$
+ * or an interval indicator $\indicator(\text{lower} < \cdot < \text{upper})$.
+ */
 type Factor = {
+  /** The key of the instance the factor came from. */
   key: string
   /** For a latent's own conditional, that latent's index; null for evidence. */
   own: number | null
+  /** The latent indices the factor's linear form reads. */
   scope: number[]
+  /** The coefficient of each latent of `scope` in the linear form. */
   weights: number[]
 } & ({ kind: 'gaussian'; mean: number; variance: number } | { kind: 'interval'; lower: number; upper: number })
 
@@ -61,39 +74,106 @@ type Factor = {
 export interface CompiledGaussianModel {
   /** The latent instance keys, in model order (the order of `means` and `variances`). */
   keys: string[]
-  /** The Gaussian priors of latents with a constant mean (precision 0 for the others). */
+  /** The prior precision of each latent with a constant mean (0 for the others). */
   priorPrecision: number[]
+  /** The prior shift (precision times mean) of each latent with a constant mean (0 for the others). */
   priorShift: number[]
+  /** The compiled factors: the latents' conditionals on other latents, then evidence, in model order. */
   factors: Factor[]
 }
 
+/**
+ * Throw the module's `DomainError`.
+ *
+ * @param what What is wrong, appended to the function's name in the message.
+ * @returns Never: it always throws.
+ */
 const fail = (what: string): never => {
   throw new DomainError('modelExpectationPropagation', `modelExpectationPropagation: ${what}`)
 }
 
+/**
+ * Whether an argument is a reference to another node.
+ *
+ * @param a The argument.
+ * @returns True for a `{ kind: 'ref' }` object.
+ */
 const isRef = (a: Arg): a is NodeRef => typeof a === 'object' && a !== null && 'kind' in a && a.kind === 'ref'
 
+/**
+ * A value as a number; throws `DomainError` when it is not a scalar (a number or a one-element tensor).
+ *
+ * @param v The value.
+ * @param what The name of the value, for the error message.
+ * @returns The number.
+ */
 function scalar(v: NodeValue, what: string): number {
   if (typeof v === 'number') return v
   if (isTensor(v) && v.shape.reduce((a, b) => a * b, 1) === 1) return toFlat(v)[0]
   return fail(`${what} must be a scalar`)
 }
 
+/**
+ * The affine form of a constant.
+ *
+ * @param c The constant.
+ * @returns The form with no terms and constant $c$.
+ */
 const constantForm = (c: number): Affine => ({ terms: new Map(), constant: c })
 
+/**
+ * The affine form $a + s\,b$.
+ *
+ * @param a The first form; not modified.
+ * @param b The second form; not modified.
+ * @param scale The multiplier $s$ of `b` (default 1; $-1$ for a difference).
+ * @returns A new form.
+ */
 function combine(a: Affine, b: Affine, scale = 1): Affine {
   const terms = new Map(a.terms)
   for (const [k, c] of b.terms) terms.set(k, (terms.get(k) ?? 0) + scale * c)
   return { terms, constant: a.constant + scale * b.constant }
 }
 
+/**
+ * The affine form $s\,a$.
+ *
+ * @param a The form; not modified.
+ * @param s The multiplier.
+ * @returns A new form.
+ */
 function scaled(a: Affine, s: number): Affine {
   return { terms: new Map([...a.terms].map(([k, c]) => [k, s * c])), constant: s * a.constant }
 }
 
 /**
- * Compile a model and its bindings for EP: latent instances, their Gaussian priors, and the factors. Throws, naming
- * the instance, when the model is not linear-Gaussian with interval and Gaussian evidence.
+ * Compile a model and its bindings for EP: latent instances, their Gaussian priors, and the factors. Throws
+ * `DomainError`, naming the instance, when the model is not linear-Gaussian with interval and Gaussian evidence: a
+ * latent standard deviation or bound, a product of two latents, a non-constant selector, or another family or link.
+ * Observed nodes without data are latents.
+ *
+ * @param m The model, or one already expanded by `expandModel` (then `bindings` is not used).
+ * @param bindings The sizes, constants and data the model is expanded with.
+ * @returns The latent keys, their priors and the factors.
+ *
+ * @example Two observations of a weight, one through a product
+ * // w ~ N(0, 1), y1 ~ N(w, 1) and y2 ~ N(2w, 1); the product by a constant folds into the factor's weight.
+ * const ref = (node) => ({ kind: 'ref', node })
+ * const node = (name, role, data) => ({ name, role, group: null, data })
+ * const regression = {
+ *   kind: 'graph', name: 'regression', directed: true, nodes: 4, groups: [], sizes: [],
+ *   labels: ['w', 'y1', 'w2', 'y2'],
+ *   edges: [[0, 1], [0, 2], [2, 3]].map(([from, to]) => ({ from, to, directed: true })),
+ *   attributes: [
+ *     node('w', 'latent', { dist: { family: 'Normal', args: [0, 1] } }),
+ *     node('y1', 'observed', { dist: { family: 'Normal', args: [ref('w'), 1] } }),
+ *     node('w2', 'deterministic', { op: 'product', args: [ref('w'), 2] }),
+ *     node('y2', 'observed', { dist: { family: 'Normal', args: [ref('w2'), 1] } }),
+ *   ],
+ * }
+ * const c = compileGaussianModel(regression, { data: { y1: 1, y2: 4 } })
+ * print('latents =', c.keys, 'prior precision', c.priorPrecision)
+ * print('factors =', c.factors)
  */
 export function compileGaussianModel(m: Model | ExpandedModel, bindings: Bindings = {}): CompiledGaussianModel {
   const em = 'instances' in m ? m : expandModel(m, bindings)
@@ -215,7 +295,7 @@ export function compileGaussianModel(m: Model | ExpandedModel, bindings: Binding
 
 /** Options of {@link modelExpectationPropagation}. */
 export interface ModelEpOptions {
-  /** Weight of the old site in each update, in [0, 1). Default 0. */
+  /** Weight of the old site in each update, in $[0, 1)$. Default 0; outside $[0, 1)$ throws `DomainError`. */
   damping?: number
   /** A sweep that moves no site parameter more than this has converged. Default 1e-8. */
   tolerance?: number
@@ -223,29 +303,60 @@ export interface ModelEpOptions {
 
 /** The state of {@link modelExpectationPropagation}: `t` counts sweeps. */
 export interface ModelEpState extends Status {
+  /** The sweeps run. */
   t: Size
   /** The latent instance keys, the order of `means` and `variances`. */
   keys: string[]
+  /** The posterior mean of each latent. */
   means: Tensor
+  /** The posterior variance of each latent. */
   variances: Tensor
-  /** Site precisions and shifts, one per (factor, scope variable), factors in order. */
+  /** Site precisions, one per (factor, scope variable), factors in order. */
   sitePrecision: Tensor
+  /** Site shifts, one per (factor, scope variable), factors in order. */
   siteShift: Tensor
-  /** Largest change of a site parameter in the last sweep. */
+  /** Largest change of a site parameter in the last sweep ($\infty$ at the start). */
   change: number
-  /** Interval updates skipped in the last sweep because a cavity was improper. */
+  /**
+   * Interval updates skipped in the last sweep because a cavity was improper or the tilted moments were not usable.
+   */
   skipped: number
+  /** Whether the last sweep moved no site parameter by more than `tolerance` (true at once with no factors). */
   converged: boolean
 }
 
 /**
- * EP over a linear-Gaussian model with interval and Gaussian evidence (see the module comment), as a traceable
+ * EP over a linear-Gaussian model with interval and Gaussian evidence (see the file comment), as a traceable
  * algorithm: one sweep per step, `converged` when a sweep moves no site by more than `tolerance`. The marginals are
- * `means` and `variances`, in the order of `keys`. No start.
+ * `means` and `variances`, in the order of `keys`. No start. The model is compiled by `compileGaussianModel` when the
+ * algorithm is made, so a model it cannot handle throws `DomainError` then, as does a `damping` outside $[0, 1)$.
  *
- * @example
- * const s = run(modelExpectationPropagation(trueSkillModel(), bindings), undefined, 100)
- * s.means // posterior skill and performance means
+ * @param m The model, or one already expanded by `expandModel`.
+ * @param bindings The sizes, constants and data (default none); evidence is the observed nodes with data.
+ * @param options The damping and tolerance.
+ * @returns The algorithm, to run with `run(alg, undefined, steps)`.
+ *
+ * @example One game: the winner's skill rises
+ * // Skills a, b ~ N(0, 1) and the observation that a − b > 0. The posterior of a is the probit tilt of N(0, 1),
+ * // since p(a − b > 0 | a) = Φ(a).
+ * const ref = (node) => ({ kind: 'ref', node })
+ * const node = (name, role, data) => ({ name, role, group: null, data })
+ * const game = {
+ *   kind: 'graph', name: 'game', directed: true, nodes: 5, groups: [], sizes: [],
+ *   labels: ['a', 'b', 'd', 'won', 'y'],
+ *   edges: [[0, 2], [1, 2], [2, 3], [3, 4]].map(([from, to]) => ({ from, to, directed: true })),
+ *   attributes: [
+ *     node('a', 'latent', { dist: { family: 'Normal', args: [0, 1] } }),
+ *     node('b', 'latent', { dist: { family: 'Normal', args: [0, 1] } }),
+ *     node('d', 'deterministic', { op: 'difference', args: [ref('a'), ref('b')] }),
+ *     node('won', 'deterministic', { op: 'interval', args: [ref('d'), 0, Infinity] }),
+ *     node('y', 'observed', { dist: { family: 'Bernoulli', args: [ref('won')] } }),
+ *   ],
+ * }
+ * const s = run(modelExpectationPropagation(game, { data: { y: 1 } }), undefined, 100)
+ * print(s.keys, 'means', s.means, 'variances', s.variances)
+ * print('probit tilt:', probitTilted(0, 1, 1))
+ * print('sweeps =', s.t, 'converged =', s.converged)
  */
 export function modelExpectationPropagation(
   m: Model | ExpandedModel,
@@ -358,7 +469,13 @@ export function modelExpectationPropagation(
 
 /**
  * New sites of one factor from its cavities (natural parameters per scope variable), or null when an interval
- * factor meets an improper cavity.
+ * factor meets an improper cavity or unusable tilted moments. A Gaussian factor's messages are exact; one to $z_j$ is
+ * flat when another variable's cavity is.
+ *
+ * @param f The factor.
+ * @param cp The cavity precision of each variable of its scope.
+ * @param cn The cavity shift of each variable of its scope.
+ * @returns The new site precision and shift for each variable of the scope, or null.
  */
 function updateFactor(
   f: Factor,
