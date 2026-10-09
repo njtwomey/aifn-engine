@@ -6,10 +6,11 @@ import { nodePath, TREE, type DocTreeNode } from '../docs/data'
 import { Carousel, type Slide } from './Carousel'
 import { FourierEpicycles } from './FourierEpicycles'
 import { HeroFigure } from './HeroFigure'
+import { LorenzSwarm } from './LorenzSwarm'
 import { MIXTURE_PLAY_MS, MixtureSteps } from './MixtureSteps'
-import { NeighbourRegions } from './NeighbourRegions'
 import { NetworkTraining } from './NetworkTraining'
 import { OptimiserRace } from './OptimiserRace'
+import { SamplerRace } from './SamplerRace'
 import { hrefOf, onLink, thumbnailOf } from './paths'
 import { ENTRIES } from './registry'
 
@@ -202,9 +203,16 @@ const SLIDES: Slide[] = [
     duration: 12000,
   },
   {
-    label: 'Classifier',
-    blurb: 'A k-nearest-neighbour classifier whose regions are redrawn as the classes drift. Drag them yourself.',
-    Figure: NeighbourRegions,
+    label: 'Sampling',
+    blurb: 'Hamiltonian Monte Carlo against a random walk on a banana-shaped density. Click to move the chain.',
+    Figure: SamplerRace,
+    duration: 10000,
+  },
+  {
+    label: 'Chaos',
+    blurb: 'A swarm started a hair apart in the Lorenz system, flying apart. Drop ρ and the chaos stops.',
+    Figure: LorenzSwarm,
+    duration: 10000,
   },
   {
     label: 'Mixture',

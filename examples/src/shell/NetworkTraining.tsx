@@ -31,6 +31,26 @@ const net = Mlp([2, 24, 24, 1], { activation: 'tanh' })
 const rule = adamRule({ stepSize: 0.01 })
 const gx = grid(-4, 4, 48)
 const GRID = tensor(gx.flatMap((b) => gx.map((a) => [a, b])))
+/** The drawn grid: three times finer than the network is evaluated on, filled by bilinear interpolation. */
+const FINE = 3
+const fx = grid(-4, 4, (gx.length - 1) * FINE + 1)
+
+/** A field on the coarse grid, bilinearly interpolated onto the fine one, so the shading is smooth, not blocky. */
+function upsample(z: ArrayLike<number>): number[][] {
+  const n = gx.length
+  const at = (i: number, j: number) => z[i * n + j]
+  return fx.map((_, I) => {
+    const i = Math.min(Math.floor(I / FINE), n - 2)
+    const v = I / FINE - i
+    return fx.map((_, J) => {
+      const j = Math.min(Math.floor(J / FINE), n - 2)
+      const u = J / FINE - j
+      const top = (1 - u) * at(i, j) + u * at(i, j + 1)
+      const bottom = (1 - u) * at(i + 1, j) + u * at(i + 1, j + 1)
+      return Math.max(-4, Math.min(4, (1 - v) * top + v * bottom))
+    })
+  })
+}
 /** Milliseconds of training per frame: the rest of the frame draws. */
 const BUDGET = 9
 
@@ -84,7 +104,7 @@ export function NetworkTraining() {
       steps++
     }
     const logits = toFlat(net.apply(r.params as never, GRID) as Tensor)
-    const z = gx.map((_, i) => gx.map((_, j) => Math.max(-4, Math.min(4, logits[i * gx.length + j]))))
+    const z = upsample(logits)
     const own = toFlat(net.apply(r.params as never, tensor(points.map((p) => [p.x, p.y]))) as Tensor)
     const accuracy = points.reduce((a, p, i) => a + ((own[i] > 0 ? 1 : 0) === p.c ? 1 : 0), 0) / points.length
     fitted.current = accuracy === 1 ? fitted.current + dt : 0
@@ -125,8 +145,8 @@ export function NetworkTraining() {
         >
           {view.z.length > 0 && (
             <Raster
-              x={gx}
-              y={gx}
+              x={fx}
+              y={fx}
               z={view.z}
               scale="diverging"
               range={[-4, 4]}
