@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 
 /**
  * A playhead that plays itself while its element is on screen: from 0 each time the element comes into view, moving
- * on after `wait(step)` milliseconds at each position, up to `count - 1`. Once the reader moves it (`set`), it is
- * theirs and never plays itself again. Returns the element's ref, the position and the reader's setter.
+ * on after `wait(step)` milliseconds at each position, up to `count - 1`, and with `loop`, back to 0 that many
+ * milliseconds after the end. Once the reader moves it (`set`), it is theirs and never plays itself again. Returns
+ * the element's ref, the position and the reader's setter.
  */
-export function useAutoPlay(count: number, wait: (step: number) => number) {
+export function useAutoPlay(count: number, wait: (step: number) => number, { loop }: { loop?: number } = {}) {
   const [step, setStep] = useState(0)
   const [auto, setAuto] = useState(true)
   const [visible, setVisible] = useState(false)
@@ -27,10 +28,15 @@ export function useAutoPlay(count: number, wait: (step: number) => number) {
   }, [])
   const delay = wait(step)
   useEffect(() => {
-    if (!visible || !auto || step >= count - 1) return
+    if (!visible || !auto) return
+    if (step >= count - 1) {
+      if (loop === undefined) return
+      const id = setTimeout(() => setStep(0), loop)
+      return () => clearTimeout(id)
+    }
     const id = setTimeout(() => setStep((s) => s + 1), delay)
     return () => clearTimeout(id)
-  }, [visible, auto, step, count, delay])
+  }, [visible, auto, step, count, delay, loop])
   const set = (s: number) => {
     autoRef.current = false
     setAuto(false)

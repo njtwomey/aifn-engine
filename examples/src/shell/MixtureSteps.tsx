@@ -28,7 +28,7 @@ const xy = (pts: number[][]) => ({ x: pts.map((p) => p[0]), y: pts.map((p) => p[
  * likely component. While on screen and untouched it plays itself; the player takes over once used.
  */
 export function MixtureSteps() {
-  const { ref, step, set } = useAutoPlay(FRAMES.length, wait)
+  const { ref, step, set } = useAutoPlay(FRAMES.length, wait, { loop: 3000 })
   const f = FRAMES[step]
   const { weights, means, covs } = f.mixture
   const trails = means.map((_, k) => xy(FRAMES.slice(0, step + 1).map((g) => g.mixture.means[k])))

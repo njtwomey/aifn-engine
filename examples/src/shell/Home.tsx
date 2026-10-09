@@ -4,9 +4,11 @@ import { Button, useTheme } from 'aifn-render'
 import { SECTIONS } from '@examples/recipe'
 import { nodePath, TREE, type DocTreeNode } from '../docs/data'
 import { Carousel, type Slide } from './Carousel'
+import { FourierEpicycles } from './FourierEpicycles'
 import { HeroFigure } from './HeroFigure'
 import { MIXTURE_PLAY_MS, MixtureSteps } from './MixtureSteps'
 import { NeighbourRegions } from './NeighbourRegions'
+import { NetworkTraining } from './NetworkTraining'
 import { OptimiserRace } from './OptimiserRace'
 import { hrefOf, onLink, thumbnailOf } from './paths'
 import { ENTRIES } from './registry'
@@ -186,29 +188,35 @@ function SectionHead({ kicker, title, children }: { kicker: string; title: strin
   )
 }
 
-/** The carousel's slides: figures made for this page, and one recipe from the gallery. */
-const recipe = (path: string) => ENTRIES.find((e) => e.path === `render/${path}`)!.Example
+/** The carousel's slides: figures made for this page, each moving on its own while it is shown. */
 const SLIDES: Slide[] = [
   {
     label: 'Optimisers',
-    blurb: 'Seven first-order methods and L-BFGS raced over a landscape with four minima. Drag the start.',
+    blurb: 'Seven first-order methods and L-BFGS raced over a landscape with four minima, from a start that wanders.',
     Figure: OptimiserRace,
   },
   {
+    label: 'Neural network',
+    blurb: 'A small network trained live on two spirals; click to add points and watch it refit.',
+    Figure: NetworkTraining,
+    duration: 12000,
+  },
+  {
     label: 'Classifier',
-    blurb: 'A k-nearest-neighbour classifier whose regions are redrawn as you drag the classes.',
+    blurb: 'A k-nearest-neighbour classifier whose regions are redrawn as the classes drift. Drag them yourself.',
     Figure: NeighbourRegions,
   },
   {
-    label: 'Code to plot',
-    blurb: 'Type a program; it runs in a worker and its value is drawn. Edit it and press Run.',
-    Figure: recipe('interpreter/code-to-plot'),
-  },
-  {
     label: 'Mixture',
-    blurb: 'A Gaussian mixture fitted by EM from one corner to convergence. It plays itself; scrub or step it.',
+    blurb: 'A Gaussian mixture fitted by EM from one corner to convergence, again and again. Scrub or step it.',
     Figure: MixtureSteps,
     duration: MIXTURE_PLAY_MS,
+  },
+  {
+    label: 'Fourier',
+    blurb: 'A Fourier series drawn by a chain of rotating circles. Pick a shape and how many circles.',
+    Figure: FourierEpicycles,
+    duration: 10000,
   },
 ]
 

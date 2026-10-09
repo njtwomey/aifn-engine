@@ -4,8 +4,9 @@ import { live } from 'aifn-compute/foundation/trace'
 import { adagrad, adam, gradientDescent, momentum, nesterov, rmsprop } from 'aifn-compute/optim/first-order'
 import { lbfgs } from 'aifn-compute/optim/second-order'
 import { Contours, Curve, Figure, Handle, Plot, Points, Raster, useAxis, type Vec2 } from 'aifn-render'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { grid } from '@examples/data'
+import { useFrames, useOnScreen, useTouched } from './live'
 
 /** Himmelblau's function: four minima of equal depth, so where an optimiser ends up depends on how it moves. */
 const f = (a: number, b: number) => (a * a + b - 11) ** 2 + (a + b * b - 7) ** 2
@@ -46,36 +47,60 @@ function pathOf<S extends Status & { x: Tensor }>(alg: Algorithm<{ x0: Vec2 }, S
   return { px, py }
 }
 
-/** Eight optimisers raced from one draggable start over Himmelblau's four-minimum landscape. */
+/** Where the start wanders on its own: a slow Lissajous figure through all four basins. */
+const wander = (t: number): Vec2 => [3.4 * Math.sin(0.21 * t - 0.3), 3.2 * Math.sin(0.29 * t + 3.3)]
+
+/**
+ * Eight optimisers raced from one start over Himmelblau's four-minimum landscape. On screen, the start wanders on its
+ * own and the paths follow; dragging it takes over, and the wandering glides back a few seconds after the reader lets go.
+ */
 export function OptimiserRace() {
-  const [start, setStart] = useState<Vec2>([-1, -0.5])
+  const [start, setStart] = useState<Vec2>(wander(0))
+  const box = useRef<HTMLDivElement>(null)
+  const shown = useOnScreen(box)
+  const { touched, touch } = useTouched(5)
+  useFrames(shown && !touched, (t, dt) => {
+    const target = wander(t)
+    const k = Math.min(1, 2.5 * dt)
+    setStart((s) => [s[0] + k * (target[0] - s[0]), s[1] + k * (target[1] - s[1])])
+  })
   const paths = METHODS.map((m) => pathOf(m.alg as Algorithm<{ x0: Vec2 }, Status & { x: Tensor }>, start))
   const x = useAxis({ label: 'x₁', range: [-5, 5] })
   const y = useAxis({ label: 'x₂', range: [-5, 5], equal: x })
   return (
-    <Figure
-      title="Race the optimisers"
-      purpose="Seven first-order methods and L-BFGS from the same start, up to 150 steps each."
-      hoverReadout={false}
-      defaultSize="L"
-      caption="Drag the start: the landscape has four minima, and the methods split between them."
-    >
-      <Plot x={x} y={y}>
-        <Raster x={xs} y={xs} z={z} fillOpacity={0.55} valueLabel="log₁₀(1 + f)" />
-        <Contours x={xs} y={xs} z={z} levels={[0.5, 1, 1.5, 2, 2.5]} />
-        {paths.map((p, i) => (
-          <Curve key={i} name={METHODS[i].name} x={p.px} y={p.py} slot={i} live />
-        ))}
-        <Points
-          name="end"
-          x={paths.map((p) => p.px.at(-1)!)}
-          y={paths.map((p) => p.py.at(-1)!)}
-          group={METHODS.map((_, i) => i)}
-          groupNames={METHODS.map((m) => m.name)}
-          live
-        />
-        <Handle kind="point" at={start} onDrag={setStart} label="start" />
-      </Plot>
-    </Figure>
+    <div ref={box}>
+      <Figure
+        title="Race the optimisers"
+        purpose="Seven first-order methods and L-BFGS from the same start, up to 150 steps each."
+        hoverReadout={false}
+        defaultSize="L"
+        caption="The start wanders on its own; drag it to take over. Four minima, and the methods split between them."
+      >
+        <Plot x={x} y={y}>
+          <Raster x={xs} y={xs} z={z} fillOpacity={0.55} valueLabel="log₁₀(1 + f)" />
+          <Contours x={xs} y={xs} z={z} levels={[0.5, 1, 1.5, 2, 2.5]} />
+          {paths.map((p, i) => (
+            <Curve key={i} name={METHODS[i].name} x={p.px} y={p.py} slot={i} live />
+          ))}
+          <Points
+            name="end"
+            x={paths.map((p) => p.px.at(-1)!)}
+            y={paths.map((p) => p.py.at(-1)!)}
+            group={METHODS.map((_, i) => i)}
+            groupNames={METHODS.map((m) => m.name)}
+            live
+          />
+          <Handle
+            kind="point"
+            at={start}
+            onDrag={(p) => {
+              touch()
+              setStart(p)
+            }}
+            label="start"
+          />
+        </Plot>
+      </Figure>
+    </div>
   )
 }
