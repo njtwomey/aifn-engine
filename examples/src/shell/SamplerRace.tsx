@@ -2,7 +2,19 @@ import type { Algorithm, Status } from 'aifn-compute/foundation/contracts'
 import { toFlat, toRows, type Tensor } from 'aifn-compute/foundation/tensor'
 import { live } from 'aifn-compute/foundation/trace'
 import { hmc, randomWalkMetropolis, type ChainStart, type LogDensity } from 'aifn-compute/inference/stochastic'
-import { choice, Contours, Curve, Figure, Plot, Points, slider, StatusText, useAxis, useFigureState } from 'aifn-render'
+import {
+  choice,
+  Contours,
+  Curve,
+  Figure,
+  Plot,
+  Points,
+  Raster,
+  slider,
+  StatusText,
+  useAxis,
+  useFigureState,
+} from 'aifn-render'
 import { useMemo, useRef, useState } from 'react'
 import { grid } from '@examples/data'
 import { useFrames, useOnScreen } from './live'
@@ -113,8 +125,9 @@ export function SamplerRace() {
         caption="Click to restart the chain there. Too large a step and proposals are rejected; too small and it crawls."
       >
         <Plot x={x} y={y} onPlotClick={([a, b]) => setStart([a, b])}>
+          <Raster x={gx} y={gy} z={density} fillOpacity={0.75} valueLabel="density" />
           <Contours x={gx} y={gy} z={density} levels={[0.02, 0.1, 0.3, 0.6, 0.9]} labels={false} />
-          <Points name="draws" x={draws.xs} y={draws.ys} slot={0} size={4} live />
+          <Points name="draws" x={draws.xs} y={draws.ys} slot={1} size={4} live />
           {now && now.trajectory.length > 1 && (
             <Curve
               name="trajectory"
