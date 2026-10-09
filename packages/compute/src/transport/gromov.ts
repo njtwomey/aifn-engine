@@ -1,8 +1,15 @@
 /**
- * Entropic Gromov–Wasserstein transport between two metric-measure spaces (Peyré, Cuturi and Solomon, 2016, "Gromov–
- * Wasserstein averaging of kernel and distance matrices", ICML, Algorithm 1 with the square loss): points are matched by
- * how they relate to the other points of their own space, not by a cross-space cost. Each step linearises the quadratic
- * objective at the current plan and solves the entropic problem with Sinkhorn.
+ * Entropic Gromov–Wasserstein transport between two metric-measure spaces (Peyré, Cuturi and Solomon, 2016,
+ * "Gromov–Wasserstein averaging of kernel and distance matrices", ICML, Algorithm 1 with the square loss): points are
+ * matched by how they relate to the other points of their own space, not by a cross-space cost. Each step linearises
+ * the quadratic objective at the current plan and solves the entropic problem with Sinkhorn.
+ *
+ * With intra-space matrices $\Cmat^x$ ($n \times n$) and $\Cmat^y$ ($m \times m$) and weights $\avec$, $\bvec$, the
+ * objective is $\sum_{ijkl} (C^x_{ik} - C^y_{jl})^2 T_{ij} T_{kl}$ over couplings $\Tmat$ of $\avec$ and $\bvec$. For
+ * such a coupling it equals $\inner{\Lmat(\Tmat)}{\Tmat}$ with the linearised cost
+ * $\Lmat(\Tmat) = \cvec_x\ones^\top + \ones\cvec_y^\top - 2\Cmat^x\Tmat(\Cmat^y)^\top$, where
+ * $(\cvec_x)_i = \sum_k (C^x_{ik})^2 a_k$ and $(\cvec_y)_j = \sum_l (C^y_{jl})^2 b_l$ (their Proposition 1). The
+ * problem is not convex, so the plan found depends on the start, here the product coupling $\avec\bvec^\top$.
  */
 
 import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -12,39 +19,58 @@ import { readCost, readVector, sinkhorn, type CostInput, type WeightsInput } fro
 
 /** The two metric-measure spaces of `gromovWassersteinSteps`. */
 export interface GromovProblem {
-  /** Intra-space distance (or similarity) matrices, n × n and m × m. */
+  /** The intra-space distance (or similarity) matrix $\Cmat^x$ of the first space, $n \times n$. */
   cx: CostInput
+  /** The intra-space distance (or similarity) matrix $\Cmat^y$ of the second space, $m \times m$. */
   cy: CostInput
-  /** Weights of the points of each space. */
+  /** The weights $\avec$ of the first space's $n$ points. */
   a: WeightsInput
+  /** The weights $\bvec$ of the second space's $m$ points, with the same total as $\avec$. */
   b: WeightsInput
 }
 
 /** Options for `gromovWassersteinSteps` and `gromovWasserstein`. */
 export interface GromovOptions {
-  /** Entropic regularisation ε > 0 of each inner Sinkhorn solve. */
+  /** Entropic regularisation $\varepsilon > 0$ of each inner Sinkhorn solve, in units of the linearised cost. */
   epsilon: Scalar
   /** Sinkhorn steps per outer step. Default 200. */
   innerSteps?: Size
-  /** Stop when the plan changes by less than this (max abs). Default 1e-7. */
+  /** Stop when no entry of the plan changes by as much as this in a step. Default 1e-7. */
   tolerance?: Scalar
 }
 
 /** One state of entropic Gromov–Wasserstein. */
 export interface GromovState extends Status {
-  /** The coupling, n × m. */
+  /** The coupling $\Tmat$, $n \times m$. */
   plan: Tensor
-  /** The GW objective Σ_{ijkl} (Cx_ik − Cy_jl)² T_ij T_kl at the plan. */
+  /**
+   * The GW objective $\sum_{ijkl} (C^x_{ik} - C^y_{jl})^2 T_{ij} T_{kl}$ at the plan, computed as
+   * $\inner{\Lmat(\Tmat)}{\Tmat}$ with the marginals taken to be $\avec$ and $\bvec$ (exact for the column marginal,
+   * and to Sinkhorn's tolerance for the row one).
+   */
   loss: Scalar
-  /** The linearised cost the last Sinkhorn solve used, n × m. */
+  /** The linearised cost $\Lmat(\Tmat)$ at the plan, $n \times m$: the cost of the next Sinkhorn solve. */
   linearCost: Tensor
-  /** Largest change of a plan entry in the last step. */
+  /** Largest change of a plan entry in the last step (infinite at the start). */
   change: Scalar
+  /** The last change is below `tolerance`. */
   converged: boolean
   /** The loss or the plan is not finite. */
   diverged: boolean
 }
 
+/**
+ * The linearised square-loss cost $\Lmat(\Tmat) = \cvec_x\ones^\top + \ones\cvec_y^\top - 2\Cmat^x\Tmat(\Cmat^y)^\top$
+ * at a plan, with $(\cvec_x)_i = \sum_k (C^x_{ik})^2 a_k$ and $(\cvec_y)_j = \sum_l (C^y_{jl})^2 b_l$, and the GW
+ * objective $\inner{\Lmat(\Tmat)}{\Tmat}$ there.
+ *
+ * @param Cx The first space's matrix $\Cmat^x$, row-major, $n \times n$.
+ * @param Cy The second space's matrix $\Cmat^y$, row-major, $m \times m$.
+ * @param a The weights $\avec$ of the first space ($n$), standing in for the plan's row sums.
+ * @param b The weights $\bvec$ of the second space ($m$), standing in for the plan's column sums.
+ * @param T The plan $\Tmat$, row-major, $n \times m$; not modified.
+ * @returns `L`, the linearised cost (row-major, $n \times m$), and `loss`, the objective at $\Tmat$.
+ */
 function linearise(Cx: Float64Array, Cy: Float64Array, a: Float64Array, b: Float64Array, T: Float64Array) {
   const n = a.length
   const m = b.length
@@ -73,8 +99,24 @@ function linearise(Cx: Float64Array, Cy: Float64Array, a: Float64Array, b: Float
 }
 
 /**
- * Entropic Gromov–Wasserstein as a traceable algorithm, started from the product coupling a bᵀ (Peyré, Cuturi and
- * Solomon, 2016, Algorithm 1). `init` takes no start (`undefined`).
+ * Entropic Gromov–Wasserstein as a traceable algorithm, started from the product coupling $\avec\bvec^\top$ (Peyré,
+ * Cuturi and Solomon, 2016, Algorithm 1). Each step solves the entropic transport problem with the linearised cost
+ * $\Lmat(\Tmat)$ of the current plan by `sinkhorn` (at most `innerSteps` steps, from zero potentials) and takes its
+ * plan as the next. `init` takes no start (`undefined`).
+ *
+ * @param problem The two spaces: their intra-space matrices and their weights.
+ * @param options The regularisation and the stopping rules.
+ * @param options.epsilon The entropic regularisation $\varepsilon > 0$ of each Sinkhorn solve.
+ * @param options.innerSteps The most Sinkhorn steps per outer step.
+ * @param options.tolerance The largest change of a plan entry at which a step counts as `converged`.
+ * @returns The algorithm: its state holds the plan, the objective and the linearised cost.
+ *
+ * @example The objective falls from the product coupling
+ * // Points 0, 1, 3 on one line and 12, 13, 10 on another: the same distances, listed in a different order.
+ * const dist = (p) => p.map((x) => p.map((y) => Math.abs(x - y)))
+ * const problem = { cx: dist([0, 1, 3]), cy: dist([12, 13, 10]), a: uniformWeights(3), b: uniformWeights(3) }
+ * const alg = gromovWassersteinSteps(problem, { epsilon: 0.1 })
+ * for (const steps of [0, 1, 5]) print(`after ${steps} steps: loss =`, run(alg, undefined, steps).loss)
  */
 export function gromovWassersteinSteps(
   problem: GromovProblem,
@@ -122,7 +164,23 @@ export function gromovWassersteinSteps(
   }
 }
 
-/** Entropic Gromov–Wasserstein run to convergence or `maxSteps` (default 50) outer steps. */
+/**
+ * Entropic Gromov–Wasserstein, `gromovWassersteinSteps` run to convergence, divergence or `maxSteps` (default 50) outer
+ * steps. Check `converged` on the result.
+ *
+ * @param problem The two spaces: their intra-space matrices and their weights.
+ * @param options The regularisation, the inner steps and tolerance of `GromovOptions`, and `maxSteps`, the most outer
+ *   steps.
+ * @returns The last state: the plan, the objective and whether it converged.
+ *
+ * @example Isometric spaces are matched point for point
+ * // 0, 1, 3 and 12, 13, 10 have the same distances: 0 matches 13, 1 matches 12 and 3 matches 10.
+ * const dist = (p) => p.map((x) => p.map((y) => Math.abs(x - y)))
+ * const problem = { cx: dist([0, 1, 3]), cy: dist([12, 13, 10]), a: uniformWeights(3), b: uniformWeights(3) }
+ * const r = gromovWasserstein(problem, { epsilon: 0.1 })
+ * print('plan =', r.plan)
+ * print('loss =', r.loss, ' converged:', r.converged, ' steps:', r.t)
+ */
 export function gromovWasserstein(problem: GromovProblem, options: GromovOptions & { maxSteps?: Size }): GromovState {
   return run(gromovWassersteinSteps(problem, options), undefined, options.maxSteps ?? 50)
 }
