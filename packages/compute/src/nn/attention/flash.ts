@@ -1,13 +1,15 @@
 /**
  * Tiled attention with the online softmax (Milakov and Gimelshein, 2018; Rabe and Staats, 2021; Dao et al., 2022,
- * FlashAttention): the scores are processed one tile of queries × keys at a time and never stored whole. Each query
- * keeps a running maximum m, a running normaliser ℓ and an unnormalised output a; a new tile with scores S and values
- * V updates them as
+ * FlashAttention): the scores are processed one tile of queries by keys at a time and never stored whole. Each query
+ * keeps a running maximum $m$, a running normaliser $\ell$ and an unnormalised output $\avec$; a new tile with scores
+ * $s_j$ and value rows $\vvec_j$ updates them as
  *
- *   m′ = max(m, max_j S_j),   ℓ′ = e^{m − m′}·ℓ + Σ_j e^{S_j − m′},   a′ = e^{m − m′}·a + Σ_j e^{S_j − m′}·V_j,
+ * $m' = \max(m, \max_j s_j)$, $\ell' = e^{m - m'} \ell + \sum_j e^{s_j - m'}$ and
+ * $\avec' = e^{m - m'} \avec + \sum_j e^{s_j - m'} \vvec_j$,
  *
- * and the output is a/ℓ once every tile is seen: exactly softmax(S)·V, in memory linear in the length. Under a causal
- * mask, tiles wholly above the diagonal are skipped.
+ * and the output is $\avec / \ell$ once every tile is seen: exactly $\mathrm{softmax}(\svec)\Vmat$, in memory
+ * linear in the length. Under a causal mask, tiles wholly above the diagonal are skipped. The pass computes on
+ * concrete numbers, one head at a time, to show the algorithm: it is not differentiable.
  */
 
 import type { Algorithm, Size, Status } from 'aifn-compute/foundation/contracts'
@@ -15,7 +17,10 @@ import { fromData, toFlat, unwrap, type Tensor, type Value } from 'aifn-compute/
 import { run } from 'aifn-compute/foundation/trace'
 import { ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A tile: query rows [q0, q1) against key rows [k0, k1). */
+/**
+ * A tile: `queries`, the query rows from the first index up to but not including the second, against `keys`, the key
+ * rows likewise.
+ */
 export type AttentionTile = { readonly queries: readonly [number, number]; readonly keys: readonly [number, number] }
 
 /** Options of `flashAttentionSteps`. */
@@ -24,31 +29,39 @@ export type FlashAttentionOptions = {
   queryBlock?: Size
   /** Keys per tile (default 4). */
   keyBlock?: Size
-  /** Causal masking (query i sees keys ≤ i). Default false. */
+  /** Causal masking (query $i$ sees keys $j \le i + T_k - T_q$, as `causalMask`). Default false. */
   causal?: boolean
-  /** Score scale (default 1/√d). */
+  /** Score scale (default $1/\sqrt{d}$). */
   scale?: number
 }
 
-/** The state of `flashAttentionSteps` after t tiles. */
+/** The state of `flashAttentionSteps` after $t$ tiles. */
 export interface FlashAttentionState extends Status {
-  /** Running maximum score per query [Tq] (−∞ before any tile). */
+  /** Running maximum score $m$ per query, `[Tq]` ($-\infty$ before any tile). */
   readonly max: Tensor
-  /** Running normaliser ℓ per query [Tq]. */
+  /** Running normaliser $\ell$ per query, `[Tq]`. */
   readonly normaliser: Tensor
-  /** Running unnormalised output a [Tq, d_v]. */
+  /** Running unnormalised output $\avec$ per query, `[Tq, d_v]`. */
   readonly accumulator: Tensor
-  /** The tile processed by the last step (null at t = 0). */
+  /** The tile processed by the last step (null at $t = 0$). */
   readonly tile: AttentionTile | null
   /** The tiles in processing order (query blocks outer, key blocks inner; causal skips removed). */
   readonly tiles: readonly AttentionTile[]
   /** Tiles skipped because the causal mask hides them entirely. */
   readonly skipped: Size
-  /** a/ℓ once every tile is processed, else null. */
+  /** $\avec / \ell$ once every tile is processed, else null. */
   readonly output: Tensor | null
+  /** True once every tile is processed (at once when there are none). */
   readonly terminated: boolean
 }
 
+/**
+ * The concrete values of a `[T, d]` matrix, row-major. Throws `ShapeError` for anything that is not a matrix.
+ *
+ * @param v The matrix: a tensor, or a traced value whose primal is read.
+ * @param what The argument's name (`q`, `k` or `v`), for the error message.
+ * @returns The number of rows and columns and the row-major data.
+ */
 const matrix = (v: Value, what: string) => {
   const t = unwrap(v) as Tensor
   if (typeof t === 'number' || t.shape.length !== 2)
@@ -57,9 +70,29 @@ const matrix = (v: Value, what: string) => {
 }
 
 /**
- * FlashAttention's tiled forward pass for one head as a step-through algorithm: q [Tq, d], k [Tk, d], v [Tk, d_v];
- * each step folds one tile of scores into the running maximum, normaliser and output by the online softmax. The final
- * `output` equals `scaledDotProductAttention(q, k, v)` (with the same `causal` and `scale`).
+ * FlashAttention's tiled forward pass for one head as a step-through algorithm: each step folds one tile of scores
+ * into the running maximum, normaliser and output by the online softmax. The final `output` equals
+ * `scaledDotProductAttention(q, k, v)` (with the same `causal` and `scale`) up to rounding. Throws `ShapeError` when
+ * an input is not a matrix or the shapes do not agree.
+ *
+ * @param q The queries `[Tq, d]`.
+ * @param k The keys `[Tk, d]`.
+ * @param v The values `[Tk, d_v]`.
+ * @param options The tile sizes, causal masking and score scale.
+ * @returns The algorithm: run it with `run(alg, undefined, steps)`; it terminates after the last tile.
+ *
+ * @example Three tokens in tiles of two: one tile is skipped by the causal mask, and the end matches attention
+ * const q = normals(stream(0), [3, 4])
+ * const k = normals(stream(1), [3, 4])
+ * const v = normals(stream(2), [3, 4])
+ * const alg = flashAttentionSteps(q, k, v, { queryBlock: 2, keyBlock: 2, causal: true })
+ * const first = run(alg, undefined, 1)
+ * print('tiles (queries, keys):', first.tiles.map((tile) => [tile.queries, tile.keys]), 'skipped:', first.skipped)
+ * print('after one tile, max:', first.max, 'normaliser:', first.normaliser)
+ * const end = run(alg, undefined, Infinity)
+ * print('steps:', end.t)
+ * print('output:', end.output)
+ * print('attention:', scaledDotProductAttention(q, k, v, { causal: true }).output)
  */
 export function flashAttentionSteps(
   q: Value,
@@ -153,7 +186,24 @@ export function flashAttentionSteps(
   }
 }
 
-/** FlashAttention's tiled forward pass run to the end: softmax(q·kᵀ·scale)·v [Tq, d_v] by the online softmax. */
+/**
+ * FlashAttention's tiled forward pass run to the end: $\mathrm{softmax}(s\Qmat\Kmat^\top)\Vmat$ (`[Tq, d_v]`, $s$
+ * the scale) by the online softmax, never forming the whole score matrix. Not differentiable; see
+ * `flashAttentionSteps`.
+ *
+ * @param q The queries `[Tq, d]`.
+ * @param k The keys `[Tk, d]`.
+ * @param v The values `[Tk, d_v]`.
+ * @param options The tile sizes, causal masking and score scale.
+ * @returns The attention output `[Tq, d_v]`.
+ *
+ * @example Tiles of one query and one key give the attention output exactly
+ * const q = normals(stream(0), [3, 4])
+ * const k = normals(stream(1), [3, 4])
+ * const v = normals(stream(2), [3, 4])
+ * print('flash:', flashAttention(q, k, v, { queryBlock: 1, keyBlock: 1 }))
+ * print('attention:', scaledDotProductAttention(q, k, v).output)
+ */
 export function flashAttention(q: Value, k: Value, v: Value, options: FlashAttentionOptions = {}): Tensor {
   return run(flashAttentionSteps(q, k, v, options), undefined, Infinity).output!
 }

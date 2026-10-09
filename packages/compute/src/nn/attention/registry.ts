@@ -1,6 +1,8 @@
 /**
- * The functions, layers and algorithms of `aifn-compute/nn/attention`, registered with the notes that define them. Layers are
- * registered as constructions (they build a layer), functional forms as transforms.
+ * The functions, layers and algorithms of `aifn-compute/nn/attention`, registered with the notes that define them.
+ * Layers are registered as constructions (they build a layer), functional forms as transforms, and the FlashAttention
+ * forward pass as a step-through algorithm with the roles of its state's fields (`state`), so a generic trace view
+ * picks its series.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -12,7 +14,9 @@ import * as flash from './flash'
 import * as masks from './masks'
 import * as positions from './positions'
 
+/** Registers a function or layer constructor of the module with its description. */
 const fn = definer<FunctionInfo>('function', 'nn/attention')
+/** Registers a step-through algorithm of the module with its description. */
 const algorithm = definer<AlgorithmInfo>('algorithm', 'nn/attention')
 
 fn(
@@ -255,6 +259,7 @@ algorithm(
   flash.flashAttentionSteps,
 )
 
+/** A registry table: each registered export of the module by name, with its description. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 
 /** Every function and layer constructor of the module, keyed by name. */

@@ -1,10 +1,18 @@
 /**
- * `aifn-compute/nn/training`: the training loop (`trainingLoop`, a traceable `Algorithm` over any pytree update rule of
- * `aifn-compute/optim/first-order`), two-player adversarial training (`adversarialTraining`), persistent contrastive divergence
- * for energy-based models (`contrastiveDivergence`), full-batch training by a vector method (`fullBatchTraining`), one
- * state shape over first-order or L-BFGS training (`methodTraining`), differentially private training (DP-SGD,
- * `privateTraining`) and activation inspection (`activations`, `recordActivations`,
- * `inspect`).
+ * `aifn-compute/nn/training`: training loops for networks, as traceable algorithms over parameter trees.
+ *
+ * - Minibatch training: `trainingLoop`, with any pytree update rule of `aifn-compute/optim/first-order` (Adam by
+ *   default), shuffled epochs, gradient clipping, and layer buffers (batch norm) carried in the state.
+ * - Full-batch training: `fullBatchTraining` by a vector method of `aifn-compute/optim/minimize` (L-BFGS by default),
+ *   over the flat objective `treeObjective`; `methodTraining` gives first-order and L-BFGS training one state shape.
+ * - Special objectives: `adversarialTraining` (a critic and a generator in alternation, as in a GAN),
+ *   `contrastiveDivergence` (energy-based models with persistent Langevin negatives, and JEM) and `privateTraining`
+ *   (DP-SGD, reporting the $\varepsilon$ spent).
+ * - Inspection: `recordActivations` and `activations` record every tapped activation of a forward pass; `inspect` adds
+ *   the gradients of a loss with respect to each activation and parameter.
+ *
+ * Every algorithm runs with `run` and `trace` from its initial parameters and draws its randomness from the step's
+ * stream, so a step is a pure function of its state and context. `trainingAlgorithms` holds their registry entries.
  */
 
 export { trainingLoop, type Batch, type TrainingOptions, type TrainingState } from './train'

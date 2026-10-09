@@ -1,10 +1,12 @@
 /**
- * Training an energy-based model p_θ(x) ∝ exp(−E_θ(x)) by persistent contrastive divergence as a traceable algorithm:
- * each step draws negatives by short-run Langevin from a replay buffer of persistent chains
- * (`aifn-compute/inference/stochastic`'s `persistentLangevin`; Tieleman, 2008; Du & Mordatch, 2019) and takes one optimiser
- * step on `contrastiveDivergenceLoss` (mean E on data − mean E on negatives), plus an optional supervised term on the
- * same minibatch. With the term the softmax cross-entropy of a classifier whose energy is −logsumexp of its logits,
- * this is JEM (Grathwohl et al., 2019, Algorithm 1).
+ * Training an energy-based model $p_\theta(\xvec) \propto \exp(-E_\theta(\xvec))$ by persistent contrastive divergence
+ * as a traceable algorithm.
+ *
+ * Each step draws negatives by short-run Langevin from a replay buffer of persistent chains
+ * (`aifn-compute/inference/stochastic`'s `persistentLangevin`; Tieleman, 2008; Du & Mordatch, 2019) and takes one
+ * optimiser step on `contrastiveDivergenceLoss` (mean $E$ on data minus mean $E$ on negatives), plus an optional
+ * supervised term on the same minibatch. With the term the softmax cross-entropy of a classifier whose energy is
+ * $-\operatorname{logsumexp}$ of its logits, this is JEM (Grathwohl et al., 2019, Algorithm 1).
  */
 
 import type { Scalar, Size, Status, StepContext } from 'aifn-compute/foundation/contracts'
@@ -37,9 +39,9 @@ import type { Batch } from './train'
 
 /** Options of `contrastiveDivergence`. */
 export type ContrastiveDivergenceTrainingOptions<P extends Params, B extends Batch & { x: Tensor }> = {
-  /** The energy E_θ of a batch of points [n, d], one value per row ([n]). */
+  /** The energy $E_\theta$ of a batch of points `[n, d]`, one value per row (`[n]`). */
   energy: (params: P, x: Value) => Value
-  /** The training set; `x` [N, d] holds the points, other fields (labels) go to `supervised`. */
+  /** The training set; `x`, `[N, d]`, holds the points, and other fields (labels) go to `supervised`. */
   data: B
   /** Points per step. Default 64. */
   batchSize?: Size
@@ -51,7 +53,7 @@ export type ContrastiveDivergenceTrainingOptions<P extends Params, B extends Bat
   bufferSize?: Size
   /** Weight of the generative term (the contrastive-divergence surrogate). Default 1; 0 trains `supervised` alone. */
   generativeWeight?: Scalar
-  /** The energy-magnitude penalty α of `contrastiveDivergenceLoss`. Default 0. */
+  /** The energy-magnitude penalty $\alpha$ of `contrastiveDivergenceLoss`. Default 0. */
   regularisation?: Scalar
   /** A supervised loss on the minibatch, added to the generative term (JEM's cross-entropy). */
   supervised?: (params: P, batch: B) => Value
@@ -59,26 +61,40 @@ export type ContrastiveDivergenceTrainingOptions<P extends Params, B extends Bat
   divergeAbove?: Scalar
 }
 
-/** The state of `contrastiveDivergence` after t updates. */
+/** The state of `contrastiveDivergence` after $t$ updates. */
 export interface ContrastiveDivergenceState<P extends Params> extends Status {
+  /** Updates applied so far. */
   readonly t: Size
+  /** The parameters after $t$ updates. */
   readonly params: P
+  /** The update rule's state. */
   readonly optimizer: unknown
-  /** The persistent chains. */
+  /** The persistent chains (empty when `generativeWeight` is 0). */
   readonly buffer: ChainBuffer
-  /** The negatives of the last step ([n, d]; empty before the first). */
+  /** The negatives of the last step (`[n, d]`; empty before the first). */
   readonly negatives: Tensor
-  /** The total loss, its generative (CD) part and its supervised part, before the last update (NaN at t = 0). */
+  /** The total loss before the last update (NaN at $t = 0$). */
   readonly loss: Scalar
+  /** Its generative (contrastive-divergence) part, unweighted (NaN at $t = 0$ or when `generativeWeight` is 0). */
   readonly generativeLoss: Scalar
+  /** Its supervised part (NaN at $t = 0$ or without `supervised`). */
   readonly supervisedLoss: Scalar
-  /** Mean energy of the minibatch's data and of the negatives (NaN at t = 0). */
+  /** Mean energy of the minibatch's data (NaN at $t = 0$). */
   readonly dataEnergy: Scalar
+  /** Mean energy of the negatives (NaN at $t = 0$). */
   readonly sampleEnergy: Scalar
+  /** The global norm of the last update's gradient (NaN at $t = 0$). */
   readonly gradNorm: Scalar
+  /** Whether the loss is not finite or exceeds `divergeAbove` in absolute value; a run stops here. */
   readonly diverged: boolean
 }
 
+/**
+ * A loss as a number.
+ *
+ * @param v A number, or a rank-0 (or traced) value.
+ * @returns Its value; for a tensor, its first entry.
+ */
 const scalarOf = (v: Value): number => {
   const raw = unwrap(v)
   return typeof raw === 'number' ? raw : toFlat(raw)[0]
@@ -86,10 +102,29 @@ const scalarOf = (v: Value): number => {
 
 /**
  * Persistent contrastive-divergence training. `init` takes `{ params }`; the buffer starts from `sampler.fresh` on the
- * init stream. Step t draws a minibatch (without replacement, from `child(s, 'batch')`), negatives by
+ * init stream. Step $t$ draws a minibatch (without replacement, from `child(s, 'batch')`), negatives $\xvec'$ by
  * `persistentLangevin` under the current parameters (`child(s, 'negatives')`), and applies one update of the gradient
- * of w_gen·(mean E(x) − mean E(x′)) + supervised. Set `generativeWeight` to 0 to train the supervised term alone with
- * the same minibatches (the baseline JEM is compared against).
+ * of $w(\operatorname{mean} E(\xvec) - \operatorname{mean} E(\xvec'))$ plus the supervised term, $w$ the
+ * `generativeWeight` (the energy penalty $\alpha$ added when `regularisation` is set). Set `generativeWeight` to 0 to
+ * train the supervised term alone with the same minibatches (the baseline JEM is compared against).
+ *
+ * @param options The energy, the data, the sampler of negatives, the buffer and batch sizes, the update rule, the
+ *   weights of the terms and the divergence threshold.
+ * @returns The algorithm, to run with `run` or `trace` from `{ params }`.
+ *
+ * @example Fit the centre $\mu$ of $E(x) = (x - \mu)^2/2$ to data near 2: each step moves $\mu$ towards the data
+ * const data = { x: tensor([[1.8], [2.1], [2.0], [1.9], [2.2], [2.0]]) }
+ * const energy = (p, x) => mul(0.5, sum(square(sub(x, p.mu)), 1))
+ * const sampler = { fresh: (s, n) => uniform(s, -1, 1, { shape: [n, 1] }), steps: 5, stepSize: 0.1 }
+ * const alg = contrastiveDivergence({ energy, data, sampler, batchSize: 4, bufferSize: 20 })
+ * const tr = trace(alg, { params: { mu: 0 } }, 40, {
+ *   every: 10,
+ *   record: { mu: (s) => s.params.mu, dataEnergy: (s) => s.dataEnergy, sampleEnergy: (s) => s.sampleEnergy },
+ * })
+ * print('steps:', tr.index)
+ * print('mu:', tr.series.mu)
+ * print('data energy:', tr.series.dataEnergy)
+ * print('sample energy:', tr.series.sampleEnergy)
  */
 export function contrastiveDivergence<P extends Params, B extends Batch & { x: Tensor }>(
   options: ContrastiveDivergenceTrainingOptions<P, B>,

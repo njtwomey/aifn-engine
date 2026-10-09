@@ -1,6 +1,6 @@
 /**
- * The algorithms of `aifn-compute/nn/training`, registered with what each factory takes (`problem`) and the roles of its
- * state's fields (`state`: iterate, objective, grad, stepSize, and the `Status` flags it sets), so a generic trace
+ * The algorithms of `aifn-compute/nn/training`, registered with what each factory takes (`problem`) and the roles of
+ * its state's fields (`state`: iterate, objective, grad, stepSize, and the `Status` flags it sets), so a generic trace
  * view picks default series and a worker can address an algorithm by key (design S §2.3).
  */
 

@@ -1,22 +1,24 @@
 /**
- * Routing for a mixture of experts: turn a router's logits [T, N] (T tokens, N experts) into combine weights [T, N]
- * that are differentiable in the logits, and a constant dispatch mask saying which expert sees which token.
+ * Routing for a mixture of experts: turn a router's logits `[T, N]` ($T$ tokens, $N$ experts) into combine weights
+ * `[T, N]` that are differentiable in the logits, and a constant dispatch mask saying which expert sees which token.
+ * Below, $\zvec_t$ is token $t$'s row of logits and $\tau$ the temperature.
  *
- * - `softmax`: dense gating, every expert sees every token with weight softmax(z/τ) (Jacobs, Jordan, Nowlan and Hinton,
- *   1991, "Adaptive mixtures of local experts", Neural Computation 3(1)).
- * - `top-k`: each token keeps its k largest logits and renormalises the softmax over them (Shazeer et al., 2017,
+ * - `softmax`: dense gating, every expert sees every token with weight $\mathrm{softmax}(\zvec_t/\tau)$ (Jacobs,
+ *   Jordan, Nowlan and Hinton, 1991, "Adaptive mixtures of local experts", Neural Computation 3(1)).
+ * - `top-k`: each token keeps its $k$ largest logits and renormalises the softmax over them (Shazeer et al., 2017,
  *   "Outrageously large neural networks", ICLR, eq. 3–5; Mixtral's convention).
  * - `noisy-top-k`: the same on logits plus Gaussian noise of a per-token, per-expert scale (Shazeer et al., 2017,
  *   eq. 4), drawn only when a stream is given (training).
  * - `switch`: top-1 with the unrenormalised probability as the weight, so the router gets a gradient (Fedus, Zoph and
  *   Shazeer, 2022, "Switch Transformers", JMLR 23, §2.1).
- * - `expert-choice`: each expert takes its C highest-probability tokens (Zhou et al., 2022, "Mixture-of-experts with
+ * - `expert-choice`: each expert takes its $C$ highest-probability tokens (Zhou et al., 2022, "Mixture-of-experts with
  *   expert choice routing", NeurIPS): balanced by construction, but a token may get no expert or several.
  *
- * Capacity (token-choice gates): each expert takes at most C = ⌈capacityFactor · T · k / N⌉ assignments, filled in
- * priority order: every token's first choice in token order, then every second choice, … (Lepikhin et al., 2021,
- * "GShard", ICLR, Algorithm 1). An assignment past capacity is dropped: its weight becomes 0, and a token with none
- * left passes through the layer as zero (a residual connection around the layer carries it on).
+ * Capacity (token-choice gates): each expert takes at most $C = \lceil c T k / N \rceil$ assignments ($c$ the
+ * `capacityFactor`), filled in priority order: every token's first choice in token order, then every second choice,
+ * and so on (Lepikhin et al., 2021, "GShard", ICLR, Algorithm 1). An assignment past capacity is dropped: its weight
+ * becomes 0, and a token with none left passes through the layer as zero (a residual connection around the layer
+ * carries it on).
  *
  * The selection is discrete and read from the primal values of the logits, so it is constant to every derivative
  * transform; gradients reach the router through the weights of the experts it chose.
@@ -39,7 +41,7 @@ import {
 import { softmax } from 'aifn-compute/numerics/special'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** The gating rules of `route`. */
+/** The gating rules of `route`, described in the file comment. */
 export type GateKind = 'softmax' | 'top-k' | 'noisy-top-k' | 'switch' | 'expert-choice'
 
 /** The gating rules, in order, for controls and registries. */
@@ -50,15 +52,18 @@ export type RoutingOptions = {
   /** The gating rule (default `top-k`). */
   gate?: GateKind
   /**
-   * Experts per token for `top-k` and `noisy-top-k` (default 2, at most N); `switch` uses 1. For `expert-choice` it
+   * Experts per token for `top-k` and `noisy-top-k` (default 2, at most $N$); `switch` uses 1. For `expert-choice` it
    * is the default capacity factor, the average number of experts per token.
    */
   k?: Size
-  /** Temperature τ > 0: the weights are a softmax of z/τ (default 1). Small τ makes soft gating nearly hard. */
+  /**
+   * Temperature $\tau > 0$: the weights are a softmax of $\zvec/\tau$ (default 1). Small $\tau$ makes soft gating
+   * nearly hard.
+   */
   temperature?: number
   /**
-   * Capacity factor c > 0 (default ∞: no dropping; `expert-choice` defaults to k). Ignored by `softmax`, whose experts
-   * see every token.
+   * Capacity factor $c > 0$ (default $\infty$: no dropping; `expert-choice` defaults to $k$). Ignored by `softmax`,
+   * whose experts see every token.
    */
   capacityFactor?: number
   /**
@@ -66,7 +71,10 @@ export type RoutingOptions = {
    * `switch` and `expert-choice`, which weight by the full softmax's probability).
    */
   normalise?: boolean
-  /** `noisy-top-k`: the noise scale, a number or [T, N] (e.g. softplus(x·W_noise)); default 1. */
+  /**
+   * `noisy-top-k`: the noise scale, a number or `[T, N]` (e.g. $\mathrm{softplus}(\xvec\Wmat_{\mathrm{noise}})$);
+   * default 1.
+   */
   noiseScale?: Value
   /** `noisy-top-k`: the stream the noise is drawn from; without one (evaluation) no noise is added. */
   stream?: Stream
@@ -74,43 +82,77 @@ export type RoutingOptions = {
 
 /** The result of `route`. */
 export type Routing = {
+  /** The gating rule used. */
   readonly gate: GateKind
+  /** The number of tokens $T$. */
   readonly tokens: Size
+  /** The number of experts $N$. */
   readonly experts: Size
-  /** Experts chosen per token (token-choice gates; N for `softmax`; the capacity factor for `expert-choice`). */
+  /**
+   * Experts chosen per token (token-choice gates; $N$ for `softmax`; for `expert-choice` the option `k`, the default
+   * capacity factor).
+   */
   readonly k: number
-  /** The router's logits [T, N], before temperature and noise. */
+  /** The router's logits `[T, N]`, before temperature and noise. */
   readonly logits: Value
-  /** The logits the selection used: z/τ plus noise for `noisy-top-k`, z/τ otherwise. */
+  /** The logits the selection used: $\zvec/\tau$ plus noise for `noisy-top-k`, $\zvec/\tau$ otherwise. */
   readonly scores: Value
-  /** softmax(scores) over every expert [T, N]: the router's probabilities (used by the auxiliary losses). */
+  /** The softmax of `scores` over every expert, `[T, N]`: the router's probabilities (used by the auxiliary losses). */
   readonly probs: Value
-  /** The combine weights [T, N]: zero where an expert was not chosen or its assignment was dropped. */
+  /** The combine weights `[T, N]`: zero where an expert was not chosen or its assignment was dropped. */
   readonly combine: Value
-  /** 1 where the gate chose expert i for token t, before capacity [T, N] (constant). */
+  /** 1 where the gate chose expert $i$ for token $t$, before capacity, `[T, N]` (constant). */
   readonly selected: Tensor
-  /** 1 where expert i processes token t, after capacity [T, N] (constant). */
+  /** 1 where expert $i$ processes token $t$, after capacity, `[T, N]` (constant). */
   readonly dispatch: Tensor
-  /** Assignments each expert may take (∞ without a capacity). */
+  /** Assignments each expert may take ($\infty$ without a capacity). */
   readonly capacity: number
 }
 
+/** The logit given to unchosen experts when renormalising: finite, so no infinity enters a derivative. */
 const NEG = -1e30
 
-/** The k largest entries of a row, by index, largest first (ties by lower index). */
+/**
+ * The $k$ largest entries of a row, by index, largest first (ties by lower index).
+ *
+ * @param row The values to rank.
+ * @param k How many indices to return (all of them when $k$ exceeds the length).
+ * @returns The indices of the $k$ largest values.
+ */
 function topIndices(row: ArrayLike<number>, k: Size): number[] {
   const idx = Array.from({ length: row.length }, (_, i) => i)
   idx.sort((a, b) => row[b] - row[a] || a - b)
   return idx.slice(0, k)
 }
 
-/** Rows of a [T, N] value's primal values. */
+/**
+ * Rows of a `[T, N]` value's primal values, as copies.
+ *
+ * @param v The `[T, N]` value; a traced one is read through its primal.
+ * @param T The number of rows.
+ * @param N The number of columns.
+ * @returns $T$ arrays of $N$ values.
+ */
 function rowsOf(v: Value, T: Size, N: Size): Float64Array[] {
   const flat = toFlat(unwrap(v) as Tensor)
   return Array.from({ length: T }, (_, t) => Float64Array.from(flat.slice(t * N, (t + 1) * N)))
 }
 
-/** The capacity ⌈c · assignments / N⌉ (∞ when c is). */
+/**
+ * An expert's capacity $\lceil c T k / N \rceil$, the assignments it may take ($\infty$ when $c$ is). Throws
+ * `DomainError` unless $c > 0$.
+ *
+ * @param tokens The number of tokens $T$.
+ * @param experts The number of experts $N$.
+ * @param k The assignments per token $k$, so $Tk$ in all.
+ * @param capacityFactor The capacity factor $c$: 1 gives each expert exactly its even share.
+ * @returns The capacity, or $\infty$ without a factor.
+ *
+ * @example Eight tokens, four experts, two choices each: an even share is four
+ * print('no limit:', expertCapacity(8, 4, 2))
+ * print('factor 1:', expertCapacity(8, 4, 2, 1))
+ * print('factor 1.25:', expertCapacity(8, 4, 2, 1.25))
+ */
 export function expertCapacity(tokens: Size, experts: Size, k: number, capacityFactor = Infinity): number {
   if (!(capacityFactor > 0))
     throw new DomainError('expertCapacity', `expertCapacity: the capacity factor must be positive`)
@@ -118,9 +160,43 @@ export function expertCapacity(tokens: Size, experts: Size, k: number, capacityF
 }
 
 /**
- * Route T tokens to N experts from the router's logits [T, N]: the combine weights (differentiable in the logits and
- * the noise scale), the router's probabilities, and the constant selection and dispatch masks (see the module comment
- * for each gate and for capacity).
+ * Route $T$ tokens to $N$ experts from the router's logits `[T, N]`: the combine weights (differentiable in the logits
+ * and the noise scale), the router's probabilities, and the constant selection and dispatch masks (see the file
+ * comment for each gate and for capacity). Throws `ShapeError` unless the logits are a matrix, and `DomainError` for a
+ * temperature that is not positive or a $k$ below 1.
+ *
+ * @param logits The router's logits `[T, N]`, one row per token; a traced value makes the weights differentiable.
+ * @param options The gate, $k$, temperature, capacity factor, renormalisation and, for `noisy-top-k`, the noise.
+ * @returns The routing: weights, probabilities, masks and capacity.
+ *
+ * @example Top-2 of three experts: each row of weights sums to one over its two experts
+ * const logits = tensor([[2, 1, 0], [0, 3, 1], [1, 1, 4]])
+ * const routing = route(logits, { gate: 'top-k', k: 2 })
+ * print('selected:', routing.selected)
+ * print('combine:', routing.combine)
+ * print('row sums:', sum(routing.combine, 1))
+ *
+ * @example Dense softmax against Switch's top-1, which keeps the unrenormalised probability
+ * const logits = tensor([[2, 1, 0], [0, 3, 1], [1, 1, 4]])
+ * print('softmax:', route(logits, { gate: 'softmax' }).combine)
+ * print('switch:', route(logits, { gate: 'switch' }).combine)
+ *
+ * @example Capacity: four tokens all choose expert 0, which takes two, in token order
+ * const routing = route(tensor([[3, 0], [2, 0], [1, 0], [4, 0]]), { gate: 'switch', capacityFactor: 1 })
+ * print('capacity:', routing.capacity)
+ * print('selected:', routing.selected)
+ * print('dispatch:', routing.dispatch)
+ *
+ * @example Expert choice: each expert takes its two likeliest tokens, so the last token gets all three
+ * const logits = tensor([[2, 1, 0], [0, 3, 1], [1, 1, 4], [2, 2, 2]])
+ * const routing = route(logits, { gate: 'expert-choice', k: 1 })
+ * print('capacity per expert:', routing.capacity)
+ * print('dispatch:', routing.dispatch)
+ *
+ * @example Noisy top-k adds noise only when given a stream
+ * const logits = tensor([[2, 1, 0], [0, 3, 1]])
+ * print('evaluation:', route(logits, { gate: 'noisy-top-k', k: 1 }).scores)
+ * print('training:', route(logits, { gate: 'noisy-top-k', k: 1, stream: stream(0) }).scores)
  */
 export function route(logits: Value, options: RoutingOptions = {}): Routing {
   const { gate = 'top-k', temperature = 1 } = options
@@ -208,9 +284,19 @@ export function route(logits: Value, options: RoutingOptions = {}): Routing {
 }
 
 /**
- * A dense routing from given probabilities [T, N] (each row summing to 1), for gates that are not a single softmax of
+ * A dense routing from given probabilities `[T, N]` (each row summing to 1), for gates that are not a single softmax of
  * logits, such as the product of softmaxes down a hierarchical mixture of experts (Jordan and Jacobs, 1994). Every
- * expert sees every token; `logits` and `scores` are log-probabilities.
+ * expert sees every token; `logits` and `scores` are log-probabilities. Throws `ShapeError` unless the probabilities
+ * are a matrix.
+ *
+ * @param probs The gate probabilities `[T, N]`, used as the combine weights.
+ * @param logProbs Their logarithms, when the caller has them more accurately (default: the log of `probs`).
+ * @returns A `softmax` routing with these weights and no capacity.
+ *
+ * @example Two tokens' given gate probabilities
+ * const routing = denseRouting(tensor([[0.5, 0.5], [0.9, 0.1]]))
+ * print('combine:', routing.combine)
+ * print('logits:', routing.logits)
  */
 export function denseRouting(probs: Value, logProbs?: Value): Routing {
   const shape = shapeOfValue(probs)

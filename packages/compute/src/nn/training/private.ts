@@ -1,9 +1,11 @@
 /**
- * Differentially private training, DP-SGD (Abadi et al., 2016): each step draws a Poisson sample of the examples (each
- * kept with probability q), computes every sampled example's gradient (`vmap(grad(loss))`), clips each to L2 norm C,
- * sums them, adds N(0, σ²C²) noise and divides by the expected batch size qn (`aifn-compute/probability/privacy`'s
- * `clipAndNoise`), then applies any update rule of `aifn-compute/optim/first-order`. The privacy spent after t steps is
- * reported as ε at the given δ by Rényi-DP accounting of the subsampled Gaussian mechanism (`dpSgdEpsilon`), as
+ * Differentially private training, DP-SGD (Abadi et al., 2016), as a traceable algorithm.
+ *
+ * Each step draws a Poisson sample of the examples (each kept with probability $q$), computes every sampled example's
+ * gradient (`vmap(grad(loss))`), clips each to Euclidean norm $C$, sums them, adds $\Gauss(0, \sigma^2 C^2)$ noise and
+ * divides by the expected batch size $qn$ (`aifn-compute/probability/privacy`'s `clipAndNoise`), then applies any
+ * update rule of `aifn-compute/optim/first-order`. The privacy spent after $t$ steps is reported as $\varepsilon$ at
+ * the given $\delta$ by Rényi-DP accounting of the subsampled Gaussian mechanism (as `dpSgdEpsilon` computes it), as
  * Opacus's RDP accountant; the guarantee covers the released parameters of every step.
  */
 
@@ -24,36 +26,49 @@ export type PrivateTrainingOptions<P extends Params, B extends Batch> = {
   loss: (params: P, example: B) => Value
   /** The training set: named tensors whose first axis indexes the examples. */
   data: B
-  /** Expected examples per step, qn (default 64, capped at n); sets the sampling rate q. */
+  /** Expected examples per step, $qn$ (default 64, capped at $n$); sets the sampling rate $q$. */
   batchSize?: Size
-  /** Per-example clipping norm C (default 1). */
+  /** Per-example clipping norm $C$ (default 1). */
   clipNorm?: Scalar
-  /** Noise multiplier σ: the noise's standard deviation over C (default 1; 0 trains without noise). */
+  /** Noise multiplier $\sigma$: the noise's standard deviation over $C$ (default 1; 0 trains without noise). */
   noiseMultiplier?: Scalar
   /** The update rule (default `adamRule({ stepSize: 0.01 })`). */
   optimizer?: UpdateRule<unknown>
-  /** The δ at which ε is reported (default 1e-5). */
+  /** The $\delta$ at which $\varepsilon$ is reported (default 1e-5). */
   delta?: Scalar
 }
 
-/** The state of `privateTraining` after t updates. */
+/** The state of `privateTraining` after $t$ updates. */
 export interface PrivateTrainingState<P extends Params> extends Status {
+  /** Updates applied so far. */
   readonly t: Size
+  /** The parameters after $t$ updates. */
   readonly params: P
+  /** The update rule's state. */
   readonly optimizer: unknown
-  /** The mean loss over this step's sample (NaN when the sample was empty). */
+  /**
+   * The mean loss over this step's sample, at the parameters before the update (NaN at $t = 0$ and when the sample
+   * was empty).
+   */
   readonly loss: Scalar
   /** Examples in this step's Poisson sample. */
   readonly batchSize: Size
-  /** The mean per-example gradient norm before clipping. */
+  /** The mean per-example gradient norm before clipping (NaN at $t = 0$ and when the sample was empty). */
   readonly gradNorm: Scalar
   /** Share of the sample whose gradients were clipped. */
   readonly clippedShare: Scalar
-  /** ε at `delta` spent by the t updates so far (∞ without noise). */
+  /** $\varepsilon$ at `delta` spent by the $t$ updates so far (0 at $t = 0$; $\infty$ without noise). */
   readonly epsilon: Scalar
+  /** Whether the loss of a non-empty sample is not finite; a run stops here. */
   readonly diverged: boolean
 }
 
+/**
+ * The data's number of examples. Throws `ShapeError` when the fields differ in length or there are none.
+ *
+ * @param data The training set, whose fields' first axes index the examples.
+ * @returns The common length of the first axes.
+ */
 function examplesOf(data: Batch): Size {
   const sizes = Object.values(data).map((t) => t.shape[0])
   if (sizes.length === 0 || sizes.some((s) => s !== sizes[0]))
@@ -61,7 +76,27 @@ function examplesOf(data: Batch): Size {
   return sizes[0]
 }
 
-/** DP-SGD as a traceable algorithm; `init` takes `{ params }`. The sample of step t is drawn from its stream. */
+/**
+ * DP-SGD as a traceable algorithm; `init` takes `{ params }`. The sample of step $t$ is drawn from `child(s, 'sample')`
+ * of its stream `s`, and the noise from `child(s, 'noise')`. An empty sample still takes a step, on noise alone.
+ *
+ * @param options The per-example loss, the data, the expected batch size, the clipping norm, the noise multiplier,
+ *   the update rule and the $\delta$ of the reported $\varepsilon$.
+ * @returns The algorithm, to run with `run` or `trace` from `{ params }`.
+ *
+ * @example Fit $y = 2x + 1$ privately: the loss falls while $\varepsilon$ grows with every step
+ * const x = linspace(-1, 1, 20)
+ * const data = { x, y: add(mul(2, x), 1) }
+ * const loss = (p, e) => square(sub(add(mul(p.w, e.x), p.b), e.y))
+ * const alg = privateTraining({ loss, data, batchSize: 10 })
+ * const tr = trace(alg, { params: { w: 0, b: 0 } }, 300, {
+ *   every: 100,
+ *   record: { loss: (s) => s.loss, epsilon: (s) => s.epsilon },
+ * })
+ * print('steps:', tr.index)
+ * print('loss:', tr.series.loss)
+ * print('epsilon:', tr.series.epsilon)
+ */
 export function privateTraining<P extends Params, B extends Batch>(
   options: PrivateTrainingOptions<P, B>,
 ): Algorithm<{ params: P }, PrivateTrainingState<P>> {

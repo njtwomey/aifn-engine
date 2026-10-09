@@ -1,8 +1,9 @@
 /**
  * The ODE block (Chen, Rubanova, Bettencourt & Duvenaud, 2018, "Neural ordinary differential equations", NeurIPS): a
- * layer whose output is the solution x(t₁) of x′ = f_θ(t, x) from its input x(t₀) = x, with f_θ any layer mapping
- * [B, d] (or [B, d + 1] with the time appended) to [B, d]. Differentiated by backpropagation through the solver or by
- * the adjoint method (`aifn-compute/dynamics/ode` `odeFlow`).
+ * layer whose output is the solution $\xvec(t_1)$ of $\xvec' = f_\theta(t, \xvec)$ from its input
+ * $\xvec(t_0) = \xvec$, with $f_\theta$ any layer mapping `[B, d]` (or `[B, d + 1]` with the time appended) to
+ * `[B, d]`. Solved by `odeFlow` of `aifn-compute/dynamics/ode` (fixed-step RK4 by default), and differentiated by
+ * backpropagation through the solver or by the adjoint method.
  */
 
 import {
@@ -28,23 +29,30 @@ import {
 import type { Scalar } from 'aifn-compute/foundation/contracts'
 import { childContext, tap, type Context, type Layer } from './layers'
 
-/** Options of {@link OdeBlock}: the solver and gradient options of `odeFlow`, and the interval. */
+/** Options of `OdeBlock`: the solver and gradient options of `odeFlow`, and the interval. */
 export type OdeBlockOptions = OdeFlowOptions & {
-  /** The interval [t₀, t₁]. Default [0, 1]. */
+  /** The interval $[t_0, t_1]$. Default `[0, 1]`. */
   interval?: readonly [Scalar, Scalar]
-  /** Append t as a last input column of the field: f(t, x) rather than the autonomous f(x). Default false. */
+  /**
+   * Append $t$ as a last input column of the field: $f(t, \xvec)$ rather than the autonomous $f(\xvec)$. Default
+   * false.
+   */
   timeDependent?: boolean
 }
 
 /** An ODE block: a layer, its field and its flow at any times. */
 export interface OdeBlockLayer<P extends Params> extends Layer<P> {
-  /** The vector field f_θ(t, x) on a batch [B, d]. */
+  /** The vector field $f_\theta(t, \xvec)$ on a batch `[B, d]`; the inner layer runs at path `field`. */
   field(params: P, t: Scalar, x: Value, ctx?: Context): Value
-  /** [x(t₀), x(t₁), …] at `times` from x(t₀) = x (with the block's options, overridden by `options`). */
+  /**
+   * The states $[\xvec(t_0), \xvec(t_1), \dots]$ at `times`, starting from `x` at the first time (with the block's
+   * options, overridden by `options`).
+   */
   flow(params: P, x: Value, times: readonly Scalar[], options?: OdeFlowOptions): Value[]
   /**
    * The flow with integrals appended (`augmentedDynamics`): the change in log density of a continuous normalising
-   * flow, and the kinetic-energy and Jacobian-Frobenius regularisers of RNODE, at every time (each from 0 at `times[0]`).
+   * flow, and the kinetic-energy and Jacobian-Frobenius regularisers of RNODE, at every time (each from 0 at
+   * `times[0]`).
    */
   flowAugmented(
     params: P,
@@ -58,6 +66,10 @@ export interface OdeBlockLayer<P extends Params> extends Layer<P> {
 /**
  * Parameters as one vector and the map back, both written with primitives, so a gradient with respect to the vector
  * reaches every leaf (the adjoint differentiates one parameter tensor).
+ *
+ * @param params The parameter tree; its leaves are flattened in `treeFlatten` order and concatenated.
+ * @returns `vector`, the concatenated leaves, and `unpack`, which slices a vector of that length back into a tree of
+ *   the same structure and shapes (number leaves come back as rank-0 values).
  */
 function packed<P>(params: P): { vector: Value; unpack: (v: Value) => P } {
   const { leaves, treedef } = treeFlatten(params)
@@ -77,9 +89,27 @@ function packed<P>(params: P): { vector: Value; unpack: (v: Value) => P } {
 }
 
 /**
- * A layer x ↦ x(t₁) where x′ = f_θ(t, x), x(t₀) = x. Its parameters are the field's. With `gradient: 'adjoint'` the
- * parameter tree is packed into one vector for `odeAdjoint`; with `'backprop'` the solver's steps are recorded. The
- * field's input is x, or [x, t] with `timeDependent`.
+ * A layer $\xvec \mapsto \xvec(t_1)$ where $\xvec' = f_\theta(t, \xvec)$, $\xvec(t_0) = \xvec$. Its parameters are the
+ * field's, and it is initialised as the field. With `gradient: 'adjoint'` the parameter tree is packed into one vector
+ * for the adjoint method; with `'backprop'` (the default) the solver's steps are recorded. The field's input is
+ * $\xvec$, or $[\xvec, t]$ with `timeDependent`. The layer also exposes the field, the flow at any times, and the flow
+ * with the integrals of `augmentedDynamics` appended.
+ *
+ * @param f The field $f_\theta$: a layer from `[B, d]` (or `[B, d + 1]` with `timeDependent`) to `[B, d]`.
+ * @param options The interval, whether the field sees the time, and the solver and gradient options of `odeFlow`.
+ * @returns The block, an `OdeBlockLayer` whose `apply` gives $\xvec(t_1)$, `[B, d]`.
+ *
+ * @example The field $f(\xvec) = -\xvec$ decays the input by $e^{-1}$ over $[0, 1]$
+ * const block = OdeBlock(ActivationLayer((v) => mul(-1, v)))
+ * const x = tensor([[1, 2]])
+ * print('x(1):', block.apply({}, x))
+ * print('x e^-1:', mul(Math.exp(-1), x))
+ * print('flow at 0, 0.5, 1:', block.flow({}, x, [0, 0.5, 1]))
+ *
+ * @example A learned linear field on a batch of three
+ * const block = OdeBlock(Linear(2, 2), { stepSize: 0.25 })
+ * const p = block.init(stream(0))
+ * print(block.label, ' output shape:', block.apply(p, normals(stream(1), [3, 2])).shape)
  */
 export function OdeBlock<P extends Params>(f: Layer<P>, options: OdeBlockOptions = {}): OdeBlockLayer<P> {
   const { interval = [0, 1], timeDependent = false, ...solver } = options

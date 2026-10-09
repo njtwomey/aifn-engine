@@ -1,22 +1,31 @@
 /**
- * Graph neural network layers on `aifn-compute/graph/propagation`'s message passing, each a functional form (graph, features,
- * parameters) and a `Layer` that closes over one graph (transductive use, as a citation network):
+ * Graph neural network layers on the message passing of `aifn-compute/graph/propagation`, each a functional form
+ * (graph, features, parameters) and a `Layer` that closes over one graph (transductive use, as on a citation network).
+ * Node features are a $V \times F$ matrix, one row per node; the messages run along the directed message edges
+ * $u \to v$ (both directions of an undirected edge).
  *
  * - **Graph convolution** (Kipf and Welling 2017, "Semi-supervised classification with graph convolutional networks",
- *   ICLR): H′ = Â H W + b with Â = D̃^{−1/2}(A + I)D̃^{−1/2} (`symmetric`), D̃⁻¹(A + I) (`random-walk`, the mean over
- *   the neighbourhood) or A + I (`none`, the sum).
- * - **Graph attention** (Veličković et al. 2018, "Graph attention networks", ICLR): z = hW per head;
- *   e_{uv} = LeakyReLU(a_srcᵀ z_u + a_dstᵀ z_v); α = softmax of e over v's incoming edges (itself included);
- *   h′_v = Σ_u α_{uv} z_u, heads concatenated or averaged. `v2` is GATv2 (Brody, Alon and Yahav 2022, "How attentive are
- *   graph attention networks?", ICLR), e_{uv} = aᵀ LeakyReLU(z_u + z_v), whose ranking of neighbours can depend on v.
+ *   ICLR): $\Hmat' = \hat{\Amat} \Hmat \Wmat + \bvec$ with
+ *   $\hat{\Amat} = \tilde{\Dmat}^{-1/2}(\Amat + \Imat)\tilde{\Dmat}^{-1/2}$ (`symmetric`),
+ *   $\tilde{\Dmat}^{-1}(\Amat + \Imat)$ (`random-walk`, the mean over the neighbourhood) or $\Amat + \Imat$
+ *   (`none`, the sum), $\tilde{\Dmat}$ the degrees of $\Amat + \Imat$.
+ * - **Graph attention** (Veličković et al. 2018, "Graph attention networks", ICLR): $\zvec = \hvec\Wmat$ per head;
+ *   $e_{uv} = \mathrm{LeakyReLU}(\avec_{\mathrm{src}}^\top \zvec_u + \avec_{\mathrm{dst}}^\top \zvec_v)$;
+ *   $\alpha_{uv}$ the softmax of $e_{uv}$ over $v$'s incoming edges (itself included);
+ *   $\hvec'_v = \sum_u \alpha_{uv} \zvec_u$, heads concatenated or averaged. `v2` is GATv2 (Brody, Alon and Yahav
+ *   2022, "How attentive are graph attention networks?", ICLR),
+ *   $e_{uv} = \avec^\top \mathrm{LeakyReLU}(\zvec_u + \zvec_v)$, whose ranking of neighbours can depend on $v$.
  * - **GraphSAGE** (Hamilton, Ying and Leskovec 2017, "Inductive representation learning on large graphs", NeurIPS):
- *   h′_v = W_self h_v + W_neigh AGG{h_u : u → v} + b, with AGG the mean, the sum, the elementwise max, or Hamilton's
- *   max-pooling max{ReLU(W_pool h_u + b_pool)}; `normalise` scales each output row to unit length. `sampleNeighbours`
- *   keeps a uniform sample of at most S incoming edges per node.
+ *   $\hvec'_v = \Wmat_{\mathrm{self}} \hvec_v + \Wmat_{\mathrm{neigh}} \mathrm{AGG}\{\hvec_u : u \to v\} + \bvec$,
+ *   with AGG the mean, the sum, the elementwise max, or Hamilton's max-pooling
+ *   $\max\{\mathrm{ReLU}(\Wmat_{\mathrm{pool}} \hvec_u + \bvec_{\mathrm{pool}})\}$; `normalise` scales each output
+ *   row to unit length. `sampleNeighbours` keeps a uniform sample of at most $S$ incoming edges per node.
  * - **Message passing** (Gilmer et al. 2017, "Neural message passing for quantum chemistry", ICML):
- *   m_v = AGG_{u → v} M([h_u, h_v, w_{uv}]), h′_v = U([h_v, m_v]) for any message and update layers M and U.
+ *   $\mvec_v = \mathrm{AGG}_{u \to v} M([\hvec_u, \hvec_v, w_{uv}])$, $\hvec'_v = U([\hvec_v, \mvec_v])$ for any
+ *   message and update layers $M$ and $U$.
  *
- * Every layer is differentiable in its parameters and in the node features, to any order.
+ * Every layer is differentiable in its parameters and in the node features, to any order. Features that are not a
+ * $V \times F$ matrix throw `ShapeError`.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -50,6 +59,14 @@ import { childContext, linear, tap, type Context, type Layer, type LinearParams 
 /** The directed message edges of a graph (both directions of an undirected edge), with optional self-loops. */
 type Edges = ReturnType<typeof messageEdges>
 
+/**
+ * Check that the features have one row per node, and return their width. Throws `ShapeError` otherwise.
+ *
+ * @param g The graph the features belong to.
+ * @param h The node features, expected to be $V \times F$ for the $V$ nodes of `g`.
+ * @param where The caller's name, for the error message.
+ * @returns The feature width $F$.
+ */
 function checkFeatures(g: Graph, h: Value, where: string): Size {
   const s = shapeOfValue(h)
   if (s.length !== 2 || s[0] !== g.nodes)
@@ -57,24 +74,52 @@ function checkFeatures(g: Graph, h: Value, where: string): Size {
   return s[1]
 }
 
+/**
+ * Per-edge values as an $E \times 1$ column, to scale the $E$ rows of messages.
+ *
+ * @param values One value per edge.
+ * @returns The values as an $E \times 1$ tensor.
+ */
 const column = (values: Float64Array): Tensor => fromData(values, [values.length, 1])
 
 // ── Graph convolution ────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** How a graph convolution weights each neighbour. */
+/**
+ * How a graph convolution weights each neighbour: `symmetric` $1/\sqrt{\tilde{d}_u \tilde{d}_v}$, `random-walk`
+ * $1/\tilde{d}_v$ (the mean) or `none` (the sum), with $\tilde{d}$ the degrees counting self-loops.
+ */
 export type GcnNormalisation = 'symmetric' | 'random-walk' | 'none'
 
 /** Options of {@link graphConv}. */
 export interface GraphConvOptions {
-  /** Default `symmetric`. */
+  /** How each neighbour is weighted (default `symmetric`). */
   normalisation?: GcnNormalisation
-  /** Add a self-loop of weight 1 to every node (Ã = A + I). Default true. */
+  /** Add a self-loop of weight 1 to every node ($\tilde{\Amat} = \Amat + \Imat$). Default true. */
   selfLoops?: boolean
-  /** Use the graph's edge weights in A (default false: 1 per edge). */
+  /**
+   * Use the graph's edge weights in $\Amat$ (default false: 1 per edge); the self-loops keep weight 1, and the degrees
+   * are then weighted degrees.
+   */
   weighted?: boolean
 }
 
-/** The propagation coefficients Â_{vu} of every message edge u → v of a graph convolution, and the edges. */
+/**
+ * The propagation coefficients $\hat{A}_{vu}$ of every message edge $u \to v$ of a graph convolution, and the edges.
+ * A node of degree 0 (no self-loop, no neighbours) gets coefficient 0 instead of a division by zero.
+ *
+ * @param g The graph; an undirected edge carries messages both ways, a directed one from `from` to `to`.
+ * @param options The normalisation, self-loops and edge weights.
+ * @returns The message `edges` (`source`, `destination` and `weight` per edge, the self-loops last) and the
+ *   `coefficients` $\hat{A}_{vu}$, an $E \times 1$ column in the same order.
+ *
+ * @example The symmetric coefficients of a path of three nodes
+ * // 0 - 1 - 2, with self-loops: degrees 2, 3, 2.
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const { edges, coefficients } = gcnCoefficients(g)
+ * print('source:', edges.source)
+ * print('destination:', edges.destination)
+ * print('coefficients:', coefficients)
+ */
 export function gcnCoefficients(g: Graph, options: GraphConvOptions = {}): { edges: Edges; coefficients: Tensor } {
   const { normalisation = 'symmetric', selfLoops = true, weighted = false } = options
   const edges = messageEdges(g, selfLoops)
@@ -93,7 +138,26 @@ export function gcnCoefficients(g: Graph, options: GraphConvOptions = {}): { edg
   return { edges, coefficients: column(coef) }
 }
 
-/** The graph convolution Â (h W) + b of features h (V × F) with W (F × G); see the module notes. */
+/**
+ * The graph convolution $\hat{\Amat} (\Hmat \Wmat) + \bvec$ (Kipf and Welling, 2017): each node's new features
+ * are the normalised sum over its neighbourhood of the transformed features. Differentiable in `h`, `weight` and
+ * `bias`. Throws `ShapeError` unless `h` has one row per node.
+ *
+ * @param g The graph.
+ * @param h The node features $\Hmat$, $V \times F$.
+ * @param weight The weight $\Wmat$, $F \times G$.
+ * @param bias The bias $\bvec$, $G$ values added to every row (default none).
+ * @param options The normalisation, self-loops and edge weights, as for `gcnCoefficients`.
+ * @returns The new features, $V \times G$.
+ *
+ * @example A graph convolution on a path of three nodes
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const h = tensor([[1, 0], [0, 1], [1, 1]])
+ * const W = tensor([[1], [1]]) // sums the two features
+ * print('sum:', graphConv(g, h, W, undefined, { normalisation: 'none' }))
+ * print('mean:', graphConv(g, h, W, undefined, { normalisation: 'random-walk' }))
+ * print('symmetric:', graphConv(g, h, W))
+ */
 export function graphConv(g: Graph, h: Value, weight: Value, bias?: Value, options: GraphConvOptions = {}): Value {
   checkFeatures(g, h, 'graphConv')
   const { edges, coefficients } = gcnCoefficients(g, options)
@@ -102,7 +166,24 @@ export function graphConv(g: Graph, h: Value, weight: Value, bias?: Value, optio
   return bias === undefined ? out : add(out, bias)
 }
 
-/** A graph convolution layer over a fixed graph: Linear(F → G) parameters, Glorot-initialised as in Kipf and Welling. */
+/**
+ * A graph convolution layer over a fixed graph: `Linear`-style parameters ($F \to G$), the weight Glorot-uniform
+ * initialised as in Kipf and Welling and the bias zero; `apply` is `graphConv` on `g`.
+ *
+ * @param g The graph every call runs on.
+ * @param inFeatures The input width $F$.
+ * @param outFeatures The output width $G$.
+ * @param options The `graphConv` options, and `bias` (default true) to include the bias.
+ * @returns The layer: `init` draws `weight` ($F \times G$) and `bias` ($G$), `apply` maps $V \times F$ features to
+ *   $V \times G$.
+ *
+ * @example A layer of width four on a 3-node graph
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const layer = GraphConv(g, 2, 4)
+ * const p = layer.init(stream(0))
+ * print(layer.label)
+ * print('output:', layer.apply(p, tensor([[1, 0], [0, 1], [1, 1]])))
+ */
 export function GraphConv(
   g: Graph,
   inFeatures: Size,
@@ -124,22 +205,23 @@ export function GraphConv(
 
 // ── Graph attention ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Parameters of a graph attention layer with H heads of width G. */
+/** Parameters of a graph attention layer with $H$ heads of width $G$. */
 export type GraphAttentionParams = {
-  /** The shared map W (F × H·G). */
+  /** The shared map $\Wmat$, $F \times HG$: head $k$ is columns $kG$ to $kG + G - 1$. */
   weight: Tensor
-  /** GAT: the source and destination halves of the attention vector a, one row per head (H × G). */
+  /** GAT: the source half $\avec_{\mathrm{src}}$ of the attention vector, one row per head ($H \times G$). */
   attSource?: Tensor
+  /** GAT: the destination half $\avec_{\mathrm{dst}}$ of the attention vector, one row per head ($H \times G$). */
   attTarget?: Tensor
-  /** GATv2: the attention vector, one row per head (H × G). */
+  /** GATv2: the attention vector $\avec$, one row per head ($H \times G$). */
   att?: Tensor
-  /** H·G when heads are concatenated, G when averaged. */
+  /** The bias: $HG$ values when heads are concatenated, $G$ when averaged (default none). */
   bias?: Tensor
 }
 
 /** Options of {@link graphAttention}. */
 export interface GraphAttentionOptions {
-  /** Heads H (default 1). */
+  /** Heads $H$ (default 1). */
   heads?: Size
   /** Concatenate the heads (default true) or average them (the output layer of Veličković et al.). */
   concat?: boolean
@@ -153,15 +235,36 @@ export interface GraphAttentionOptions {
 
 /** A graph attention pass: the output and the attention weights on every message edge. */
 export interface GraphAttentionResult {
-  /** V × H·G (concatenated) or V × G (averaged). */
+  /** The new features, $V \times HG$ (heads concatenated) or $V \times G$ (averaged). */
   readonly output: Value
-  /** α per message edge and head, E × H; each destination's column sums to one. */
+  /** $\alpha$ per message edge and head, $E \times H$: in each column, the weights into one node sum to one. */
   readonly attention: Value
+  /** The source node $u$ of each message edge ($E$ entries, the self-loops last). */
   readonly source: Int32Array
+  /** The destination node $v$ of each message edge ($E$ entries). */
   readonly destination: Int32Array
 }
 
-/** One graph attention pass over features h (V × F); see the module notes. */
+/**
+ * One graph attention pass (GAT, or GATv2 with `variant: 'v2'`; see the file notes). Differentiable in `h` and the
+ * parameters. Throws `ShapeError` unless `h` has one row per node and $\Wmat$'s columns split into the heads, and
+ * `DomainError` when the attention vectors of the variant are missing.
+ *
+ * @param g The graph.
+ * @param h The node features, $V \times F$.
+ * @param params The map $\Wmat$, the attention vectors of the variant and the optional bias.
+ * @param options The number of heads, how they are combined, the LeakyReLU slope, self-loops and the variant.
+ * @returns The output with the attention weights on every message edge and the edges they belong to.
+ *
+ * @example Zero attention vectors attend uniformly: the mean over each neighbourhood
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const h = tensor([[1, 0], [0, 1], [1, 1]])
+ * const params = { weight: tensor([[1, 0], [0, 1]]), attSource: tensor([[0, 0]]), attTarget: tensor([[0, 0]]) }
+ * const { output, attention, source, destination } = graphAttention(g, h, params)
+ * print('edges:', source, '->', destination)
+ * print('attention:', attention)
+ * print('output:', output)
+ */
 export function graphAttention(
   g: Graph,
   h: Value,
@@ -198,13 +301,32 @@ export function graphAttention(
   return { output: out, attention: alpha, source, destination }
 }
 
-/** A graph attention layer over a fixed graph; `forward` also returns the attention weights. */
+/**
+ * A graph attention layer over a fixed graph; `forward` also returns the attention weights. `options` are the
+ * `graphAttention` options the layer was built with.
+ */
 export interface GraphAttentionLayer extends Layer<GraphAttentionParams> {
   readonly options: GraphAttentionOptions
   forward(params: GraphAttentionParams, x: Value, ctx?: Context): GraphAttentionResult
 }
 
-/** A graph attention layer (F → H heads of width G), Glorot-initialised as in Veličković et al. */
+/**
+ * A graph attention layer ($F$ inputs to $H$ heads of width $G$) over a fixed graph, Glorot-uniform initialised as in
+ * Veličković et al., with a zero bias; `apply` returns the output of `graphAttention`, `forward` the whole result.
+ *
+ * @param g The graph every call runs on.
+ * @param inFeatures The input width $F$.
+ * @param outPerHead The width $G$ of each head.
+ * @param options The `graphAttention` options, and `bias` (default true) to include the bias.
+ * @returns The layer, with `forward` for the attention weights.
+ *
+ * @example Two heads on a 3-node graph
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const layer = GraphAttention(g, 2, 3, { heads: 2 })
+ * const { output, attention } = layer.forward(layer.init(stream(0)), tensor([[1, 0], [0, 1], [1, 1]]))
+ * print('output shape:', shapeOf(output))
+ * print('attention (edge x head):', attention)
+ */
 export function GraphAttention(
   g: Graph,
   inFeatures: Size,
@@ -240,21 +362,48 @@ export function GraphAttention(
 
 // ── GraphSAGE ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** How GraphSAGE aggregates the neighbours: `pool` is Hamilton's max-pooling of ReLU(W_pool h_u + b_pool). */
+/**
+ * How GraphSAGE aggregates the neighbours: `mean`, `sum`, `max`, or `pool`, Hamilton's max-pooling of
+ * $\mathrm{ReLU}(\Wmat_{\mathrm{pool}} \hvec_u + \bvec_{\mathrm{pool}})$.
+ */
 export type SageAggregator = Aggregation | 'pool'
 
-/** Parameters of a GraphSAGE layer. */
+/**
+ * Parameters of a GraphSAGE layer: `self` ($\Wmat_{\mathrm{self}}$, $F \times G$, whose bias is the layer's),
+ * `neighbour` ($\Wmat_{\mathrm{neigh}}$, $F \times G$) and, for the `pool` aggregator, `pool` ($F \times F$ with
+ * bias).
+ */
 export type SageParams = { self: LinearParams; neighbour: LinearParams; pool?: LinearParams }
 
 /** Options of {@link sageConv}. */
 export interface SageOptions {
-  /** Default `mean`. */
+  /** How the neighbours are aggregated (default `mean`). */
   aggregate?: SageAggregator
   /** Scale each output row to unit Euclidean length (Hamilton et al., Algorithm 1, line 7). Default false. */
   normalise?: boolean
 }
 
-/** One GraphSAGE pass: W_self h_v + W_neigh AGG{h_u : u → v} + b, without self-loops; see the module notes. */
+/**
+ * One GraphSAGE pass,
+ * $\hvec'_v = \Wmat_{\mathrm{self}} \hvec_v + \Wmat_{\mathrm{neigh}} \mathrm{AGG}\{\hvec_u : u \to v\} + \bvec$,
+ * the neighbourhood without self-loops (a node with no neighbours aggregates zeros). Differentiable in `h` and the
+ * parameters. Throws `ShapeError` unless `h` has one row per node, and `DomainError` for `pool` without `pool`
+ * parameters.
+ *
+ * @param g The graph, or a neighbourhood sample of it from `sampleNeighbours`.
+ * @param h The node features, $V \times F$.
+ * @param params The self, neighbour and (for `pool`) pooling maps.
+ * @param options The aggregator and whether to scale each output row to unit length.
+ * @returns The new features, $V \times G$.
+ *
+ * @example Mean and max of the neighbours alone
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const h = tensor([[1, 0], [0, 1], [1, 1]])
+ * // No self term, identity on the neighbours: the output is the aggregate itself.
+ * const params = { self: { weight: tensor([[0, 0], [0, 0]]) }, neighbour: { weight: tensor([[1, 0], [0, 1]]) } }
+ * print('mean:', sageConv(g, h, params))
+ * print('max:', sageConv(g, h, params, { aggregate: 'max' }))
+ */
 export function sageConv(g: Graph, h: Value, params: SageParams, options: SageOptions = {}): Value {
   checkFeatures(g, h, 'sageConv')
   const { aggregate = 'mean', normalise = false } = options
@@ -273,7 +422,23 @@ export function sageConv(g: Graph, h: Value, params: SageParams, options: SageOp
   return out
 }
 
-/** A GraphSAGE layer (F → G) over a fixed graph; the `pool` aggregator adds a Linear(F → F) pooling map. */
+/**
+ * A GraphSAGE layer ($F \to G$) over a fixed graph, LeCun-uniform initialised with zero biases; the `pool`
+ * aggregator adds an $F \to F$ pooling map. `apply` is `sageConv` on `g`.
+ *
+ * @param g The graph every call runs on.
+ * @param inFeatures The input width $F$.
+ * @param outFeatures The output width $G$.
+ * @param options The aggregator and the row normalisation.
+ * @returns The layer: `init` draws `SageParams`, `apply` maps $V \times F$ features to $V \times G$.
+ *
+ * @example A max-pooling layer on a 3-node graph
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const layer = SageConv(g, 2, 3, { aggregate: 'pool' })
+ * const p = layer.init(stream(0))
+ * print(layer.label, Object.keys(p))
+ * print('output:', layer.apply(p, tensor([[1, 0], [0, 1], [1, 1]])))
+ */
 export function SageConv(g: Graph, inFeatures: Size, outFeatures: Size, options: SageOptions = {}): Layer<SageParams> {
   const init = lecunUniform()
   const lin = (s: Stream, i: Size, o: Size, bias: boolean): LinearParams => ({
@@ -295,7 +460,19 @@ export function SageConv(g: Graph, inFeatures: Size, outFeatures: Size, options:
 /**
  * A neighbourhood sample (Hamilton et al. 2017, §3.1): the graph with at most `size` incoming message edges per node,
  * drawn uniformly without replacement from `child(stream, 'node', v)`; directed, so each node aggregates exactly its
- * sample.
+ * sample. Edge weights are dropped and node labels kept. Throws `DomainError` unless `size` is a positive integer.
+ *
+ * @param g The graph to sample from (its message edges, both directions of an undirected edge).
+ * @param size The largest number $S$ of incoming edges kept per node; a node with fewer keeps them all.
+ * @param stream The random stream; node $v$ draws from its own child stream, so its sample does not depend on the
+ *   other nodes.
+ * @returns A directed graph on the same nodes with the sampled edges.
+ *
+ * @example Node 0 of a star keeps two of its three neighbours
+ * const star = [{ from: 0, to: 1 }, { from: 0, to: 2 }, { from: 0, to: 3 }]
+ * const s = sampleNeighbours({ kind: 'graph', nodes: 4, edges: star, directed: false }, 2, stream(0))
+ * print('directed:', s.directed)
+ * print('edges:', s.edges.map((e) => `${e.from} -> ${e.to}`).join(', '))
  */
 export function sampleNeighbours(g: Graph, size: Size, stream: Stream): Graph {
   if (!(Number.isInteger(size) && size >= 1))
@@ -321,16 +498,31 @@ export function sampleNeighbours(g: Graph, size: Size, stream: Stream): Graph {
 
 /** Options of {@link messagePassing}. */
 export interface MessagePassingOptions {
-  /** Default `sum` (Gilmer et al.). */
+  /** How the messages into a node are combined (default `sum`, as Gilmer et al.). */
   aggregate?: Aggregation
-  /** Pass each node a message from itself too. Default false. */
+  /** Pass each node a message from itself too, with edge weight 1. Default false. */
   selfLoops?: boolean
 }
 
 /**
- * One generic message-passing step: m_v = AGG_{u → v} message([h_u, h_v, w_{uv}]) and h′_v = update([h_v, m_v]), where
- * `message` maps rows of width 2F + 1 and `update` rows of width F + M (any differentiable functions, such as layers'
- * `apply` with their parameters).
+ * One generic message-passing step:
+ * $\mvec_v = \mathrm{AGG}_{u \to v}\, \mathrm{message}([\hvec_u, \hvec_v, w_{uv}])$ and
+ * $\hvec'_v = \mathrm{update}([\hvec_v, \mvec_v])$, with $w_{uv}$ the edge weight (1 where the edge has none).
+ * Differentiable whenever `message` and `update` are. Throws `ShapeError` unless `h` has one row per node.
+ *
+ * @param g The graph.
+ * @param h The node features, $V \times F$.
+ * @param message The message function, from the $E \times (2F + 1)$ rows $[\hvec_u, \hvec_v, w_{uv}]$ (one per
+ *   message edge) to $E \times M$ messages; any differentiable function, such as a layer's `apply` with its parameters.
+ * @param update The update function, from the $V \times (F + M)$ rows $[\hvec_v, \mvec_v]$ to the new features.
+ * @param options The aggregation and self-loops.
+ * @returns What `update` returns, normally $V \times G$.
+ *
+ * @example Identity message and update show what each node receives
+ * // Node 0 receives [h1, h0, w01] = [2, 1, 2] from node 1 over the edge of weight 2.
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1, weight: 2 }, { from: 1, to: 2 }], directed: false }
+ * const h = tensor([[1], [2], [3]])
+ * print('[h_v, m_v] =', messagePassing(g, h, (x) => x, (x) => x))
  */
 export function messagePassing(
   g: Graph,
@@ -346,12 +538,31 @@ export function messagePassing(
   return update(concat([h, agg], 1))
 }
 
-/** Parameters of a message-passing layer: those of its message and update layers. */
+/** Parameters of a message-passing layer: those of its `message` and `update` layers. */
 export type MessagePassingParams = { message: Params; update: Params }
 
 /**
- * A message-passing layer over a fixed graph from a message layer (2F + 1 → M) and an update layer (F + M → G), e.g.
- * small `Mlp`s.
+ * A message-passing layer over a fixed graph from a message layer ($2F + 1 \to M$) and an update layer
+ * ($F + M \to G$), such as small `Mlp`s; `apply` is `messagePassing` on `g` with the two layers' `apply`.
+ *
+ * @param g The graph every call runs on.
+ * @param message The message layer, applied to the $E \times (2F + 1)$ rows $[\hvec_u, \hvec_v, w_{uv}]$.
+ * @param update The update layer, applied to the $V \times (F + M)$ rows $[\hvec_v, \mvec_v]$.
+ * @param options The aggregation and self-loops.
+ * @returns The layer, whose parameters are those of the two layers.
+ *
+ * @example Two hand-written linear layers as message and update
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * const lin = (i, o) => ({
+ *   kind: 'lin',
+ *   label: `lin(${i}, ${o})`,
+ *   init: (s) => ({ w: normals(s, [i, o]) }),
+ *   apply: (p, x) => matmul(x, p.w),
+ * })
+ * const layer = MessagePassing(g, lin(3, 2), lin(3, 2), { aggregate: 'mean' })
+ * const out = layer.apply(layer.init(stream(0)), tensor([[1], [0], [-1]]))
+ * print(layer.label)
+ * print('output:', out)
  */
 export function MessagePassing(
   g: Graph,

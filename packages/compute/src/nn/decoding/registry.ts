@@ -1,11 +1,19 @@
-/** The decoders (step-through algorithms) and logit processors of `aifn-compute/nn/decoding`, registered with their notes. */
+/**
+ * The decoders (step-through algorithms) and logit processors of `aifn-compute/nn/decoding`, registered with their
+ * notes. Each decoder is registered with the roles of its state's fields (`state`: the tokens or beams as the
+ * iterate, the log-probability as the objective where there is one, and the `terminated` flag), so a generic trace
+ * view picks its series.
+ */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as decoders from './decoders'
 import * as processors from './processors'
 
+/** Registers a decoder of the module with its description. */
 const algorithm = definer<AlgorithmInfo>('algorithm', 'nn/decoding')
+/** Registers a processor or helper of the module with its description. */
 const fn = definer<FunctionInfo>('function', 'nn/decoding')
+/** The note every decoder serves. */
 const notes = ['decoding-strategies']
 
 algorithm(
@@ -102,6 +110,7 @@ fn(
   decoders.expectedTokensPerCall,
 )
 
+/** A registry table: each registered export of the module by name, with its description. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 
 /** The decoders, keyed by factory name. */

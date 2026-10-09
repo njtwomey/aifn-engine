@@ -26,12 +26,16 @@ import { xavierUniform } from 'aifn-compute/nn/init'
 import { Linear, linear, type LinearParams } from 'aifn-compute/nn/layers'
 import { ShapeError } from 'aifn-compute/foundation/errors'
 
-/** The context vector [..., d_v] and the attention weights over the source positions [..., T]. */
+/**
+ * One attention step: the `context` vector $[\dots, d_v]$, the attention `weights` $\alpha_j$ over the $T$ source
+ * positions $[\dots, T]$ (summing to one), and the raw `scores` $e_j$ before masking and the softmax $[\dots, T]$.
+ */
 export type AlignmentResult = { context: Value; weights: Value; scores: Value }
 
 /**
- * An attention mechanism for a recurrent decoder: parameters from `init`, and `attend(params, query [..., d_q],
- * keys [..., T, d_k], values = keys, mask [..., T])` → context and weights.
+ * An attention mechanism for a recurrent decoder. `init` draws its parameters from a stream; `attend` scores a query
+ * $[\dots, d_q]$ (the decoder state) against the keys $[\dots, T, d_k]$ (the encoder states) and returns the weighted
+ * sum of the values (default the keys), with the positions where `mask` is zero left out.
  */
 export interface SequenceAttention<P> {
   readonly kind: string
@@ -40,19 +44,48 @@ export interface SequenceAttention<P> {
   attend(params: P, query: Value, keys: Value, values?: Value, mask?: Value): AlignmentResult
 }
 
+/**
+ * The shared end of every score: mask, softmax over the source positions, and the weighted sum of the values.
+ *
+ * @param scores The scores $e_j$, $[\dots, T]$.
+ * @param values The values to average, $[\dots, T, d_v]$.
+ * @param mask Which positions may be attended, $[\dots, T]$: where it is zero (false) the score is set to
+ *   $-\infty$, so the weight is 0. Left out, every position is attended.
+ * @returns The context $\sum_j \alpha_j \vvec_j$, the weights $\alpha = \mathrm{softmax}(e)$ and the unmasked scores.
+ */
 function align(scores: Value, values: Value, mask?: Value): AlignmentResult {
   const masked = mask === undefined ? scores : where(mask, scores, -Infinity)
   const weights = softmax(masked, { axis: -1 })
   return { context: squeeze(matmul(expandDims(weights, -2), values), -2), weights, scores }
 }
 
-/** Parameters of `BahdanauAttention`: W_q [d_q, n], W_k [d_k, n] (with bias) and v [n, 1]. */
+/**
+ * Parameters of `BahdanauAttention`: `query` $\Wmat_q$ ($d_q \times n$, no bias), `key` $\Wmat_k$ ($d_k \times n$,
+ * with bias) and `v` ($n \times 1$).
+ */
 export type BahdanauParams = { query: LinearParams; key: LinearParams; v: Tensor }
 
 /**
- * Additive attention (Bahdanau, Cho and Bengio, 2015, §3.1 and A.1.2): e_j = vᵀ tanh(W_q s + W_k h_j) for the decoder
- * state s and each encoder state h_j, α = softmax(e), context = Σ_j α_j h_j. `hidden` is the width n of the scoring
- * network.
+ * Additive attention (Bahdanau, Cho and Bengio, 2015, §3.1 and A.1.2):
+ * $e_j = \vvec^\top \tanh(\Wmat_q \svec + \Wmat_k \hvec_j + \bvec)$ for the decoder state $\svec$ and each encoder
+ * state $\hvec_j$, $\alpha = \mathrm{softmax}(e)$, context $= \sum_j \alpha_j \hvec_j$. Every weight is
+ * Glorot-uniform initialised and the bias zero. Differentiable in the parameters, the query and the keys.
+ *
+ * @param queryDim The width $d_q$ of the decoder state.
+ * @param keyDim The width $d_k$ of the encoder states.
+ * @param hidden The width $n$ of the scoring network.
+ * @returns The mechanism: `init` draws `BahdanauParams`, and `attend` gives the context and weights.
+ *
+ * @example Attend over three encoder states
+ * const att = BahdanauAttention(2, 3, 4)
+ * const p = att.init(stream(0))
+ * const keys = normals(stream(1), [3, 3])
+ * const { weights, context } = att.attend(p, tensor([1, -1]), keys)
+ * print('weights =', weights)
+ * print('sum =', sum(weights))
+ * print('context =', context)
+ * // A mask of zeros leaves positions out.
+ * print('masked weights =', att.attend(p, tensor([1, -1]), keys, keys, tensor([1, 1, 0])).weights)
  */
 export function BahdanauAttention(queryDim: Size, keyDim: Size, hidden: Size): SequenceAttention<BahdanauParams> {
   const q = Linear(queryDim, hidden, { bias: false, init: xavierUniform() })
@@ -74,16 +107,44 @@ export function BahdanauAttention(queryDim: Size, keyDim: Size, hidden: Size): S
   }
 }
 
-/** Luong's scores: `dot` sᵀh, `general` sᵀW h, `concat` vᵀ tanh(W[s; h]). */
+/**
+ * Luong's scores: `dot` $\svec^\top \hvec$, `general` $\svec^\top \Wmat \hvec$ and `concat`
+ * $\vvec^\top \tanh(\Wmat [\svec; \hvec])$.
+ */
 export type LuongScore = 'dot' | 'general' | 'concat'
 
-/** Parameters of `LuongAttention`: W for `general` [d_k, d_q], or W [d_q + d_k, n] and v [n, 1] for `concat`. */
+/**
+ * Parameters of `LuongAttention`: none for `dot`; `weight` $\Wmat$ ($d_k \times d_q$, scoring
+ * $\hvec_j^\top \Wmat \svec$) for `general`; `concat` (a weight of $(d_q + d_k) \times n$, no bias) and `v`
+ * ($n \times 1$) for `concat`.
+ */
 export type LuongParams = { weight?: Tensor; concat?: LinearParams; v?: Tensor }
 
 /**
  * Multiplicative (global) attention of Luong, Pham and Manning (2015, §3.1, eq. 8): scores of the current decoder
- * state s against each encoder state h_j by `dot` (d_q = d_k), `general` or `concat`; α = softmax(scores), context =
- * Σ_j α_j h_j.
+ * state $\svec$ against each encoder state $\hvec_j$ by `dot` ($d_q = d_k$), `general` or `concat`;
+ * $\alpha = \mathrm{softmax}(e)$, context $= \sum_j \alpha_j \hvec_j$. Weights are Glorot-uniform initialised.
+ * Throws `ShapeError` for `dot` scores with $d_q \ne d_k$.
+ *
+ * @param queryDim The width $d_q$ of the decoder state.
+ * @param keyDim The width $d_k$ of the encoder states.
+ * @param score The score function: `dot`, `general` (a bilinear form) or `concat` (a one-hidden-layer network).
+ * @param hidden The width $n$ of the `concat` scoring network (default $d_q$); unused by the other scores.
+ * @returns The mechanism: `init` draws `LuongParams`, and `attend` gives the context and weights.
+ *
+ * @example Dot scores: the query picks out the keys most like it
+ * const att = LuongAttention(2, 2, 'dot')
+ * const keys = tensor([[1, 0], [0, 1], [1, 1]])
+ * const { scores, weights, context } = att.attend(att.init(stream(0)), tensor([2, 0]), keys)
+ * print('scores =', scores)
+ * print('weights =', weights)
+ * print('context =', context)
+ *
+ * @example General scores between different widths
+ * const att = LuongAttention(2, 3, 'general')
+ * const p = att.init(stream(0))
+ * print('W =', p.weight)
+ * print('weights =', att.attend(p, tensor([1, 0]), normals(stream(1), [3, 3])).weights)
  */
 export function LuongAttention(
   queryDim: Size,

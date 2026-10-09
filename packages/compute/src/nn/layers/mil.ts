@@ -1,20 +1,23 @@
 /**
- * Multiple-instance pooling: from a bag of instance embeddings Z [B, t, d] (B bags of t instances, e.g. the time points
- * of a series) to bag logits [B, c], in the five ways MILLET compares (Early et al. 2024, ICLR, §3.2 and Tables
- * A.1–A.5). ψ is a linear classifier d → c; the attention head is a(z) = σ(wᵀ tanh(Vᵀz)) ∈ (0, 1) with an internal width
- * of 8 (sigmoid rather than softmax, so long bags do not flatten the weights).
+ * Multiple-instance pooling: from a bag of instance embeddings $\Zmat$, `[B, t, d]` ($B$ bags of $t$ instances, e.g.
+ * the time points of a series), to bag logits `[B, c]`, in the five ways MILLET compares (Early et al. 2024, ICLR,
+ * §3.2 and Tables A.1–A.5). $\psi$ is a linear classifier from $d$ to $c$ features; the attention head is
+ * $a(\zvec) = \sigma(\wvec^\top \tanh(\Vmat^\top\zvec + \bvec_V) + b_w) \in (0, 1)$ with an internal width of 8
+ * (sigmoid rather than softmax, so long bags do not flatten the weights). With $a_j = a(\zvec_j)$ and
+ * $\operatorname{mean}_j$ the mean over a bag's instances:
  *
- * - `embedding` (global average pooling, as a plain CNN): Ŷ = ψ(mean_j z_j).
- * - `attention` (Ilse et al. 2018, with sigmoid weights): Ŷ = ψ(mean_j a_j z_j).
- * - `instance` (mi-Net, Wang et al. 2018): ŷ_j = ψ(z_j); Ŷ = mean_j ŷ_j.
- * - `additive` (Javed et al. 2022): ŷ_j = ψ(a_j z_j); Ŷ = mean_j ŷ_j.
- * - `conjunctive` (MILLET): ŷ_j = ψ(z_j); Ŷ = mean_j a_j ŷ_j; attention and classifier act in parallel.
+ * - `embedding` (global average pooling, as a plain CNN): $\hat{Y} = \psi(\operatorname{mean}_j \zvec_j)$.
+ * - `attention` (Ilse et al. 2018, with sigmoid weights): $\hat{Y} = \psi(\operatorname{mean}_j a_j \zvec_j)$.
+ * - `instance` (mi-Net, Wang et al. 2018): $\hat{y}_j = \psi(\zvec_j)$; $\hat{Y} = \operatorname{mean}_j \hat{y}_j$.
+ * - `additive` (Javed et al. 2022): $\hat{y}_j = \psi(a_j \zvec_j)$; $\hat{Y} = \operatorname{mean}_j \hat{y}_j$.
+ * - `conjunctive` (MILLET): $\hat{y}_j = \psi(\zvec_j)$; $\hat{Y} = \operatorname{mean}_j a_j \hat{y}_j$; attention and
+ *   classifier act in parallel.
  *
- * Every kind returns an instance-level interpretation: the class-specific instance predictions (ŷ for `instance`, aŷ
- * for `additive` and `conjunctive`), the class-agnostic weights a for `attention`, and for `embedding` the class
- * activation map ψ(z_j) (Zhou et al. 2016), which for a linear ψ equals the per-instance class score up to the bias.
- * An optional mask [B, t] (1 = kept) removes instances from their bag: means run over the kept instances only, as
- * when a perturbation metric drops time points.
+ * Every kind returns an instance-level interpretation: the class-specific instance predictions ($\hat{y}_j$ for
+ * `instance`, $a_j \hat{y}_j$ for `additive` and `conjunctive`), the class-agnostic weights $a_j$ for `attention`, and
+ * for `embedding` the class activation map $\psi(\zvec_j)$ (Zhou et al. 2016, there without the bias), whose mean over
+ * the bag is the bag logit since $\psi$ is affine. An optional mask `[B, t]` (1 = kept) removes instances from their
+ * bag: means run over the kept instances only, as when a perturbation metric drops time points.
  */
 
 import { child } from 'aifn-compute/foundation/random'
@@ -45,27 +48,47 @@ export const MIL_POOLING_KINDS: readonly MilPoolingKind[] = [
   'conjunctive',
 ]
 
-/** Parameters of MIL pooling: the classifier ψ (d → c) and, for the attention kinds, the head (d → h → 1). */
+/** Parameters of MIL pooling. */
 export type MilPoolingParams = {
+  /** The classifier $\psi$, a linear map from $d$ to $c$ features. */
   classifier: LinearParams
+  /**
+   * The attention head of the attention kinds: `hidden`, from $d$ to the internal width $h$ ($\Vmat$, $\bvec_V$), and
+   * `score`, from $h$ to 1 ($\wvec$, $b_w$).
+   */
   attention?: { hidden: LinearParams; score: LinearParams }
 }
 
-/** The outputs of {@link milPool}. */
+/** The outputs of `milPool`. */
 export interface MilPooled {
-  /** Bag logits [B, c]. */
+  /** Bag logits, `[B, c]`. */
   readonly logits: Value
-  /** Attention weights [B, t] (the attention kinds). */
+  /** Attention weights $a_j$, `[B, t]` (the attention kinds only). */
   readonly attention?: Value
-  /** Instance predictions [B, t, c] before attention weighting (ψ(z_j), or ψ(a_j z_j) for `additive`). */
+  /**
+   * Instance predictions, `[B, t, c]`, before attention weighting: $\psi(\zvec_j)$, or $\psi(a_j \zvec_j)$ for
+   * `additive`. Absent for `attention`.
+   */
   readonly predictions?: Value
-  /** The instance-level interpretation: [B, t, c] (class-specific) or [B, t] (`attention`). */
+  /** The instance-level interpretation: `[B, t, c]` (class-specific) or `[B, t]` (`attention`). */
   readonly interpretation: Value
 }
 
+/**
+ * Whether a pooling kind has an attention head.
+ *
+ * @param kind The pooling kind.
+ * @returns True for `attention`, `additive` and `conjunctive`.
+ */
 const usesAttention = (kind: MilPoolingKind) => kind === 'attention' || kind === 'additive' || kind === 'conjunctive'
 
-/** The mean over axis 1 of x [B, t, k], over the kept instances when a mask [B, t] is given. */
+/**
+ * The mean over the instances of each bag, over the kept instances only when a mask is given.
+ *
+ * @param x Per-instance values, `[B, t, k]`.
+ * @param mask Which instances are kept, `[B, t]` of 1 (kept) and 0; left out, all are.
+ * @returns The bag means, `[B, k]`.
+ */
 function bagMean(x: Value, mask: Tensor | undefined): Value {
   const [, t] = shapeOfValue(x)
   if (!mask) return div(sum(x, 1), t)
@@ -73,12 +96,41 @@ function bagMean(x: Value, mask: Tensor | undefined): Value {
   return div(sum(mul(x, m), 1), sum(m, 1))
 }
 
-/** The attention weights a = σ(wᵀ tanh(Vᵀz)) of every instance, [B, t, 1]. */
+/**
+ * The attention weights $a(\zvec) = \sigma(\wvec^\top \tanh(\Vmat^\top\zvec + \bvec_V) + b_w)$ of every instance.
+ *
+ * @param p The attention head's parameters.
+ * @param z The instance embeddings, `[B, t, d]`.
+ * @returns The weights, in $(0, 1)$, `[B, t, 1]`.
+ */
 function attend(p: NonNullable<MilPoolingParams['attention']>, z: Value): Value {
   return sigmoid(linear(tanh(linear(z, p.hidden.weight, p.hidden.bias)), p.score.weight, p.score.bias))
 }
 
-/** Pool a bag of instance embeddings Z [B, t, d] into bag logits by one of the five methods (module notes). */
+/**
+ * Pool bags of instance embeddings $\Zmat$, `[B, t, d]`, into bag logits by one of the five methods of the file notes,
+ * with the instance-level interpretation. Differentiable. Throws `ShapeError` when `z` is not rank 3 or the mask's
+ * leading axes are not `[B, t]`, and `DomainError` when an attention kind is given no attention head.
+ *
+ * @param kind The pooling method.
+ * @param params The classifier and, for the attention kinds, the attention head, as `MilPooling` draws them.
+ * @param z The instance embeddings, `[B, t, d]`.
+ * @param mask Which instances are kept, `[B, t]` of 1 (kept) and 0; left out, all are.
+ * @returns The bag logits, and the attention weights, instance predictions and interpretation the method has.
+ *
+ * @example Conjunctive pooling: the bag logits are the bag mean of the interpretation
+ * const p = MilPooling(3, 2, 'conjunctive').init(stream(0))
+ * const out = milPool('conjunctive', p, normals(stream(1), [1, 4, 3]))
+ * print('logits:', out.logits)
+ * print('attention:', out.attention)
+ * print('mean of the interpretation:', mean(out.interpretation, 1))
+ *
+ * @example A mask drops instances from the bag
+ * const p = MilPooling(3, 2, 'instance').init(stream(0))
+ * const z = tensor([[[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]]])
+ * print('first two kept:', milPool('instance', p, z, tensor([[1, 1, 0, 0]])).logits)
+ * print('bag of the first two:', milPool('instance', p, tensor([[[1, 0, 0], [0, 1, 0]]])).logits)
+ */
 export function milPool(kind: MilPoolingKind, params: MilPoolingParams, z: Value, mask?: Tensor): MilPooled {
   const shape = shapeOfValue(z)
   if (shape.length !== 3)
@@ -115,8 +167,21 @@ export function milPool(kind: MilPoolingKind, params: MilPoolingParams, z: Value
 
 /**
  * MIL pooling as a layer from embeddings of width `features` to `classes` logits: `apply(params, z)` gives the bag
- * logits [B, c]; {@link milPool} with the same parameters gives the interpretation too. `attentionWidth` is the
- * attention head's internal width (default 8, as MILLET).
+ * logits `[B, c]` (with no mask); `milPool` with the same parameters gives the interpretation too. The classifier is
+ * drawn from the stream's child `classifier`, the attention head from `('attention', 'hidden')` and
+ * `('attention', 'score')`.
+ *
+ * @param features The embedding width $d$.
+ * @param classes The number of classes $c$.
+ * @param kind The pooling method; the attention kinds also get an attention head.
+ * @param options `attentionWidth`, the attention head's internal width $h$ (default 8, as MILLET).
+ * @returns The layer, with parameters `MilPoolingParams`.
+ *
+ * @example Attention pooling of two bags of five instances
+ * const layer = MilPooling(4, 3, 'attention')
+ * const p = layer.init(stream(0))
+ * print(layer.label, ' head:', p.attention.hidden.weight.shape, p.attention.score.weight.shape)
+ * print('logits:', layer.apply(p, normals(stream(1), [2, 5, 4])))
  */
 export function MilPooling(
   features: number,

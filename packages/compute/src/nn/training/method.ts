@@ -1,8 +1,10 @@
 /**
  * Training by a chosen method with one state shape, so a run can offer either: first-order updates through
  * `trainingLoop` (any pytree update rule, minibatch or full batch), or full-batch L-BFGS through `fullBatchTraining`
- * (Liu & Nocedal, 1989). Every state carries `params`, the training `loss` of those parameters, the evaluations of the
- * loss so far and the stop flags; once L-BFGS stops (converged or stalled), further steps return the state unchanged.
+ * (Liu & Nocedal, 1989).
+ *
+ * Every state carries `params`, the training `loss` of those parameters, the evaluations of the loss so far and the
+ * stop flags; once L-BFGS stops (converged or stalled), further steps advance only the step count `t`.
  */
 
 import type { Scalar, Size } from 'aifn-compute/foundation/contracts'
@@ -16,7 +18,8 @@ import { trainingLoop, type Batch } from './train'
 
 /**
  * How to train: a first-order update rule through `trainingLoop` (`first-order` with any rule, or `adam` as plain data,
- * which a worker can receive), or full-batch L-BFGS.
+ * which a worker can receive), or full-batch L-BFGS. `adam` takes the options of `adamRule`, whose defaults (step size
+ * 1e-3) are its own, not `trainingLoop`'s.
  */
 export type TrainingMethod =
   | (AdamRuleOptions & {
@@ -37,23 +40,27 @@ export type TrainingMethod =
     }
   | {
       method: 'lbfgs'
-      /** Curvature pairs kept, m (default 10). */
+      /** Curvature pairs kept, $m$ (default 10). */
       memory?: Size
-      /** Stop when ‖∇‖₂ ≤ tolerance (default 1e-6). */
+      /** Stop when $\lVert \nabla \rVert_2 \le$ `tolerance` (default 1e-6). */
       tolerance?: Scalar
     }
 
 /** The state of `methodTraining`. */
 export type MethodTrainingState<P extends Params> = {
+  /** Steps taken. */
   readonly t: Size
+  /** The parameters after $t$ steps. */
   readonly params: P
   /** The loss of `params`: on this step's minibatch for first-order training, on the whole set for L-BFGS. */
   readonly loss: Scalar
   /** Loss-and-gradient evaluations so far (L-BFGS's line search may take several per step). */
   readonly evaluations: Size
+  /** L-BFGS met its tolerance (always false for first-order training). */
   readonly converged: boolean
+  /** The loss diverged. */
   readonly diverged: boolean
-  /** The method stopped: further steps change nothing. */
+  /** The method stopped: further steps change only `t`. */
   readonly stopped: boolean
   /** The underlying algorithm's state. */
   readonly inner: unknown
@@ -62,7 +69,22 @@ export type MethodTrainingState<P extends Params> = {
 /**
  * Train `params` on `loss` over `data` by `method`. The loss takes the parameters, a batch of `data` (the whole set for
  * L-BFGS) and, for first-order training, the layers' context (dropout streams, buffers); L-BFGS passes none, so a model
- * with dropout or batch norm should train first-order.
+ * with dropout or batch norm should train first-order. First-order training counts one evaluation per step and stops
+ * only when it diverges.
+ *
+ * @param loss The loss of the parameters on a batch, a number or rank-0 value.
+ * @param data The training set: named tensors whose first axis indexes the examples.
+ * @param method The method and its settings.
+ * @returns The algorithm, to run with `run` or `trace` from `{ params }`.
+ *
+ * @example Twenty steps of Adam and of L-BFGS on the same least-squares fit
+ * const data = { x: tensor([[0], [1], [2], [3]]), y: tensor([[1], [3], [5], [7]]) }
+ * const loss = (p, d) => mean(square(sub(add(matmul(d.x, p.w), p.b), d.y)))
+ * const start = { params: { w: zeros([1, 1]), b: zeros([1]) } }
+ * for (const method of [{ method: 'adam', stepSize: 0.1 }, { method: 'lbfgs' }]) {
+ *   const s = run(methodTraining(loss, data, method), start, 20)
+ *   print(method.method, ' loss:', s.loss, ' evaluations:', s.evaluations, ' stopped:', s.stopped)
+ * }
  */
 export function methodTraining<P extends Params, B extends Batch>(
   loss: (params: P, batch: B, ctx?: Context) => Value,

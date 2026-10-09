@@ -8,7 +8,9 @@ import * as layer from './layer'
 import * as losses from './losses'
 import * as routing from './routing'
 
+/** Registers a function or layer constructor of the module with its description. */
 const fn = definer<FunctionInfo>('function', 'nn/experts')
+/** The note every entry serves. */
 const NOTES = ['mixture-of-experts']
 
 fn(
@@ -105,6 +107,7 @@ fn(
   losses.routingStatistics,
 )
 
+/** A registry table: each registered export of the module by name, with its description. */
 type Table = Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>>
 
 /** Every function and layer constructor of the module, keyed by name. */
