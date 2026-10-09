@@ -203,7 +203,7 @@ export interface CodeTreeNode {
   readonly count: Size
   /** How many rows come before this node's rows in the codes' lexicographic order: its rows are `[offset, offset + count)`. */
   readonly offset: Size
-  /** The parent's index in `nodes` (−1 at the root). */
+  /** The parent's index in `nodes` ($-1$ at the root). */
   readonly parent: number
   /** The children's indices in `nodes`, in order of their last code. */
   readonly children: readonly number[]

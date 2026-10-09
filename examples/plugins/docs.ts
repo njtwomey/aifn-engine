@@ -238,7 +238,10 @@ function declarationsOf(file: string): Map<string, DocExport & { exported: boole
     signature: string,
     fn?: ts.SignatureDeclaration,
   ) => {
-    if (out.has(name)) return
+    // A function's overloads keep the first; a value (function, const, class) sharing its name with a type takes its
+    // place, since the value carries the parameters and examples (`type Normal` and `function Normal`).
+    const had = out.get(name)
+    if (had && !(had.kind === 'type' && kind !== 'type')) return
     const tags = splitDoc(docOf(sf, node))
     const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1
     out.set(name, {
