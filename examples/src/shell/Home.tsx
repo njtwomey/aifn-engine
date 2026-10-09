@@ -6,6 +6,7 @@ import { nodePath, TREE, type DocTreeNode } from '../docs/data'
 import { Carousel, type Slide } from './Carousel'
 import { FourierEpicycles } from './FourierEpicycles'
 import { HeroFigure } from './HeroFigure'
+import { KalmanTracker } from './KalmanTracker'
 import { LorenzSwarm } from './LorenzSwarm'
 import { MazeSearch } from './MazeSearch'
 import { MIXTURE_PLAY_MS, MixtureSteps } from './MixtureSteps'
@@ -230,6 +231,12 @@ const SLIDES: Slide[] = [
     label: 'Sampling',
     blurb: 'Hamiltonian Monte Carlo against a random walk on a banana-shaped density. Click to move the chain.',
     Figure: SamplerRace,
+    duration: 10000,
+  },
+  {
+    label: 'Tracking',
+    blurb: 'A Kalman filter following a moving target from noisy readings. Drag the target and the filter chases it.',
+    Figure: KalmanTracker,
     duration: 10000,
   },
   {
