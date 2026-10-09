@@ -14,44 +14,61 @@ import { dlqr, type StateFeedbackPlant } from './lqr'
 
 type F64 = dense.F64
 
-/** A linear MPC problem on the discrete plant x_{k+1} = Ax_k + Bu_k. */
+/**
+ * A linear MPC problem on the discrete plant $\xvec_{k+1} = \Amat\xvec_k + \Bmat\uvec_k$ (`A` $n \times n$; `B`
+ * $n \times m$, or a vector of $n$ for a single input).
+ */
 export type MpcProblem = StateFeedbackPlant & {
-  /** State weight Q (n × n, symmetric positive semi-definite). */
+  /** State weight $\Qmat$ ($n \times n$, symmetric positive semi-definite). */
   Q: MatrixLike
-  /** Input weight R (m × m, symmetric positive definite). */
+  /** Input weight $\Rmat$ ($m \times m$, symmetric positive definite). */
   R: MatrixLike
-  /** Terminal weight P; default the stabilising DARE solution, the LQR cost-to-go. */
+  /** Terminal weight $\Pmat$ ($n \times n$); default the stabilising DARE solution, the LQR cost-to-go. */
   P?: MatrixLike
-  /** Prediction horizon N ≥ 1 (steps). */
+  /** Prediction horizon $N \ge 1$ (steps). */
   horizon: Size
-  /** Input bounds, per input or one number for all (±Infinity for none). */
+  /** Lower input bounds, per input or one number for all (`-Infinity` for none, the default). */
   uMin?: VectorLike | Scalar
+  /** Upper input bounds, per input or one number for all (`Infinity` for none, the default). */
   uMax?: VectorLike | Scalar
-  /** State bounds on x₁ … x_N, per state or one number (±Infinity for none). */
+  /** Lower state bounds on $\xvec_1, \dots, \xvec_N$, per state or one number (`-Infinity` for none, the default). */
   xMin?: VectorLike | Scalar
+  /** Upper state bounds on $\xvec_1, \dots, \xvec_N$, per state or one number (`Infinity` for none, the default). */
   xMax?: VectorLike | Scalar
   /**
-   * Make the state bounds soft: a slack s ≥ 0 per state and step widens them, xMin − s ≤ x ≤ xMax + s, at a cost
-   * `quadratic`·‖s‖² + `linear`·1ᵀs added to the objective (defaults 1e3 and 1e2). The plan is then always feasible.
-   * With `linear` above the hard problem's largest bound multiplier the penalty is exact: the soft plan equals the hard
-   * one whenever the hard one exists (Kerrigan & Maciejowski, 2000).
+   * Make the state bounds soft: a slack $\svec \ge 0$ per state and step widens them,
+   * $\xvec_{\min} - \svec \le \xvec \le \xvec_{\max} + \svec$, at a cost
+   * $\rho \lVert \svec \rVert^2 + \lambda \ones^\top \svec$ added to the objective, with $\rho$ = `quadratic` and
+   * $\lambda$ = `linear` (defaults $10^3$ and $10^2$). The plan is then always feasible. With $\lambda$ above the hard
+   * problem's largest bound multiplier the penalty is exact: the soft plan equals the hard one whenever the hard one
+   * exists (Kerrigan & Maciejowski, 2000). Ignored when no state bound is finite.
    */
   soft?: { quadratic?: Scalar; linear?: Scalar }
 }
 
-/** The solution of one MPC problem from a state x₀. */
+/** The solution of one MPC problem from a state $\xvec_0$. */
 export type MpcPlan = {
-  /** The optimal inputs u₀ … u_{N−1}, N × m. */
+  /** The optimal inputs $\uvec_0, \dots, \uvec_{N-1}$, $N \times m$. */
   u: Matrix
-  /** The predicted states x₀ … x_N, (N + 1) × n. */
+  /** The predicted states $\xvec_0, \dots, \xvec_N$, $(N + 1) \times n$. */
   x: Matrix
-  /** The optimal cost Σ (x−r)ᵀQ(x−r) + uᵀRu + terminal term. */
+  /**
+   * The optimal cost
+   * $\sum_{k=0}^{N-1} (\evec_k^\top\Qmat\evec_k + \uvec_k^\top\Rmat\uvec_k) + \evec_N^\top\Pmat\evec_N$, with
+   * $\evec_k = \xvec_k - \rvec$ the deviation from the reference.
+   */
   cost: Scalar
-  /** The QP's status. */
+  /**
+   * The QP's status: `'optimal'`, `'limit'` (input bounds only, step limit reached), or the general QP's status, with
+   * ": state bounds dropped" appended when the state bounds could not be met and only the input bounds were kept.
+   */
   status: string
-  /** Box constraints active at the solution (inputs at a bound), counted. */
+  /** How many entries of the planned inputs sit at one of their bounds. */
   active: Size
-  /** With soft state bounds: the slacks s₁ … s_N, N × n (how far each predicted state leaves its bounds). */
+  /**
+   * With soft state bounds: the slacks $\svec_1, \dots, \svec_N$, $N \times n$ (how far each predicted state leaves its
+   * bounds).
+   */
   slack?: Matrix
   /** With soft state bounds: the penalty paid for the slacks (not included in `cost`). */
   penalty?: Scalar
@@ -59,17 +76,32 @@ export type MpcPlan = {
 
 /** A linear MPC controller: the condensed QP's matrices, built once, and `plan(x0, reference?)`. */
 export type MpcController = {
+  /** The number of states $n$. */
   readonly n: Size
+  /** The number of inputs $m$. */
   readonly m: Size
+  /** The prediction horizon $N$. */
   readonly horizon: Size
-  /** The terminal weight used. */
+  /** The terminal weight $\Pmat$ used ($n \times n$). */
   readonly P: Matrix
-  /** The model the controller predicts with (B as n × m), the default plant of `recedingHorizon`. */
+  /** The model the controller predicts with (`B` as $n \times m$), the default plant of `recedingHorizon`. */
   readonly model: { A: Matrix; B: Matrix }
-  /** Solve from x₀, regulating to the state `reference` (default 0; it should be an equilibrium with u = 0). */
+  /**
+   * Solve from $\xvec_0$, regulating to the state `reference` (default $\zeros$; it should be an equilibrium with
+   * $\uvec = \zeros$).
+   */
   plan(x0: VectorLike, reference?: VectorLike): MpcPlan
 }
 
+/**
+ * Expand an optional bound to one value per entry.
+ *
+ * @param v The bound as given: undefined, one number for every entry, or one value per entry.
+ * @param k The number of entries (states or inputs).
+ * @param fill The value used when `v` is undefined (`-Infinity` or `Infinity`, no bound).
+ * @param where The caller's name for the bound, used in error messages.
+ * @returns A new array of `k` bounds. A vector of the wrong length throws `ShapeError`.
+ */
 function bound(v: VectorLike | Scalar | undefined, k: number, fill: number, where: string): F64 {
   if (v === undefined) return new Float64Array(k).fill(fill)
   if (typeof v === 'number') return new Float64Array(k).fill(v)
@@ -80,13 +112,49 @@ function bound(v: VectorLike | Scalar | undefined, k: number, fill: number, wher
 
 /**
  * A linear MPC controller (Rawlings, Mayne & Diehl, 2017, §1.3). The predicted states are affine in the stacked
- * inputs U = (u₀, …, u_{N−1}): X = Φx₀ + ΓU with Φ = (A, A², …, Aᴺ) and Γ the block lower-triangular matrix of
- * A^{i−j−1}B. Substituting gives the condensed QP min ½UᵀHU + fᵀU with H = 2(ΓᵀQ̄Γ + R̄) and f = 2ΓᵀQ̄(Φx₀ − r̄),
- * Q̄ = diag(Q, …, Q, P). Input bounds alone are a box QP (`boxQuadprog`); state bounds add the rows ±ΓU ≤ … of a
- * general QP (`quadprog`); when the state bounds cannot be met from x₀, the plan keeps only the input bounds and its
- * status says so. With `soft`, the state bounds take slacks s (one per state and step) and the QP is over (U, s) with
- * the penalty ρ‖s‖² + λ1ᵀs; it always has a solution. With the DARE terminal weight and no active constraints the first
- * input equals −Kx₀ of LQR for every horizon.
+ * inputs $\bar{\uvec} = (\uvec_0, \dots, \uvec_{N-1})$: $\bar{\xvec} = \Phimat\xvec_0 + \Gammamat\bar{\uvec}$ with
+ * $\Phimat = (\Amat, \Amat^2, \dots, \Amat^N)$ and $\Gammamat$ the block lower-triangular matrix of blocks
+ * $\Amat^{i-j-1}\Bmat$. Substituting gives the condensed QP
+ * $\min \tfrac{1}{2}\bar{\uvec}^\top\Hmat\bar{\uvec} + \fvec^\top\bar{\uvec}$ with
+ * $\Hmat = 2(\Gammamat^\top\bar{\Qmat}\Gammamat + \bar{\Rmat})$ and
+ * $\fvec = 2\Gammamat^\top\bar{\Qmat}(\Phimat\xvec_0 - \bar{\rvec})$, where
+ * $\bar{\Qmat} = \diag(\Qmat, \dots, \Qmat, \Pmat)$ and $\bar{\Rmat} = \diag(\Rmat, \dots, \Rmat)$. Input bounds alone
+ * are a box QP (`boxQuadprog`); state bounds add the rows $\pm\Gammamat\bar{\uvec} \le \dots$ of a general QP
+ * (`quadprog`); when the state bounds cannot be met from $\xvec_0$, the plan keeps only the input bounds and its status
+ * says so. With `soft`, the state bounds take slacks $\svec$ (one per state and step) and the QP is over
+ * $(\bar{\uvec}, \svec)$ with the penalty $\rho\lVert \svec \rVert^2 + \lambda\ones^\top\svec$; it always has a
+ * solution. With the DARE terminal weight and no active constraints the first input equals $-\Kmat\xvec_0$ of LQR for
+ * every horizon.
+ *
+ * @param problem The plant, weights, horizon and bounds. A non-square `A`, weights of the wrong shape or a vector
+ *   bound of the wrong length throw `ShapeError`; a horizon that is not a positive integer, or `soft` weights that are
+ *   not positive (quadratic) and non-negative (linear), throw `DomainError`.
+ * @returns The controller: its dimensions, terminal weight and model, and `plan`, which solves the QP from a state.
+ *   Planning from an $\xvec_0$ of the wrong length throws `ShapeError`.
+ *
+ * @example Unconstrained MPC is LQR
+ * // x_{k+1} = x_k + u_k, Q = R = 1: the LQR gain is 0.618 (dlqr's example), so u₀ = −0.618 · 5.
+ * const mpc = mpcController({ A: [[1]], B: [[1]], Q: [[1]], R: [[1]], horizon: 3 })
+ * const plan = mpc.plan([5])
+ * print('inputs =', plan.u)
+ * print('predicted states =', plan.x)
+ * print('cost =', plan.cost, ' status:', plan.status)
+ *
+ * @example An input bound saturates the plan
+ * const mpc = mpcController({ A: [[1]], B: [[1]], Q: [[1]], R: [[1]], horizon: 3, uMin: -1, uMax: 1 })
+ * const plan = mpc.plan([5])
+ * print('inputs =', plan.u)
+ * print('predicted states =', plan.x)
+ * print('inputs at a bound:', plan.active)
+ *
+ * @example A state bound that cannot be met, kept soft
+ * // From x₀ = 5 with |u| ≤ 1 the state cannot be brought below 3 in one step: the slack says by how much it misses.
+ * const mpc = mpcController({
+ *   A: [[1]], B: [[1]], Q: [[1]], R: [[1]], horizon: 2, uMin: -1, uMax: 1, xMax: 3, soft: {},
+ * })
+ * const plan = mpc.plan([5])
+ * print('predicted states =', plan.x)
+ * print('slack =', plan.slack)
  */
 export function mpcController(problem: MpcProblem): MpcController {
   const a = dense.toMatrixF64(problem.A, 'mpc A')
@@ -265,14 +333,17 @@ export interface RecedingHorizonState extends Status {
   x: Vector
   /** The input applied from now to the next sample: the plan's first input. */
   u: Vector
-  /** The plan made now: predicted states (N + 1) × n and inputs N × m. */
+  /** The plan made now: its predicted states, $(N + 1) \times n$. */
   predictedX: Matrix
+  /** The plan made now: its inputs, $N \times m$. */
   predictedU: Matrix
   /** The plan's cost. */
   cost: Scalar
   /** The QP's status at this sample. */
   status: string
+  /** True once `steps` samples have been applied (never when `steps` is not given). */
   terminated: boolean
+  /** True when the plant state is not finite. */
   diverged: boolean
 }
 
@@ -280,18 +351,38 @@ export interface RecedingHorizonState extends Status {
 export type RecedingHorizonOptions = {
   /** The true plant, if it differs from the controller's model (model mismatch). Default `controller.model`. */
   plant?: StateFeedbackPlant
-  /** The reference state to regulate to. Default 0. */
+  /** The reference state to regulate to. Default $\zeros$. */
   reference?: VectorLike
-  /** An additive disturbance on the state at each step, w_k (a function of the step). */
+  /** An additive disturbance $\wvec_k$ on the state at each step, as a function of the step $k$. */
   disturbance?: (t: Size) => VectorLike
   /** Stop after this many samples. */
   steps?: Size
 }
 
 /**
- * Receding-horizon control as a traceable algorithm: at each sample the controller plans N steps ahead from the
- * measured state, the plant moves under the plan's first input, and the rest of the plan is discarded. `init` takes
- * `{ x0 }`. The state records both the plan (predicted) and what happened (applied), so a view can draw them together.
+ * Receding-horizon control as a traceable algorithm: at each sample the controller plans $N$ steps ahead from the
+ * measured state, the plant moves under the plan's first input, $\xvec_{k+1} = \Amat\xvec_k + \Bmat\uvec_k + \wvec_k$,
+ * and the rest of the plan is discarded. `init` takes `{ x0 }`. The state records both the plan (predicted) and what
+ * happened (applied), so a view can draw them together.
+ *
+ * @param controller The controller that plans at every sample, as `mpcController` returns it.
+ * @param options The true plant (default the controller's model), the reference, a disturbance and the number of
+ *   samples after which the run stops.
+ * @returns The algorithm: `init` plans from `x0`, and each `step` applies the first input and plans again.
+ *
+ * @example Five samples of bounded control
+ * const mpc = mpcController({ A: [[1]], B: [[1]], Q: [[1]], R: [[1]], horizon: 3, uMin: -1, uMax: 1 })
+ * const loop = recedingHorizon(mpc, { steps: 5 })
+ * const end = run(loop, { x0: [5] }, 10)
+ * print('samples applied =', end.t)
+ * print('state now =', end.x)
+ * print('next input =', end.u)
+ *
+ * @example A model that is wrong
+ * // The controller believes x_{k+1} = x_k + u_k, the plant is x_{k+1} = 1.2 x_k + u_k: feedback still regulates it.
+ * const mpc = mpcController({ A: [[1]], B: [[1]], Q: [[1]], R: [[1]], horizon: 5 })
+ * const loop = recedingHorizon(mpc, { plant: { A: [[1.2]], B: [[1]] } })
+ * print('after 10 samples x =', run(loop, { x0: [5] }, 10).x)
  */
 export function recedingHorizon(
   controller: MpcController,

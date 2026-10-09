@@ -1,8 +1,8 @@
 /**
- * Event detection: find the times at which scalar functions g(t, x(t)) cross zero along a solution, as scipy's
- * `solve_ivp(events=…)` does. A sign change of g between two accepted steps brackets a crossing; the crossing is then
- * located by Brent's method on the cubic Hermite interpolant of the step (Hairer, Nørsett & Wanner, 1993, §II.6,
- * "Dense output" and "Discontinuities"; Shampine & Thompson, 2000).
+ * Event detection: find the times at which scalar functions $g(t, \xvec(t))$ cross zero along a solution, as
+ * scipy's `solve_ivp(events=…)` does. A sign change of $g$ between two accepted steps brackets a crossing; the
+ * crossing is then located by Brent's method on the cubic Hermite interpolant of the step (Hairer, Nørsett & Wanner,
+ * 1993, §II.6, "Dense output" and "Discontinuities"; Shampine & Thompson, 2000).
  */
 
 import { findRoot } from 'aifn-compute/numerics/roots'
@@ -13,13 +13,18 @@ import type { OdeState, Rhs } from './types'
 
 type F64 = dense.F64
 
-/** An event: the zero of g(t, x). */
+/** An event: the zero of $g(t, \xvec)$. */
 export type OdeEvent = {
+  /** The name reported with each crossing. Default `'event k'`, $k$ the event's position in the list. */
   name?: string
+  /**
+   * The event function $g(t, \xvec)$: a number for a time and a state (a vector of length $n$). It is also called on
+   * interpolated states while a crossing is located.
+   */
   g: (t: Scalar, x: Tensor) => Scalar
   /** Stop the integration at the first crossing. Default false. */
   terminal?: boolean
-  /** Only crossings in this direction: +1 (g increasing), −1 (decreasing) or 0 (both, the default). */
+  /** Only crossings in this direction: $+1$ ($g$ increasing), $-1$ (decreasing) or 0 (both, the default). */
   direction?: -1 | 0 | 1
 }
 
@@ -27,11 +32,13 @@ export type OdeEvent = {
 export type EventHit = {
   /** The position of the event in the list passed to `withEvents`. */
   event: Index
+  /** The event's `name`, or `'event k'` for an unnamed one. */
   name: string
   /** The time of the crossing. */
   time: Scalar
+  /** The state at the crossing, from the step's Hermite interpolant. */
   x: Vector
-  /** +1 if g increased through zero, −1 if it decreased. */
+  /** $+1$ if $g$ increased through zero, $-1$ if it decreased. */
   direction: 1 | -1
 }
 
@@ -39,15 +46,24 @@ export type EventHit = {
 export type EventState<S extends OdeState> = S & {
   /** Every crossing found so far, in time order. */
   events: EventHit[]
-  /** g at the current point, one per event. */
+  /** $g$ at the current point, one per event. */
   eventValues: Scalar[]
   /** True once a terminal event has stopped the run (the runner stops on it). */
   terminated: boolean
 }
 
 /**
- * The cubic Hermite interpolant on [t₀, t₁] through (t₀, x₀) and (t₁, x₁) with slopes f₀ and f₁: third-order accurate,
- * which is enough to locate events to well within a step's own error.
+ * The cubic Hermite interpolant on $[t_0, t_1]$ through $(t_0, \xvec_0)$ and $(t_1, \xvec_1)$ with slopes $\fvec_0$
+ * and $\fvec_1$: third-order accurate, which is enough to locate events to well within a step's own error.
+ *
+ * @param t0 The time $t_0$ at the start of the step.
+ * @param x0 The state $\xvec_0$ at $t_0$ ($n$ values; read when the interpolant is called, so not to be modified).
+ * @param f0 The derivative $\fvec_0 = f(t_0, \xvec_0)$ ($n$ values).
+ * @param t1 The time $t_1$ at the end of the step (different from $t_0$).
+ * @param x1 The state $\xvec_1$ at $t_1$ ($n$ values).
+ * @param f1 The derivative $\fvec_1 = f(t_1, \xvec_1)$ ($n$ values).
+ * @returns A function of $t$ that returns a new array of the $n$ interpolated values; it extrapolates outside
+ *   $[t_0, t_1]$.
  */
 export function hermite(t0: Scalar, x0: F64, f0: F64, t1: Scalar, x1: F64, f1: F64): (t: Scalar) => F64 {
   const h = t1 - t0
@@ -62,14 +78,40 @@ export function hermite(t0: Scalar, x0: F64, f0: F64, t1: Scalar, x1: F64, f1: F
 }
 
 /**
- * Wraps a solver so that it detects the zeros of the given event functions. After each step, every event whose g
+ * Wraps a solver so that it detects the zeros of the given event functions. After each step, every event whose $g$
  * changes sign (in its `direction`) is located by Brent's method on the step's Hermite interpolant, which costs two
- * extra evaluations of f per step with a crossing. A terminal event ends the run at the event: the state is moved to
- * (t_e, x(t_e)) and `terminated` is set, which stops the runners. Works with any solver whose state is an `OdeState`.
+ * extra evaluations of $f$ per step with a crossing. A terminal event ends the run at the event: the state is moved to
+ * $(t_e, \xvec(t_e))$ and `terminated` is set, which stops the runners. Works with any solver whose state is an
+ * `OdeState`.
  *
- * A crossing is a strict sign change into or onto zero (g < 0 → g ≥ 0, or g > 0 → g ≤ 0), so a step that ends
- * exactly on g = 0 reports the event once, and a run that starts on g = 0 reports nothing there. scipy's `solve_ivp`
- * counts g ≤ 0 → g ≥ 0, so it reports a start on zero, and a zero at a step's end in both steps.
+ * A crossing is a strict sign change into or onto zero ($g < 0$ to $g \ge 0$, or $g > 0$ to $g \le 0$), so a step that
+ * ends exactly on $g = 0$ reports the event once, and a run that starts on $g = 0$ reports nothing there. scipy's
+ * `solve_ivp` counts $g \le 0$ to $g \ge 0$, so it reports a start on zero, and a zero at a step's end in both steps.
+ *
+ * @param solver The solver to wrap; its state, `done` and step count are kept, with the event fields added.
+ * @param f The right-hand side the solver integrates, evaluated at both ends of a step to build the interpolant.
+ * @param events The events to watch; a hit's `event` is its position in this list.
+ * @returns The wrapped solver, started with the same value as `solver`.
+ *
+ * @example The zeros of a harmonic oscillator
+ * // q′ = p, p′ = −q from (1, 0): q = cos t is zero at π/2 and 3π/2.
+ * const f = (t, x) => stack([get(x, 1), neg(get(x, 0))])
+ * const zero = { name: 'q = 0', g: (t, x) => get(x, 0) }
+ * const alg = withEvents(rungeKutta(f, 'rk4', { stepSize: 0.1, tEnd: 6 }), f, [zero])
+ * const s = run(alg, { x0: [1, 0] }, 100)
+ * print('times =', s.events.map((e) => e.time))
+ * print('pi/2, 3pi/2 =', [Math.PI / 2, (3 * Math.PI) / 2])
+ * print('directions =', s.events.map((e) => e.direction))
+ *
+ * @example A terminal event in one direction
+ * // A ball thrown up at 10 m/s from height 0: it lands, moving down, at t = 20/9.81.
+ * const f = (t, x) => stack([get(x, 1), -9.81])
+ * const ground = { name: 'ground', g: (t, x) => get(x, 0), direction: -1, terminal: true }
+ * const s = run(withEvents(dormandPrince(f, { tEnd: 10 }), f, [ground]), { x0: [0, 10] }, 100)
+ * print('landed at t =', s.time)
+ * print('20 / 9.81 =', 20 / 9.81)
+ * print('state =', s.x)
+ * print('terminated =', s.terminated)
  */
 export function withEvents<Opts, S extends OdeState>(
   solver: Algorithm<Opts, S>,

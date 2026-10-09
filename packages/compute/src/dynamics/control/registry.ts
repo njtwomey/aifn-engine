@@ -1,5 +1,6 @@
 /**
- * The functions of `aifn-compute/dynamics/control`, registered with the notes they serve.
+ * The functions and algorithms of `aifn-compute/dynamics/control`, registered with the notes they serve: the LQR,
+ * pole-placement, MPC and LQG solvers as functions, and the receding-horizon and LQG loops as step algorithms.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

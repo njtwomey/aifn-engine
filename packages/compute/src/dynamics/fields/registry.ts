@@ -1,5 +1,6 @@
 /**
- * The functions of `aifn-compute/dynamics/fields`, registered with the notes they serve.
+ * The functions of `aifn-compute/dynamics/fields`, registered with the notes they serve: the calculus, flow, transport
+ * and fixed-point functions, each with its role and the notes that use it.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

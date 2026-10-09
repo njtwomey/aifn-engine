@@ -1,8 +1,9 @@
 /**
- * Linear stability of numerical methods: applied to the test equation x′ = λx with z = hλ, a one-step method gives
- * x_{n+1} = R(z) x_n, and a linear multistep method a recurrence whose characteristic roots ζ must satisfy |ζ| ≤ 1.
- * The stability region is where the amplification (|R(z)|, or the largest |ζ|) is at most 1 (Hairer & Wanner, 1996,
- * §IV.2–3 and §V.1).
+ * Linear stability of numerical methods: applied to the test equation $x' = \lambda x$ with $z = h\lambda$, a one-step
+ * method gives $x_{n+1} = R(z) x_n$, and a linear multistep method a recurrence whose characteristic roots $\zeta$ must
+ * satisfy $\lvert \zeta \rvert \le 1$. The stability region is where the amplification ($\lvert R(z) \rvert$, or the
+ * largest $\lvert \zeta \rvert$) is at most 1 (Hairer & Wanner, 1996, §IV.2–3 and §V.1). Complex numbers are worked
+ * with as pairs $[\operatorname{Re}, \operatorname{Im}]$, and a method is given by name or by its Butcher tableau.
  */
 
 import { fromData, type Matrix, type Vector } from 'aifn-compute/foundation/tensor'
@@ -13,7 +14,21 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A complex number as [re, im]. */
 type C = [number, number]
+/**
+ * The complex product $ab$.
+ *
+ * @param a The first factor, as [re, im].
+ * @param b The second factor, as [re, im].
+ * @returns $ab$ as [re, im].
+ */
 const cmul = (a: C, b: C): C => [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
+/**
+ * The complex quotient $a / b$ (infinite or NaN parts when $b = 0$).
+ *
+ * @param a The numerator, as [re, im].
+ * @param b The denominator, as [re, im].
+ * @returns $a / b$ as [re, im].
+ */
 const cdiv = (a: C, b: C): C => {
   const d = b[0] * b[0] + b[1] * b[1]
   return [(a[0] * b[0] + a[1] * b[1]) / d, (a[1] * b[0] - a[0] * b[1]) / d]
@@ -30,7 +45,10 @@ export type StabilityMethod =
   | 'bdf3'
   | ButcherTableau
 
-// BDF_k as (1 − zβ)ζ^k − Σ_j a_j ζ^{k−j} = 0 (see implicit.ts).
+/**
+ * The BDF methods of order $k$ by their coefficients: the characteristic polynomial on the test equation is
+ * $(1 - z\beta)\zeta^k - \sum_{j=1}^{k} a_j \zeta^{k-j} = 0$ (see `implicit.ts`).
+ */
 const BDF: Record<string, { a: number[]; beta: number }> = {
   bdf1: { a: [1], beta: 1 },
   bdf2: { a: [4 / 3, -1 / 3], beta: 2 / 3 },
@@ -38,8 +56,14 @@ const BDF: Record<string, { a: number[]; beta: number }> = {
 }
 
 /**
- * The stability function R(z) = 1 + z bᵀ(I − zA)⁻¹𝟙 of a Runge–Kutta tableau (explicit or implicit), evaluated in
- * complex arithmetic by forward substitution when A is lower triangular and Gaussian elimination otherwise.
+ * The stability function $R(z) = 1 + z \bvec^\top (\Imat - z\Amat)^{-1} \ones$ of a Runge–Kutta tableau (explicit
+ * or implicit), evaluated in complex arithmetic by Gaussian elimination without pivoting, which for a lower-triangular
+ * $\Amat$ is forward substitution. A zero pivot gives infinite or NaN parts.
+ *
+ * @param tab The tableau: its `a` gives $\Amat$ (missing entries are 0, so rows may be short) and its `b` gives
+ *   $\bvec$ and the number of stages.
+ * @param z The point $z = h\lambda$, as [re, im].
+ * @returns $R(z)$ as [re, im].
  */
 function rkStability(tab: ButcherTableau, z: C): C {
   const s = tab.b.length
@@ -77,7 +101,14 @@ function rkStability(tab: ButcherTableau, z: C): C {
   return [1 + zs[0], zs[1]]
 }
 
-/** The largest modulus among the roots of a complex polynomial (coefficients highest degree first), by Durand–Kerner. */
+/**
+ * The largest modulus among the roots of a complex polynomial, by the Durand–Kerner iteration (at most 200 sweeps,
+ * stopping when no root moves by more than $10^{-14}$); a linear polynomial is solved directly.
+ *
+ * @param coefficients The coefficients, highest degree first, as [re, im] pairs; the leading one must be non-zero and
+ *   the degree at least 1.
+ * @returns The largest $\lvert \zeta \rvert$ over the roots $\zeta$.
+ */
 function largestRootModulus(coefficients: C[]): number {
   const n = coefficients.length - 1
   if (n === 1) {
@@ -114,9 +145,33 @@ function largestRootModulus(coefficients: C[]): number {
 }
 
 /**
- * The amplification of a method on x′ = λx at z = hλ = re + i·im: |R(z)| for a one-step method (explicit or implicit
- * Runge–Kutta, `'implicit-euler'`, `'implicit-trapezoid'`), or the largest modulus of the characteristic roots for BDF1–3. The
- * method is linearly stable at z when this is at most 1.
+ * The amplification of a method on $x' = \lambda x$ at $z = h\lambda = a + ib$: $\lvert R(z) \rvert$ for a one-step
+ * method (explicit or implicit Runge–Kutta, `'implicit-euler'`, `'implicit-trapezoid'`), or the largest modulus of the
+ * characteristic roots for BDF of order 1 to 3. The method is linearly stable at $z$ when this is at most 1. An
+ * unknown method name throws `DomainError`.
+ *
+ * @param method The method: a name, or a Butcher tableau (explicit or implicit).
+ * @param re The real part $a$ of $z$.
+ * @param im The imaginary part $b$ of $z$.
+ * @returns The amplification at $z$, a non-negative number.
+ *
+ * @example Explicit Euler is stable only for small steps, implicit Euler on the whole left half-plane
+ * // Explicit Euler: |1 + z|. Implicit Euler: 1/|1 − z|.
+ * print('euler at z = -1:', amplification('euler', -1, 0))
+ * print('euler at z = -3:', amplification('euler', -3, 0))
+ * print('implicit-euler at z = -3:', amplification('implicit-euler', -3, 0))
+ * print('implicit-euler at z = -100:', amplification('implicit-euler', -100, 0))
+ *
+ * @example Higher-order methods reach further along the negative axis
+ * for (const m of ['euler', 'heun', 'rk4', 'dormand-prince', 'bdf2']) {
+ *   print(m, 'at z = -2.5:', amplification(m, -2.5, 0))
+ * }
+ *
+ * @example On the imaginary axis (an undamped oscillation)
+ * // The trapezoid rule is exactly neutral there; RK4 is just inside its region at z = 2i.
+ * print('implicit-trapezoid at z = 2i:', amplification('implicit-trapezoid', 0, 2))
+ * print('rk4 at z = 2i:', amplification('rk4', 0, 2))
+ * print('heun at z = 2i:', amplification('heun', 0, 2))
  */
 export function amplification(method: StabilityMethod, re: Scalar, im: Scalar): Scalar {
   const z: C = [re, im]
@@ -144,19 +199,44 @@ export function amplification(method: StabilityMethod, re: Scalar, im: Scalar): 
   return Math.hypot(r[0], r[1])
 }
 
-/** A method's amplification on a grid of the complex z-plane. */
+/** A method's amplification on a grid of the complex $z$-plane. */
 export type StabilityRegion = {
-  /** Real parts of z (nx). */
+  /** Real parts of $z$, ascending (length `nx`). */
   real: Vector
-  /** Imaginary parts of z (ny). */
+  /** Imaginary parts of $z$, ascending (length `ny`). */
   imag: Vector
-  /** The amplification at each grid point (ny × nx); the method is stable where it is ≤ 1. */
+  /**
+   * The amplification at each grid point (`ny` $\times$ `nx`): row $j$, column $i$ is at `real[i]` $+ i \cdot$
+   * `imag[j]`. The method is stable where it is $\le 1$.
+   */
   amplification: Matrix
 }
 
 /**
- * The amplification of a method over the rectangle `real` × `imag` of the z = hλ plane on an nx × ny grid (default
- * 121 × 121). Contour it at 1 to draw the boundary of the stability region.
+ * The amplification of a method over the rectangle `real` $\times$ `imag` of the $z = h\lambda$ plane on an
+ * `nx` $\times$ `ny` grid (default $121 \times 121$), by `amplification` at every point. Contour it at 1 to draw the
+ * boundary of the stability region.
+ *
+ * @param method The method: a name, or a Butcher tableau.
+ * @param options The rectangle and the grid.
+ * @param options.real The range of real parts, both ends included.
+ * @param options.imag The range of imaginary parts, both ends included.
+ * @param options.nx The number of grid points along the real axis (a single point sits at the lower end).
+ * @param options.ny The number of grid points along the imaginary axis.
+ * @returns The grid's axes and the amplification at each point.
+ *
+ * @example Explicit Euler's region is a disc of radius 1
+ * // |1 + z| on a 5 × 3 grid: real parts −2 to 0, imaginary parts −1 to 1.
+ * const r = stabilityRegion('euler', { real: [-2, 0], imag: [-1, 1], nx: 5, ny: 3 })
+ * print('real =', r.real)
+ * print('imag =', r.imag)
+ * print('amplification =', r.amplification)
+ *
+ * @example The share of a square that is stable
+ * for (const m of ['euler', 'rk4', 'implicit-euler']) {
+ *   const a = toFlat(stabilityRegion(m, { real: [-4, 0], imag: [-2, 2], nx: 41, ny: 41 }).amplification)
+ *   print(m, 'stable on', a.filter((v) => v <= 1).length, 'of', a.length, 'points')
+ * }
  */
 export function stabilityRegion(
   method: StabilityMethod,
@@ -175,9 +255,25 @@ export function stabilityRegion(
 }
 
 /**
- * The boundary locus of BDF_k: the image of the unit circle ζ = e^{iθ} under z(ζ) = (1 − Σ_j a_j ζ^{−j})/β, the
- * values of z = hλ at which a characteristic root has modulus exactly 1. The stability region is the exterior of the
- * closed curve. Returns `n` points (default 400) as real and imaginary parts.
+ * The boundary locus of the BDF method of order $k$: the image of the unit circle $\zeta = e^{i\theta}$ under
+ * $z(\zeta) = (1 - \sum_j a_j \zeta^{-j}) / \beta$, the values of $z = h\lambda$ at which a characteristic root has
+ * modulus exactly 1. The stability region is the exterior of the closed curve.
+ *
+ * @param method The BDF method, of order 1, 2 or 3.
+ * @param n The number of points, at $\theta$ evenly spaced from 0 to $2\pi$ inclusive, so the last repeats the first
+ *   and closes the curve. At least 2 (a single point is NaN).
+ * @returns The real and imaginary parts of the points of the curve (length `n` each).
+ *
+ * @example BDF2's boundary at four angles
+ * // θ = 0, π/2, π, 3π/2, 2π: z = 0 at θ = 0, and the curve reaches z = 4 on the real axis at θ = π.
+ * const { real, imag } = boundaryLocus('bdf2', 5)
+ * print('real =', real)
+ * print('imag =', imag)
+ *
+ * @example BDF1's boundary is the circle of radius 1 about 1
+ * // Implicit Euler is unstable only inside |1 − z| < 1.
+ * const { real, imag } = boundaryLocus('bdf1', 9)
+ * print('distance from 1 =', toFlat(real).map((x, k) => Math.hypot(x - 1, toFlat(imag)[k])))
  */
 export function boundaryLocus(method: 'bdf1' | 'bdf2' | 'bdf3', n: Size = 400): { real: Vector; imag: Vector } {
   const { a, beta } = BDF[method]

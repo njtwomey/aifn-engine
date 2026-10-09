@@ -1,7 +1,8 @@
 /**
- * The algorithms of `aifn-compute/dynamics/sde`, registered with what each factory takes (`problem`) and the roles of its
- * state's fields (`state`: iterate, objective, grad, stepSize, and the `Status` flags it sets), so a generic trace
- * view picks default series and a worker can address an algorithm by key (design S §2.3).
+ * The algorithms and functions of `aifn-compute/dynamics/sde`, registered with the notes they serve. Each scheme is
+ * registered with what its factory takes (`problem`) and the roles of its state's fields (`state`: iterate, objective,
+ * grad, stepSize, and the `Status` flags it sets), so a generic trace view picks default series and a worker can
+ * address an algorithm by key (design S §2.3).
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

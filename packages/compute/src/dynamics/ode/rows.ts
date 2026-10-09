@@ -12,8 +12,9 @@ import { DORMAND_PRINCE } from './adaptive'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /**
- * The field on the rows still integrating: `t` their times [m], `x` their states [m × d] row-major and `rows` their
- * indices in the batch [m]; returns f(tᵢ, xᵢ) for each, [m × d] row-major.
+ * The field on the $m$ rows still integrating: `t` their times ($m$ values), `x` their states ($m \times d$,
+ * row-major) and `rows` their indices in the batch ($m$ values); returns $f(t_i, \xvec_i)$ for each, $m \times d$
+ * row-major.
  */
 export type RowsRhs = (t: Float64Array, x: Float64Array, rows: Int32Array) => ArrayLike<number>
 
@@ -21,35 +22,38 @@ export type RowsRhs = (t: Float64Array, x: Float64Array, rows: Int32Array) => Ar
 export type RowsSolveOptions = {
   /** Start time of every row. Default 0. */
   t0?: Scalar
-  /** End time of every row (required; below t0 integrates backwards). */
+  /** End time of every row (required; below `t0` integrates backwards). */
   tEnd: Scalar
-  /** Relative and absolute tolerances (defaults 1e-3 and 1e-6, as `dormandPrince`). */
+  /** The relative tolerance (default 1e-3, as `dormandPrince`). */
   rtol?: Scalar
+  /** The absolute tolerance, one value for every component (default 1e-6, as `dormandPrince`). */
   atol?: Scalar
   /** The most accepted steps per row before it is marked failed. Default 10 000. */
   maxSteps?: Size
   /**
-   * Continue earlier solves (a `RowsSolution` will do) rather than starting afresh: each row's proposed step size and
-   * f(t₀, x₀) from the previous solve's `nextStepSize` and `derivative` (the field must be unchanged for that row). A
-   * row whose step is not a finite non-zero number starts afresh (its f(t₀, x₀) and starting step cost two
-   * evaluations).
+   * Continue earlier solves (a `RowsSolution` will do) rather than starting afresh: each row's proposed step size
+   * (its magnitude, capped by the interval) and $f(t_0, \xvec_0)$ from the previous solve's `nextStepSize` and
+   * `derivative` (the field must be unchanged for that row). A row whose step is not a finite non-zero number starts
+   * afresh (its $f(t_0, \xvec_0)$ and starting step cost two evaluations).
    */
   resume?: { nextStepSize: ArrayLike<number>; derivative: ArrayLike<number> }
 }
 
 /** The solution of {@link dormandPrinceRows}. */
 export type RowsSolution = {
-  /** States at tEnd [B × d] row-major (a failed row keeps its last accepted state). */
+  /** States at `tEnd`, $B \times d$ row-major (a failed row keeps its last accepted state). */
   x: Float64Array
   /** Function evaluations of each row, including the start's evaluation and the starting-step probe. */
   evaluations: Int32Array
-  /** Accepted and rejected steps of each row. */
+  /** Accepted steps of each row. */
   steps: Int32Array
+  /** Rejected step attempts of each row. */
   rejected: Int32Array
   /** 1 where a row stopped early (step size underflow or `maxSteps`). */
   failed: Uint8Array
-  /** The step each row would try next and f at its end state [B × d] (to `resume` a later solve). */
+  /** The step each row would try next, signed (to `resume` a later solve). */
   nextStepSize: Float64Array
+  /** $f$ at each row's end state, $B \times d$ row-major (to `resume` a later solve). */
   derivative: Float64Array
 }
 
@@ -58,15 +62,37 @@ const MIN_FACTOR = 0.2
 const MAX_FACTOR = 10
 
 /**
- * Solve B independent IVPs xᵢ′ = f(t, xᵢ), xᵢ(t₀) = x0ᵢ (x0 is [B × d] row-major) with Dormand–Prince, each row with its
- * own step-size control (the controller, starting step and first-same-as-last reuse of `dormandPrince`). Each stage
- * calls `f` once on the rows still integrating.
+ * Solve $B$ independent IVPs $\xvec_i' = f(t, \xvec_i)$, $\xvec_i(t_0) = \xvec_{0,i}$ with Dormand–Prince, each row
+ * with its own step-size control (the controller, starting step and first-same-as-last reuse of `dormandPrince`).
+ * Each stage calls `f` once on the rows still integrating. A row stops early, marked in `failed`, when its step size
+ * underflows or it reaches `maxSteps`; a non-finite attempt is retried with a fifth of the step. Non-finite `t0` or
+ * `tEnd`, or a `d` that is not a positive integer, throws `DomainError`; an `x0` that is not whole rows of $d$ values,
+ * or an `f` that returns the wrong number of values, throws `ShapeError`.
  *
- * @example
- * // x′ = −kᵢ x with a different rate per row: the stiffer row takes more evaluations.
+ * @param f The field on the rows still integrating, called with their times, states and indices in the batch.
+ * @param x0 The initial states, $B \times d$ row-major ($B$ is its length over $d$); copied, not modified.
+ * @param d The dimension of each row's state.
+ * @param options The interval, the tolerances, the step limit per row and the solves to resume.
+ * @returns The end states and, per row, the work done, whether it failed, and the step and derivative to resume from.
+ *
+ * @example A different rate per row: the faster decay takes more evaluations
+ * // x′ = −kᵢ x on two rows of d = 1.
  * const k = [0.5, 20]
- * const sol = dormandPrinceRows((t, x, rows) => x.map((v, j) => -k[rows[j]] * v), Float64Array.of(1, 1), 1, { tEnd: 1 })
- * sol.evaluations // [≈ 20, ≈ 80]
+ * const sol = dormandPrinceRows((t, x, rows) => x.map((v, j) => -k[rows[j]] * v), Float64Array.of(1, 1), 1, {
+ *   tEnd: 1,
+ * })
+ * print('x(1) =', sol.x)
+ * print('exact =', k.map((r) => Math.exp(-r)))
+ * print('evaluations =', sol.evaluations)
+ * print('accepted, rejected =', sol.steps, sol.rejected)
+ *
+ * @example Resuming a solve skips the start-up evaluations
+ * const f = (t, x, rows) => x.map((v) => -v)
+ * const first = dormandPrinceRows(f, Float64Array.of(1, 2), 1, { tEnd: 0.5 })
+ * const resumed = dormandPrinceRows(f, first.x, 1, { t0: 0.5, tEnd: 1, resume: first })
+ * const afresh = dormandPrinceRows(f, first.x, 1, { t0: 0.5, tEnd: 1 })
+ * print('x(1) =', resumed.x, ' exact =', [1, 2].map((v) => v * Math.exp(-1)))
+ * print('evaluations resumed =', resumed.evaluations, ' afresh =', afresh.evaluations)
  */
 export function dormandPrinceRows(f: RowsRhs, x0: ArrayLike<number>, d: Size, options: RowsSolveOptions): RowsSolution {
   const { t0 = 0, tEnd, rtol = 1e-3, atol = 1e-6, maxSteps = 10_000 } = options

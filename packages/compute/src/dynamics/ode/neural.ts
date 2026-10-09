@@ -3,15 +3,18 @@
  * 2018, "Neural ordinary differential equations", NeurIPS; Grathwohl, Chen, Bettencourt, Sutskever & Duvenaud, 2019,
  * "FFJORD", ICLR; Finlay, Jacobsen, Nurbekyan & Oberman, 2020, "How to train your neural ODE", ICML).
  *
- * - `odeFlow`: the states x(t₁), …, x(t_m) of x′ = f(t, x, θ) from x(t₀), differentiable with respect to x(t₀) and θ
- *   either by backpropagation through the solver's steps (discretise-then-optimise: the exact gradient of the discrete
- *   solution, memory linear in the steps) or by the adjoint method (optimise-then-discretise: one backward solve,
- *   memory constant in the steps, the gradient of the exact flow to the solver's accuracy). Work is reported per solve.
- * - `jacobianTrace`: tr(∂f/∂x) for each row of a batch, exactly (one jvp per dimension) or by Hutchinson's estimator
- *   εᵀ(∂f/∂x)ε with a Rademacher or Gaussian probe ε (Hutchinson, 1989), from one vjp.
- * - `augmentedDynamics`: f with the integrals a CNF and its regularisers need appended to the state: the change in log
- *   density d(Δ)/dt = −tr(∂f/∂x) (the instantaneous change of variables), the kinetic energy ‖f‖² and the Jacobian's
- *   Frobenius norm ‖εᵀ∂f/∂x‖² (RNODE).
+ * - `odeFlow`: the states $\xvec(t_1), \dots, \xvec(t_m)$ of $\xvec' = f(t, \xvec, \thetavec)$ from $\xvec(t_0)$,
+ *   differentiable with respect to $\xvec(t_0)$ and $\thetavec$ either by backpropagation through the solver's steps
+ *   (discretise-then-optimise: the exact gradient of the discrete solution, memory linear in the steps) or by the
+ *   adjoint method (optimise-then-discretise: one backward solve, memory constant in the steps, the gradient of the
+ *   exact flow to the solver's accuracy). Work is reported per solve.
+ * - `jacobianTrace`: $\trace(\partial f/\partial\xvec)$ for each row of a batch, exactly (one jvp per dimension) or
+ *   by Hutchinson's estimator $\epsilonvec^\top (\partial f/\partial\xvec) \epsilonvec$ with a Rademacher or Gaussian
+ *   probe $\epsilonvec$ (Hutchinson, 1989; drawn by `traceProbe`), from one vjp.
+ * - `augmentedDynamics`: $f$ with the integrals a CNF and its regularisers need appended to the state: the change in
+ *   log density, $d\Delta/dt = -\trace(\partial f/\partial\xvec)$ (the instantaneous change of variables), the
+ *   kinetic energy $\lVert f \rVert^2$ and the Jacobian's Frobenius norm
+ *   $\lVert \epsilonvec^\top \partial f/\partial\xvec \rVert^2$ (RNODE).
  */
 
 import { DomainError, NumericalError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -51,10 +54,14 @@ export type OdeFlowOptions = {
   gradient?: OdeGradient
   /** The solver. Default `'rk4'`. */
   method?: OdeFlowMethod
-  /** The step size of a fixed-step method (its magnitude; the sign follows each interval). Default 0.1. */
+  /**
+   * The step size of a fixed-step method (its magnitude, positive, or `DomainError` is thrown; the sign follows each
+   * interval). Default 0.1.
+   */
   stepSize?: Scalar
-  /** Tolerances of Dormand–Prince (default 1e-3 and 1e-6). */
+  /** The relative tolerance of Dormand–Prince (default 1e-3). */
   rtol?: Scalar
+  /** The absolute tolerance of Dormand–Prince (default 1e-6). */
   atol?: Scalar
   /** The most steps per solve (default 10 000); a solve that needs more throws `NumericalError`. */
   maxSteps?: Size
@@ -68,22 +75,56 @@ export type OdeFlowOptions = {
   onSolve?: (info: OdeSolveInfo) => void
 }
 
-/** A right-hand side on a state of any shape: x′ = f(t, x, θ) with f(t, x, θ) shaped like x. */
+/**
+ * A right-hand side on a state of any shape: $\xvec' = f(t, \xvec, \thetavec)$ with $f(t, \xvec, \thetavec)$ shaped
+ * like $\xvec$.
+ */
 export type ShapedRhs = (t: Scalar, x: Value, params: Value) => Value
 
+/**
+ * The values of a number or a (possibly traced) tensor as a flat array, read from the primal value.
+ *
+ * @param v The number or tensor.
+ * @returns Its entries in row-major order (one entry for a number).
+ */
 const flatOf = (v: Value): Float64Array =>
   typeof v === 'number' ? Float64Array.of(v) : Float64Array.from(toFlat(unwrap(v) as Tensor))
 
 /**
- * The flow map of x′ = f(t, x, θ) sampled at `times` (increasing or decreasing): a function of x(t₀) (any shape) and θ
- * returning [x(t₀), x(t₁), …, x(t_m)], each shaped like x(t₀). Under `grad` it is differentiated by `gradient`:
- * `'backprop'` unrolls the solver on traced values (`unrolled`; Dormand–Prince chooses its steps on primal values, so
- * they are constants of the discrete solution), `'adjoint'` uses `odeAdjoint` on each interval. Without a transform it
- * simply solves.
+ * The flow map of $\xvec' = f(t, \xvec, \thetavec)$ sampled at `times`: a function of $\xvec(t_0)$ (any shape) and
+ * $\thetavec$ returning $[\xvec(t_0), \xvec(t_1), \dots, \xvec(t_m)]$, each shaped like $\xvec(t_0)$. Each interval
+ * $[t_{i-1}, t_i]$ is solved in its own direction (increasing or decreasing). Under `grad` it is differentiated by
+ * `gradient`: `'backprop'` unrolls the solver on traced values (`unrolled`; Dormand–Prince chooses its steps on primal
+ * values, so they are constants of the discrete solution), `'adjoint'` uses `odeAdjoint` on each interval. Without a
+ * transform it simply solves. A solve that fails or needs more than `maxSteps` steps throws `NumericalError`
+ * 'not-converged'; fewer than two times, a time equal to the one before it, or a step size that is not positive
+ * throws `DomainError`.
  *
- * @example
- * const flow = odeFlow((t, x, k) => mul(neg(k), x), [0, 1], { gradient: 'adjoint', method: 'dormand-prince' })
- * grad((k: Value) => sum(flow(tensor([1, 2]), k)[1]))(0.5) // ≈ −3e^{−0.5}
+ * @param f The right-hand side $f(t, \xvec, \thetavec)$, called with $\xvec$ in the shape of $\xvec(t_0)$ and
+ *   returning the derivative in that shape. It is written with tensor primitives, so that it can be differentiated.
+ * @param times The times $t_0, t_1, \dots, t_m$ to sample: at least two, finite, each different from the one before.
+ * @param options The gradient method, the solver and its step size or tolerances, the step limit, the adjoint's
+ *   checkpoints and a callback reporting the work of each solve.
+ * @returns The map from $\xvec(t_0)$ and $\thetavec$ to the list of states, one per time, the first being
+ *   $\xvec(t_0)$ itself.
+ *
+ * @example States of a decay at three times, and their gradient both ways
+ * const f = (t, x, k) => mul(neg(k), x)
+ * print('x(0), x(0.5), x(1) =', odeFlow(f, [0, 0.5, 1])(tensor([1, 2]), 0.5))
+ * for (const gradient of ['backprop', 'adjoint']) {
+ *   const flow = odeFlow(f, [0, 1], { gradient })
+ *   print(`${gradient}: d sum x(1) / dk =`, grad((k) => sum(flow(tensor([1, 2]), k)[1]))(0.5))
+ * }
+ * print('exact -3 e^-0.5 =', -3 * Math.exp(-0.5))
+ *
+ * @example The work of a gradient by each method
+ * const f = (t, x, k) => mul(neg(k), x)
+ * for (const gradient of ['backprop', 'adjoint']) {
+ *   const solves = []
+ *   const flow = odeFlow(f, [0, 1], { gradient, method: 'dormand-prince', onSolve: (s) => solves.push(s) })
+ *   grad((k) => sum(flow(tensor([1, 2]), k)[1]))(0.5)
+ *   print(`${gradient}:`, solves.map((s) => `${s.phase} ${s.steps} steps, ${s.evaluations} evaluations`))
+ * }
  */
 export function odeFlow(
   f: ShapedRhs,
@@ -152,10 +193,26 @@ export function odeFlow(
 /** The trace estimators of {@link jacobianTrace}. */
 export type TraceEstimator = 'exact' | 'hutchinson'
 
-/** The probe distributions of Hutchinson's estimator: both have E[εεᵀ] = I; Rademacher has the lower variance. */
+/**
+ * The probe distributions of Hutchinson's estimator: both have $\expect[\epsilonvec\epsilonvec^\top] = \Imat$;
+ * Rademacher has the lower variance.
+ */
 export type ProbeKind = 'rademacher' | 'gaussian'
 
-/** A probe of the given shape: independent ±1 signs (Rademacher) or standard normals. */
+/**
+ * A probe for Hutchinson's estimator: independent signs $\pm 1$ with equal probability (Rademacher) or standard
+ * normals, drawn from the stream (which advances).
+ *
+ * @param s The stream to draw from.
+ * @param shape The shape of the probe, that of the batch it multiplies ($B \times d$ for `jacobianTrace`).
+ * @param kind `'rademacher'` or `'gaussian'`.
+ * @returns A tensor of the given shape.
+ *
+ * @example Rademacher and Gaussian probes
+ * const s = stream(0)
+ * print('rademacher =', traceProbe(s, [2, 3]))
+ * print('gaussian =', traceProbe(s, [2, 3], 'gaussian'))
+ */
 export function traceProbe(s: Stream, shape: readonly Size[], kind: ProbeKind = 'rademacher'): Tensor {
   const n = shape.reduce((a, b) => a * b, 1)
   if (kind === 'gaussian') return normals(s, shape)
@@ -167,29 +224,68 @@ export function traceProbe(s: Stream, shape: readonly Size[], kind: ProbeKind = 
 
 /** Options of {@link jacobianTrace}. */
 export type JacobianTraceOptions = {
-  /** Default `'exact'`. */
+  /**
+   * `'exact'` (default): one forward-mode product per dimension. `'hutchinson'`: one reverse-mode product with
+   * `probe`.
+   */
   estimator?: TraceEstimator
-  /** The probe ε, shaped like x (required by `'hutchinson'`, and by `'exact'` when `probeProduct` is wanted). */
+  /**
+   * The probe $\epsilonvec$, shaped like $\xvec$ (required by `'hutchinson'`, and by `'exact'` when `probeProduct` is
+   * wanted).
+   */
   probe?: Value
-  /** Also return εᵀ∂f/∂x per row (for the Jacobian Frobenius regulariser). Default false. */
+  /**
+   * Also return $\epsilonvec^\top \partial f/\partial\xvec$ per row (for the Jacobian Frobenius regulariser).
+   * Default false.
+   */
   probeProduct?: boolean
 }
 
 /** The result of {@link jacobianTrace}. */
 export type JacobianTrace = {
-  /** f(x), shape [B, d]. */
+  /** $f(\xvec)$, shape $B \times d$. */
   value: Value
-  /** tr(∂fᵢ/∂xᵢ) per row (exact) or its estimate εᵢᵀ(∂fᵢ/∂xᵢ)εᵢ, shape [B]. */
+  /**
+   * $\trace(\partial f_i/\partial\xvec_i)$ per row $i$ (exact) or its estimate
+   * $\epsilonvec_i^\top (\partial f_i/\partial\xvec_i) \epsilonvec_i$, $B$ values.
+   */
   trace: Value
-  /** εᵢᵀ ∂fᵢ/∂xᵢ per row, shape [B, d] (when asked for, or computed by the Hutchinson estimate anyway). */
+  /**
+   * $\epsilonvec_i^\top \partial f_i/\partial\xvec_i$ per row, shape $B \times d$ (when asked for, or computed by the
+   * Hutchinson estimate anyway).
+   */
   probeProduct?: Value
 }
 
 /**
- * The trace of the Jacobian of a row-wise map f: [B, d] → [B, d] (row i of the output depends on row i of x only), per
- * row: exactly by d forward-mode products J eₖ (cost d evaluations), or by Hutchinson's unbiased estimator εᵀJε from
- * one reverse-mode product εᵀJ (cost one evaluation, variance Σ_{j≠k} (J_jk² + J_jk J_kj) for Rademacher ε). Written
- * with transforms, so it nests under `grad` (training a CNF differentiates the trace).
+ * The trace of the Jacobian of a row-wise map $f: \reals^{B \times d} \to \reals^{B \times d}$ (row $i$ of the output
+ * depends on row $i$ of $\xvec$ only), per row: exactly by $d$ forward-mode products $\Jmat\evec_k$ (cost $d$
+ * evaluations), or by Hutchinson's unbiased estimator $\epsilonvec^\top\Jmat\epsilonvec$ from one reverse-mode
+ * product $\epsilonvec^\top\Jmat$ (cost one evaluation, variance $\sum_{j \ne k} (J_{jk}^2 + J_{jk} J_{kj})$ for
+ * Rademacher $\epsilonvec$). The exact trace with `probeProduct` costs one reverse-mode product more. Written with
+ * transforms, so it nests under `grad` (training a CNF differentiates the trace). An $\xvec$ that is not a matrix
+ * throws `ShapeError`; the Hutchinson estimate or the probe product without a `probe` throws `DomainError`.
+ *
+ * @param f The row-wise map, written with tensor primitives; it takes and returns a $B \times d$ batch.
+ * @param x The batch $\xvec$, $B \times d$, at which the Jacobian is taken.
+ * @param options The estimator, the probe and whether to return the probe product.
+ * @returns $f(\xvec)$, the trace (or estimate) per row and, when computed, the probe product.
+ *
+ * @example An elementwise map: the Hutchinson estimate is exact for a diagonal Jacobian
+ * const f = (x) => mul(x, x)
+ * const x = tensor([[1, 2], [3, 4]])
+ * print('exact =', jacobianTrace(f, x).trace)
+ * const probe = traceProbe(stream(0), [2, 2])
+ * print('hutchinson =', jacobianTrace(f, x, { estimator: 'hutchinson', probe }).trace)
+ *
+ * @example A coupled map: each estimate is noisy, their mean is the trace
+ * // Every row maps by A = [[1, 2], [3, 4]], whose trace is 5.
+ * const f = (x) => matmul(x, transpose(tensor([[1, 2], [3, 4]])))
+ * const x = normals(stream(1), [1000, 2])
+ * print('exact, first rows =', slice(jacobianTrace(f, x).trace, [0, 3]))
+ * const { trace } = jacobianTrace(f, x, { estimator: 'hutchinson', probe: traceProbe(stream(2), [1000, 2]) })
+ * print('hutchinson, first rows =', slice(trace, [0, 3]))
+ * print('hutchinson, mean of 1000 =', mean(trace))
  */
 export function jacobianTrace(f: (x: Value) => Value, x: Value, options: JacobianTraceOptions = {}): JacobianTrace {
   const { estimator = 'exact', probe, probeProduct = false } = options
@@ -225,27 +321,36 @@ export function jacobianTrace(f: (x: Value) => Value, x: Value, options: Jacobia
 
 /** Options of {@link augmentedDynamics}. */
 export type AugmentedDynamicsOptions = {
-  /** The dimension d of each row of x. */
+  /** The dimension $d$ of each row of $\xvec$. */
   dim: Size
-  /** Integrate the change in log density, −tr(∂f/∂x), exactly or by Hutchinson's estimator. Default none. */
+  /**
+   * Integrate the change in log density, $-\trace(\partial f/\partial\xvec)$, exactly (`'exact'`) or by
+   * Hutchinson's estimator (`'hutchinson'`, which needs `probe`). Default null: not integrated.
+   */
   logDensity?: TraceEstimator | null
-  /** Integrate the kinetic energy ‖f‖² per row (RNODE). Default false. */
+  /** Integrate the kinetic energy $\lVert f \rVert^2$ per row (RNODE). Default false. */
   kinetic?: boolean
-  /** Integrate ‖εᵀ ∂f/∂x‖², an unbiased estimate of the Jacobian's squared Frobenius norm, per row (RNODE). */
+  /**
+   * Integrate $\lVert \epsilonvec^\top \partial f/\partial\xvec \rVert^2$, an unbiased estimate of the Jacobian's
+   * squared Frobenius norm, per row (RNODE; needs `probe`). Default false.
+   */
   jacobianFrobenius?: boolean
-  /** The probe ε, [B, d], held fixed for the whole solve (FFJORD draws one per solve). */
+  /** The probe $\epsilonvec$, $B \times d$, held fixed for the whole solve (FFJORD draws one per solve). */
   probe?: Value
 }
 
 /** The parts of an augmented state, each per row. */
 export type AugmentedParts = {
-  /** x, [B, d]. */
+  /** $\xvec$, $B \times d$. */
   x: Value
-  /** Δ(t) = −∫ tr(∂f/∂x) dt from the start of the solve, [B] (when integrated). */
+  /**
+   * $\Delta(t) = -\int \trace(\partial f/\partial\xvec) \, dt$ from the start of the solve, $B$ values (when
+   * integrated).
+   */
   logDensityChange?: Value
-  /** ∫ ‖f‖² dt, [B]. */
+  /** $\int \lVert f \rVert^2 \, dt$, $B$ values (when integrated). */
   kinetic?: Value
-  /** ∫ ‖εᵀ∂f/∂x‖² dt, [B]. */
+  /** $\int \lVert \epsilonvec^\top \partial f/\partial\xvec \rVert^2 \, dt$, $B$ values (when integrated). */
   jacobianFrobenius?: Value
 }
 
@@ -253,17 +358,37 @@ export type AugmentedParts = {
 export type AugmentedDynamics = {
   /** The right-hand side on the packed state, for `odeFlow`. */
   rhs: ShapedRhs
-  /** The packed state at the start: x with every integral at 0. */
+  /** The packed state at the start, from $\xvec$ ($B \times d$): $\xvec$ flattened, with every integral at 0. */
   pack: (x: Value) => Value
-  /** The parts of a packed state. */
+  /** The parts of a packed state (of any shape holding $B (d + \text{extras})$ values). */
   unpack: (z: Value) => AugmentedParts
 }
 
 /**
- * x′ = f(t, x, θ) for a batch x of shape [B, d], augmented with the integrals a continuous normalising flow and its
- * regularisers need, packed as one vector [x (B·d), Δ (B), kinetic (B), Frobenius (B)] (absent parts omitted). Along
- * x′ = f, the log density obeys d log p(x(t))/dt = −tr(∂f/∂x) (the instantaneous change of variables, Chen et al.,
- * 2018, theorem 1), so log p_{t₁}(x(t₁)) = log p_{t₀}(x(t₀)) + Δ(t₁) with Δ(t₀) = 0, in either direction of time.
+ * $\xvec' = f(t, \xvec, \thetavec)$ for a batch $\xvec$ of shape $B \times d$, augmented with the integrals a
+ * continuous normalising flow and its regularisers need, packed as one vector: $\xvec$ ($Bd$ values), then $\Delta$,
+ * the kinetic energy and the Frobenius term ($B$ values each; absent parts omitted). Along $\xvec' = f$, the log
+ * density obeys $\frac{d}{dt} \log p(\xvec(t)) = -\trace(\partial f/\partial\xvec)$ (the instantaneous change of
+ * variables, Chen et al., 2018, theorem 1), so $\log p_{t_1}(\xvec(t_1)) = \log p_{t_0}(\xvec(t_0)) + \Delta(t_1)$
+ * with $\Delta(t_0) = 0$, in either direction of time. Asking for no integral, or for the Hutchinson estimate or the
+ * Frobenius term without a probe, throws `DomainError`; unpacking a state that does not split into rows throws
+ * `ShapeError`.
+ *
+ * @param f The field $f(t, \xvec, \thetavec)$ on the batch: row-wise, taking and returning $B \times d$, written with
+ *   tensor primitives (its Jacobian trace is taken by `jacobianTrace`).
+ * @param options The row dimension $d$, which integrals to append, and the probe the Hutchinson estimate and the
+ *   Frobenius term need.
+ * @returns The packed right-hand side for `odeFlow`, with `pack` and `unpack` to move between $\xvec$ and the packed
+ *   state.
+ *
+ * @example The log density and kinetic energy of a contraction
+ * // x′ = −x on two rows of d = 2: tr(∂f/∂x) = −2, so Δ(1) = 2; ∫‖f‖² dt = ‖x₀‖² (1 − e⁻²) / 2.
+ * const aug = augmentedDynamics((t, x, theta) => mul(neg(theta), x), { dim: 2, logDensity: 'exact', kinetic: true })
+ * const [, end] = odeFlow(aug.rhs, [0, 1])(aug.pack(tensor([[1, 0], [0, 2]])), 1)
+ * const parts = aug.unpack(end)
+ * print('x(1) =', parts.x)
+ * print('Δ(1) =', parts.logDensityChange)
+ * print('kinetic =', parts.kinetic, ' exact =', [1, 4].map((r) => (r * (1 - Math.exp(-2))) / 2))
  */
 export function augmentedDynamics(
   f: (t: Scalar, x: Value, params: Value) => Value,
