@@ -29,25 +29,43 @@ function spirals(): Pt[] {
 
 const net = Mlp([2, 24, 24, 1], { activation: 'tanh' })
 const rule = adamRule({ stepSize: 0.01 })
-const gx = grid(-4, 4, 48)
+const gx = grid(-4, 4, 56)
 const GRID = tensor(gx.flatMap((b) => gx.map((a) => [a, b])))
-/** The drawn grid: three times finer than the network is evaluated on, filled by bilinear interpolation. */
-const FINE = 3
+/** The drawn grid: four times finer than the network is evaluated on, filled by bicubic interpolation. */
+const FINE = 4
 const fx = grid(-4, 4, (gx.length - 1) * FINE + 1)
 
-/** A field on the coarse grid, bilinearly interpolated onto the fine one, so the shading is smooth, not blocky. */
-function upsample(z: ArrayLike<number>): number[][] {
+/** Catmull–Rom weights for the four samples around a point a fraction `t` of the way from the second to the third. */
+const cubic = (t: number): [number, number, number, number] => {
+  const t2 = t * t
+  const t3 = t2 * t
+  return [0.5 * (-t3 + 2 * t2 - t), 0.5 * (3 * t3 - 5 * t2 + 2), 0.5 * (-3 * t3 + 4 * t2 + t), 0.5 * (t3 - t2)]
+}
+
+/**
+ * The network's output on the coarse grid as the colour field 2p − 1 = tanh(logit / 2), which rolls off smoothly
+ * where the network is sure rather than clipping, interpolated bicubically onto the fine grid: smooth shading, no
+ * kinks along the coarse cells.
+ */
+function surface(logits: ArrayLike<number>): number[][] {
   const n = gx.length
-  const at = (i: number, j: number) => z[i * n + j]
+  const at = (i: number, j: number) => {
+    const v = logits[Math.min(n - 1, Math.max(0, i)) * n + Math.min(n - 1, Math.max(0, j))]
+    return Math.tanh(v / 2)
+  }
   return fx.map((_, I) => {
     const i = Math.min(Math.floor(I / FINE), n - 2)
-    const v = I / FINE - i
+    const wy = cubic(I / FINE - i)
     return fx.map((_, J) => {
       const j = Math.min(Math.floor(J / FINE), n - 2)
-      const u = J / FINE - j
-      const top = (1 - u) * at(i, j) + u * at(i, j + 1)
-      const bottom = (1 - u) * at(i + 1, j) + u * at(i + 1, j + 1)
-      return Math.max(-4, Math.min(4, (1 - v) * top + v * bottom))
+      const wx = cubic(J / FINE - j)
+      let v = 0
+      for (let a = 0; a < 4; a++) {
+        let row = 0
+        for (let b = 0; b < 4; b++) row += wx[b] * at(i - 1 + a, j - 1 + b)
+        v += wy[a] * row
+      }
+      return Math.max(-1, Math.min(1, v))
     })
   })
 }
@@ -83,6 +101,7 @@ export function NetworkTraining() {
   const run = useRef({ seed: 0, params: net.init(stream('home/net/0')) as Params, state: null as RuleState | null })
   const [view, setView] = useState({ step: 0, loss: NaN, accuracy: NaN, z: [] as number[][] })
   const fitted = useRef(0)
+  const tick = useRef(0)
   const restart = () => {
     const seed = run.current.seed + 1
     run.current = { seed, params: net.init(stream(`home/net/${seed}`)) as Params, state: null }
@@ -103,8 +122,9 @@ export function NetworkTraining() {
       r.params = applyUpdates(r.params, u.updates)
       steps++
     }
-    const logits = toFlat(net.apply(r.params as never, GRID) as Tensor)
-    const z = upsample(logits)
+    // The surface is redrawn every other frame: it costs about as much as the training.
+    const redraw = (tick.current = (tick.current + 1) % 2) === 0 || view.z.length === 0
+    const z = redraw ? surface(toFlat(net.apply(r.params as never, GRID) as Tensor)) : view.z
     const own = toFlat(net.apply(r.params as never, tensor(points.map((p) => [p.x, p.y]))) as Tensor)
     const accuracy = points.reduce((a, p, i) => a + ((own[i] > 0 ? 1 : 0) === p.c ? 1 : 0), 0) / points.length
     fitted.current = accuracy === 1 ? fitted.current + dt : 0
@@ -149,9 +169,9 @@ export function NetworkTraining() {
               y={fx}
               z={view.z}
               scale="diverging"
-              range={[-4, 4]}
+              range={[-1, 1]}
               fillOpacity={0.45}
-              valueLabel="logit"
+              valueLabel="2p − 1"
               boundary
               live
             />
