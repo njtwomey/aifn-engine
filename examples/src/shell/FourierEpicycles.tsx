@@ -1,6 +1,18 @@
 import { fft } from 'aifn-compute/foundation/fourier'
 import { tensor, toComplexFlat } from 'aifn-compute/foundation/tensor'
-import { choice, Curve, Figure, int, Plot, Points, Segments, useAxis, useFigureState } from 'aifn-render'
+import {
+  choice,
+  Curve,
+  Figure,
+  int,
+  Plot,
+  Points,
+  Segments,
+  seriesColor,
+  useAxis,
+  useFigureState,
+  useTheme,
+} from 'aifn-render'
 import { useRef, useState } from 'react'
 import { grid } from '@examples/data'
 import { useFrames, useOnScreen } from './live'
@@ -98,6 +110,13 @@ function chain(terms: Term[], theta: number) {
 }
 
 const circle = grid(0, 2 * Math.PI, 40)
+/** The pen's trail is drawn as this many pieces, each older one fainter, so it fades out behind the pen. */
+const PIECES = 10
+
+/** A `#rrggbb` colour at opacity `a`. */
+const withAlpha = (hex: string, a: number) =>
+  `rgba(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)}, ${a.toFixed(3)})`
+
 /** Seconds the pen takes to go once round. */
 const PERIOD = 10
 
@@ -120,6 +139,14 @@ export function FourierEpicycles() {
   const pen = centres[centres.length - 1]
   // The pen's path over the last loop, behind it.
   const trail = grid(theta - 2 * Math.PI, theta, 700).map((th) => chain(terms, th).at(-1)!)
+  // The trail in pieces counted back from the pen (piece 0 the newest), sharing an end point so they join up.
+  const blue = seriesColor(useTheme().resolved, 0)
+  const size = Math.ceil(trail.length / PIECES)
+  const pieces = Array.from({ length: PIECES }, (_, k) => {
+    const to = trail.length - k * size
+    const span = trail.slice(Math.max(0, to - size - 1), to)
+    return { span, color: withAlpha(blue, (1 - k / PIECES) ** 1.4) }
+  }).filter((piece) => piece.span.length > 1)
   const rings = { x: [] as number[], y: [] as number[] }
   terms.forEach((t, i) => {
     const [cx, cy] = centres[i]
@@ -158,7 +185,16 @@ export function FourierEpicycles() {
             emphasis
             live
           />
-          <Curve name="pen" x={trail.map((p) => p[0])} y={trail.map((p) => p[1])} slot={0} live />
+          {pieces.map((piece, k) => (
+            <Curve
+              key={k}
+              x={piece.span.map((p) => p[0])}
+              y={piece.span.map((p) => p[1])}
+              color={piece.color}
+              silent
+              live
+            />
+          ))}
           <Points name="tip" x={[pen[0]]} y={[pen[1]]} emphasis live />
         </Plot>
       </Figure>
