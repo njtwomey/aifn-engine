@@ -37,8 +37,8 @@ const TARGET: LogDensity = {
   },
 }
 
-const gx = grid(-5, 5, 90)
-const gy = grid(-5.5, 3, 90)
+const gx = grid(-5, 5, 240)
+const gy = grid(-5.5, 3, 240)
 const density = gy.map((b) => gx.map((a) => Math.exp(banana(a, b))))
 /**
  * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ridge, pale where log π = −4
