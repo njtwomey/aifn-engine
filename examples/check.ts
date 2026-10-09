@@ -65,7 +65,9 @@ Object.assign(globalThis, {
 
 const server = await createServer({
   configFile: path.join(root, 'vite.config.ts'),
-  server: { middlewareMode: true, hmr: false },
+  // No file watching: a file saved mid-run would re-evaluate its module, and a primitive or registry entry defined
+  // at load would then be defined twice. The check reads each file once.
+  server: { middlewareMode: true, hmr: false, watch: null, ws: false },
   appType: 'custom',
   logLevel: 'error',
 })
