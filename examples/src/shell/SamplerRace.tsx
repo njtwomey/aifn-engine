@@ -19,7 +19,7 @@ import { useMemo, useRef, useState } from 'react'
 import { grid } from '@examples/data'
 import { useFrames, useOnScreen } from './live'
 
-/** A banana: x₁ ~ N(0, 1.8²), and x₂ given x₁ normal about a parabola, a curved ridge that is hard to walk along. */
+/** A banana: x₁ ~ N(0, 1.8²), and x₂ given x₁ normal about a parabola: a curved ridge that is hard to walk. */
 const banana = (a: number, b: number) => -0.5 * (a / 1.8) ** 2 - 0.5 * ((b - 1.6 + 0.35 * a * a) / 0.55) ** 2
 const TARGET: LogDensity = {
   kind: 'log-density',
@@ -40,6 +40,11 @@ const TARGET: LogDensity = {
 const gx = grid(-5, 5, 90)
 const gy = grid(-5.5, 3, 90)
 const density = gy.map((b) => gx.map((a) => Math.exp(banana(a, b))))
+/**
+ * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ridge, pale where log π = −4 and
+ * blue in the tails.
+ */
+const shade = gy.map((b) => gx.map((a) => Math.max(-4, Math.min(4, banana(a, b) + 4))))
 /** Draws kept on the plot: the oldest fall away. */
 const KEEP = 600
 
@@ -122,24 +127,25 @@ export function SamplerRace() {
               : 'Starting…'}
           </StatusText>
         }
-        caption="Click to restart the chain there. Too large a step and proposals are rejected; too small and it crawls."
+        caption="Click to restart the chain there. Too large a step and proposals fail; too small and it crawls."
       >
         <Plot x={x} y={y} onPlotClick={([a, b]) => setStart([a, b])}>
-          <Raster x={gx} y={gy} z={density} fillOpacity={0.75} valueLabel="density" />
+          <Raster x={gx} y={gy} z={shade} scale="diverging" range={[-4, 4]} fillOpacity={0.7} valueLabel="log π + 4" />
           <Contours x={gx} y={gy} z={density} levels={[0.02, 0.1, 0.3, 0.6, 0.9]} labels={false} />
-          <Points name="draws" x={draws.xs} y={draws.ys} slot={1} size={4} live />
+          <Points name="draws" x={draws.xs} y={draws.ys} slot={2} size={7} live />
           {now && now.trajectory.length > 1 && (
             <Curve
               name="trajectory"
               x={now.trajectory.map((p) => p[0])}
               y={now.trajectory.map((p) => p[1])}
-              slot={now.accepted ? 2 : 7}
+              emphasis={now.accepted}
+              muted={!now.accepted}
               showPoints
               silent
               live
             />
           )}
-          {now && <Points name="now" x={[now.x[0]]} y={[now.x[1]]} emphasis size={10} live />}
+          {now && <Points name="now" x={[now.x[0]]} y={[now.x[1]]} emphasis size={13} live />}
         </Plot>
       </Figure>
     </div>
