@@ -11,3 +11,12 @@
 /* Tailwind only generates the classes it finds: scan the app and render sources. */
 @source '.';
 @source '../../packages/render/src';
+/* The landing page carousel's progress bar under the active tab. */
+@keyframes carousel-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}

@@ -1,18 +1,12 @@
 import { ChevronRight, Search, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { Button, Input, ThemeToggle, cn } from 'aifn-render'
+import { Button, Input, cn } from 'aifn-render'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from 'aifn-render/ui/collapsible'
 import { SECTIONS } from '@examples/recipe'
 import { filePath, nodePath, TREE, type DocPackage, type DocTreeNode } from '../docs/data'
 import { ENTRIES } from './registry'
 import { hrefOf, onLink } from './paths'
 import type { Area } from './Shell'
-
-const AREAS = [
-  { id: 'compute', label: 'Compute' },
-  { id: 'methods', label: 'Methods' },
-  { id: 'render', label: 'Render' },
-] as const
 
 const linkClass = (active: boolean, strong = false) =>
   cn(
@@ -24,42 +18,17 @@ const linkClass = (active: boolean, strong = false) =>
 const triggerClass =
   'group flex w-full items-center gap-1 rounded-md px-2 py-1.5 text-left text-xs font-medium tracking-wide text-muted-foreground uppercase outline-none hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring/50'
 
-/** The index: the site's name, the three packages, then the index of the package the page belongs to. */
+/** The index of the package the page belongs to (the top bar links the packages), with a close button on narrow screens. */
 export function Sidebar({ area, current, onClose }: { area: Area; current: string; onClose: () => void }) {
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b px-4 py-3">
-        <a href={hrefOf('')} onClick={onLink('')} className="flex-1 truncate text-sm font-semibold tracking-tight">
-          AIFN Engine
-        </a>
-        <ThemeToggle />
-        <Button variant="ghost" size="icon-sm" className="md:hidden" aria-label="Close index" onClick={onClose}>
+      <div className="flex justify-end border-b px-2 py-2 md:hidden">
+        <Button variant="ghost" size="icon-sm" aria-label="Close index" onClick={onClose}>
           <X />
         </Button>
       </div>
-      <nav aria-label="Packages" className="flex gap-1 border-b px-3 py-2 text-sm">
-        {AREAS.map((a) => (
-          <a
-            key={a.id}
-            href={hrefOf(a.id)}
-            onClick={onLink(a.id)}
-            aria-current={area === a.id ? 'true' : undefined}
-            className={cn(
-              'flex-1 rounded-md px-2 py-1 text-center hover:bg-sidebar-accent',
-              area === a.id ? 'bg-sidebar-accent font-medium' : 'text-sidebar-foreground/75',
-            )}
-          >
-            {a.label}
-          </a>
-        ))}
-      </nav>
       {area === 'render' && <RecipeNav current={current} />}
       {(area === 'compute' || area === 'methods') && <DocsNav key={area} pkg={area} current={current} />}
-      {area === 'home' && (
-        <p className="px-4 py-4 text-sm text-muted-foreground">
-          Pick a package: the numerics, the methods built on them, or the figures that draw them.
-        </p>
-      )}
     </div>
   )
 }
