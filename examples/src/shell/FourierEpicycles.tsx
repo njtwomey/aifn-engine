@@ -5,11 +5,46 @@ import { useRef, useState } from 'react'
 import { grid } from '@examples/data'
 import { useFrames, useOnScreen } from './live'
 
-const N = 256
+const N = 512
 const ts = grid(0, 2 * Math.PI, N + 1).slice(0, N)
+
+/** The k-th vertex of the Hilbert curve on an n × n grid (n a power of two), by the usual quadrant-rotation walk. */
+function hilbertVertex(n: number, k: number): number[] {
+  let [x, y] = [0, 0]
+  for (let s = 1, d = k; s < n; s *= 2, d = Math.floor(d / 4)) {
+    const rx = 1 & Math.floor(d / 2)
+    const ry = 1 & (d ^ rx)
+    if (ry === 0) {
+      if (rx === 1) [x, y] = [s - 1 - x, s - 1 - y]
+      ;[x, y] = [y, x]
+    }
+    x += s * rx
+    y += s * ry
+  }
+  return [x, y]
+}
+
+/**
+ * The order-3 Hilbert curve (8 × 8) traced out and back along itself, so the loop closes without a jump, sampled at
+ * N points evenly by arc length.
+ */
+function hilbertLoop(): number[][] {
+  const n = 8
+  const out = Array.from({ length: n * n }, (_, k) => hilbertVertex(n, k).map((v) => ((v - (n - 1) / 2) * 6) / (n - 1)))
+  const path = [...out, ...out.slice(0, -1).reverse()]
+  // Every edge has the same length, so even spacing in arc length is even spacing in edge index.
+  const edges = path.length - 1
+  return Array.from({ length: N }, (_, i) => {
+    const u = (i * edges) / N
+    const e = Math.floor(u)
+    const f = u - e
+    return [path[e][0] + f * (path[e + 1][0] - path[e][0]), path[e][1] + f * (path[e + 1][1] - path[e][1])]
+  })
+}
 
 /** The closed curves to draw, each sampled at N points around one loop. */
 const SHAPES: Record<string, number[][]> = {
+  hilbert: hilbertLoop(),
   heart: ts.map((t) => [
     (16 * Math.sin(t) ** 3) / 5,
     (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) / 5,
@@ -73,8 +108,8 @@ const PERIOD = 10
  */
 export function FourierEpicycles() {
   const s = useFigureState({
-    shape: choice(['heart', 'star', 'square'], 'heart', { label: 'shape' }),
-    terms: int(12, { min: 1, max: 80, label: 'circles' }),
+    shape: choice(['hilbert', 'heart', 'star', 'square'], 'hilbert', { label: 'shape' }),
+    terms: int(120, { min: 1, max: 300, label: 'circles' }),
   })
   const [theta, setTheta] = useState(0)
   const box = useRef<HTMLDivElement>(null)
@@ -84,7 +119,7 @@ export function FourierEpicycles() {
   const centres = chain(terms, theta)
   const pen = centres[centres.length - 1]
   // The pen's path over the last loop, behind it.
-  const trail = grid(theta - 2 * Math.PI, theta, 240).map((th) => chain(terms, th).at(-1)!)
+  const trail = grid(theta - 2 * Math.PI, theta, 700).map((th) => chain(terms, th).at(-1)!)
   const rings = { x: [] as number[], y: [] as number[] }
   terms.forEach((t, i) => {
     const [cx, cy] = centres[i]

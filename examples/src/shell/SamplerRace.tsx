@@ -41,8 +41,8 @@ const gx = grid(-5, 5, 90)
 const gy = grid(-5.5, 3, 90)
 const density = gy.map((b) => gx.map((a) => Math.exp(banana(a, b))))
 /**
- * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ridge, pale where log π = −4 and
- * blue in the tails.
+ * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ridge, pale where log π = −4
+ * and blue in the tails.
  */
 const shade = gy.map((b) => gx.map((a) => Math.max(-4, Math.min(4, banana(a, b) + 4))))
 /** Draws kept on the plot: the oldest fall away. */
