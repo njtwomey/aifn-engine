@@ -1,7 +1,13 @@
 /**
- * The Nelder–Mead simplex method (Nelder & Mead, 1965), derivative free, as specified by Lagarias, Reeds, Wright &
- * Wright (1998), "Convergence properties of the Nelder–Mead simplex method in low dimensions", with the optional
- * dimension-adaptive coefficients of Gao & Han (2012).
+ * The Nelder–Mead simplex method (Nelder and Mead, 1965), which minimises $f : \reals^n \to \reals$ from its values
+ * alone, as specified by Lagarias, Reeds, Wright and Wright (1998), "Convergence properties of the Nelder–Mead simplex
+ * method in low dimensions", §2, with the optional dimension-adaptive coefficients of Gao and Han (2012).
+ *
+ * The method keeps $n + 1$ vertices sorted by value. Each step moves the worst vertex $\xvec_{n+1}$ along the line
+ * through the centroid $\bar{\xvec}$ of the other $n$, to $\bar{\xvec} + c(\bar{\xvec} - \xvec_{n+1})$ with
+ * $c = \rho$ (reflect), $\rho\chi$ (expand), $\rho\gamma$ (contract outside) or $-\gamma$ (contract inside), or
+ * shrinks every vertex towards the best by $\sigma$. It stops when both the simplex and the spread of its values are
+ * small.
  */
 
 import type { Matrix, Vector } from 'aifn-compute/foundation/tensor'
@@ -19,25 +25,38 @@ export type NelderMeadOperation = 'init' | 'reflect' | 'expand' | 'contract-outs
 
 /** A point the step evaluated, labelled by its role. */
 export type NelderMeadTrial = {
+  /** The move that proposed the point: one of the steps of `NelderMeadOperation` other than `'init'`. */
   kind: 'reflect' | 'expand' | 'contract-outside' | 'contract-inside' | 'shrink'
+  /** The point, of length $n$. */
   point: Vector
+  /** $f$ at the point. */
   value: number
 }
 
 /** The state of `nelderMead`. `x` and `value` are the best vertex and its value. */
 export type NelderMeadState = IterateState & {
-  /** The n + 1 vertices as rows, sorted by value, best first. */
+  /**
+   * The $n + 1$ vertices as the rows of an $(n + 1) \times n$ matrix, sorted by value, best first (ties keep the
+   * older vertex first).
+   */
   simplex: Matrix
-  /** f at each vertex, ascending. */
+  /** $f$ at each vertex, ascending, in the order of the rows of `simplex`. */
   values: Vector
-  /** The centroid of the n best vertices, about which the worst was reflected on the last step. */
+  /**
+   * The centroid of the $n$ best vertices, about which the worst was moved on the last step (on `'init'`, the
+   * starting point $\xvec_0$).
+   */
   centroid: Vector
+  /** What the last step did to the simplex. */
   operation: NelderMeadOperation
-  /** The points evaluated on the last step, in order. */
+  /** The points evaluated on the last step, in order (none on `'init'`). */
   trials: NelderMeadTrial[]
-  /** max‖v_i − v_best‖∞, the simplex size used in the stopping test. */
+  /**
+   * $\max_i \lVert \vvec_i - \vvec_1 \rVert_\infty$ over the vertices $\vvec_i$, with $\vvec_1$ the best: the simplex
+   * size of the stopping test.
+   */
   size: number
-  /** max|f_i − f_best|, the value spread used in the stopping test. */
+  /** $\max_i \lvert f_i - f_1 \rvert$, the spread of the values of the stopping test. */
   spread: number
 }
 
@@ -45,20 +64,55 @@ export type NelderMeadState = IterateState & {
 export type NelderMeadOptions = Pick<StoppingOptions, 'divergeAbove'> & {
   /** Stop when the simplex size is at most `xTolerance` and the value spread at most `fTolerance`. Defaults 1e-8. */
   xTolerance?: number
+  /** The largest value spread at which the method stops (with `xTolerance`). Default 1e-8. */
   fTolerance?: number
   /**
-   * The starting simplex, (n + 1)×n. Default: x₀ and n points each with one coordinate of x₀ scaled by 1.05 (or set
-   * to 0.00025 when it is zero), as scipy does.
+   * The starting simplex, $(n + 1) \times n$, one vertex per row ($n$ is the length of $\xvec_0$, which is still
+   * required). Default: $\xvec_0$ and $n$ points each with one coordinate of $\xvec_0$ scaled by 1.05 (or set to
+   * 0.00025 when it is zero), as scipy does.
    */
   initialSimplex?: MatrixLike
-  /** Use the coefficients of Gao & Han (2012), which adapt to the dimension. Default false. */
+  /**
+   * Use the coefficients of Gao and Han (2012), which adapt to the dimension: $\chi = 1 + 2/n$,
+   * $\gamma = 3/4 - 1/(2n)$, $\sigma = 1 - 1/n$. They equal the standard ones when $n = 2$. Default false.
+   */
   adaptive?: boolean
 }
 
 /**
  * Nelder–Mead: each step replaces the worst vertex by its reflection through the centroid of the others, an expansion,
  * or an outside or inside contraction, or shrinks the simplex towards the best vertex (Lagarias et al., 1998, §2).
- * Coefficients ρ = 1, χ = 2, γ = ½, σ = ½ (or adaptive). `f` returns a number. `init` takes `{ x0 }`.
+ * Coefficients $\rho = 1$, $\chi = 2$, $\gamma = 1/2$, $\sigma = 1/2$ (or adaptive). `init` takes `{ x0 }`. Each
+ * step costs one or two evaluations of $f$, or $n + 2$ when it shrinks. The method converges when the simplex size and
+ * the value spread are both within tolerance, and flags divergence when the best value or vertex is not finite or
+ * $\lvert f \rvert$ exceeds `divergeAbove`.
+ *
+ * @param f The objective: takes a point (a vector of length $n$) and returns $f(\xvec)$ as a number, or an object with
+ *   a `value` field (any `grad` is ignored).
+ * @param options The tolerances of the stopping test, the starting simplex and whether the coefficients adapt to the
+ *   dimension.
+ * @returns The algorithm, to step with `run` or `trace` from `{ x0 }`.
+ *
+ * @example Minimise a quadratic from its values alone
+ * // The minimum is at (1, -0.5), where f = 0.
+ * const f = (x) => {
+ *   const [a, b] = toFlat(x)
+ *   return (a - 1) ** 2 + 2 * (b + 0.5) ** 2
+ * }
+ * const s = run(nelderMead(f), { x0: [0, 0] }, 500)
+ * print('x =', s.x)
+ * print('f(x) =', s.value)
+ * print('steps =', s.t)
+ * print('evaluations =', s.evaluations)
+ *
+ * @example The moves of the first steps, from a simplex of your own
+ * const f = (x) => {
+ *   const [a, b] = toFlat(x)
+ *   return (a - 1) ** 2 + 2 * (b + 0.5) ** 2
+ * }
+ * const tr = trace(nelderMead(f, { initialSimplex: [[0, 0], [2, 0], [0, 2]] }), { x0: [0, 0] }, 6)
+ * print('operations =', tr.steps.map((s) => s.operation))
+ * print('best values =', tr.steps.map((s) => s.value))
  */
 export function nelderMead(
   f: ValueFunction,

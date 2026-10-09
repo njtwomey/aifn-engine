@@ -60,6 +60,7 @@ fn(
   search.searchHistory,
 )
 
+/** A registry table: the entries of one kind, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 
 /** The algorithm of the module, keyed by factory name. */

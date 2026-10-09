@@ -1,6 +1,16 @@
 /**
- * Line searches along a direction p from a point x: backtracking to the Armijo (sufficient decrease) condition, and a
- * search for a step satisfying the strong Wolfe conditions. Both record every trial point they evaluate.
+ * Line searches along a direction $\pvec$ from a point $\xvec$: backtracking to the Armijo (sufficient decrease)
+ * condition, and a search for a step satisfying the strong Wolfe conditions. Both record every trial point they
+ * evaluate.
+ *
+ * Along the line the objective is $\phi(\alpha) = f(\xvec + \alpha\pvec)$, with slope
+ * $\phi'(\alpha) = \nabla f(\xvec + \alpha\pvec)^\top\pvec$. Sufficient decrease is
+ * $\phi(\alpha) \le \phi(0) + c_1\alpha\phi'(0)$ and strong curvature is
+ * $\lvert\phi'(\alpha)\rvert \le c_2\lvert\phi'(0)\rvert$, with $0 < c_1 < c_2 < 1$. A search needs a descent
+ * direction, $\phi'(0) < 0$; otherwise it fails at once. Failure is reported (`converged: false`) and never thrown, and
+ * the point returned is then the best trial below $f(\xvec)$, or $\xvec$ itself. The vector functions (`backtracking`,
+ * `strongWolfe`) wrap the working-array ones (`backtrackingSearch`, `strongWolfeSearch`) that the optimisers call in
+ * their inner loops.
  *
  * Nocedal & Wright (2006), "Numerical Optimization", 2nd ed.: Algorithm 3.1 (backtracking), Algorithms 3.5 and 3.6
  * (strong Wolfe search and zoom), equation 3.59 (cubic interpolation).
@@ -15,28 +25,46 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 const { axpy, dot, toF64, vec } = dense
 type F64 = dense.F64
 
-/** One evaluated step length: the point x + αp, f there, and the slope ∇f(x + αp)ᵀp. */
+/**
+ * One evaluated step length `alpha` ($\alpha$): the point `x` ($\xvec + \alpha\pvec$), the objective `value` there,
+ * and the `slope` $\nabla f(\xvec + \alpha\pvec)^\top\pvec$ along the direction.
+ */
 export type LineSearchTrial = { alpha: number; x: Vector; value: number; slope: number }
 
 /** The outcome of a line search. */
 export type LineSearchResult = {
+  /** Which search produced the result. */
   method: 'backtracking' | 'strong-wolfe'
-  /** The accepted step length (0 when no trial lowered f). */
+  /**
+   * The step length $\alpha$ returned: the accepted one, or after a failure the trial with the lowest value below
+   * $f(\xvec)$, or 0 when no trial lowered $f$.
+   */
   alpha: number
-  /** The accepted point x + αp. */
+  /** The point returned, $\xvec + \alpha\pvec$. */
   x: Vector
-  /** f at the accepted point. */
+  /** $f$ at the point returned. */
   value: number
-  /** ∇f at the accepted point. */
+  /** $\nabla f$ at the point returned. */
   grad: Vector
-  /** Every trial evaluated, in order; the accepted one is among them unless `alpha` is 0. */
+  /** Every trial evaluated, in order; the point returned is among them unless `alpha` is 0. */
   trials: LineSearchTrial[]
+  /** Evaluations of $f$ made by the search: one per trial (an evaluation at $\xvec$ itself is not counted). */
   evaluations: number
-  /** The slope at α = 0, ∇f(x)ᵀp. The search fails at once unless it is negative (p must be a descent direction). */
+  /**
+   * The slope at $\alpha = 0$, $\nabla f(\xvec)^\top\pvec$. The search fails at once unless it is negative
+   * ($\pvec$ must be a descent direction).
+   */
   initialSlope: number
-  /** Sufficient decrease at `alpha`: f(x + αp) ≤ f(x) + c₁α∇f(x)ᵀp. */
+  /**
+   * Sufficient decrease at `alpha`: $f(\xvec + \alpha\pvec) \le f(\xvec) + c_1\alpha\nabla f(\xvec)^\top\pvec$
+   * (false when `alpha` is 0).
+   */
   armijo: boolean
-  /** Strong curvature at `alpha`: |∇f(x + αp)ᵀp| ≤ c₂|∇f(x)ᵀp|; null for backtracking, which does not test it. */
+  /**
+   * Strong curvature at `alpha`:
+   * $\lvert\nabla f(\xvec + \alpha\pvec)^\top\pvec\rvert \le c_2\lvert\nabla f(\xvec)^\top\pvec\rvert$ (false
+   * when `alpha` is 0); null for backtracking, which does not test it.
+   */
   curvature: boolean | null
   /** True when the conditions the search enforces hold at `alpha`. */
   converged: boolean
@@ -46,9 +74,9 @@ export type LineSearchResult = {
 export type BacktrackingOptions = {
   /** First step length tried. Default 1. */
   alpha0?: number
-  /** Factor applied to α after each failed trial, in (0, 1). Default 0.5. */
+  /** Factor $\rho$ applied to $\alpha$ after each failed trial, in $(0, 1)$. Default 0.5. */
   shrink?: number
-  /** Sufficient-decrease constant c₁ in (0, 1). Default 1e-4. */
+  /** Sufficient-decrease constant $c_1$ in $(0, 1)$. Default 1e-4. */
   c1?: number
   /** Most trials. Default 50. */
   maxTrials?: number
@@ -56,25 +84,41 @@ export type BacktrackingOptions = {
 
 /** Options for `strongWolfe`. */
 export type StrongWolfeOptions = {
+  /** First step length tried (capped at `alphaMax`). Default 1. */
   alpha0?: number
-  /** Sufficient-decrease constant c₁. Default 1e-4. */
+  /** Sufficient-decrease constant $c_1$. Default 1e-4. */
   c1?: number
-  /** Curvature constant c₂ in (c₁, 1). Default 0.9 (quasi-Newton); use 0.1 for nonlinear conjugate gradients. */
+  /** Curvature constant $c_2$ in $(c_1, 1)$. Default 0.9 (quasi-Newton); use 0.1 for nonlinear conjugate gradients. */
   c2?: number
-  /** Largest step length. Default 1e10. */
+  /** Largest step length. The bracketing phase doubles $\alpha$ up to it. Default 1e10. */
   alphaMax?: number
   /** Most trials (bracketing and zoom together). Default 30. */
   maxTrials?: number
 }
 
-/** A search's outcome on working arrays: the public result plus the accepted point, gradient and value. */
+/**
+ * A search's outcome on working arrays: the public `result`, plus the point returned (`x`), its gradient (`grad`) and
+ * its `value` as float64 arrays and a number, for the optimiser to carry on from.
+ */
 export type SearchOutcome = { result: LineSearchResult; x: F64; grad: F64; value: number }
 
+/** A trial in working arrays: the step length, the point, its value and gradient, and the slope along $\pvec$. */
 type Point = { alpha: number; x: F64; value: number; grad: F64; slope: number }
 
 /**
- * Packs the accepted point, or, when the search failed, the trial with the lowest value if it is below f(x), else
- * α = 0 (x unchanged). Failure is reported by `converged: false`, never hidden.
+ * Packs the accepted point, or, when the search failed, the trial with the lowest value if it is below $f(\xvec)$,
+ * else $\alpha = 0$ ($\xvec$ unchanged). Failure is reported by `converged: false`, never hidden.
+ *
+ * @param method Which search ran, recorded in the result.
+ * @param x0 The start point $\xvec$, returned when no trial is chosen.
+ * @param value0 $f(\xvec)$, the value a fallback trial must beat.
+ * @param grad0 $\nabla f(\xvec)$, returned with `x0`.
+ * @param slope0 The initial slope $\nabla f(\xvec)^\top\pvec$, used to test the conditions at the point returned.
+ * @param c1 The sufficient-decrease constant $c_1$.
+ * @param c2 The curvature constant $c_2$, or null when the curvature condition is not tested (backtracking).
+ * @param points Every trial evaluated, in order.
+ * @param accepted The trial that met the search's conditions, or null when none did.
+ * @returns The outcome, with `converged` true exactly when `accepted` was given.
  */
 function finish(
   method: LineSearchResult['method'],
@@ -115,6 +159,16 @@ function finish(
   }
 }
 
+/**
+ * Evaluates the objective at $\xvec + \alpha\pvec$.
+ *
+ * @param f The objective, returning value and gradient.
+ * @param x The start point $\xvec$ (not modified).
+ * @param p The search direction $\pvec$.
+ * @param alpha The step length $\alpha$.
+ * @param where The caller's name, for error messages.
+ * @returns The trial: its point, value, gradient and slope $\nabla f^\top\pvec$.
+ */
 function probe(f: ObjectiveFn, x: F64, p: F64, alpha: number, where: string): Point {
   const xa = axpy(alpha, p, x)
   const { value, grad } = evaluate(f, xa, where)
@@ -122,8 +176,29 @@ function probe(f: ObjectiveFn, x: F64, p: F64, alpha: number, where: string): Po
 }
 
 /**
- * Backtracking on float64 working arrays (see `backtracking`): x, f(x), ∇f(x) and the direction p are given, and the
- * accepted point comes back as arrays. For optimisers' inner loops; the arrays are not mutated.
+ * Backtracking on float64 working arrays (see `backtracking`): $\xvec$, $f(\xvec)$, $\nabla f(\xvec)$ and the
+ * direction $\pvec$ are given, and the point returned comes back as arrays. For optimisers' inner loops; the arrays
+ * are not mutated. A non-finite trial value counts as a failed trial, so the step shrinks past it.
+ *
+ * @param f The objective, returning value and gradient.
+ * @param x The start point $\xvec$, $n$ values.
+ * @param value $f(\xvec)$, already known to the caller.
+ * @param grad $\nabla f(\xvec)$, $n$ values.
+ * @param p The search direction $\pvec$, $n$ values; it must be a descent direction ($\nabla f^\top\pvec < 0$).
+ * @param options The first step length, the shrink factor $\rho$, $c_1$ and the trial budget.
+ * @returns The public result, with the point returned, its gradient and its value as working arrays.
+ *
+ * @example Backtrack on working arrays, as an optimiser's inner loop does
+ * // f(x) = x₁² + 10x₂² from (1, 1), whose value is 11 and gradient (2, 20).
+ * const f = (x) => {
+ *   const [a, b] = x.data
+ *   return { value: a * a + 10 * b * b, grad: [2 * a, 20 * b] }
+ * }
+ * const x = new Float64Array([1, 1])
+ * const out = backtrackingSearch(f, x, 11, new Float64Array([2, 20]), new Float64Array([-2, -20]))
+ * print('alpha =', out.result.alpha)
+ * print('new x =', out.x, ' f =', out.value)
+ * print('start x, unchanged =', x)
  */
 export function backtrackingSearch(
   f: ObjectiveFn,
@@ -150,8 +225,16 @@ export function backtrackingSearch(
 }
 
 /**
- * The minimiser of the cubic interpolating φ and φ′ at a and b (Nocedal & Wright eq. 3.59), or NaN when the cubic
- * has no minimiser there.
+ * The minimiser of the cubic interpolating $\phi$ and $\phi'$ at $a$ and $b$ (Nocedal & Wright eq. 3.59), or NaN when
+ * the cubic has no minimiser there.
+ *
+ * @param a The first step length.
+ * @param fa $\phi(a)$.
+ * @param da $\phi'(a)$.
+ * @param b The second step length.
+ * @param fb $\phi(b)$.
+ * @param db $\phi'(b)$.
+ * @returns The step length minimising the interpolating cubic (not clamped to the interval), or NaN.
  */
 function cubicMinimiser(a: number, fa: number, da: number, b: number, fb: number, db: number): number {
   const d1 = da + db - 3 * ((fa - fb) / (a - b))
@@ -164,6 +247,25 @@ function cubicMinimiser(a: number, fa: number, da: number, b: number, fb: number
 /**
  * The strong Wolfe search on float64 working arrays (see `strongWolfe` and `backtrackingSearch`). For optimisers'
  * inner loops; the arrays are not mutated.
+ *
+ * @param f The objective, returning value and gradient.
+ * @param x The start point $\xvec$, $n$ values.
+ * @param value $f(\xvec)$, already known to the caller.
+ * @param grad $\nabla f(\xvec)$, $n$ values.
+ * @param p The search direction $\pvec$, $n$ values; it must be a descent direction ($\nabla f^\top\pvec < 0$).
+ * @param options The first and largest step lengths, $c_1$, $c_2$ and the trial budget.
+ * @returns The public result, with the point returned, its gradient and its value as working arrays.
+ *
+ * @example One strong Wolfe step on working arrays
+ * // f(x) = x₁² + 10x₂² from (1, 1) along −∇f: the exact minimiser along the line is 404 / 8008.
+ * const f = (x) => {
+ *   const [a, b] = x.data
+ *   return { value: a * a + 10 * b * b, grad: [2 * a, 20 * b] }
+ * }
+ * const g = new Float64Array([2, 20])
+ * const out = strongWolfeSearch(f, new Float64Array([1, 1]), 11, g, new Float64Array([-2, -20]), { c2: 0.1 })
+ * print('alpha =', out.result.alpha, ' exact:', 404 / 8008)
+ * print('x =', out.x, ' grad =', out.grad)
  */
 export function strongWolfeSearch(
   f: ObjectiveFn,
@@ -221,6 +323,17 @@ export function strongWolfeSearch(
   return done(null)
 }
 
+/**
+ * Converts the arguments of `backtracking` and `strongWolfe` to working arrays, evaluating the objective at $\xvec$
+ * for whichever of the value and gradient the caller did not supply.
+ *
+ * @param f The objective, returning value and gradient.
+ * @param x The start point $\xvec$.
+ * @param direction The search direction $\pvec$, of the same length as `x` (a `ShapeError` otherwise).
+ * @param at The caller's $f(\xvec)$ (`value`) and $\nabla f(\xvec)$ (`grad`), either of which may be left out.
+ * @param where The caller's name, for error messages.
+ * @returns The start point, direction, value and gradient as working arrays and a number.
+ */
 function start(
   f: ObjectiveFn,
   x: VectorLike,
@@ -242,12 +355,42 @@ function start(
 }
 
 /**
- * Backtracking line search: tries α = α₀, α₀ρ, α₀ρ², … and accepts the first α with sufficient decrease
- * f(x + αp) ≤ f(x) + c₁α∇f(x)ᵀp (Nocedal & Wright, Algorithm 3.1).
+ * Backtracking line search: tries $\alpha = \alpha_0, \alpha_0\rho, \alpha_0\rho^2, \dots$ and accepts the first
+ * $\alpha$ with sufficient decrease $f(\xvec + \alpha\pvec) \le f(\xvec) + c_1\alpha\nabla f(\xvec)^\top\pvec$
+ * (Nocedal & Wright, Algorithm 3.1).
  *
- * `x` and `direction` are vectors of length n; `at` may supply f(x) and ∇f(x) (otherwise f is evaluated at x, which
- * `evaluations` does not count). Every trial is recorded. When p is not a descent direction or no trial passes within
- * `maxTrials`, `converged` is false and the best trial below f(x) (or α = 0) is returned.
+ * Every trial is recorded. When $\pvec$ is not a descent direction or no trial passes within `maxTrials`, `converged`
+ * is false and the best trial below $f(\xvec)$ (or $\alpha = 0$) is returned. Direction and point of different
+ * lengths throw `ShapeError`.
+ *
+ * @param f The objective, returning `{ value, grad }` at a point.
+ * @param x The start point $\xvec$, a vector of length $n$.
+ * @param direction The search direction $\pvec$, of length $n$.
+ * @param options The search's options, and optionally `value` and `grad`, the caller's $f(\xvec)$ and
+ *   $\nabla f(\xvec)$. Whichever is left out is computed by evaluating $f$ at $\xvec$, which `evaluations` does not
+ *   count.
+ * @returns The step length and point returned, with every trial and which conditions hold there.
+ *
+ * @example Halve the step until the decrease is sufficient
+ * // f(x) = x₁² + 10x₂² from (1, 1), along the steepest-descent direction −∇f = (−2, −20).
+ * const f = (x) => {
+ *   const [a, b] = x.data
+ *   return { value: a * a + 10 * b * b, grad: [2 * a, 20 * b] }
+ * }
+ * const r = backtracking(f, [1, 1], [-2, -20])
+ * print('step lengths tried =', r.trials.map((t) => t.alpha))
+ * print('alpha =', r.alpha)
+ * print('x =', r.x, ' f(x) =', r.value)
+ * print('converged =', r.converged)
+ *
+ * @example An uphill direction is reported, not searched
+ * const f = (x) => {
+ *   const [a, b] = x.data
+ *   return { value: a * a + 10 * b * b, grad: [2 * a, 20 * b] }
+ * }
+ * const r = backtracking(f, [1, 1], [2, 20])
+ * print('initial slope =', r.initialSlope)
+ * print('alpha =', r.alpha, ' converged =', r.converged)
  */
 export function backtracking(
   f: ObjectiveFn,
@@ -261,10 +404,32 @@ export function backtracking(
 
 /**
  * Line search for a step satisfying the strong Wolfe conditions, sufficient decrease
- * f(x + αp) ≤ f(x) + c₁α∇f(x)ᵀp and curvature |∇f(x + αp)ᵀp| ≤ c₂|∇f(x)ᵀp|, by bracketing then zooming with
- * safeguarded cubic interpolation (Nocedal & Wright, Algorithms 3.5 and 3.6).
+ * $f(\xvec + \alpha\pvec) \le f(\xvec) + c_1\alpha\nabla f(\xvec)^\top\pvec$ and curvature
+ * $\lvert\nabla f(\xvec + \alpha\pvec)^\top\pvec\rvert \le c_2\lvert\nabla f(\xvec)^\top\pvec\rvert$, by
+ * bracketing (doubling $\alpha$ up to `alphaMax`) then zooming with safeguarded cubic interpolation (Nocedal & Wright,
+ * Algorithms 3.5 and 3.6).
  *
- * Arguments as for `backtracking`. Every trial is recorded; failure is reported by `converged: false`.
+ * Every trial is recorded; failure is reported by `converged: false`, as for `backtracking`.
+ *
+ * @param f The objective, returning `{ value, grad }` at a point.
+ * @param x The start point $\xvec$, a vector of length $n$.
+ * @param direction The search direction $\pvec$, of length $n$.
+ * @param options The search's options, and optionally `value` and `grad`, the caller's $f(\xvec)$ and
+ *   $\nabla f(\xvec)$. Whichever is left out is computed by evaluating $f$ at $\xvec$, which `evaluations` does not
+ *   count.
+ * @returns The step length and point returned, with every trial and which conditions hold there.
+ *
+ * @example A step close to the exact minimiser along the line
+ * // f(x) = x₁² + 10x₂² from (1, 1) along −∇f: along the line, f is least at 404 / 8008.
+ * const f = (x) => {
+ *   const [a, b] = x.data
+ *   return { value: a * a + 10 * b * b, grad: [2 * a, 20 * b] }
+ * }
+ * const r = strongWolfe(f, [1, 1], [-2, -20], { c2: 0.1 })
+ * print('alpha =', r.alpha, ' exact:', 404 / 8008)
+ * print('x =', r.x, ' f(x) =', r.value)
+ * print('armijo =', r.armijo, ' curvature =', r.curvature)
+ * print('evaluations =', r.evaluations)
  */
 export function strongWolfe(
   f: ObjectiveFn,

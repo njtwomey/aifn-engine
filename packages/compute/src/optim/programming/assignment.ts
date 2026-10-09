@@ -1,9 +1,13 @@
 /**
  * The assignment problem by the Hungarian algorithm (Kuhn, 1955, "The Hungarian method for the assignment problem",
  * Naval Research Logistics Quarterly 2), in Munkres' star-and-prime form (Munkres, 1957, J. SIAM 5(1)) extended to
- * rectangular matrices (Bourgeois and Lassalle, 1971, CACM 14(12)). Each step is one of Munkres' steps, so a figure can
- * show the reduced matrix, the starred and primed zeros, the covered lines and each augmenting path. Row and column
- * potentials u, v are kept so that reduced = cost − u − v throughout; at the end they are an optimal dual solution.
+ * rectangular matrices (Bourgeois and Lassalle, 1971, CACM 14(12)). Each step is one of Munkres' steps, so a figure
+ * can show the reduced matrix, the starred and primed zeros, the covered lines and each augmenting path. Row and
+ * column potentials $\uvec$, $\vvec$ are kept so that the reduced matrix is $c_{ij} - u_i - v_j$ throughout; at the
+ * end they are an optimal dual solution.
+ *
+ * A matrix with more rows than columns is transposed first, so the algorithm always works on $k \le l$ rows and
+ * columns; `hungarian` maps the result back to the input's rows.
  */
 
 import type { Tensor } from 'aifn-compute/foundation/tensor'
@@ -23,17 +27,20 @@ export type HungarianPhase =
   | 'star'
   /** Cover the columns holding starred zeros; done when all rows are assigned. */
   | 'cover'
-  /** Prime an uncovered zero; cover its row and uncover its star's column, or go to augment if its row has no star. */
+  /**
+   * Prime an uncovered zero; cover its row and uncover its star's column, or go to augment if its row has no star.
+   */
   | 'prime'
   /** Flip stars and primes along the alternating path from the last primed zero: one more assignment. */
   | 'augment'
   /** Add the smallest uncovered value to covered rows and subtract it from uncovered columns: a new zero appears. */
   | 'adjust'
+  /** Every row holds a starred zero: the assignment is optimal. */
   | 'done'
 
 /** Options for `hungarianSteps` and `hungarian`. */
 export interface HungarianOptions {
-  /** Maximise the total instead of minimising it (the algorithm then runs on −cost). */
+  /** Maximise the total instead of minimising it (the algorithm then runs on the negated costs). */
   maximize?: boolean
 }
 
@@ -42,39 +49,65 @@ export interface HungarianOptions {
  * once every row holds a starred zero (an optimal assignment).
  */
 export interface HungarianState extends Status {
-  /** The reduced cost matrix cost − u − v, k × l with k ≤ l. */
+  /** The reduced cost matrix $c_{ij} - u_i - v_j$, $k \times l$ with $k \le l$. */
   reduced: Tensor
-  /** The (sign-adjusted, oriented) cost matrix the algorithm works on, k × l. */
+  /** The (sign-adjusted, oriented) cost matrix the algorithm works on, $k \times l$. */
   cost: Tensor
-  /** Column of the starred zero in each row, or −1; int32, length k. */
+  /** Column of the starred zero in each row, or $-1$; int32, length $k$. */
   starred: Tensor
-  /** Column of the primed zero in each row, or −1; int32, length k. */
+  /** Column of the primed zero in each row, or $-1$; int32, length $k$. */
   primed: Tensor
-  /** 1 for covered rows (length k) and columns (length l); int32. */
+  /** 1 for each covered row, else 0; int32, length $k$. */
   rowCovered: Tensor
+  /** 1 for each covered column, else 0; int32, length $l$. */
   columnCovered: Tensor
-  /** Row and column potentials, with reduced = cost − u − v. */
+  /** Row potentials $\uvec$, length $k$, with the reduced matrix $c_{ij} - u_i - v_j$. */
   rowPotential: Tensor
+  /** Column potentials $\vvec$, length $l$. */
   columnPotential: Tensor
-  /** What the last step did (`start` initially), and what the next one will do. */
+  /** What the last step did (`start` initially). */
   last: HungarianPhase | 'start'
+  /** What the next step will do. */
   next: HungarianPhase
-  /** The last augmenting path as (row, column) cells, alternating primed and starred zeros; shape [p, 2]; int32. */
+  /**
+   * The last augmenting path as (row, column) cells, alternating primed and starred zeros; shape `[p, 2]`; int32.
+   * After a `prime` step that finds a row with no star, it holds only that primed zero, from which `augment` starts.
+   */
   path: Tensor
-  /** The value added and subtracted by the last `adjust` step. */
+  /** The value added and subtracted by the last step when it was `adjust`; 0 after any other step. */
   delta: Scalar
   /** True when the input had more rows than columns and the algorithm works on its transpose. */
   transposed: boolean
+  /** True once `next` is `done`. */
   converged: boolean
 }
 
+/**
+ * Whether a reduced cost counts as zero.
+ *
+ * @param v The reduced cost.
+ * @param tol The absolute tolerance ($10^{-12}$ times the largest absolute cost, or 1 if larger).
+ * @returns True when $\lvert v \rvert \le$ `tol`.
+ */
 const isZero = (v: number, tol: number) => Math.abs(v) <= tol
 
 /**
- * The Hungarian algorithm (Kuhn, 1955; Munkres' steps, 1957) on the cost matrix `cost` (n × m, finite; rectangular
- * matrices assign every row, or every column if fewer), as a traceable algorithm with no start. Each step performs one
- * `HungarianPhase` (priming one zero at a time). It converges when every row of the oriented matrix holds a starred
- * zero; the stars are then an optimal assignment. `hungarian` runs it to the end.
+ * The Hungarian algorithm (Kuhn, 1955; Munkres' steps, 1957) on the cost matrix `cost` ($n \times m$, finite;
+ * rectangular matrices assign every row, or every column if fewer), as a traceable algorithm with no start. Each step
+ * performs one `HungarianPhase` (priming one zero at a time). It converges when every row of the oriented matrix holds
+ * a starred zero; the stars are then an optimal assignment. `hungarian` runs it to the end. Throws `DomainError` for
+ * a non-finite cost.
+ *
+ * @param cost The cost matrix, $n \times m$, as a tensor or a list of rows.
+ * @param options Whether to maximise instead of minimise.
+ * @returns The algorithm. Its start is ignored; once converged, a step returns the state unchanged.
+ *
+ * @example Munkres' steps on a 3 by 3 matrix
+ * const tr = trace(hungarianSteps([[4, 1, 3], [2, 0, 5], [3, 2, 2]]), {}, 100)
+ * print('steps =', tr.steps.map((s) => s.last))
+ * const s = tr.steps.at(-1)
+ * print('reduced =', s.reduced)
+ * print('starred column of each row =', s.starred)
  */
 export function hungarianSteps(cost: MatrixLike, options: HungarianOptions = {}): Algorithm<object, HungarianState> {
   const rowsIn = 'shape' in cost ? cost.shape[0] : cost.length
@@ -236,12 +269,18 @@ export function hungarianSteps(cost: MatrixLike, options: HungarianOptions = {})
 
 /** The result of `hungarian`. */
 export interface AssignmentResult {
-  /** The column assigned to each row of the input, or −1 for an unassigned row (more rows than columns); int32. */
+  /**
+   * The column assigned to each row of the input, or $-1$ for an unassigned row (more rows than columns); int32.
+   */
   assignment: Tensor
   /** Total cost of the assignment (in the input's sign, also when maximising). */
   cost: Scalar
-  /** Dual potentials of the rows and columns of the input (for the minimised matrix: ±cost), with cost ≥ u + v. */
+  /**
+   * Dual potentials $\uvec$ of the input's rows, for the minimised matrix $\Cmat$ (the costs, negated when
+   * maximising), with $c_{ij} \ge u_i + v_j$.
+   */
   rowPotential: Tensor
+  /** Dual potentials $\vvec$ of the input's columns; see `rowPotential`. */
   columnPotential: Tensor
   /** Munkres steps taken. */
   steps: Size
@@ -249,8 +288,23 @@ export interface AssignmentResult {
 
 /**
  * Solve the linear assignment problem: assign each row to a distinct column (or each column to a row, when there are
- * fewer columns) minimising (or, with `maximize`, maximising) the total cost, by the Hungarian algorithm in O(n³), as
- * `scipy.optimize.linear_sum_assignment`.
+ * fewer columns) minimising (or, with `maximize`, maximising) the total cost, by the Hungarian algorithm in $O(n^3)$,
+ * as `scipy.optimize.linear_sum_assignment`. Throws `DomainError` for a non-finite cost.
+ *
+ * @param cost The cost matrix, $n \times m$, as a tensor or a list of rows.
+ * @param options Whether to maximise instead of minimise.
+ * @returns The assignment, its total cost, the dual potentials and the steps taken.
+ *
+ * @example Assign three workers to three jobs
+ * const r = hungarian([[4, 1, 3], [2, 0, 5], [3, 2, 2]])
+ * print('job of each worker =', r.assignment, ' cost =', r.cost)
+ * // At the optimum the potentials add up to the cost (strong duality).
+ * print('u =', r.rowPotential, ' v =', r.columnPotential)
+ *
+ * @example Maximise, and a rectangular matrix
+ * print('maximised:', hungarian([[4, 1, 3], [2, 0, 5], [3, 2, 2]], { maximize: true }).assignment)
+ * const r = hungarian([[1, 2], [2, 4], [3, 1]])
+ * print('three rows, two columns:', r.assignment, ' cost =', r.cost)
  */
 export function hungarian(cost: MatrixLike, options: HungarianOptions = {}): AssignmentResult {
   const s = run(hungarianSteps(cost, options), {}, 1_000_000)

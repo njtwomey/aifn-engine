@@ -1,7 +1,8 @@
 /**
  * Stochastic derivative-free search: simulated annealing (a Metropolis random walk with a falling temperature) and
- * the covariance matrix adaptation evolution strategy (CMA-ES). Step t draws only from the runner's step stream
- * (`ctx.stream`), so a step is a pure function of the state and the root key.
+ * the covariance matrix adaptation evolution strategy (CMA-ES). Both minimise $f : \reals^n \to \reals$ from its
+ * values alone. Step $t$ draws only from the runner's step stream (`ctx.stream`), so a step is a pure function of the
+ * state and the root key, and a run is reproduced by passing the same root `stream` to `run` or `trace`.
  */
 
 import { eigh } from 'aifn-compute/numerics/linalg'
@@ -18,16 +19,22 @@ type F64 = dense.F64
 
 /** The state of `simulatedAnnealing`. `x` is the current point of the walk (not necessarily the best). */
 export type SimulatedAnnealingState = IterateState & {
-  /** The point proposed on the last step and f there. */
+  /** The point $\xvec'$ proposed on the last step ($\xvec_0$ at `init`). */
   proposal: Vector
+  /** $f(\xvec')$ at the proposal. */
   proposalValue: number
-  /** The Metropolis acceptance probability min(1, exp(−Δf/T)) of the last proposal. */
+  /**
+   * The Metropolis acceptance probability $\min(1, \exp(-\Delta f / T))$ of the last proposal, with
+   * $\Delta f = f(\xvec') - f(\xvec)$ (NaN at `init`; 0 for a proposal whose value is NaN).
+   */
   acceptance: number
+  /** Whether the last proposal was accepted, so that `x` moved to it. */
   accepted: boolean
-  /** The temperature used on the last step (the first step's at t = 0). */
+  /** The temperature used on the last step (at `init`, the temperature of the first step, $T_0$). */
   temperature: number
-  /** The best point seen and its value. */
+  /** The best point the walk has accepted (or started from). */
   best: Vector
+  /** $f$ at `best`. */
   bestValue: number
   /** Accepted proposals so far. */
   acceptedCount: number
@@ -36,8 +43,8 @@ export type SimulatedAnnealingState = IterateState & {
 /** Options for `simulatedAnnealing`. */
 export type SimulatedAnnealingOptions = Pick<StoppingOptions, 'divergeAbove'> & {
   /**
-   * The temperature T_t on step t, or a starting temperature T₀ cooled geometrically, T_t = T₀·`cooling`ᵗ.
-   * Default T₀ = 1.
+   * The temperature $T_t$ on step $t = 0, 1, \dots$ as a schedule, or a starting temperature $T_0$ cooled
+   * geometrically, $T_t = T_0 c^t$ with $c$ = `cooling`. Default $T_0 = 1$.
    */
   temperature?: number | Schedule
   /** Geometric cooling factor when `temperature` is a number. Default 0.995. */
@@ -47,9 +54,32 @@ export type SimulatedAnnealingOptions = Pick<StoppingOptions, 'divergeAbove'> & 
 }
 
 /**
- * Simulated annealing (Kirkpatrick, Gelatt & Vecchi, 1983): propose x′ = x + σε, ε ~ N(0, I), and accept it with the
- * Metropolis probability min(1, exp(−(f(x′) − f(x))/T_t)); the temperature falls so the walk settles into low regions.
- * It keeps running until the step limit (`converged` stays false). `init` takes `{ x0 }`; step t draws from the runner's step stream.
+ * Simulated annealing (Kirkpatrick, Gelatt and Vecchi, 1983): propose
+ * $\xvec' = \xvec + \sigmavec \odot \epsilonvec$, $\epsilonvec \sim \Gauss(\zeros, \Imat)$, and accept it with
+ * the Metropolis probability $\min(1, \exp(-(f(\xvec') - f(\xvec))/T_t))$; the temperature falls so the walk
+ * settles into low regions. It keeps running until the step limit (`converged` stays false), or until the value or
+ * point is not finite or $\lvert f \rvert$ exceeds `divergeAbove`. A proposal whose value is NaN is never accepted,
+ * and at $T_t \le 0$ only proposals that do not raise $f$ are. `x` is where the walk is; `best` is the best point it
+ * has accepted. `init` takes `{ x0 }`; step $t$ draws from the runner's step stream, one evaluation of $f$ per step.
+ *
+ * @param f The objective: takes a point (a vector of length $n$) and returns $f(\xvec)$ as a number, or an object with
+ *   a `value` field.
+ * @param options The temperature (a schedule, or a starting temperature with its geometric `cooling` factor) and the
+ *   standard deviations $\sigmavec$ of the proposal.
+ * @returns The algorithm, to step with `run` or `trace` from `{ x0 }`.
+ *
+ * @example Find the deeper of two wells
+ * // A tilted double well: its minima are near x = -1 (the deeper) and x = 1, and the walk starts at x = 3.
+ * const f = (x) => {
+ *   const v = toFlat(x)[0]
+ *   return (v * v - 1) ** 2 + 0.3 * v
+ * }
+ * const alg = simulatedAnnealing(f, { temperature: 1, cooling: 0.99, proposalScale: 0.3 })
+ * const s = run(alg, { x0: [3] }, 1000, { stream: stream(1) })
+ * print('best =', s.best)
+ * print('f(best) =', s.bestValue)
+ * print('accepted =', s.acceptedCount, 'of', s.t)
+ * print('final temperature =', s.temperature)
  */
 export function simulatedAnnealing(
   f: ValueFunction,
@@ -119,44 +149,84 @@ export function simulatedAnnealing(
 // ---------------------------------------------------------------------------------------------------------------------
 // CMA-ES.
 
-/** The state of `cmaEs`. `x` is the distribution mean m and `value` is f(m). */
+/** The state of `cmaEs`. `x` is the distribution mean $\mvec$ and `value` is $f(\mvec)$. */
 export type CmaEsState = IterateState & {
-  /** Generation count (equal to t). */
+  /** Generation count (equal to `t`). */
   generation: number
-  /** The global step size σ. */
+  /** The global step size $\sigma$, for the next generation. */
   sigma: number
-  /** The covariance matrix C (n×n); samples are x ~ N(m, σ²C). */
+  /** The covariance matrix $\Cmat$ ($n \times n$); samples are $\xvec \sim \Gauss(\mvec, \sigma^2\Cmat)$. */
   covariance: Matrix
-  /** Evolution paths for σ (conjugate) and for C. */
+  /** The conjugate evolution path $\pvec_\sigma$, which adapts $\sigma$ (zero at `init`). */
   pathSigma: Vector
+  /** The evolution path $\pvec_c$ of the rank-one update of $\Cmat$ (zero at `init`). */
   pathCovariance: Vector
-  /** The last generation's λ samples as rows (λ×n) and f at each, in sampling order. */
+  /** The last generation's $\lambda$ samples as the rows of a $\lambda \times n$ matrix, in sampling order. */
   population: Matrix
+  /** $f$ at each sample of `population`, in the same order. */
   populationValues: Vector
-  /** The best point seen over all generations and its value. */
+  /** The best point evaluated over all generations: a sample or a mean. */
   best: Vector
+  /** $f$ at `best`. */
   bestValue: number
-  /** The √eigenvalues of C (axis lengths of the search ellipsoid), descending. */
+  /** The square roots of the eigenvalues of $\Cmat$ (axis lengths of the search ellipsoid), descending. */
   axisLengths: Vector
 }
 
 /** Options for `cmaEs`. */
 export type CmaEsOptions = Pick<StoppingOptions, 'divergeAbove'> & {
-  /** Initial step size σ₀. Default 0.5. */
+  /** Initial step size $\sigma_0$. Default 0.5. */
   sigma?: number
-  /** Population size λ. Default 4 + ⌊3 ln n⌋. */
+  /**
+   * Population size $\lambda$ (at least 2, or the run is flagged diverged at `init`). Default
+   * $4 + \lfloor 3 \ln n \rfloor$.
+   */
   populationSize?: number
-  /** Stop when σ·(largest axis length) falls below this. Default 1e-10. */
+  /** Stop when $\sigma$ times the largest axis length falls below this. Default 1e-10. */
   xTolerance?: number
   /** Stop when the population's value range falls below this. Default 1e-12. */
   fTolerance?: number
 }
 
 /**
- * The (μ/μ_w, λ) CMA-ES with default parameters from Hansen (2016), "The CMA Evolution Strategy: A Tutorial",
- * arXiv:1604.00772, Table 1 and Appendix A: sample λ points from N(m, σ²C), move m to the weighted mean of the best
- * μ = ⌊λ/2⌋, update the evolution paths, adapt C by rank-one and rank-μ updates, and adapt σ by cumulative step-size
- * adaptation. `init` takes `{ x0 }` (the initial mean); step t draws from the runner's step stream.
+ * The $(\mu/\mu_w, \lambda)$ CMA-ES with default parameters from Hansen (2016), "The CMA Evolution Strategy: A
+ * Tutorial", arXiv:1604.00772, Table 1 and Appendix A: sample $\lambda$ points from $\Gauss(\mvec, \sigma^2\Cmat)$,
+ * move $\mvec$ to the weighted mean of the best $\mu = \lfloor \lambda/2 \rfloor$ (positive weights only), update
+ * the evolution paths, adapt $\Cmat$ by rank-one and rank-$\mu$ updates, and adapt $\sigma$ by cumulative step-size
+ * adaptation. `init` takes `{ x0 }` (the initial mean, with $\Cmat = \Imat$); step $t$ draws from the runner's step
+ * stream. Each generation evaluates $f$ at the $\lambda$ samples and at the new mean. It converges when $\sigma$
+ * times the longest axis falls below `xTolerance` or the generation's values span less than `fTolerance`, and flags
+ * divergence when the mean, its value or $\sigma$ is not finite, or $\lvert f \rvert$ exceeds `divergeAbove`.
+ * Samples whose value is NaN rank last.
+ *
+ * @param f The objective: takes a point (a vector of length $n$) and returns $f(\xvec)$ as a number, or an object with
+ *   a `value` field.
+ * @param options The initial step size, the population size and the tolerances of the stopping test.
+ * @returns The algorithm, to step with `run` or `trace` from `{ x0 }`.
+ *
+ * @example Minimise a quadratic
+ * // The minimum is at (1, -0.5), where f = 0.
+ * const f = (x) => {
+ *   const [a, b] = toFlat(x)
+ *   return (a - 1) ** 2 + 2 * (b + 0.5) ** 2
+ * }
+ * const s = run(cmaEs(f, { sigma: 0.5 }), { x0: [0, 0] }, 500, { stream: stream(0) })
+ * print('mean =', s.x)
+ * print('f(mean) =', s.value)
+ * print('generations =', s.generation)
+ * print('evaluations =', s.evaluations)
+ *
+ * @example The covariance learns the shape of a valley
+ * // Rosenbrock's function: near its minimum (1, 1) the valley runs along the direction (1, 2).
+ * const rosen = (x) => {
+ *   const [a, b] = toFlat(x)
+ *   return (1 - a) ** 2 + 100 * (b - a * a) ** 2
+ * }
+ * const s = run(cmaEs(rosen), { x0: [-1.2, 1] }, 2000, { stream: stream(0) })
+ * print('mean =', s.x)
+ * print('generations =', s.generation)
+ * print('C =', s.covariance)
+ * print('axis lengths =', s.axisLengths)
  */
 export function cmaEs(f: ValueFunction, options: CmaEsOptions = {}): Algorithm<StartOptions, CmaEsState> {
   const { sigma: sigma0 = 0.5, xTolerance = 1e-10, fTolerance = 1e-12, divergeAbove = DEFAULT_DIVERGE } = options

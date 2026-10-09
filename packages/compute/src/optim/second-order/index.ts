@@ -1,7 +1,19 @@
 /**
- * `aifn-compute/optim/second-order`: second-order and quasi-Newton methods: Newton (damped, trust region), BFGS, L-BFGS, OWL-QN
- * (L-BFGS for f + C‖x‖₁),
- * Gauss–Newton and Levenberg–Marquardt for least squares.
+ * `aifn-compute/optim/second-order`: Newton, quasi-Newton and least-squares methods, which use or build curvature
+ * information to take longer, better-scaled steps than gradient descent.
+ *
+ * - With a supplied Hessian: `newton` (damped by a line search, with a diagonal shift where the Hessian is not
+ *   positive definite) and `trustRegion` (dogleg steps within an adaptive radius).
+ * - From gradients alone: `bfgs` (a dense $n \times n$ inverse-Hessian approximation), `lbfgs` (the last $m$
+ *   `CurvaturePair`s, $O(mn)$ a step, for large $n$), and `owlqn`, L-BFGS for $f(\xvec) + C\lVert \xvec \rVert_1$, with
+ *   its `pseudoGradient`.
+ * - Nonlinear least squares, $\tfrac12\lVert \rvec(\xvec) \rVert^2$ from residuals and their Jacobian
+ *   (`ResidualFunction`): `gaussNewton`, `levenbergMarquardt` (damped, more robust far from the solution), and the
+ *   one-call `leastSquares`.
+ *
+ * Each method is a step-through `Algorithm` started from `{ x0 }`, and reports non-convergence, divergence and a line
+ * search that cannot make progress (`stalled`) in its state rather than throwing. `secondOrderAlgorithms` registers
+ * them.
  */
 
 export {

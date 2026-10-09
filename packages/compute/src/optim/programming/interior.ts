@@ -4,8 +4,11 @@
  * "Numerical Optimization", Algorithm 14.3) on the homogeneous self-dual embedding (Xu, Hung & Ye, 1996, "A simplified
  * homogeneous and self-dual linear programming algorithm and its implementation", Ann. Oper. Res. 62; Andersen &
  * Andersen, 2000), which tells an infeasible problem from an unbounded one and certifies both. It works on the
- * standard form min cᵀz s.t. Az = b, z ≥ 0 and follows the central path z∘s = μ1 towards μ = 0. Every iterate is
- * recorded, and `lpCentralPath` computes points on the exact central path (from Mehrotra's starting point of §14.2).
+ * standard form of `./lp` (minimise $\cvec^\top\zvec$ subject to $\Amat\zvec = \bvec$, $\zvec \ge \zeros$), with
+ * linearly dependent rows removed first, and follows the central path $\zvec \circ \svec = \mu\ones$ towards
+ * $\mu = 0$. Every iterate is recorded, and `lpCentralPath` computes points on the exact central path (from
+ * Mehrotra's starting point of §14.2). Linear systems are solved by the normal equations
+ * $\Amat\Dmat\Amat^\top$, $\Dmat = \Zmat\Smat^{-1}$.
  */
 
 import { dense, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -27,66 +30,109 @@ import { unsolved, type LinearProgramResult } from './simplex'
 
 /** Options for `linearInteriorPoint`. */
 export interface InteriorPointOptions {
-  /** Stop when the relative primal and dual residuals and the relative duality gap are all below this (default 1e-9). */
+  /**
+   * Stop when the relative primal and dual residuals and the relative duality gap are all below this (default 1e-9).
+   * It is also the threshold of the infeasibility and unboundedness tests.
+   */
   tolerance?: Scalar
   /** Fraction of the step to the boundary taken (default 0.99). */
   stepFraction?: Scalar
 }
 
-/** Where the interior-point method stands: still iterating, or what the embedding has proved. */
+/**
+ * Where the interior-point method stands: still iterating (`running`), or what the embedding has proved (`optimal`,
+ * `infeasible`, `unbounded`).
+ */
 export type InteriorPointStatus = 'running' | 'optimal' | 'infeasible' | 'unbounded'
 
 /** One iterate of the interior-point method (on the homogeneous self-dual embedding). */
 export interface InteriorPointState extends Status {
-  /** The homogeneous primal iterate in standard form, length N (strictly positive); the solution estimate is z/τ. */
+  /**
+   * The homogeneous primal iterate in standard form, length $N$ (strictly positive); the solution estimate is
+   * $\zvec/\tau$.
+   */
   z: Tensor
-  /** Homogeneous dual variables of the standard-form rows, length m (estimate y/τ). */
+  /** Homogeneous dual variables of the kept standard-form rows, length $m$ (estimate $\yvec/\tau$). */
   y: Tensor
-  /** Homogeneous dual slacks (reduced costs), length N (strictly positive; estimate s/τ). */
+  /** Homogeneous dual slacks (reduced costs), length $N$ (strictly positive; estimate $\svec/\tau$). */
   s: Tensor
-  /** The embedding's scale τ > 0: → a positive limit at an optimum, → 0 when the problem has none. */
+  /**
+   * The embedding's scale $\tau > 0$: it tends to a positive limit at an optimum, and to 0 when the problem has none.
+   */
   tau: Scalar
-  /** The embedding's gap variable κ ≥ 0: → 0 at an optimum, → bᵀy − cᵀz > 0 when infeasible or unbounded. */
+  /**
+   * The embedding's gap variable $\kappa \ge 0$: it tends to 0 at an optimum, and to
+   * $\bvec^\top\yvec - \cvec^\top\zvec > 0$ when the problem is infeasible or unbounded.
+   */
   kappa: Scalar
-  /** The primal estimate z/τ in the original variables, length n: the point drawn on the central path. */
+  /**
+   * The primal estimate $\zvec/\tau$ in the original variables, length $n$: the point drawn on the central path.
+   */
   x: Tensor
-  /** The duality measure μ = (zᵀs + τκ) / (N + 1). */
+  /** The duality measure $\mu = (\zvec^\top\svec + \tau\kappa) / (N + 1)$. */
   mu: Scalar
-  /** The centring parameter σ of the last step (Mehrotra's (μ_aff/μ)³). */
+  /**
+   * The centring parameter $\sigma$ of the last step (Mehrotra's $(\mu_{\text{aff}}/\mu)^3$, capped at 1); NaN at the
+   * start and after a failed step.
+   */
   sigma: Scalar
-  /** Primal and dual step lengths of the last step. */
+  /** The primal step length of the last step (0 at the start and after a failed step). */
   alphaPrimal: Scalar
+  /** The dual step length of the last step; equal to `alphaPrimal`, as one step length is used for all variables. */
   alphaDual: Scalar
-  /** ‖Az − b‖ / (1 + ‖b‖). */
+  /**
+   * $\lVert \Amat\zvec/\tau - \bvec \rVert / (1 + \lVert \bvec \rVert)$, over the kept rows.
+   */
   primalResidual: Scalar
-  /** ‖Aᵀy + s − c‖ / (1 + ‖c‖). */
+  /** $\lVert \Amat^\top\yvec/\tau + \svec/\tau - \cvec \rVert / (1 + \lVert \cvec \rVert)$. */
   dualResidual: Scalar
-  /** Relative duality gap |cᵀz − bᵀy| / (1 + |cᵀz|). */
+  /**
+   * Relative duality gap $\lvert g - \bvec^\top\tilde\yvec \rvert / (1 + \lvert g \rvert)$ with
+   * $g = \cvec^\top\tilde\zvec$, at the estimates $\tilde\zvec = \zvec/\tau$, $\tilde\yvec = \yvec/\tau$.
+   */
   gap: Scalar
-  /** cᵀx of the current iterate. */
+  /** $\cvec^\top\xvec$ of the current estimate, in the original variables. */
   objective: Scalar
   /** `optimal` once converged; `infeasible` or `unbounded` once certified (the run then stops, `terminated`). */
   status: InteriorPointStatus
   /**
-   * The certificate when there is no optimum: for `unbounded`, a unit ray d in the original variables with cᵀd < 0
-   * along which every constraint holds; for `infeasible`, the unit Farkas vector y on the standard-form rows (Aᵀy ≤ 0,
-   * bᵀy > 0). Null otherwise.
+   * The certificate when there is no optimum. For `unbounded`, a ray $\dvec$ in the original variables with
+   * $\cvec^\top\dvec < 0$ along which every constraint holds: the image of a unit ray in standard form, so not
+   * itself of unit length. For `infeasible`, the unit Farkas vector $\yvec$ on the kept standard-form rows
+   * ($\Amat^\top\yvec \le \zeros$, $\bvec^\top\yvec > 0$), or null when the equality rows were found inconsistent at
+   * the start. Null otherwise.
    */
   certificate: Tensor | null
+  /** True when `status` is `optimal`. */
   converged: boolean
   /** True on numerical failure (singular normal equations, non-finite iterates), never for infeasibility. */
   diverged: boolean
+  /** True when `status` is `infeasible` or `unbounded`. */
   terminated: boolean
   /** Rows of the standard form kept after removing linearly dependent ones. */
   rowsKept: Tensor
+  /** The standard form the method works on. */
   standard: StandardForm
-  /** The starting point's residual norms and μ, for the relative infeasibility tests (internal). */
+  /**
+   * The starting point's residual norms (primal `rp`, dual `rd`, gap `rg`) and $\mu$, for the relative infeasibility
+   * tests (internal).
+   */
   initial: { rp: Scalar; rd: Scalar; rg: Scalar; mu: Scalar }
 }
 
-/** The reduced standard form: rows made linearly independent. */
+/**
+ * The reduced standard form: rows made linearly independent. `m` rows and `N` columns; `A` row-major, `b` and `c` as
+ * in the standard form; `kept` lists the standard-form row of each row.
+ */
 type Reduced = { m: number; N: number; A: Float64Array; b: Float64Array; c: Float64Array; kept: number[] }
 
+/**
+ * Remove the linearly dependent rows of a standard form (`independentRows`), and report whether a removed row
+ * contradicts the others.
+ *
+ * @param sf The standard form (not modified).
+ * @returns The reduced form, and `inconsistent`, true when $\Amat\zvec = \bvec$ has no solution.
+ */
 function reduce(sf: StandardForm): { reduced: Reduced; inconsistent: boolean } {
   const { rows, inconsistent } = independentRows({ m: sf.m, n: sf.N, a: sf.A }, sf.b)
   const A = new Float64Array(rows.length * sf.N)
@@ -97,7 +143,13 @@ function reduce(sf: StandardForm): { reduced: Reduced; inconsistent: boolean } {
   }
 }
 
-/** A D Aᵀ for a diagonal D. */
+/**
+ * The normal matrix $\Amat\Dmat\Amat^\top$ for a diagonal $\Dmat$.
+ *
+ * @param R The reduced form, whose $\Amat$ ($m \times N$) is used.
+ * @param d The diagonal of $\Dmat$, $N$ values.
+ * @returns $\Amat\Dmat\Amat^\top$, row-major, $m \times m$ (symmetric).
+ */
 function normalMatrix(R: Reduced, d: Float64Array): Float64Array {
   const { m, N, A } = R
   const M = new Float64Array(m * m)
@@ -111,6 +163,13 @@ function normalMatrix(R: Reduced, d: Float64Array): Float64Array {
   return M
 }
 
+/**
+ * The product $\Amat\vvec$ with the reduced form's matrix.
+ *
+ * @param R The reduced form ($\Amat$ is $m \times N$).
+ * @param v The vector $\vvec$, $N$ values.
+ * @returns $\Amat\vvec$, $m$ values.
+ */
 const Av = (R: Reduced, v: ArrayLike<number>) => {
   const out = new Float64Array(R.m)
   for (let i = 0; i < R.m; i++) {
@@ -120,6 +179,13 @@ const Av = (R: Reduced, v: ArrayLike<number>) => {
   }
   return out
 }
+/**
+ * The product $\Amat^\top\vvec$ with the reduced form's matrix.
+ *
+ * @param R The reduced form ($\Amat$ is $m \times N$).
+ * @param v The vector $\vvec$, $m$ values.
+ * @returns $\Amat^\top\vvec$, $N$ values.
+ */
 const ATv = (R: Reduced, v: ArrayLike<number>) => {
   const out = new Float64Array(R.N)
   for (let i = 0; i < R.m; i++) for (let j = 0; j < R.N; j++) out[j] += R.A[i * R.N + j] * v[i]
@@ -127,8 +193,19 @@ const ATv = (R: Reduced, v: ArrayLike<number>) => {
 }
 
 /**
- * Solve the Newton system [0 Aᵀ I; A 0 0; S 0 Z] [Δz; Δy; Δs] = [−r_c; −r_b; −r_zs] by the normal equations
- * A D Aᵀ Δy = −r_b + A S⁻¹ r_zs − A D r_c with D = Z S⁻¹.
+ * Solve the Newton system of the central-path equations,
+ * $\Amat^\top\Delta\yvec + \Delta\svec = -\rvec_c$, $\Amat\Delta\zvec = -\rvec_b$,
+ * $\Smat\Delta\zvec + \Zmat\Delta\svec = -\rvec_{zs}$, by the normal equations
+ * $\Amat\Dmat\Amat^\top\Delta\yvec = -\rvec_b + \Amat\Smat^{-1}\rvec_{zs} - \Amat\Dmat\rvec_c$ with
+ * $\Dmat = \Zmat\Smat^{-1}$. A singular normal matrix gives $\Delta\yvec = \zeros$ and `singular: true`.
+ *
+ * @param R The reduced form.
+ * @param z The primal iterate $\zvec$, $N$ positive values.
+ * @param s The dual slacks $\svec$, $N$ positive values.
+ * @param rb The primal residual $\rvec_b = \Amat\zvec - \bvec$, $m$ values.
+ * @param rc The dual residual $\rvec_c = \Amat^\top\yvec + \svec - \cvec$, $N$ values.
+ * @param rzs The complementarity residual $\rvec_{zs}$ ($z_j s_j - \mu$ for a target $\mu$), $N$ values.
+ * @returns The direction $(\Delta\zvec, \Delta\yvec, \Delta\svec)$, and whether the normal matrix was singular.
  */
 function newton(
   R: Reduced,
@@ -154,13 +231,28 @@ function newton(
   return { dz, dy, ds, singular }
 }
 
-/** The largest α ≤ 1 with v + α dv ≥ 0. */
+/**
+ * The largest $\alpha \le 1$ with $\vvec + \alpha\,\Delta\vvec \ge \zeros$.
+ *
+ * @param v The current point $\vvec$, non-negative.
+ * @param dv The direction $\Delta\vvec$, of the same length.
+ * @returns $\alpha$, 1 when no entry of the direction is negative.
+ */
 function maxStep(v: Float64Array, dv: Float64Array): number {
   let a = 1
   for (let j = 0; j < v.length; j++) if (dv[j] < 0) a = Math.min(a, -v[j] / dv[j])
   return a
 }
 
+/**
+ * The residuals of the central-path equations at $(\zvec, \yvec, \svec)$.
+ *
+ * @param R The reduced form.
+ * @param z The primal point $\zvec$, $N$ values.
+ * @param y The dual variables $\yvec$, $m$ values.
+ * @param s The dual slacks $\svec$, $N$ values.
+ * @returns `rb` $= \Amat\zvec - \bvec$ and `rc` $= \Amat^\top\yvec + \svec - \cvec$.
+ */
 function residuals(R: Reduced, z: Float64Array, y: Float64Array, s: Float64Array) {
   const rb = Av(R, z)
   for (let i = 0; i < R.m; i++) rb[i] -= R.b[i]
@@ -169,7 +261,14 @@ function residuals(R: Reduced, z: Float64Array, y: Float64Array, s: Float64Array
   return { rb, rc }
 }
 
-/** Mehrotra's starting point (Nocedal and Wright, 2006, §14.2): least-norm z and least-squares y, shifted inside. */
+/**
+ * Mehrotra's starting point (Nocedal and Wright, 2006, §14.2): the least-norm $\zvec$ with $\Amat\zvec = \bvec$ and
+ * the least-squares $\yvec$ with $\svec = \cvec - \Amat^\top\yvec$, then $\zvec$ and $\svec$ shifted to be strictly
+ * positive. When $\Amat\Amat^\top$ is singular it falls back to $\zvec = \svec = \ones$, $\yvec = \zeros$.
+ *
+ * @param R The reduced form.
+ * @returns The starting point $(\zvec, \yvec, \svec)$.
+ */
 function startingPoint(R: Reduced): { z: Float64Array; y: Float64Array; s: Float64Array } {
   const ones = new Float64Array(R.N).fill(1)
   const AAt = normalMatrix(R, ones)
@@ -202,10 +301,24 @@ function startingPoint(R: Reduced): { z: Float64Array; y: Float64Array; s: Float
   return { z, y, s }
 }
 
-/** The residual norms of the starting point and its μ, for the relative infeasibility tests. */
+/**
+ * The residual norms of the starting point (primal `rp`, dual `rd`, gap `rg`) and its $\mu$, for the relative
+ * infeasibility tests.
+ */
 type Initial = { rp: number; rd: number; rg: number; mu: number }
 
-/** Residuals of the homogeneous self-dual model at (z, y, s, τ, κ). */
+/**
+ * Residuals of the homogeneous self-dual model at $(\zvec, \yvec, \svec, \tau, \kappa)$.
+ *
+ * @param R The reduced form.
+ * @param z The primal iterate $\zvec$, $N$ values.
+ * @param y The dual iterate $\yvec$, $m$ values.
+ * @param s The dual slacks $\svec$, $N$ values.
+ * @param tau The scale $\tau$.
+ * @param kappa The gap variable $\kappa$.
+ * @returns `rp` $= \bvec\tau - \Amat\zvec$, `rd` $= \cvec\tau - \Amat^\top\yvec - \svec$,
+ *   `rg` $= \cvec^\top\zvec - \bvec^\top\yvec + \kappa$, and `mu` $= (\zvec^\top\svec + \tau\kappa) / (N + 1)$.
+ */
 function hsdResiduals(R: Reduced, z: Float64Array, y: Float64Array, s: Float64Array, tau: number, kappa: number) {
   const rp = Av(R, z)
   for (let i = 0; i < R.m; i++) rp[i] = R.b[i] * tau - rp[i]
@@ -216,7 +329,26 @@ function hsdResiduals(R: Reduced, z: Float64Array, y: Float64Array, s: Float64Ar
   return { rp, rd, rg, mu }
 }
 
-/** Assemble a state: the solution estimate (z, y, s)/τ, its convergence measures and the infeasibility tests. */
+/**
+ * Assemble a state: the solution estimate $(\zvec, \yvec, \svec)/\tau$, its convergence measures and the
+ * infeasibility tests of Andersen and Andersen (2000), which certify infeasibility or unboundedness when the model's
+ * residuals, or $\mu$, have shrunk below the tolerance relative to the start while $\tau$ has become small relative
+ * to $\kappa$.
+ *
+ * @param base The standard form and the kept rows, carried from state to state.
+ * @param tolerance The convergence and certification threshold.
+ * @param R The reduced form.
+ * @param z The primal iterate $\zvec$, $N$ values; copied into the state.
+ * @param y The dual iterate $\yvec$, $m$ values; copied into the state.
+ * @param s The dual slacks $\svec$, $N$ values; copied into the state.
+ * @param tau The scale $\tau$.
+ * @param kappa The gap variable $\kappa$.
+ * @param initial The starting point's residual norms and $\mu$, or null for the starting point itself, whose own are
+ *   then used.
+ * @param extra The fields the caller sets: the step count `t`, `sigma` and the step lengths, and `singular`, true when
+ *   the step failed (the state is then `diverged` unless it is already decided).
+ * @returns The state.
+ */
 function makeState(
   base: Pick<InteriorPointState, 'standard' | 'rowsKept'>,
   tolerance: Scalar,
@@ -300,9 +432,28 @@ function makeState(
 }
 
 /**
- * The Newton direction of the homogeneous self-dual model with centring γ, residual reduction η and second-order
- * corrections (cz, cτκ), by the normal equations M = A D Aᵀ, D = Z S⁻¹, solved twice with one factorisation:
- * M p = b + A D c and M q = η r_p + A D (η r_d − Z⁻¹ r_zs); then Δy = q + p Δτ, Δz = u + v Δτ, and Δτ from the gap row.
+ * The Newton direction of the homogeneous self-dual model with centring $\gamma$, residual reduction $\eta$ and
+ * second-order corrections, by the normal equations $\Mmat = \Amat\Dmat\Amat^\top$, $\Dmat = \Zmat\Smat^{-1}$,
+ * solved twice with one factorisation: $\Mmat\pvec = \bvec + \Amat\Dmat\cvec$ and
+ * $\Mmat\qvec = \eta\rvec_p + \Amat\Dmat(\eta\rvec_d - \Zmat^{-1}\rvec_{zs})$; then
+ * $\Delta\yvec = \qvec + \pvec\,\Delta\tau$, $\Delta\zvec = \uvec + \vvec\,\Delta\tau$, and $\Delta\tau$ from the gap
+ * row. Here $\rvec_{zs} = \gamma\mu\ones - \Zmat\Smat\ones - \cvec_{zs}$. A numerically singular $\Mmat$ gets a
+ * diagonal shift of $10^{-12}$ times its largest diagonal entry.
+ *
+ * @param R The reduced form.
+ * @param z The primal iterate $\zvec$, $N$ positive values.
+ * @param s The dual slacks $\svec$, $N$ positive values.
+ * @param tau The scale $\tau$.
+ * @param kappa The gap variable $\kappa$.
+ * @param r The model's residuals and $\mu$ at the iterate, as `hsdResiduals` returns them.
+ * @param gamma The centring $\gamma$: the target is $\gamma\mu$ (0 for the affine predictor, $\sigma$ for the
+ *   corrector).
+ * @param eta The fraction $\eta$ of the residuals the step removes (1 for the predictor, $1 - \sigma$ for the
+ *   corrector).
+ * @param corr The second-order corrections: `zs`, the products $\Delta z_j \Delta s_j$ of the predictor (null for
+ *   none), and `tk`, the product $\Delta\tau\,\Delta\kappa$.
+ * @returns The direction `dz`, `dy`, `ds`, `dtau`, `dkappa`, or null when the system could not be solved or the
+ *   direction is not finite.
  */
 function hsdDirection(
   R: Reduced,
@@ -359,7 +510,16 @@ function hsdDirection(
   return { dz, dy, ds, dtau, dkappa }
 }
 
-/** The largest α ≤ 1 keeping z, s, τ, κ non-negative along a direction. */
+/**
+ * The largest $\alpha \le 1$ keeping $\zvec$, $\svec$, $\tau$ and $\kappa$ non-negative along a direction.
+ *
+ * @param z The primal iterate $\zvec$.
+ * @param s The dual slacks $\svec$.
+ * @param tau The scale $\tau$.
+ * @param kappa The gap variable $\kappa$.
+ * @param dir The direction, as `hsdDirection` returns it (its `dy` is not needed).
+ * @returns $\alpha$.
+ */
 function hsdStep(
   z: Float64Array,
   s: Float64Array,
@@ -373,7 +533,12 @@ function hsdStep(
   return a
 }
 
-/** The reduced problem is held by the state implicitly; rebuild it from the standard form and the kept rows. */
+/**
+ * The reduced problem is held by the state implicitly; rebuild it from the standard form and the kept rows.
+ *
+ * @param state A state of `linearInteriorPoint`.
+ * @returns The reduced form, with fresh copies of the kept rows.
+ */
 function reducedOf(state: InteriorPointState): Reduced {
   const sf = state.standard
   const kept = Array.from(state.rowsKept.data)
@@ -385,16 +550,39 @@ function reducedOf(state: InteriorPointState): Reduced {
 /**
  * The primal–dual interior-point method for the linear program `problem` on the homogeneous self-dual embedding (Ye,
  * Todd & Mizuno, 1994; Xu, Hung & Ye, 1996; Andersen & Andersen, 2000, "The MOSEK interior point optimizer"), with
- * Mehrotra's predictor–corrector, as a traceable algorithm with no start. The embedding adds τ, κ ≥ 0 and solves
+ * Mehrotra's predictor–corrector, as a traceable algorithm with no start. The embedding adds $\tau, \kappa \ge 0$ and
+ * solves $\Amat\zvec = \bvec\tau$, $\Amat^\top\yvec + \svec = \cvec\tau$,
+ * $\bvec^\top\yvec - \cvec^\top\zvec = \kappa$, $\zvec \circ \svec = \zeros$ and $\tau\kappa = 0$, which always has a
+ * strictly complementary solution, reached from
+ * $(\zvec, \yvec, \svec, \tau, \kappa) = (\ones, \zeros, \ones, 1, 1)$ without a feasible start. If $\tau > 0$ there,
+ * $(\zvec, \yvec, \svec)/\tau$ is an optimal primal–dual pair (`status: 'optimal'`). If $\tau = 0$ then
+ * $\kappa = \bvec^\top\yvec - \cvec^\top\zvec > 0$, and $\yvec$ or $\zvec$ certifies that there is no optimum:
+ * $\bvec^\top\yvec > 0$ with $\Amat^\top\yvec \le \zeros$ proves the primal infeasible (Farkas; `'infeasible'`), and
+ * $\cvec^\top\zvec < 0$ with $\Amat\zvec = \zeros$, $\zvec \ge \zeros$ is a ray of unbounded descent (`'unbounded'`,
+ * the ray in `certificate`). Each step is one predictor–corrector iteration with a common step length for all
+ * variables; `x` is the current estimate $\zvec/\tau$ in the original variables. `diverged` is kept for numerical
+ * failure only. Throws as `parseLP` does for an ill-formed problem, when the algorithm is made.
  *
- *   Az = bτ,  Aᵀy + s = cτ,  bᵀy − cᵀz = κ,  z∘s = 0,  τκ = 0,
+ * @param problem The linear program, in the form of `scipy.optimize.linprog`.
+ * @param options The tolerance and the fraction of the step to the boundary taken.
+ * @returns The algorithm. Its start is ignored; once the run has ended or diverged, a step returns the state
+ *   unchanged.
  *
- * which always has a strictly complementary solution, reached from (z, y, s, τ, κ) = (1, 0, 1, 1, 1) without a
- * feasible start. If τ > 0 there, (z, y, s)/τ is an optimal primal–dual pair (`status: 'optimal'`). If τ = 0 then
- * κ = bᵀy − cᵀz > 0, and y or z certifies that there is no optimum: bᵀy > 0 with Aᵀy ≤ 0 proves the primal infeasible
- * (Farkas; `'infeasible'`), and cᵀz < 0 with Az = 0, z ≥ 0 is a ray of unbounded descent (`'unbounded'`, the ray in
- * `certificate`). Each step is one predictor–corrector iteration with a common step length for all variables; `x` is
- * the current estimate z/τ in the original variables. `diverged` is kept for numerical failure only.
+ * @example Converge to the vertex of a two-variable LP
+ * // Maximise x + y subject to x + 2y <= 4 and 3x + y <= 6, x, y >= 0 (so minimise -x - y).
+ * const problem = { c: [-1, -1], A_ub: [[1, 2], [3, 1]], b_ub: [4, 6] }
+ * const tr = trace(linearInteriorPoint(problem), {}, 50)
+ * print('mu =', tr.steps.map((s) => s.mu))
+ * const s = tr.steps.at(-1)
+ * print('status =', s.status, ' steps =', s.t)
+ * print('x =', s.x)
+ *
+ * @example Certify that a program is infeasible
+ * // x + y <= -1 has no solution with x, y >= 0: tau shrinks to 0 while kappa stays positive.
+ * const s = run(linearInteriorPoint({ c: [1, 1], A_ub: [[1, 1]], b_ub: [-1] }), {}, 50)
+ * print('status =', s.status)
+ * print('tau =', s.tau, ' kappa =', s.kappa)
+ * print('Farkas vector =', s.certificate)
  */
 export function linearInteriorPoint(
   problem: LinearProgram,
@@ -469,7 +657,12 @@ export function linearInteriorPoint(
 /**
  * Solve a linear program by the interior-point method (a `run` of `linearInteriorPoint`); `linprog`'s path. The status
  * is `optimal`, `infeasible` or `unbounded` (certified by the embedding; `ray` holds the unbounded direction),
- * `diverged` on numerical failure, or `limit` after `maxSteps`.
+ * `diverged` on numerical failure, or `limit` after `maxSteps`. The duals at an optimum are $\yvec/\tau$, mapped back
+ * to the original rows and bounds.
+ *
+ * @param problem The linear program.
+ * @param options `tolerance` (default 1e-9) and `maxSteps` (default 200).
+ * @returns The result.
  */
 export function interiorPointSolve(
   problem: LinearProgram,
@@ -493,21 +686,37 @@ export function interiorPointSolve(
 
 /** Points on the central path of a linear program. */
 export interface CentralPath {
-  /** The barrier parameters, as given. */
+  /** The barrier parameters, as given ($k$ of them). */
   mu: Tensor
-  /** The central point x(μ) in the original variables, one row per μ: shape [k, n]. */
+  /** The central point $\xvec(\mu)$ in the original variables, one row per $\mu$: shape `[k, n]`. */
   x: Tensor
-  /** cᵀx(μ). */
+  /** $\cvec^\top\xvec(\mu)$, one per $\mu$. */
   objective: Tensor
-  /** True for each μ whose Newton iteration met the tolerance, int32 (0 or 1). */
+  /** 1 for each $\mu$ whose Newton iterations met the tolerance, else 0; int32. */
   converged: Tensor
 }
 
 /**
- * The exact central path of a linear program: for each μ, the solution of Az = b, Aᵀy + s = c, z∘s = μ1, z, s > 0
- * (the minimiser of cᵀz − μ Σ log zⱼ subject to Az = b; Nocedal and Wright, 2006, §14.1). Each point is found by
- * damped Newton iterations warm-started from the previous one, so give `mu` in decreasing order. The path exists
- * when the primal and dual problems are both strictly feasible.
+ * The exact central path of a linear program: for each $\mu$, the solution of $\Amat\zvec = \bvec$,
+ * $\Amat^\top\yvec + \svec = \cvec$, $\zvec \circ \svec = \mu\ones$, $\zvec, \svec > \zeros$ (the minimiser of
+ * $\cvec^\top\zvec - \mu \sum_j \log z_j$ subject to $\Amat\zvec = \bvec$; Nocedal and Wright, 2006, §14.1), in the
+ * standard form of `./lp`. Each point is found by at most 100 damped Newton iterations, warm-started from the previous
+ * one (the first from Mehrotra's starting point), so give `mu` in decreasing order. The path exists when the primal
+ * and dual problems are both strictly feasible; a point whose iterations did not meet the tolerance is still returned,
+ * flagged in `converged`.
+ *
+ * @param problem The linear program, in the form of `scipy.optimize.linprog`.
+ * @param mu The barrier parameters $\mu > 0$, largest first.
+ * @param tolerance The largest residual accepted, the complementarity residual measured relative to $\mu$.
+ * @returns The central points, their objectives and convergence flags.
+ *
+ * @example The central path approaches the optimal vertex as mu shrinks
+ * // Maximise x + y subject to x + 2y <= 4 and 3x + y <= 6, x, y >= 0: the optimum is the vertex (1.6, 1.2).
+ * const problem = { c: [-1, -1], A_ub: [[1, 2], [3, 1]], b_ub: [4, 6] }
+ * const path = lpCentralPath(problem, [1, 0.1, 0.01, 0.001])
+ * print('x(mu) =', path.x)
+ * print('objective =', path.objective)
+ * print('converged =', path.converged)
  */
 export function lpCentralPath(problem: LinearProgram, mu: VectorLike, tolerance = 1e-10): CentralPath {
   const sf = standardForm(parseLP(problem))

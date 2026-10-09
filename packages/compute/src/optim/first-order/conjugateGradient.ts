@@ -1,6 +1,13 @@
 /**
- * Conjugate gradients: the linear method for symmetric positive definite systems Ax = b (equivalently, minimising
- * ½xᵀAx − bᵀx), and the nonlinear methods of Fletcher–Reeves and Polak–Ribière for general smooth objectives.
+ * Conjugate gradients: the linear method for symmetric positive definite systems $\Amat\xvec = \bvec$ (equivalently,
+ * minimising $\tfrac12\xvec^\top\Amat\xvec - \bvec^\top\xvec$), and the nonlinear methods of Fletcher–Reeves and
+ * Polak–Ribière for general smooth objectives.
+ *
+ * Both build each search direction from the new gradient (or residual) and the previous direction,
+ * $\pvec \leftarrow -\nabla f + \beta\pvec$, so they keep only a few vectors and never form a matrix. The linear
+ * method needs only products $\vvec \mapsto \Amat\vvec$, and reports an indefinite $\Amat$ rather than throwing; the
+ * nonlinear one takes its step lengths from a strong Wolfe line search and restarts from steepest descent when the
+ * direction stops being one of descent. Nocedal & Wright (2006), "Numerical Optimization", 2nd ed., chapter 5.
  */
 
 import type { Tensor, Vector } from 'aifn-compute/foundation/tensor'
@@ -15,39 +22,70 @@ import { operatorOf, type LinearOperator } from 'aifn-compute/numerics/linalg'
 const { axpy, data, dot, norm, scale, sub, toF64, vec } = dense
 type F64 = dense.F64
 
-/** Which β the nonlinear method uses. */
+/** Which $\beta$ the nonlinear method uses: Fletcher–Reeves or Polak–Ribière (clipped at 0). */
 export type ConjugateGradientVariant = 'fletcher-reeves' | 'polak-ribiere'
 
 /** The state of `conjugateGradient`. */
 export type ConjugateGradientState = IterateState & {
+  /** $\nabla f(\xvec)$. */
   grad: Vector
+  /** $\lVert \nabla f(\xvec) \rVert_2$, compared with `tolerance`. */
   gradNorm: number
-  /** The search direction for the next step, p = −∇f + βp_prev. */
+  /** The search direction for the next step, $\pvec = -\nabla f + \beta\pvec_{\text{prev}}$. */
   direction: Vector
-  /** The β used to build `direction` (0 on a restart). */
+  /** The $\beta$ used to build `direction` (0 on a restart). */
   beta: number
-  /** True when `direction` was reset to −∇f (every n steps, or when it was not a descent direction). */
+  /**
+   * True when `direction` was reset to $-\nabla f$ (every `restartEvery` steps, or when it was not a descent direction
+   * or $\beta$ was not finite). True at $t = 0$.
+   */
   restarted: boolean
+  /** The step length $\alpha$ the line search accepted on the last step; NaN at $t = 0$. */
   stepSize: number
+  /** The last line search, with its trial points; null at $t = 0$. */
   lineSearch: LineSearchResult | null
-  /** True when the last line search could not lower f (x unchanged); the run stops. */
+  /** True when the last line search could not lower $f$ ($\xvec$ unchanged); the run stops. */
   stalled: boolean
 }
 
 /** Options for `conjugateGradient`. */
 export type ConjugateGradientOptions = StoppingOptions & {
-  /** Default `'polak-ribiere'` (with β⁺ = max(β, 0)). */
+  /** Which $\beta$ to use. Default `'polak-ribiere'` (with $\beta^+ = \max(\beta, 0)$). */
   variant?: ConjugateGradientVariant
-  /** Restart with steepest descent every this many steps. Default n (the dimension). */
+  /** Restart with steepest descent every this many steps. Default $n$ (the dimension). */
   restartEvery?: number
-  /** Line-search options; default c₂ = 0.1, as the Fletcher–Reeves descent guarantee needs c₂ < ½. */
+  /**
+   * Line-search options; default $c_2 = 0.1$, as the Fletcher–Reeves descent guarantee needs $c_2 < \tfrac12$. The
+   * first trial step `alpha0` is chosen by the method and overrides any given here.
+   */
   lineSearchOptions?: StrongWolfeOptions
 }
 
 /**
- * Nonlinear conjugate gradients (Nocedal & Wright, §5.2): x ← x + αp with α from a strong Wolfe search, then
- * p ← −∇f + βp with β_FR = ‖g′‖²/‖g‖² (Fletcher & Reeves, 1964) or β_PR⁺ = max(0, g′ᵀ(g′ − g)/‖g‖²) (Polak & Ribière,
- * 1969). The first trial step length follows Nocedal & Wright eq. 3.60. `init` takes `{ x0 }`.
+ * Nonlinear conjugate gradients (Nocedal & Wright, §5.2): $\xvec \leftarrow \xvec + \alpha\pvec$ with $\alpha$ from a
+ * strong Wolfe search, then $\pvec \leftarrow -\gvec_{k+1} + \beta\pvec$ with
+ * $\beta_{\mathrm{FR}} = \lVert \gvec_{k+1} \rVert^2 / \lVert \gvec_k \rVert^2$ (Fletcher & Reeves, 1964) or
+ * $\beta_{\mathrm{PR}}^+ = \max(0, \gvec_{k+1}^\top(\gvec_{k+1} - \gvec_k) / \lVert \gvec_k \rVert^2)$ (Polak &
+ * Ribière, 1969), where $\gvec_k = \nabla f(\xvec_k)$. The first trial step length follows Nocedal & Wright eq. 3.60.
+ * The run stops when the gradient norm reaches `tolerance`, on divergence, or when a line search cannot lower $f$.
+ *
+ * @param f The objective, returning `{ value, grad }` at a point.
+ * @param options The choice of $\beta$, the restart period, the line-search options and the stopping options.
+ * @returns The algorithm; `init` takes `{ x0 }`.
+ *
+ * @example Rosenbrock's function from the standard start
+ * // (1 − a)² + 100(b − a²)², least at (1, 1).
+ * const rosenbrock = (x) => {
+ *   const [a, b] = x.data
+ *   return {
+ *     value: (1 - a) ** 2 + 100 * (b - a * a) ** 2,
+ *     grad: [-2 * (1 - a) - 400 * a * (b - a * a), 200 * (b - a * a)],
+ *   }
+ * }
+ * for (const variant of ['fletcher-reeves', 'polak-ribiere']) {
+ *   const s = run(conjugateGradient(rosenbrock, { variant }), { x0: [-1.2, 1] }, 1000)
+ *   print(`${variant}: x =`, s.x, ' steps =', s.t, ' evaluations =', s.evaluations)
+ * }
  */
 export function conjugateGradient(
   f: ObjectiveFn,
@@ -131,37 +169,62 @@ export function conjugateGradient(
 
 /** The state of `linearConjugateGradient`. */
 export type LinearConjugateGradientState = {
+  /** Steps taken. */
   t: number
+  /** The current iterate $\xvec$. */
   x: Vector
-  /** The residual r = b − Ax. */
+  /** The residual $\rvec = \bvec - \Amat\xvec$. */
   residual: Vector
+  /** $\lVert \rvec \rVert_2$. */
   residualNorm: number
-  /** The next search direction p (A-conjugate to all earlier ones in exact arithmetic). */
+  /** The next search direction $\pvec$ ($\Amat$-conjugate to all earlier ones in exact arithmetic). */
   direction: Vector
-  /** The step length α = rᵀr / pᵀAp of the last step (NaN at t = 0). */
+  /** The step length $\alpha = \rvec^\top\rvec / \pvec^\top\Amat\pvec$ of the last step (NaN at $t = 0$). */
   alpha: number
-  /** β = r′ᵀr′ / rᵀr of the last step (NaN at t = 0). */
+  /** $\beta = \rvec_{k+1}^\top\rvec_{k+1} / \rvec_k^\top\rvec_k$ of the last step (NaN at $t = 0$). */
   beta: number
-  /** The quadratic ½xᵀAx − bᵀx that CG minimises. */
+  /** The quadratic $\tfrac12\xvec^\top\Amat\xvec - \bvec^\top\xvec$ that CG minimises. */
   value: number
   /** Matrix–vector products so far. */
   products: number
+  /** $\lVert \rvec \rVert \le$ `tolerance` $\cdot \lVert \bvec \rVert$; the run stops. */
   converged: boolean
-  /** True when pᵀAp ≤ 0 was met: A is not positive definite and the run stops. */
+  /**
+   * True when $\pvec^\top\Amat\pvec \le 0$ was met: $\Amat$ is not positive definite and the run stops, with
+   * $\xvec$ left as it was.
+   */
   indefinite: boolean
 }
 
 /** Options for `linearConjugateGradient`. */
 export type LinearConjugateGradientOptions = {
-  /** Stop when ‖r‖ ≤ tolerance · ‖b‖. Default 1e-10. */
+  /**
+   * Stop when $\lVert \rvec \rVert \le$ `tolerance` $\cdot \lVert \bvec \rVert$ (or $\le$ `tolerance` when
+   * $\bvec = \zeros$). Default 1e-10.
+   */
   tolerance?: number
 }
 
 /**
- * Conjugate gradients for Ax = b with A symmetric positive definite (Hestenes & Stiefel, 1952; Nocedal & Wright,
- * Algorithm 5.2): at most n steps in exact arithmetic, with the error in the A-norm reduced at the rate
- * (√κ − 1)/(√κ + 1) per step for condition number κ. `A` is an n×n matrix or a function v ↦ Av; `b` has length n.
- * `init` takes `{ x0 }` (default zeros).
+ * Conjugate gradients for $\Amat\xvec = \bvec$ with $\Amat$ symmetric positive definite (Hestenes & Stiefel, 1952;
+ * Nocedal & Wright, Algorithm 5.2): at most $n$ steps in exact arithmetic, with the error in the $\Amat$-norm reduced
+ * at the rate $(\sqrt{\kappa} - 1)/(\sqrt{\kappa} + 1)$ per step for condition number $\kappa$. One product with
+ * $\Amat$ per step. An indefinite $\Amat$ is reported (`indefinite`), not thrown.
+ *
+ * @param A The operator $\Amat$: an $n \times n$ matrix, or a function returning $\Amat\vvec$ for a vector $\vvec$.
+ *   Only products with it are used, so it is never factored.
+ * @param b The right-hand side $\bvec$, of length $n$.
+ * @param options The relative residual tolerance.
+ * @returns The algorithm; `init` takes `{ x0 }`, and $\xvec_0 = \zeros$ when it is left out.
+ *
+ * @example A two-by-two system in two steps
+ * // A = [[4, 1], [1, 3]], b = (1, 2): the solution is (1/11, 7/11).
+ * const alg = linearConjugateGradient([[4, 1], [1, 3]], [1, 2])
+ * for (const steps of [0, 1, 2]) {
+ *   const s = run(alg, {}, steps)
+ *   print(`after ${steps} steps: x =`, s.x, ' residual norm =', s.residualNorm)
+ * }
+ * print('1/11, 7/11 =', [1 / 11, 7 / 11])
  */
 export function linearConjugateGradient(
   A: LinearOperator,
@@ -230,16 +293,37 @@ export function linearConjugateGradient(
 
 /** The result of `solveConjugateGradient`. */
 export type ConjugateGradientSolution = {
+  /** The last iterate, the solution when `converged`. */
   x: Tensor
+  /** $\lVert \bvec - \Amat\xvec \rVert_2$ at `x`. */
   residualNorm: number
+  /** Steps taken. */
   steps: number
+  /** The relative residual reached the tolerance. */
   converged: boolean
+  /** $\Amat$ was found not positive definite, and the run stopped. */
   indefinite: boolean
 }
 
 /**
- * Solves Ax = b (A symmetric positive definite, n×n or v ↦ Av) by linear conjugate gradients, running at most
- * `maxSteps` steps (default 10n, allowing for rounding). See `linearConjugateGradient`.
+ * Solves $\Amat\xvec = \bvec$ ($\Amat$ symmetric positive definite, $n \times n$ or $\vvec \mapsto \Amat\vvec$) by
+ * linear conjugate gradients, running at most `maxSteps` steps (default $10n$, allowing for rounding). Failure to
+ * converge and an indefinite $\Amat$ are reported in the result, not thrown. See `linearConjugateGradient`.
+ *
+ * @param A The operator $\Amat$: an $n \times n$ matrix, or a function returning $\Amat\vvec$ for a vector $\vvec$.
+ * @param b The right-hand side $\bvec$, of length $n$.
+ * @param options The relative residual `tolerance`, the starting point `x0` (default zeros) and `maxSteps`.
+ * @returns The last iterate, its residual norm, the steps taken, and whether it converged or met indefiniteness.
+ *
+ * @example Solve with a matrix, and with a function
+ * print(solveConjugateGradient([[4, 1], [1, 3]], [1, 2]))
+ * // A diagonal operator diag(1, 2, 3) given as a product, never as a matrix.
+ * print(solveConjugateGradient((v) => mul(tensor([1, 2, 3]), v), [1, 1, 1]).x)
+ *
+ * @example An indefinite matrix is reported
+ * // [[1, 2], [2, 1]] has eigenvalues 3 and −1.
+ * const { converged, indefinite } = solveConjugateGradient([[1, 2], [2, 1]], [1, 2])
+ * print('converged =', converged, ' indefinite =', indefinite)
  */
 export function solveConjugateGradient(
   A: LinearOperator,

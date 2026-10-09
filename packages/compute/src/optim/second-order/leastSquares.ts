@@ -1,6 +1,12 @@
 /**
- * Nonlinear least squares, minimising f(x) = ½‖r(x)‖² for residuals r: ℝⁿ → ℝᵐ with Jacobian J (m×n): Gauss–Newton,
- * which solves the linearised problem min ‖Jp + r‖ at each step, and Levenberg–Marquardt, which damps it.
+ * Nonlinear least squares, minimising $f(\xvec) = \tfrac12\lVert \rvec(\xvec) \rVert^2$ for residuals
+ * $\rvec: \reals^n \to \reals^m$ with Jacobian $\Jmat$ ($m \times n$): Gauss–Newton, which solves the linearised
+ * problem $\min_{\pvec} \lVert \Jmat\pvec + \rvec \rVert$ at each step, and Levenberg–Marquardt, which damps it.
+ *
+ * Both use $\Jmat^\top\Jmat$ in place of the Hessian of $f$, which drops the second derivatives of the residuals, so
+ * they need only the residuals and their Jacobian, and converge fast when the residuals at the solution are small.
+ * The gradient is $\nabla f = \Jmat^\top\rvec$. Non-convergence and divergence (a non-finite value, iterate or
+ * Jacobian) are reported in the state, not thrown.
  */
 
 import { cholesky, choleskySolve, lstsq } from 'aifn-compute/numerics/linalg'
@@ -21,11 +27,26 @@ import { dense } from 'aifn-compute/foundation/tensor'
 const { allFinite, axpy, data, dot, gram, mat, matTVec, matVec, norm, scale, toF64, toMatrixF64, vec } = dense
 type F64 = dense.F64
 
-/** Residuals and their Jacobian at a point: r (length m) and J (m×n, J_ij = ∂r_i/∂x_j). */
+/**
+ * Residuals and their Jacobian at a point: `residuals` $\rvec$ (length $m$) and `jacobian` $\Jmat$
+ * ($m \times n$, $J_{ij} = \partial r_i / \partial x_j$).
+ */
 export type ResidualFunction = (x: Vector) => { residuals: VectorLike; jacobian: MatrixLike }
 
+/**
+ * The residuals at a point as working arrays: $\rvec$, $\Jmat$ (row-major), $m$, and the value
+ * $\tfrac12\lVert \rvec \rVert^2$ and gradient $\Jmat^\top\rvec$ of the objective.
+ */
 type Residuals = { r: F64; J: F64; m: number; value: number; grad: F64 }
 
+/**
+ * Evaluates the residual function at a point and derives the least-squares value and gradient from it.
+ *
+ * @param fn The residual function.
+ * @param x The point, $n$ values.
+ * @param where The caller's name, for error messages (a Jacobian that is not $m \times n$ throws).
+ * @returns The residuals, the Jacobian, $m$, $\tfrac12\lVert \rvec \rVert^2$ and $\Jmat^\top\rvec$.
+ */
 function residualsAt(fn: ResidualFunction, x: F64, where: string): Residuals {
   const out = fn(vec(x))
   const r = toF64(out.residuals, where)
@@ -34,7 +55,13 @@ function residualsAt(fn: ResidualFunction, x: F64, where: string): Residuals {
   return { r, J, m, value: 0.5 * dot(r, r), grad: matTVec(J, r, m, x.length) }
 }
 
-/** ½‖r(x)‖² and its gradient Jᵀr as an objective, for line searches. */
+/**
+ * $\tfrac12\lVert \rvec(\xvec) \rVert^2$ and its gradient $\Jmat^\top\rvec$ as an objective, for line searches.
+ *
+ * @param fn The residual function.
+ * @param where The caller's name, for error messages.
+ * @returns The objective, returning `{ value, grad }`.
+ */
 function asObjective(fn: ResidualFunction, where: string): ObjectiveFn {
   return (x) => {
     const { value, grad } = residualsAt(fn, data(x), where)
@@ -44,24 +71,30 @@ function asObjective(fn: ResidualFunction, where: string): ObjectiveFn {
 
 /** The state of `gaussNewton` and `levenbergMarquardt`. */
 export type LeastSquaresState = IterateState & {
-  /** r(x). */
+  /** $\rvec(\xvec)$. */
   residuals: Vector
-  /** J(x), m×n. */
+  /** $\Jmat(\xvec)$, $m \times n$. */
   jacobian: Matrix
-  /** ∇f = Jᵀr. */
+  /** $\nabla f = \Jmat^\top\rvec$. */
   grad: Vector
+  /** $\lVert \Jmat^\top\rvec \rVert_2$, compared with `tolerance`. */
   gradNorm: number
-  /** The step proposed on the last step (zeros at t = 0). */
+  /** The step proposed on the last step (zeros at $t = 0$). */
   step: Vector
 }
 
 /** The state of `gaussNewton`. */
 export type GaussNewtonState = LeastSquaresState & {
-  /** Numerical rank of J at the last step (from the SVD); below n means the step is the minimum-norm one. */
+  /**
+   * Numerical rank of $\Jmat$ at the last step (from the SVD); below $n$ means the step is the minimum-norm one. NaN
+   * at $t = 0$.
+   */
   rank: number
+  /** The step length $\alpha$ taken along the last step (1 without a line search); NaN at $t = 0$. */
   stepSize: number
+  /** The last backtracking search, with its trial points; null without a line search or at $t = 0$. */
   lineSearch: LineSearchResult | null
-  /** True when the last line search could not lower f (x unchanged); the run stops. */
+  /** True when the last line search could not lower $f$ ($\xvec$ unchanged); the run stops. */
   stalled: boolean
 }
 
@@ -69,9 +102,20 @@ export type GaussNewtonState = LeastSquaresState & {
 export type GaussNewtonOptions = StoppingOptions & {
   /** `'backtracking'` (default, damped Gauss–Newton) or `'none'` (full steps). */
   lineSearch?: 'backtracking' | 'none'
+  /** Options of the backtracking search. */
   lineSearchOptions?: BacktrackingOptions
 }
 
+/**
+ * The state shared by both methods at the start point: the residuals, Jacobian, value and gradient there.
+ *
+ * @param fn The residual function.
+ * @param x0 The start point $\xvec_0$.
+ * @param name The method's name, for error messages.
+ * @param tolerance The gradient-norm tolerance for `converged`.
+ * @param divergeAbove The value above which the state is flagged `diverged` (as is a non-finite Jacobian).
+ * @returns The state at $t = 0$, with one evaluation counted.
+ */
 function initial(fn: ResidualFunction, x0: VectorLike, name: string, tolerance: number, divergeAbove: number) {
   const x = toF64(x0, name)
   const e = residualsAt(fn, x, name)
@@ -93,9 +137,31 @@ function initial(fn: ResidualFunction, x0: VectorLike, name: string, tolerance: 
 }
 
 /**
- * Gauss–Newton (Nocedal & Wright, §10.3): the step p minimises ‖J p + r‖ (solved by the SVD, so a rank-deficient J
- * gives the minimum-norm step), then x ← x + αp with α from Armijo backtracking on ½‖r‖² (or α = 1 with
- * `lineSearch: 'none'`). Convergence is fast when the residuals at the solution are small. `init` takes `{ x0 }`.
+ * Gauss–Newton (Nocedal & Wright, §10.3): the step $\pvec$ minimises $\lVert \Jmat\pvec + \rvec \rVert$ (solved by
+ * the SVD, so a rank-deficient $\Jmat$ gives the minimum-norm step), then $\xvec \leftarrow \xvec + \alpha\pvec$ with
+ * $\alpha$ from Armijo backtracking on $\tfrac12\lVert \rvec \rVert^2$ (or $\alpha = 1$ with `lineSearch: 'none'`).
+ * Convergence is fast when the residuals at the solution are small. A line search that cannot lower $f$ sets
+ * `stalled` and ends the run.
+ *
+ * @param residuals The residual function, returning $\rvec(\xvec)$ and $\Jmat(\xvec)$.
+ * @param options The line search and its options, and the stopping options.
+ * @returns The algorithm; `init` takes `{ x0 }`.
+ *
+ * @example Fit an exponential decay
+ * // Fit y = a·exp(bt) to four exact points of 2·exp(−t/2), from (a, b) = (1, 0).
+ * const t = [0, 1, 2, 3]
+ * const y = t.map((ti) => 2 * Math.exp(-0.5 * ti))
+ * const residuals = (x) => {
+ *   const [a, b] = x.data
+ *   return {
+ *     residuals: t.map((ti, i) => a * Math.exp(b * ti) - y[i]),
+ *     jacobian: t.map((ti) => [Math.exp(b * ti), a * ti * Math.exp(b * ti)]),
+ *   }
+ * }
+ * for (const steps of [1, 2, 4]) {
+ *   const s = run(gaussNewton(residuals), { x0: [1, 0] }, steps)
+ *   print(`after ${steps} steps: (a, b) =`, s.x, ' f =', s.value)
+ * }
  */
 export function gaussNewton(
   residuals: ResidualFunction,
@@ -155,11 +221,11 @@ export function gaussNewton(
 
 /** The state of `levenbergMarquardt`. */
 export type LevenbergMarquardtState = LeastSquaresState & {
-  /** The damping λ for the next step. */
+  /** The damping $\lambda$ for the next step. */
   lambda: number
-  /** Nielsen's growth factor ν for λ after a rejected step. */
+  /** Nielsen's growth factor $\nu$ for $\lambda$ after a rejected step (2 after an accepted one). */
   nu: number
-  /** Gain ratio ρ = actual / predicted reduction of the last step. */
+  /** Gain ratio $\rho$ = actual / predicted reduction of the last step (NaN at $t = 0$). */
   ratio: number
   /** Whether the last proposed step was accepted (x moved). */
   accepted: boolean
@@ -167,21 +233,43 @@ export type LevenbergMarquardtState = LeastSquaresState & {
 
 /** Options for `levenbergMarquardt`. */
 export type LevenbergMarquardtOptions = StoppingOptions & {
-  /** Initial λ = τ · max diag(JᵀJ). Default τ = 1e-3. */
+  /** $\tau$ in the initial damping $\lambda = \tau \max_i (\Jmat^\top\Jmat)_{ii}$. Default 1e-3. */
   tau?: number
   /**
-   * `'marquardt'` damps with λ·diag(JᵀJ) (Marquardt, 1963), making the step invariant to rescaling x; `'identity'`
-   * (default) damps with λI (Levenberg, 1944).
+   * `'marquardt'` damps with $\lambda\diag(\Jmat^\top\Jmat)$ (Marquardt, 1963; each entry at least $10^{-12}$),
+   * making the step invariant to rescaling $\xvec$; `'identity'` (default) damps with $\lambda\Imat$ (Levenberg, 1944).
    */
   scaling?: 'identity' | 'marquardt'
 }
 
 /**
  * Levenberg–Marquardt (Levenberg, 1944; Marquardt, 1963) with Nielsen's (1999) damping update: solve
- * (JᵀJ + λD)p = −Jᵀr, accept when the gain ratio ρ is positive, then λ ← λ·max(⅓, 1 − (2ρ − 1)³) and ν ← 2 on
- * success, λ ← λν and ν ← 2ν on failure (Madsen, Nielsen & Tingleff, 2004, "Methods for Non-Linear Least Squares
- * Problems", Algorithm 3.16). Large λ gives short gradient-descent steps, small λ Gauss–Newton steps. `init` takes
- * `{ x0 }`.
+ * $(\Jmat^\top\Jmat + \lambda\Dmat)\pvec = -\Jmat^\top\rvec$, accept when the gain ratio $\rho$ is positive, then
+ * $\lambda \leftarrow \lambda\max(\tfrac13, 1 - (2\rho - 1)^3)$ and $\nu \leftarrow 2$ on success,
+ * $\lambda \leftarrow \lambda\nu$ and $\nu \leftarrow 2\nu$ on failure (Madsen, Nielsen & Tingleff, 2004, "Methods
+ * for Non-Linear Least Squares Problems", Algorithm 3.16). Large $\lambda$ gives short gradient-descent steps, small
+ * $\lambda$ Gauss–Newton steps. $\Dmat$ is $\Imat$ or $\diag(\Jmat^\top\Jmat)$ (see `scaling`). A rejected step leaves
+ * $\xvec$ unchanged; a step too small to change $\xvec$ counts as converged.
+ *
+ * @param residuals The residual function, returning $\rvec(\xvec)$ and $\Jmat(\xvec)$.
+ * @param options The initial damping factor $\tau$, the damping `scaling`, and the stopping options.
+ * @returns The algorithm; `init` takes `{ x0 }`, and each step evaluates the residuals once.
+ *
+ * @example Fit an exponential decay, watching the damping fall
+ * // Fit y = a·exp(bt) to four exact points of 2·exp(−t/2), from (a, b) = (1, 0).
+ * const t = [0, 1, 2, 3]
+ * const y = t.map((ti) => 2 * Math.exp(-0.5 * ti))
+ * const residuals = (x) => {
+ *   const [a, b] = x.data
+ *   return {
+ *     residuals: t.map((ti, i) => a * Math.exp(b * ti) - y[i]),
+ *     jacobian: t.map((ti) => [Math.exp(b * ti), a * ti * Math.exp(b * ti)]),
+ *   }
+ * }
+ * for (const steps of [1, 2, 4]) {
+ *   const s = run(levenbergMarquardt(residuals), { x0: [1, 0] }, steps)
+ *   print(`after ${steps} steps: (a, b) =`, s.x, ' lambda =', s.lambda, ' accepted =', s.accepted)
+ * }
  */
 export function levenbergMarquardt(
   residuals: ResidualFunction,
@@ -252,21 +340,51 @@ export function levenbergMarquardt(
 
 /** The result of `leastSquares`. */
 export type LeastSquaresResult = {
+  /** The method that ran. */
   method: 'gauss-newton' | 'levenberg-marquardt'
+  /** The final iterate. */
   x: Vector
-  /** ½‖r(x)‖². */
+  /** $\tfrac12\lVert \rvec(\xvec) \rVert^2$. */
   value: number
+  /** $\rvec(\xvec)$ at the final iterate. */
   residuals: Vector
+  /** $\lVert \Jmat^\top\rvec \rVert_2$ at the final iterate. */
   gradNorm: number
+  /** Steps taken. */
   steps: number
+  /** Evaluations of the residual function, the initial one included. */
   evaluations: number
+  /** The method's stopping test passed. */
   converged: boolean
+  /** The value, iterate or Jacobian became non-finite, or the value passed `divergeAbove`. */
   diverged: boolean
 }
 
 /**
- * Minimises ½‖r(x)‖² from `x0` by Levenberg–Marquardt (default) or Gauss–Newton, for at most `maxSteps` steps
- * (default 200). A `run` wrapper over `levenbergMarquardt` / `gaussNewton`.
+ * Minimises $\tfrac12\lVert \rvec(\xvec) \rVert^2$ from `x0` by Levenberg–Marquardt (default) or Gauss–Newton, for
+ * at most `maxSteps` steps (default 200). A `run` wrapper over `levenbergMarquardt` / `gaussNewton`; failure to
+ * converge is reported in the result.
+ *
+ * @param residuals The residual function, returning $\rvec(\xvec)$ and $\Jmat(\xvec)$.
+ * @param x0 The start point $\xvec_0$.
+ * @param options `method` and `maxSteps`, and the chosen method's options.
+ * @returns The final iterate, its value, residuals and gradient norm, the steps and evaluations used, and whether it
+ *   converged or diverged.
+ *
+ * @example Fit an exponential decay in one call
+ * // Fit y = a·exp(bt) to four exact points of 2·exp(−t/2), from (a, b) = (1, 0).
+ * const t = [0, 1, 2, 3]
+ * const y = t.map((ti) => 2 * Math.exp(-0.5 * ti))
+ * const residuals = (x) => {
+ *   const [a, b] = x.data
+ *   return {
+ *     residuals: t.map((ti, i) => a * Math.exp(b * ti) - y[i]),
+ *     jacobian: t.map((ti) => [Math.exp(b * ti), a * ti * Math.exp(b * ti)]),
+ *   }
+ * }
+ * const fit = leastSquares(residuals, [1, 0])
+ * print('(a, b) =', fit.x, ' f =', fit.value)
+ * print('steps =', fit.steps, ' converged =', fit.converged)
  */
 export function leastSquares(
   residuals: ResidualFunction,

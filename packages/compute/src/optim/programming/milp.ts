@@ -3,6 +3,10 @@
  * automatic method of solving discrete programming problems", Econometrica 28(3)), with the whole search tree kept,
  * and Gomory's fractional cutting planes for pure integer programs (Gomory, 1958, "Outline of an algorithm for integer
  * solutions to linear programs", Bull. AMS 64(5); presentation as in Wolsey, 1998, "Integer Programming", §8.6).
+ *
+ * Both minimise, as `scipy.optimize.milp`, and both solve their linear programs with the simplex method of
+ * `./simplex`: branch and bound solves each node's relaxation from scratch, while the cutting-plane method keeps one
+ * optimal tableau and adds a row and a column per cut.
  */
 
 import { treeFromParents, type Tree } from 'aifn-compute/graph'
@@ -21,6 +25,7 @@ import { DomainError } from 'aifn-compute/foundation/errors'
  * as `scipy.optimize.milp` (1 = integer, 0 = continuous; default: every variable integer).
  */
 export interface MixedIntegerProgram extends LinearProgram {
+  /** For each of the $n$ variables, non-zero (1) when it must be an integer, 0 when continuous. Default all 1. */
   integrality?: VectorLike
 }
 
@@ -41,27 +46,38 @@ export type BranchNodeStatus =
 
 /** One node of the branch-and-bound tree. */
 export interface BranchNode {
+  /** The node's id: its index in `nodes`, in order of creation (the root is 0). */
   id: number
-  /** The parent's id, or −1 for the root. */
+  /** The parent's id, or $-1$ for the root. */
   parent: number
+  /** The number of branchings from the root (0 for the root). */
   depth: number
-  /** The node's variable bounds (the problem's, tightened by branching), length n. */
+  /** The node's lower bounds on the variables (the problem's, tightened by branching), length $n$. */
   lower: Tensor
+  /** The node's upper bounds on the variables, length $n$. */
   upper: Tensor
-  /** The branching decision that created this node, or null for the root. */
+  /**
+   * The branching decision that created this node, or null for the root: the `variable` (0-based), its fractional
+   * `value` in the parent's relaxation, and the `direction` (`down` for $x_j \le \lfloor v \rfloor$, `up` for
+   * $x_j \ge \lceil v \rceil$).
+   */
   branch: { variable: number; value: number; direction: 'down' | 'up' } | null
+  /** How the node ended, or `open`. */
   status: BranchNodeStatus
   /** A lower bound on the node's objective: its LP relaxation value once solved, the parent's until then. */
   bound: number
   /** The relaxation's solution, or null if not solved or infeasible. */
   x: Tensor | null
-  /** The step at which the node was processed, or −1 while open. */
+  /** The step at which the node was processed, or $-1$ while open. */
   order: number
-  /** The variable branched on at this node, or −1. */
+  /** The variable branched on at this node, or $-1$. */
   branchedOn: number
 }
 
-/** Node selection. `depth-first` dives (down branch first), `best-bound` takes the lowest bound, `breadth-first` FIFO. */
+/**
+ * Node selection. `depth-first` dives (down branch first), `best-bound` takes the lowest bound (the deeper node on
+ * ties), `breadth-first` takes the oldest open node.
+ */
 export type NodeSelection = 'depth-first' | 'best-bound' | 'breadth-first'
 
 /** Options for `branchAndBound`. */
@@ -74,7 +90,9 @@ export interface BranchAndBoundOptions {
   integralityTolerance?: Scalar
 }
 
-/** Overall status of a branch-and-bound or cutting-plane run. */
+/**
+ * Overall status of a branch-and-bound or cutting-plane run: `running`, or `optimal`, `infeasible` or `unbounded`.
+ */
 export type IntegerProgramStatus = 'running' | 'optimal' | 'infeasible' | 'unbounded'
 
 /**
@@ -90,27 +108,51 @@ export interface BranchAndBoundState extends Status {
   incumbent: Tensor | null
   /** Its objective, Infinity when there is none. */
   incumbentValue: Scalar
-  /** The smallest bound over open nodes and the incumbent: the optimum lies in [bestBound, incumbentValue]. */
+  /**
+   * The smallest bound over open nodes and the incumbent: the optimum lies between `bestBound` and `incumbentValue`.
+   */
   bestBound: Scalar
-  /** incumbentValue − bestBound (Infinity with no incumbent). */
+  /**
+   * `incumbentValue` minus `bestBound`: `Infinity` with no incumbent while nodes are open, and NaN once a run ends
+   * with none.
+   */
   gap: Scalar
-  /** The node processed by the last step, or −1. */
+  /** The node processed by the last step, or $-1$. */
   current: Index
+  /** Whether the search goes on, or how it ended. */
   status: IntegerProgramStatus
   /** Simplex steps over all relaxations. */
   lpSteps: Size
+  /** The problem as parsed. */
   problem: ParsedLP
+  /** 1 for each integer variable, 0 for a continuous one; int32, length $n$. */
   integer: Tensor
+  /** True when `status` is `optimal`. */
   converged: boolean
+  /** True when `status` is `infeasible` or `unbounded`. */
   terminated: boolean
 }
 
+/**
+ * Read which variables must be integers. Throws `ShapeError` when `integrality` does not have $n$ entries.
+ *
+ * @param problem The mixed-integer program.
+ * @param n The number of variables.
+ * @returns 1 for each integer variable (a non-zero entry, or every variable when `integrality` is absent), else 0.
+ */
 function readIntegrality(problem: MixedIntegerProgram, n: number): Int32Array {
   if (problem.integrality === undefined) return new Int32Array(n).fill(1)
   return Int32Array.from(readVector(problem.integrality, 'integrality', n), (v) => (v ? 1 : 0))
 }
 
-/** The relaxation at a node: the problem with the node's bounds. */
+/**
+ * The relaxation at a node: the problem with the node's bounds and no integrality.
+ *
+ * @param lp The parsed problem.
+ * @param lower The node's lower bounds, length $n$.
+ * @param upper The node's upper bounds, length $n$.
+ * @returns The linear program to solve at the node.
+ */
 function relaxation(lp: ParsedLP, lower: ArrayLike<number>, upper: ArrayLike<number>): LinearProgram {
   return {
     c: vector(lp.c),
@@ -122,14 +164,33 @@ function relaxation(lp: ParsedLP, lower: ArrayLike<number>, upper: ArrayLike<num
   }
 }
 
+/**
+ * How far a value is from the nearest integer.
+ *
+ * @param v The value.
+ * @returns The distance, between 0 and $1/2$.
+ */
 const fractionality = (v: number) => Math.abs(v - Math.round(v))
 
-/** The Status flags of an integer-programming state from its outcome. */
+/**
+ * The Status flags of an integer-programming state from its outcome.
+ *
+ * @param status The outcome.
+ * @returns `converged` (when `optimal`) and `terminated` (when `infeasible` or `unbounded`).
+ */
 const flags = (status: IntegerProgramStatus) => ({
   converged: status === 'optimal',
   terminated: status === 'infeasible' || status === 'unbounded',
 })
 
+/**
+ * Complete a branch-and-bound state: the best bound over the open nodes and the incumbent, the gap, and the status
+ * (`optimal` or `infeasible` once no node is open, with or without an incumbent; `running` before).
+ *
+ * @param s The state without its summary fields.
+ * @param override A status to report instead (an unbounded relaxation ends the run as `unbounded`).
+ * @returns The state.
+ */
 function summarise(
   s: Omit<BranchAndBoundState, 'bestBound' | 'gap' | 'status' | 'converged' | 'terminated'>,
   override?: IntegerProgramStatus,
@@ -141,7 +202,15 @@ function summarise(
   return { ...s, bestBound, gap: s.incumbentValue - bestBound, status, ...flags(status) }
 }
 
-/** Pick (and remove) the next open node. */
+/**
+ * Pick (and remove) the next open node: the last added for `depth-first`, the first for `breadth-first`, and for
+ * `best-bound` the lowest bound, the deeper node on ties.
+ *
+ * @param open The ids of the open nodes, oldest first (not modified).
+ * @param nodes Every node, indexed by id.
+ * @param strategy The node selection.
+ * @returns The chosen id, and the remaining open ids in order.
+ */
 function select(open: readonly number[], nodes: readonly BranchNode[], strategy: NodeSelection): [number, number[]] {
   const rest = [...open]
   if (strategy === 'depth-first') return [rest.pop()!, rest]
@@ -158,11 +227,25 @@ function select(open: readonly number[], nodes: readonly BranchNode[], strategy:
 }
 
 /**
- * Branch and bound (Land and Doig, 1960) for the mixed-integer linear program `problem`, as a traceable algorithm with
- * no start. Each step processes one node: it solves the node's LP
- * relaxation by the simplex method and prunes the node (`infeasible`, or `bound` when its value cannot beat the
- * incumbent), accepts it (`integral`, perhaps a new incumbent), or branches on a fractional variable xⱼ = v into
- * xⱼ ≤ ⌊v⌋ (`down`) and xⱼ ≥ ⌈v⌉ (`up`). The whole tree is kept in `nodes`. The run is done when no node is open.
+ * Branch and bound (Land and Doig, 1960) for the mixed-integer linear program `problem`, as a traceable algorithm
+ * with no start. Each step processes one node: it solves the node's LP relaxation by the simplex method and prunes the
+ * node (`infeasible`, or `bound` when its value cannot beat the incumbent), accepts it (`integral`, perhaps a new
+ * incumbent), or branches on a fractional variable $x_j = v$ into $x_j \le \lfloor v \rfloor$ (`down`) and
+ * $x_j \ge \lceil v \rceil$ (`up`). The whole tree is kept in `nodes`. The run is done when no node is open; an
+ * unbounded relaxation ends it as `unbounded`. Throws as `parseLP` does for an ill-formed problem.
+ *
+ * @param problem The mixed-integer program, in the form of `scipy.optimize.milp`.
+ * @param options The node selection, the branching variable and the integrality tolerance.
+ * @returns The algorithm. Its start is ignored; once the run has ended, a step returns the state unchanged.
+ *
+ * @example Watch the bounds close on an integer optimum
+ * // Maximise 5x + 4y subject to 6x + 4y <= 24 and x + 2y <= 6, x, y >= 0 integer. The relaxation's optimum is
+ * // fractional; branch and bound proves the integer one.
+ * const problem = { c: [-5, -4], A_ub: [[6, 4], [1, 2]], b_ub: [24, 6] }
+ * const tr = trace(branchAndBound(problem), {}, 50)
+ * for (const s of tr.steps.slice(1))
+ *   print('node', s.current, s.nodes[s.current].status, ' incumbent', s.incumbentValue, ' best bound', s.bestBound)
+ * print('x =', tr.steps.at(-1).incumbent)
  */
 export function branchAndBound(
   problem: MixedIntegerProgram,
@@ -280,6 +363,7 @@ export function branchAndBound(
 
 /** Node data of a branch-and-bound search tree (see `branchAndBoundTree`). */
 export interface SearchTreeNodeData {
+  /** How the node ended, or `open`. */
   status: BranchNodeStatus
   /** Why the node was pruned: its relaxation is `infeasible`, or its `bound` cannot beat the incumbent; else null. */
   prunedBy: 'infeasible' | 'bound' | null
@@ -287,24 +371,41 @@ export interface SearchTreeNodeData {
   bound: number
   /** The relaxation's solution, or null if not solved or infeasible. */
   x: number[] | null
-  /** The step at which the node was processed, −1 while open. */
+  /** The step at which the node was processed, $-1$ while open. */
   order: number
-  /** The variable branched on at this node, or −1. */
+  /** The variable branched on at this node, or $-1$. */
   branchedOn: number
 }
 
-/** Edge data of a branch-and-bound search tree: the branching decision, labelled in TeX, e.g. `$x_{1} \le 2$`. */
+/**
+ * Edge data of a branch-and-bound search tree: the branching decision (as in `BranchNode.branch`: the 0-based
+ * `variable`, its fractional `value` and the `direction`). The tree also gives each edge a TeX `label` such as
+ * `$x_{1} \le 2$`, with the variable numbered from 1.
+ */
 export interface SearchTreeEdgeData {
+  /** The variable branched on, 0-based. */
   variable: number
+  /** Its fractional value in the parent's relaxation. */
   value: number
+  /** `down` for the branch $x_j \le \lfloor v \rfloor$, `up` for $x_j \ge \lceil v \rceil$. */
   direction: 'down' | 'up'
 }
 
 /**
- * The branch-and-bound search tree as an `aifn-compute/graph` `Tree` (binary: the down branch xⱼ ≤ ⌊v⌋ is slot 0, the up
- * branch xⱼ ≥ ⌈v⌉ slot 1). Node ids are the `BranchNode` ids (the root is 0); nodes carry their bound, status and
- * pruning reason, edges the branching decision with a TeX label. Works on any state's `nodes`, so a figure can draw
- * the tree as it grows.
+ * The branch-and-bound search tree as an `aifn-compute/graph` `Tree` (binary: the down branch
+ * $x_j \le \lfloor v \rfloor$ is slot 0, the up branch $x_j \ge \lceil v \rceil$ slot 1). Node ids are the `BranchNode`
+ * ids (the root is 0); nodes carry their bound, status and pruning reason, edges the branching decision with a TeX
+ * label. Works on any state's `nodes`, so a figure can draw the tree as it grows.
+ *
+ * @param nodes The nodes of a branch-and-bound state (or `MixedIntegerResult.tree`), indexed by id.
+ * @returns The tree; its edges are indexed by the child's id (null for the root).
+ *
+ * @example The tree of a small integer program
+ * const r = milp({ c: [-5, -4], A_ub: [[6, 4], [1, 2]], b_ub: [24, 6] })
+ * const tree = branchAndBoundTree(r.tree)
+ * print('status =', tree.nodes.map((n) => n.status))
+ * print('bound =', tree.nodes.map((n) => n.bound))
+ * print('branch =', tree.edges.map((e) => (e ? e.label : '-')))
  */
 export function branchAndBoundTree(nodes: readonly BranchNode[]): Tree<SearchTreeNodeData, SearchTreeEdgeData> {
   const tree = treeFromParents<SearchTreeNodeData, SearchTreeEdgeData>(
@@ -334,9 +435,11 @@ export function branchAndBoundTree(nodes: readonly BranchNode[]): Tree<SearchTre
 
 /** The result of `milp`. */
 export interface MixedIntegerResult {
+  /** How the search ended: `optimal`, `infeasible`, `unbounded`, or `limit` when it stopped at `maxSteps`. */
   status: Exclude<IntegerProgramStatus, 'running'> | 'limit'
   /** The best integral solution (NaN when none). */
   x: Tensor
+  /** The objective of `x`: `-Infinity` when unbounded, NaN when there is no integral solution. */
   objective: Scalar
   /** The lower bound proved; equal to `objective` at an optimum. */
   bound: Scalar
@@ -349,8 +452,24 @@ export interface MixedIntegerResult {
 }
 
 /**
- * Solve a mixed-integer linear program by branch and bound (as `scipy.optimize.milp`, minimising; negate c to
- * maximise), processing at most `maxSteps` nodes (default 100 000). The result carries the whole search tree.
+ * Solve a mixed-integer linear program by branch and bound (as `scipy.optimize.milp`, minimising; negate `c` to
+ * maximise), processing at most `maxSteps` nodes (default 100 000). The result carries the whole search tree. Throws as
+ * `parseLP` does for an ill-formed problem.
+ *
+ * @param problem The mixed-integer program, in the form of `scipy.optimize.milp`.
+ * @param options The options of `branchAndBound`, and `maxSteps`, the most nodes processed.
+ * @returns The best integral solution, its objective, the bound proved and the search tree.
+ *
+ * @example An integer optimum is not the rounded LP optimum
+ * // Maximise 5x + 4y subject to 6x + 4y <= 24 and x + 2y <= 6, x, y >= 0.
+ * const problem = { c: [-5, -4], A_ub: [[6, 4], [1, 2]], b_ub: [24, 6] }
+ * print('LP relaxation:', linprog(problem).x)
+ * const r = milp(problem)
+ * print('integer optimum:', r.x, ' objective =', r.objective, ' nodes =', r.nodes)
+ *
+ * @example Only some variables integer
+ * const r = milp({ c: [-5, -4], A_ub: [[6, 4], [1, 2]], b_ub: [24, 6], integrality: [1, 0] })
+ * print('x integer, y continuous:', r.x, ' objective =', r.objective)
  */
 export function milp(
   problem: MixedIntegerProgram,
@@ -372,9 +491,11 @@ export function milp(
 // ---------------------------------------------------------------------------------------------------------------------
 // Gomory fractional cuts.
 
-/** A cutting plane in the original variables: a·x ≤ b. */
+/** A cutting plane in the original variables: $\avec^\top\xvec \le b$. */
 export interface Cut {
+  /** The coefficients $\avec$, length $n$. */
   a: Tensor
+  /** The right-hand side $b$. */
   b: Scalar
 }
 
@@ -389,36 +510,58 @@ export interface GomoryOptions {
  * cuts added; `converged` when the relaxation's optimum is integral, `terminated` when infeasible or unbounded.
  */
 export interface GomoryState extends Status {
-  /** The tableau, (m + 1) × (k + 1), in the layout of `SimplexState.tableau`; each cut adds a row and a column. */
+  /**
+   * The tableau, $(m + 1) \times (k + 1)$, in the layout of `SimplexState.tableau`; each cut adds a row and a column.
+   */
   tableau: Tensor
+  /** The basic column of each constraint row, int32, length $m$. */
   basis: Tensor
-  /** Column labels; cut slacks are `g1`, `g2`, …. */
+  /** Column labels; cut slacks are `g1`, `g2`, and so on. */
   labels: readonly string[]
   /** The relaxation's optimum in the original variables. */
   x: Tensor
+  /** $\cvec^\top\xvec$ at that optimum. */
   objective: Scalar
-  /** The cuts added so far, as a·x ≤ b in the original variables. */
+  /** The cuts added so far, as $\avec^\top\xvec \le b$ in the original variables. */
   cuts: readonly Cut[]
-  /** The tableau row the last cut was read from, or −1. */
+  /** The tableau row the last cut was read from, or $-1$. */
   sourceRow: Index
   /** Dual simplex pivots made by the last step to restore feasibility. */
   dualPivots: Size
+  /** Whether cuts go on, or how the method ended. */
   status: IntegerProgramStatus
   /**
-   * Each tableau column as an affine function of x: row k is (g, h) with column k = g·x + h; shape [k, n + 1]. It is
-   * how cuts written in tableau columns are drawn in x-space.
+   * Each tableau column as an affine function of $\xvec$: row $q$ is $(\gvec_q, h_q)$, with column $q$ equal to
+   * $\gvec_q^\top\xvec + h_q$; shape `[k, n + 1]`. It is how cuts written in tableau columns are drawn in
+   * $\xvec$-space.
    */
   affine: Tensor
+  /** The standard form of the relaxation. */
   standard: StandardForm
+  /** True when `status` is `optimal`. */
   converged: boolean
+  /** True when `status` is `infeasible` or `unbounded`. */
   terminated: boolean
 }
 
+/**
+ * The fractional part of a value, rounded to 0 when within `tol` of an integer.
+ *
+ * @param v The value.
+ * @param tol The integrality tolerance.
+ * @returns $v - \lfloor v \rfloor$, or 0 when that is below `tol` or above $1 -$ `tol`.
+ */
 const frac = (v: number, tol: number) => {
   const f = v - Math.floor(v)
   return f < tol || 1 - f < tol ? 0 : f
 }
 
+/**
+ * Throw `DomainError` unless the cutting-plane method applies: integer constraint data and bounds (so that the slack
+ * variables are integer too), and no free variable.
+ *
+ * @param lp The parsed problem.
+ */
 function checkIntegerData(lp: ParsedLP): void {
   const all = [lp.Aub.a, lp.bub, lp.Aeq.a, lp.beq]
   for (const a of all)
@@ -435,7 +578,14 @@ function checkIntegerData(lp: ParsedLP): void {
   }
 }
 
-/** The affine map from x to each standard-form column (no free variables). */
+/**
+ * The affine map from $\xvec$ to each standard-form column (no free variables): $x_j - l_j$ or $u_j - x_j$ for a
+ * variable's column, $b_i - \avec_i^\top\xvec$ for the slack of a $\le$ row, and $u_j - x_j$ for the slack of an upper
+ * bound.
+ *
+ * @param sf The standard form, with no free variables.
+ * @returns Row-major, $N \times (n + 1)$: row $q$ holds the coefficients of column $q$ on $\xvec$, then its constant.
+ */
 function affineColumns(sf: StandardForm): Float64Array {
   const { lp, N } = sf
   const n = lp.n
@@ -464,6 +614,22 @@ function affineColumns(sf: StandardForm): Float64Array {
   return G
 }
 
+/**
+ * Assemble a cutting-plane state from its tableau: the basic solution in the original variables and, unless the
+ * caller gives one, the status (`optimal` when every basic value is integral, else `running`).
+ *
+ * @param sf The standard form of the relaxation.
+ * @param tol The integrality tolerance.
+ * @param t The tableau, row-major, $(m + 1) \times w$; copied into the state.
+ * @param m The number of constraint rows.
+ * @param w The row width (columns plus the right-hand side).
+ * @param basis The basic column of each constraint row.
+ * @param labels The label of each column.
+ * @param affine Each column as an affine function of $\xvec$, row-major, $(w - 1) \times (n + 1)$.
+ * @param extra The fields the caller sets: the cut count `t`, `cuts`, `sourceRow`, `dualPivots`, and optionally a
+ *   `status` that overrides the integrality test.
+ * @returns The state.
+ */
 function gomoryState(
   sf: StandardForm,
   tol: Scalar,
@@ -497,12 +663,26 @@ function gomoryState(
 }
 
 /**
- * Gomory's fractional cutting-plane method (Gomory, 1958) for the pure integer program `problem`, as a traceable
- * algorithm with no start. The initial state is the LP relaxation's optimal simplex tableau. Each step reads the row whose
- * basic variable has the largest fractional part f₀, adds the cut Σⱼ frac(āⱼ) zⱼ ≥ f₀ over the non-basic columns (every
- * integer point satisfies it; the current vertex does not), and restores feasibility by dual simplex pivots. The run
- * is done when the relaxation's optimum is integral (`optimal`) or a cut makes it `infeasible`. The data must be
- * integers so that the slack variables are integer too.
+ * Gomory's fractional cutting-plane method (Gomory, 1958) for the pure integer program `problem` (every variable
+ * integer), as a traceable algorithm with no start. The initial state is the LP relaxation's optimal simplex tableau.
+ * Each step reads the row whose basic variable has the largest fractional part $f_0$, adds the cut
+ * $\sum_j \operatorname{frac}(\bar a_j) z_j \ge f_0$ over the non-basic columns (every integer point satisfies it;
+ * the current vertex does not), and restores feasibility by dual simplex pivots. The run is done when the relaxation's
+ * optimum is integral (`optimal`) or a cut makes it `infeasible`. The data must be integers so that the slack
+ * variables are integer too: `DomainError` is thrown, when the algorithm is made, for fractional data or bounds or a
+ * free variable.
+ *
+ * @param problem The integer program, as a linear program whose variables must all be integers.
+ * @param options The integrality tolerance.
+ * @returns The algorithm. Its start is ignored; once the run has ended, a step returns the state unchanged.
+ *
+ * @example Cut a fractional vertex down to the integer optimum
+ * // Maximise 5x + 4y subject to 6x + 4y <= 24 and x + 2y <= 6, x, y >= 0 integer.
+ * const tr = trace(gomory({ c: [-5, -4], A_ub: [[6, 4], [1, 2]], b_ub: [24, 6] }), {}, 20)
+ * print('x =', tr.steps.map((s) => Array.from(s.x.data)))
+ * const s = tr.steps.at(-1)
+ * print('status =', s.status, ' objective =', s.objective)
+ * print('cuts a =', s.cuts.map((c) => Array.from(c.a.data)), ' b =', s.cuts.map((c) => c.b))
  */
 export function gomory(problem: LinearProgram, options: GomoryOptions = {}): Algorithm<object, GomoryState> {
   const tol = options.tolerance ?? 1e-9

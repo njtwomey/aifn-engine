@@ -199,6 +199,7 @@ fn(
   regret.ogdRegretBound,
 )
 
+/** A registry table: the entries of one kind, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const all = { ...experts, ...convex, ...regret }
 

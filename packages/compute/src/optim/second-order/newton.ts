@@ -2,6 +2,14 @@
  * Second-order methods with a supplied Hessian: damped Newton (a Newton direction, made a descent direction by adding
  * a multiple of the identity when the Hessian is not positive definite, and a line search), and a trust-region method
  * with the dogleg step.
+ *
+ * Both minimise the local quadratic model
+ * $m(\pvec) = f(\xvec) + \nabla f(\xvec)^\top\pvec + \tfrac12\pvec^\top\nabla^2 f(\xvec)\pvec$: Newton's method
+ * steps to its minimiser and then searches along the step, the trust region trusts it only within a radius $\Delta$
+ * that it adapts. Each takes the objective (value and gradient) and a `hessian` function
+ * returning $\nabla^2 f(\xvec)$ as an $n \times n$ matrix, evaluated once at each new iterate. Both converge
+ * quadratically near a minimiser with a positive definite Hessian (Nocedal & Wright, 2006, "Numerical Optimization",
+ * 2nd ed., chapters 3 and 4). Failure is reported in the state (`diverged`, `stalled`), not thrown.
  */
 
 import { cholesky, choleskySolve } from 'aifn-compute/numerics/linalg'
@@ -21,14 +29,29 @@ import { dense } from 'aifn-compute/foundation/tensor'
 const { allFinite, axpy, data, dot, mat, matVec, norm, scale, sub, toF64, toMatrixF64, vec } = dense
 type F64 = dense.F64
 
-/** Evaluates the Hessian as a working array, checked for shape. */
+/**
+ * Evaluates the Hessian as a working array, checked for shape.
+ *
+ * @param h The Hessian function.
+ * @param x The point, $n$ values.
+ * @param where The caller's name, for error messages.
+ * @returns $\nabla^2 f(\xvec)$ as a row-major array of $n^2$ values.
+ */
 function hessianAt(h: Hessian, x: F64, where: string): F64 {
   return toMatrixF64(h(vec(x)), where, x.length, x.length).data
 }
 
 /**
- * Solves (H + τI)p = −g with the smallest τ on the ladder 0, β, 2β, 4β, … (β = 10⁻³·max|Hᵢᵢ|, or 10⁻³) that makes
- * H + τI positive definite: Nocedal & Wright (2006), Algorithm 3.3, "Cholesky with added multiple of the identity".
+ * Solves $(\Hmat + \tau\Imat)\pvec = -\gvec$ with the first $\tau$ on a doubling ladder that makes
+ * $\Hmat + \tau\Imat$ positive definite (it factors by Cholesky): Nocedal & Wright (2006), Algorithm 3.3, "Cholesky
+ * with added multiple of the identity". The ladder starts at $\tau = 0$ when every $H_{ii} > 0$, else at
+ * $\beta - \min_i H_{ii}$, and continues $\tau \leftarrow \max(2\tau, \beta)$, with
+ * $\beta = 10^{-3} \max_i \lvert H_{ii} \rvert$ (or $10^{-3}$ for a zero diagonal). At most 80 shifts are tried.
+ *
+ * @param H The Hessian $\Hmat$, a row-major array of $n^2$ values (symmetric; only its lower triangle is factored).
+ * @param g The gradient $\gvec$, $n$ values.
+ * @returns The `direction` $\pvec$ and the `shift` $\tau$ used, or null when $\Hmat$ has a non-finite entry or no
+ *   shift tried made it factor.
  */
 export function shiftedNewtonDirection(H: F64, g: F64): { direction: F64; shift: number } | null {
   const n = g.length
@@ -56,42 +79,94 @@ export function shiftedNewtonDirection(H: F64, g: F64): { direction: F64; shift:
 
 /** The state of `newton`. */
 export type NewtonState = IterateState & {
+  /** $\nabla f(\xvec)$. */
   grad: Vector
+  /** $\lVert \nabla f(\xvec) \rVert_2$, compared with `tolerance`. */
   gradNorm: number
-  /** ∇²f(x). */
+  /** $\nabla^2 f(\xvec)$. */
   hessian: Matrix
-  /** The last Newton direction p = −(H + τI)⁻¹∇f (zeros at t = 0). */
+  /** The last Newton direction $\pvec = -(\Hmat + \tau\Imat)^{-1}\nabla f$ (zeros at $t = 0$). */
   direction: Vector
-  /** The shift τ added to the Hessian's diagonal on the last step (0 when it was positive definite). */
+  /** The shift $\tau$ added to the Hessian's diagonal on the last step (0 when it was positive definite). */
   shift: number
-  /** The accepted step length on the last step (1 is a full Newton step); NaN at t = 0. */
+  /** The accepted step length on the last step (1 is a full Newton step); NaN at $t = 0$. */
   stepSize: number
-  /** The Newton decrement squared, −∇fᵀp = ∇fᵀ(H + τI)⁻¹∇f, on the last step: twice the predicted decrease. */
+  /**
+   * The Newton decrement squared, $-\nabla f^\top\pvec = \nabla f^\top(\Hmat + \tau\Imat)^{-1}\nabla f$, on the last
+   * step: twice the predicted decrease. NaN at $t = 0$.
+   */
   decrement: number
-  /** The last line search with its trials; null for a pure Newton step or at t = 0. */
+  /** The last line search with its trials; null for a pure Newton step or at $t = 0$. */
   lineSearch: LineSearchResult | null
-  /** True when the last line search could not lower f (x unchanged); the run stops. */
+  /** True when the last line search could not lower $f$ ($\xvec$ unchanged); the run stops. */
   stalled: boolean
 }
 
 /** Options for `newton`. */
 export type NewtonOptions = StoppingOptions & {
-  /** The Hessian ∇²f(x). */
+  /** The Hessian $\nabla^2 f(\xvec)$, required. */
   hessian: Hessian
   /**
-   * `'backtracking'` (default) damps the step with an Armijo backtracking search from α = 1; `'strong-wolfe'` uses a
-   * strong Wolfe search; `'none'` takes the full Newton step (pure Newton's method).
+   * `'backtracking'` (default) damps the step with an Armijo backtracking search from $\alpha = 1$; `'strong-wolfe'`
+   * uses a strong Wolfe search; `'none'` takes the full Newton step (pure Newton's method).
    */
   lineSearch?: 'backtracking' | 'strong-wolfe' | 'none'
+  /** Options of the backtracking search. The strong Wolfe search always runs with its defaults. */
   lineSearchOptions?: BacktrackingOptions
 }
 
 /**
- * Damped Newton's method: p = −(H + τI)⁻¹∇f(x), with τ = 0 when the Hessian H is positive definite and otherwise the
- * smallest shift that makes it so (Nocedal & Wright, Algorithm 3.3), then x ← x + αp with α from a backtracking line
- * search (α = 1 near a minimiser, where convergence is quadratic). `init` takes `{ x0 }`.
+ * Damped Newton's method: $\pvec = -(\Hmat + \tau\Imat)^{-1}\nabla f(\xvec)$, with $\tau = 0$ when the Hessian
+ * $\Hmat$ is positive definite and otherwise a shift that makes it so (Nocedal & Wright, Algorithm 3.3, see
+ * `shiftedNewtonDirection`), then $\xvec \leftarrow \xvec + \alpha\pvec$ with $\alpha$ from a backtracking line search
+ * ($\alpha = 1$ near a minimiser, where convergence is quadratic). The shift keeps $\pvec$ a descent direction, so
+ * the method heads for a minimum and not a saddle point.
  *
- * If no shift makes H + τI factorable (a non-finite Hessian), the state is flagged `diverged`.
+ * If no shift makes $\Hmat + \tau\Imat$ factorable (a non-finite Hessian), the state is flagged `diverged`. A line
+ * search that cannot lower $f$ sets `stalled`; both end the run.
+ *
+ * @param f The objective, returning `{ value, grad }` at a point.
+ * @param options The `hessian` (required), the line search and its options, and the stopping options.
+ * @returns The algorithm; `init` takes `{ x0 }`.
+ *
+ * @example Rosenbrock's function from the standard start
+ * // (1 − a)² + 100(b − a²)², least at (1, 1), with its exact Hessian.
+ * const rosenbrock = (x) => {
+ *   const [a, b] = x.data
+ *   return {
+ *     value: (1 - a) ** 2 + 100 * (b - a * a) ** 2,
+ *     grad: [-2 * (1 - a) - 400 * a * (b - a * a), 200 * (b - a * a)],
+ *   }
+ * }
+ * const hessian = (x) => {
+ *   const [a, b] = x.data
+ *   return [
+ *     [2 - 400 * (b - a * a) + 800 * a * a, -400 * a],
+ *     [-400 * a, 200],
+ *   ]
+ * }
+ * for (const steps of [1, 2, 3]) {
+ *   const s = run(newton(rosenbrock, { hessian }), { x0: [-1.2, 1] }, steps)
+ *   print(`after ${steps} steps: x =`, s.x, ' step length =', s.stepSize)
+ * }
+ * const s = run(newton(rosenbrock, { hessian }), { x0: [-1.2, 1] }, 100)
+ * print('converged after', s.t, 'steps: x =', s.x, ' f =', s.value)
+ *
+ * @example A shift turns an indefinite Hessian into a descent direction
+ * // f(x) = a² − b² + b⁴ has a saddle at (0, 0) and minima at (0, ±1/√2). At (1, 0.1) its Hessian is indefinite.
+ * const f = (x) => {
+ *   const [a, b] = x.data
+ *   return { value: a * a - b * b + b ** 4, grad: [2 * a, -2 * b + 4 * b ** 3] }
+ * }
+ * const hessian = (x) => [
+ *   [2, 0],
+ *   [0, -2 + 12 * x.data[1] ** 2],
+ * ]
+ * const first = run(newton(f, { hessian }), { x0: [1, 0.1] }, 1)
+ * print('shift on the first step =', first.shift)
+ * const s = run(newton(f, { hessian }), { x0: [1, 0.1] }, 100)
+ * print('x =', s.x, ' f =', s.value)
+ * print('1 / sqrt(2) =', Math.SQRT1_2)
  */
 export function newton(f: ObjectiveFn, options: NewtonOptions): Algorithm<StartOptions, NewtonState> {
   const {
@@ -179,25 +254,32 @@ export function newton(f: ObjectiveFn, options: NewtonOptions): Algorithm<StartO
 // ---------------------------------------------------------------------------------------------------------------------
 // Trust region with the dogleg step.
 
-/** Which step the dogleg took. */
+/**
+ * Which step the dogleg took: `'newton'` (the full step fits), `'dogleg'` (the path meets the boundary), `'cauchy'`
+ * (steepest descent, cut at the boundary or at the model's minimum along it), or `'none'` (a zero gradient, and at
+ * $t = 0$).
+ */
 export type DoglegKind = 'newton' | 'dogleg' | 'cauchy' | 'none'
 
 /** The state of `trustRegion`. */
 export type TrustRegionState = IterateState & {
+  /** $\nabla f(\xvec)$. */
   grad: Vector
+  /** $\lVert \nabla f(\xvec) \rVert_2$, compared with `tolerance`. */
   gradNorm: number
+  /** $\nabla^2 f(\xvec)$. */
   hessian: Matrix
-  /** The trust-region radius Δ for the next step. */
+  /** The trust-region radius $\Delta$ for the next step. */
   radius: number
-  /** The step p proposed on the last step (whether or not it was accepted). */
+  /** The step $\pvec$ proposed on the last step (whether or not it was accepted). */
   step: Vector
   /** `newton` (the full step fits), `dogleg` (the path meets the boundary), `cauchy` (steepest descent). */
   stepKind: DoglegKind
-  /** Actual reduction f(x) − f(x + p) on the last step. */
+  /** Actual reduction $f(\xvec) - f(\xvec + \pvec)$ on the last step. */
   actual: number
-  /** Predicted reduction of the quadratic model, −(gᵀp + ½pᵀHp). */
+  /** Predicted reduction of the quadratic model, $-(\gvec^\top\pvec + \tfrac12\pvec^\top\Hmat\pvec)$. */
   predicted: number
-  /** ρ = actual / predicted: near 1 when the model is good. */
+  /** $\rho$ = actual / predicted: near 1 when the model is good. */
   ratio: number
   /** Whether the last proposed step was accepted (x moved). */
   accepted: boolean
@@ -205,19 +287,26 @@ export type TrustRegionState = IterateState & {
 
 /** Options for `trustRegion`. */
 export type TrustRegionOptions = StoppingOptions & {
+  /** The Hessian $\nabla^2 f(\xvec)$, required. */
   hessian: Hessian
-  /** Initial radius Δ₀. Default 1. */
+  /** Initial radius $\Delta_0$. Default 1. */
   radius?: number
   /** Largest radius. Default 1e3. */
   maxRadius?: number
-  /** Accept a step when ρ > η. Default 0.15 (Nocedal & Wright suggest η ∈ [0, ¼)). */
+  /** Accept a step when $\rho > \eta$. Default 0.15 (Nocedal & Wright suggest $\eta \in [0, \tfrac14)$). */
   eta?: number
 }
 
 /**
- * The dogleg step for the model m(p) = gᵀp + ½pᵀBp within ‖p‖ ≤ Δ (Nocedal & Wright, §4.1): the full Newton step if
- * B is positive definite and the step fits; otherwise the path from the origin to the Cauchy point and on towards the
- * Newton step, cut at the boundary. When B is not positive definite the Cauchy point is used (eq. 4.11–4.12).
+ * The dogleg step for the model $m(\pvec) = \gvec^\top\pvec + \tfrac12\pvec^\top\Bmat\pvec$ within
+ * $\lVert \pvec \rVert \le \Delta$ (Nocedal & Wright, §4.1): the full Newton step if $\Bmat$ is positive definite and
+ * the step fits; otherwise the path from the origin to the minimiser along $-\gvec$ and on towards the Newton step,
+ * cut at the boundary. When $\Bmat$ is not positive definite the Cauchy point is used (eq. 4.11–4.12).
+ *
+ * @param g The gradient $\gvec$, $n$ values.
+ * @param B The model's Hessian $\Bmat$, a row-major array of $n^2$ values.
+ * @param radius The trust-region radius $\Delta$.
+ * @returns The step `p` and which kind it is; a zero step of kind `'none'` when $\gvec = \zeros$.
  */
 function dogleg(g: F64, B: F64, radius: number): { p: F64; kind: DoglegKind } {
   const n = g.length
@@ -246,8 +335,39 @@ function dogleg(g: F64, B: F64, radius: number): { p: F64; kind: DoglegKind } {
 
 /**
  * A trust-region method with the dogleg step (Nocedal & Wright, Algorithm 4.1): each step minimises the quadratic
- * model within radius Δ, compares the actual and predicted reductions (ρ), accepts the step when ρ > η, and grows
- * Δ (ρ > ¾ at the boundary) or shrinks it (ρ < ¼). Rejected steps leave x unchanged. `init` takes `{ x0 }`.
+ * model within radius $\Delta$, compares the actual and predicted reductions ($\rho$), accepts the step when
+ * $\rho > \eta$, and doubles $\Delta$ (up to `maxRadius`, when $\rho > \tfrac34$ and the step reached the boundary) or
+ * shrinks it to $\tfrac14\lVert \pvec \rVert$ (when $\rho < \tfrac14$, or $f$ was not finite at the trial point).
+ * Rejected steps leave $\xvec$ unchanged. A radius that collapses below $10^{-14}$ counts as converged, since no step
+ * can make progress; a non-finite Hessian flags `diverged`.
+ *
+ * @param f The objective, returning `{ value, grad }` at a point.
+ * @param options The `hessian` (required), the initial and largest radii, the acceptance threshold $\eta$, and the
+ *   stopping options.
+ * @returns The algorithm; `init` takes `{ x0 }`, and each step evaluates $f$ once.
+ *
+ * @example Rosenbrock's function from the standard start
+ * // The second step overshoots (ratio below 0) and is rejected; the radius shrinks and the next one is accepted.
+ * const rosenbrock = (x) => {
+ *   const [a, b] = x.data
+ *   return {
+ *     value: (1 - a) ** 2 + 100 * (b - a * a) ** 2,
+ *     grad: [-2 * (1 - a) - 400 * a * (b - a * a), 200 * (b - a * a)],
+ *   }
+ * }
+ * const hessian = (x) => {
+ *   const [a, b] = x.data
+ *   return [
+ *     [2 - 400 * (b - a * a) + 800 * a * a, -400 * a],
+ *     [-400 * a, 200],
+ *   ]
+ * }
+ * for (const steps of [1, 2, 3]) {
+ *   const s = run(trustRegion(rosenbrock, { hessian }), { x0: [-1.2, 1] }, steps)
+ *   print(`step ${steps}:`, s.stepKind, ' ratio =', s.ratio, ' accepted =', s.accepted, ' radius =', s.radius)
+ * }
+ * const s = run(trustRegion(rosenbrock, { hessian }), { x0: [-1.2, 1] }, 200)
+ * print('converged after', s.t, 'steps: x =', s.x, ' f =', s.value)
  */
 export function trustRegion(f: ObjectiveFn, options: TrustRegionOptions): Algorithm<StartOptions, TrustRegionState> {
   const {

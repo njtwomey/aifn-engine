@@ -1,9 +1,11 @@
 /**
- * Convex quadratic programming: minimise ½xᵀQx + cᵀx subject to Ax ≤ b and Ex = e, by the primal active-set method
- * (Nocedal and Wright, 2006, "Numerical Optimization", Algorithm 16.3) and a primal–dual interior-point method with
- * Mehrotra's predictor–corrector (ibid., §16.6); and box-constrained QP by projected gradient with subspace Newton
- * steps (Moré and Toraldo, 1991, "On the solution of large quadratic programming problems with bound constraints",
- * SIAM J. Optimization 1(1)). Multipliers follow the Lagrangian L = ½xᵀQx + cᵀx + λᵀ(Ax − b) + νᵀ(Ex − e), λ ≥ 0.
+ * Convex quadratic programming: minimise $\frac{1}{2}\xvec^\top\Qmat\xvec + \cvec^\top\xvec$ subject to
+ * $\Amat\xvec \le \bvec$ and $\Emat\xvec = \evec$, by the primal active-set method (Nocedal and Wright, 2006,
+ * "Numerical Optimization", Algorithm 16.3) and a primal–dual interior-point method with Mehrotra's
+ * predictor–corrector (ibid., §16.6); and box-constrained QP by projected gradient with subspace Newton steps (Moré
+ * and Toraldo, 1991, "On the solution of large quadratic programming problems with bound constraints", SIAM J.
+ * Optimization 1(1)). Multipliers follow the Lagrangian $L = f(\xvec) + \lambdavec^\top(\Amat\xvec - \bvec)$
+ * $+ \nuvec^\top(\Emat\xvec - \evec)$, with $f$ the objective and $\lambdavec \ge \zeros$.
  */
 
 import { dense, fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -27,35 +29,54 @@ import {
 import { simplexSolve } from './simplex'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A convex quadratic program: minimise ½xᵀQx + cᵀx subject to A x ≤ b and E x = e (variables otherwise free). */
+/**
+ * A convex quadratic program: minimise $\frac{1}{2}\xvec^\top\Qmat\xvec + \cvec^\top\xvec$ subject to
+ * $\Amat\xvec \le \bvec$ and $\Emat\xvec = \evec$ (variables otherwise free). Absent constraints are empty.
+ */
 export interface QuadraticProgram {
   /**
-   * Symmetric Hessian, n × n, positive semi-definite on the null space of E (the problem is then convex). The interior
-   * point stops `nonconvex` otherwise; the active set stops `nonconvex` when a working set exposes negative curvature.
+   * Symmetric Hessian $\Qmat$, $n \times n$, positive semi-definite on the null space of $\Emat$ (the problem is then
+   * convex). The interior point stops `nonconvex` otherwise; the active set stops `nonconvex` when a working set
+   * exposes negative curvature.
    */
   Q: MatrixLike
-  /** Linear term, length n. */
+  /** Linear term $\cvec$, length $n$. */
   c: VectorLike
-  /** Inequality constraints A x ≤ b: A is m × n. */
+  /** Inequality constraint matrix $\Amat$ of $\Amat\xvec \le \bvec$, $m \times n$. */
   A?: MatrixLike
+  /** Inequality right-hand side $\bvec$, length $m$. */
   b?: VectorLike
-  /** Equality constraints E x = e: E is p × n. */
+  /** Equality constraint matrix $\Emat$ of $\Emat\xvec = \evec$, $p \times n$. */
   E?: MatrixLike
+  /** Equality right-hand side $\evec$, length $p$. */
   e?: VectorLike
 }
 
 /** A quadratic program read into dense arrays. */
 export interface ParsedQP {
+  /** The number of variables. */
   n: number
+  /** The Hessian, $n \times n$. */
   Q: Mat
+  /** The linear term, length $n$. */
   c: Float64Array
+  /** The inequality matrix, $m \times n$ ($0 \times n$ when there is none). */
   A: Mat
+  /** The inequality right-hand side, length $m$. */
   b: Float64Array
+  /** The equality matrix, $p \times n$ ($0 \times n$ when there is none). */
   E: Mat
+  /** The equality right-hand side, length $p$. */
   e: Float64Array
 }
 
-/** Read and validate a quadratic program. */
+/**
+ * Read and validate a quadratic program. Throws `ShapeError` when a size disagrees with the length of `c` (or `Q` is
+ * not square), and `DomainError` for a non-finite entry. Symmetry and convexity are not checked here.
+ *
+ * @param problem The quadratic program, with its matrices and vectors as tensors or plain arrays.
+ * @returns The program as dense arrays.
+ */
 export function parseQP(problem: QuadraticProgram): ParsedQP {
   const c = readVector(problem.c, 'quadratic program: c')
   const n = c.length
@@ -77,35 +98,68 @@ export function parseQP(problem: QuadraticProgram): ParsedQP {
   return { n, Q, c, A, b, E, e }
 }
 
+/**
+ * The objective $\frac{1}{2}\xvec^\top\Qmat\xvec + \cvec^\top\xvec$ of a quadratic program at a point.
+ *
+ * @param qp The parsed quadratic program.
+ * @param x The point, $n$ values.
+ * @returns The objective.
+ */
 const objectiveOf = (qp: ParsedQP, x: ArrayLike<number>) => 0.5 * dense.dot(x, matVec(qp.Q, x)) + dense.dot(qp.c, x)
 
 /** The Karush–Kuhn–Tucker residuals of a point and multipliers of a quadratic program. */
 export interface KKTReport {
+  /** The point $\xvec$, length $n$. */
   x: Tensor
-  /** ½xᵀQx + cᵀx. */
+  /** $\frac{1}{2}\xvec^\top\Qmat\xvec + \cvec^\top\xvec$. */
   objective: Scalar
-  /** Multipliers λ of A x ≤ b (length m; ≥ 0 at an optimum). */
+  /** Multipliers $\lambdavec$ of $\Amat\xvec \le \bvec$ (length $m$; $\ge 0$ at an optimum). */
   lambda: Tensor
-  /** Multipliers ν of E x = e (length p). */
+  /** Multipliers $\nuvec$ of $\Emat\xvec = \evec$ (length $p$). */
   nu: Tensor
-  /** Slacks b − A x (length m). */
+  /** Slacks $\bvec - \Amat\xvec$ (length $m$). */
   slack: Tensor
-  /** ‖Qx + c + Aᵀλ + Eᵀν‖∞: stationarity of the Lagrangian. */
+  /**
+   * $\lVert \Qmat\xvec + \cvec + \Amat^\top\lambdavec + \Emat^\top\nuvec \rVert_\infty$: stationarity of the
+   * Lagrangian.
+   */
   stationarity: Scalar
-  /** Largest violation of A x ≤ b or E x = e. */
+  /** Largest violation of $\Amat\xvec \le \bvec$ or $\Emat\xvec = \evec$. */
   primalInfeasibility: Scalar
-  /** Largest negative multiplier, as a positive number (0 when λ ≥ 0). */
+  /** Largest negative multiplier, as a positive number (0 when $\lambdavec \ge \zeros$). */
   dualInfeasibility: Scalar
-  /** max |λᵢ · slackᵢ|: complementary slackness. */
+  /** $\max_i \lvert \lambda_i s_i \rvert$ ($s_i$ the slack): complementary slackness. */
   complementarity: Scalar
-  /** 1 for each inequality with slack at most `tolerance`, else 0; int32. */
+  /** 1 for each inequality whose slack is at most `tolerance` in absolute value, else 0; int32. */
   active: Tensor
 }
 
 /**
  * The KKT report of a point `x` with multipliers `lambda` (inequalities) and `nu` (equalities): stationarity, primal
  * and dual feasibility and complementary slackness (Nocedal and Wright, 2006, Theorem 12.1). All four are zero at an
- * optimum of a convex QP.
+ * optimum of a convex QP. Throws `ShapeError` when a length disagrees with the problem.
+ *
+ * @param problem The quadratic program, or its parsed form (as `parseQP` returns it, which is not parsed again).
+ * @param x The point $\xvec$, $n$ values.
+ * @param lambda The multipliers $\lambdavec$ of the inequalities, $m$ values.
+ * @param nu The multipliers $\nuvec$ of the equalities, $p$ values.
+ * @param tolerance The largest absolute slack at which an inequality is reported `active`. It decides nothing else.
+ * @returns The report.
+ *
+ * @example Certify the minimiser of a small QP
+ * // Minimise (x - 1)^2 + (y - 2.5)^2 over a pentagon (Nocedal and Wright, Example 16.4). At (1.4, 1.7) only the first
+ * // constraint, -x + 2y <= 2, binds; its multiplier is 0.8.
+ * const A = [[-1, 2], [1, 2], [1, -2], [-1, 0], [0, -1]]
+ * const problem = { Q: [[2, 0], [0, 2]], c: [-2, -5], A, b: [2, 6, 2, 0, 0] }
+ * const r = kktReport(problem, [1.4, 1.7], [0.8, 0, 0, 0, 0], [])
+ * print('stationarity =', r.stationarity, ' complementarity =', r.complementarity)
+ * print('primal infeasibility =', r.primalInfeasibility, ' dual infeasibility =', r.dualInfeasibility)
+ * print('active =', r.active)
+ *
+ * @example A wrong multiplier shows in the stationarity residual
+ * const A = [[-1, 2], [1, 2], [1, -2], [-1, 0], [0, -1]]
+ * const problem = { Q: [[2, 0], [0, 2]], c: [-2, -5], A, b: [2, 6, 2, 0, 0] }
+ * print('stationarity =', kktReport(problem, [1.4, 1.7], [0.5, 0, 0, 0, 0], []).stationarity)
  */
 export function kktReport(
   problem: QuadraticProgram | ParsedQP,
@@ -149,9 +203,11 @@ export function kktReport(
 }
 
 /**
- * Outcome of a QP solver. `nonconvex`: Q has negative curvature where the method needs it to have none, so a stationary
- * point need not be a minimiser. The active set checks the null space of its working set at each step; the interior
- * point checks the null space of the equalities E before its first step.
+ * Outcome of a QP solver: `running`, `optimal`, `infeasible` (active set: no feasible start exists), `singular` (a
+ * linear system could not be solved), `nonconvex` or `diverged` (interior point: the iterates grew past $10^{12}$ or
+ * became non-finite). `nonconvex`: $\Qmat$ has negative curvature where the method needs it to have none, so a
+ * stationary point need not be a minimiser. The active set checks the null space of its working set at each step; the
+ * interior point checks the null space of the equalities $\Emat$ before its first step.
  */
 export type QuadraticProgramStatus = 'running' | 'optimal' | 'infeasible' | 'singular' | 'nonconvex' | 'diverged'
 
@@ -164,46 +220,72 @@ export interface ActiveSetOptions {
   tolerance?: Scalar
 }
 
-/** The start of `activeSet`: a feasible point; default a vertex of the feasible set found by the simplex method. */
+/**
+ * The start of `activeSet`: `x0`, a feasible point (not checked); default a vertex of the feasible set found by the
+ * simplex method.
+ */
 export type ActiveSetStart = { x0?: VectorLike }
 
-/** What an active-set step did. */
+/**
+ * What an active-set step did: `start` (the initial state), `step` (moved to the working-set minimiser), `add` (stopped
+ * at a blocking constraint and added it), `drop` (removed the constraint with the most negative multiplier) or
+ * `optimal`.
+ */
 export type ActiveSetEvent = 'start' | 'step' | 'add' | 'drop' | 'optimal'
 
 /**
  * One iterate of the primal active-set method: `converged` at an optimum, `terminated` when the problem is
- * infeasible or an equality-QP solve is singular.
+ * infeasible, an equality-QP solve is singular, or a working set exposes negative curvature.
  */
 export interface ActiveSetState extends Status {
-  /** The current feasible point, length n. */
+  /** The current feasible point, length $n$ (NaN when the problem is infeasible). */
   x: Tensor
   /** The working set: indices of inequalities held as equalities, int32, ascending. */
   working: Tensor
-  /** The step direction p computed by the last step (zero when x minimises over the working set). */
+  /**
+   * The step direction $\pvec$ computed by the last step (zero when $\xvec$ minimises over the working set).
+   */
   p: Tensor
-  /** The step length taken along p. */
+  /** The step length taken along $\pvec$ (1 unless a constraint blocks the step). */
   alpha: Scalar
-  /** Multipliers of the inequalities (length m; zero outside the working set) from the last equality-QP solve. */
+  /** Multipliers of the inequalities (length $m$; zero outside the working set) from the last equality-QP solve. */
   lambda: Tensor
-  /** Multipliers of the equalities (length p). */
+  /** Multipliers of the equalities (length $p$). */
   nu: Tensor
-  /** The constraint added (blocking) or dropped (most negative multiplier) by the last step, or −1. */
+  /** The constraint added (blocking) or dropped (most negative multiplier) by the last step, or $-1$. */
   changed: number
+  /** What the step that made this state did. */
   event: ActiveSetEvent
+  /** The objective at `x`. */
   objective: Scalar
+  /** Whether the run goes on, or how it ended. */
   status: QuadraticProgramStatus
+  /** The problem as parsed. */
   problem: ParsedQP
+  /** True when `status` is `optimal`. */
   converged: boolean
+  /** True when `status` is `infeasible`, `singular` or `nonconvex`. */
   terminated: boolean
 }
 
-/** The Status flags of a QP solver state from its outcome. */
+/**
+ * The Status flags of a QP solver state from its outcome.
+ *
+ * @param status The outcome.
+ * @returns `converged` (when `optimal`) and `terminated` (when `infeasible`, `singular` or `nonconvex`).
+ */
 const flags = (status: QuadraticProgramStatus) => ({
   converged: status === 'optimal',
   terminated: status === 'infeasible' || status === 'singular' || status === 'nonconvex',
 })
 
-/** Rows of [E; A_W] as a dense matrix. */
+/**
+ * The rows of the equalities and of the working set, $[\Emat; \Amat_W]$, as a dense matrix.
+ *
+ * @param qp The parsed quadratic program.
+ * @param working The indices of the inequalities in the working set, in the order their rows are stacked.
+ * @returns The $(p + \lvert W \rvert) \times n$ matrix.
+ */
 function workingRows(qp: ParsedQP, working: ArrayLike<number>): Mat {
   const k = qp.E.m + working.length
   const a = new Float64Array(k * qp.n)
@@ -213,7 +295,16 @@ function workingRows(qp: ParsedQP, working: ArrayLike<number>): Mat {
   return { m: k, n: qp.n, a }
 }
 
-/** Solve the equality-constrained QP min ½pᵀQp + gᵀp s.t. M p = 0 through its KKT system; μ are M's multipliers. */
+/**
+ * Solve the equality-constrained QP: minimise $\frac{1}{2}\pvec^\top\Qmat\pvec + \gvec^\top\pvec$ subject to
+ * $\Mmat\pvec = \zeros$, through its KKT system $\Qmat\pvec + \Mmat^\top\muvec = -\gvec$, $\Mmat\pvec = \zeros$.
+ *
+ * @param qp The parsed quadratic program, whose $\Qmat$ is used.
+ * @param M The constraint rows $\Mmat$ (equalities, then the working set), $k \times n$.
+ * @param g The gradient $\gvec = \Qmat\xvec + \cvec$ at the current point, $n$ values.
+ * @returns `p`, the step to the minimiser; `mu`, the $k$ multipliers of $\Mmat$'s rows; and `singular`, true when the
+ *   KKT matrix is singular (both are then zero).
+ */
 function equalityQP(qp: ParsedQP, M: Mat, g: Float64Array) {
   const n = qp.n
   const size = n + M.m
@@ -231,10 +322,16 @@ function equalityQP(qp: ParsedQP, M: Mat, g: Float64Array) {
 }
 
 /**
- * Whether Q has negative curvature on the null space of M: the reduced Hessian ZᵀQZ (Z an orthonormal basis of that
- * null space) has an eigenvalue below −`tol` relative to Q's scale. Z is rank-revealing, the eigenvectors of MᵀM with
- * eigenvalues below 10⁻¹² of the largest, so dependent rows of M (repeated or combined equalities) do not shrink the
- * null space. Zero curvature is left to the KKT solve, which reports it as singular.
+ * Whether $\Qmat$ has negative curvature on the null space of $\Mmat$: the reduced Hessian $\Zmat^\top\Qmat\Zmat$
+ * ($\Zmat$ an orthonormal basis of that null space) has an eigenvalue below $-$`tol` times
+ * $1 + \max_{ij} \lvert Q_{ij} \rvert$. $\Zmat$ is rank-revealing, the eigenvectors of $\Mmat^\top\Mmat$ with
+ * eigenvalues at most $10^{-12}$ of the largest, so dependent rows of $\Mmat$ (repeated or combined equalities) do not
+ * shrink the null space. Zero curvature is left to the KKT solve, which reports it as singular.
+ *
+ * @param qp The parsed quadratic program, whose $\Qmat$ is used.
+ * @param M The constraint rows $\Mmat$, $k \times n$ (with $k = 0$ the whole space is checked).
+ * @param tol The tolerance on the smallest eigenvalue, relative to $\Qmat$'s scale.
+ * @returns True when the reduced Hessian has a negative eigenvalue; false also when the null space is trivial.
  */
 function negativeCurvature(qp: ParsedQP, M: Mat, tol: number): boolean {
   const n = qp.n
@@ -284,7 +381,15 @@ function negativeCurvature(qp: ParsedQP, M: Mat, tol: number): boolean {
   return Math.min(...values) < -tol * (1 + dense.maxAbs(qp.Q.a))
 }
 
-/** Greedily choose inequalities active at x whose rows are independent of E's and each other's. */
+/**
+ * Greedily choose inequalities active at $\xvec$ whose rows are independent of $\Emat$'s and each other's (by
+ * Gram–Schmidt with re-orthogonalisation).
+ *
+ * @param qp The parsed quadratic program.
+ * @param x The starting point, $n$ values.
+ * @param tol An inequality is active when its slack is at most `tol` times $1 + \lvert b_i \rvert$.
+ * @returns The chosen inequalities' indices, ascending.
+ */
 function initialWorkingSet(qp: ParsedQP, x: Float64Array, tol: number): number[] {
   const Ax = matVec(qp.A, x)
   const chosen: number[] = []
@@ -308,7 +413,13 @@ function initialWorkingSet(qp: ParsedQP, x: Float64Array, tol: number): number[]
   return chosen
 }
 
-/** A feasible point of {A x ≤ b, E x = e} from the simplex method, or null when there is none. */
+/**
+ * A feasible point of $\Amat\xvec \le \bvec$, $\Emat\xvec = \evec$ (a vertex, from the simplex method with a zero
+ * objective and free variables), or null when there is none.
+ *
+ * @param qp The parsed quadratic program.
+ * @returns The point, $n$ values, or null.
+ */
 function feasiblePoint(qp: ParsedQP): Float64Array | null {
   const rows = (M: Mat) => Array.from({ length: M.m }, (_, i) => Array.from(M.a.subarray(i * M.n, (i + 1) * M.n)))
   const r = simplexSolve({
@@ -324,12 +435,28 @@ function feasiblePoint(qp: ParsedQP): Float64Array | null {
 
 /**
  * The primal active-set method for the convex QP `problem` (Nocedal and Wright, 2006, Algorithm 16.3) as a traceable
- * algorithm; `init` takes `{ x0? }`, a feasible start (default: a vertex found by the simplex method). Each step solves the equality-constrained QP on the working set; it then either
- * moves to its minimiser (`step`), stops at a blocking constraint and adds it (`add`), drops the inequality with the
- * most negative multiplier (`drop`), or certifies optimality (`optimal`, all multipliers ≥ 0). It needs Q positive
- * definite on the null space of each working set (e.g. Q positive definite). Each step checks that reduced Hessian and
+ * algorithm; `init` takes `{ x0? }`, a feasible start (default: a vertex found by the simplex method; the initial
+ * state is `infeasible` when there is none). The initial working set holds the inequalities active at the start whose
+ * rows are independent. Each step solves the equality-constrained QP on the working set; it then either moves to its
+ * minimiser (`step`), stops at a blocking constraint and adds it (`add`), drops the inequality with the most negative
+ * multiplier (`drop`), or certifies optimality (`optimal`, all multipliers $\ge 0$). It needs $\Qmat$ positive definite
+ * on the null space of each working set (e.g. $\Qmat$ positive definite). Each step checks that reduced Hessian and
  * stops `nonconvex` when it has a negative eigenvalue (the subproblem's stationary point is then a saddle, not a
  * minimiser), or `singular` when the KKT system cannot be solved (zero curvature).
+ *
+ * @param problem The quadratic program.
+ * @param options The tolerance on zero steps, multipliers and active constraints.
+ * @returns The algorithm. Once the run has ended, a step returns the state unchanged.
+ *
+ * @example Nocedal and Wright's Example 16.4, from the vertex (2, 0)
+ * // Minimise (x - 1)^2 + (y - 2.5)^2 subject to five linear inequalities. The minimiser is (1.4, 1.7).
+ * const A = [[-1, 2], [1, 2], [1, -2], [-1, 0], [0, -1]]
+ * const problem = { Q: [[2, 0], [0, 2]], c: [-2, -5], A, b: [2, 6, 2, 0, 0] }
+ * const tr = trace(activeSet(problem), { x0: [2, 0] }, 20)
+ * print('events =', tr.steps.map((s) => s.event))
+ * print('x =', tr.steps.map((s) => Array.from(s.x.data)))
+ * print('working sets =', tr.steps.map((s) => Array.from(s.working.data)))
+ * print('multipliers =', tr.steps.at(-1).lambda)
  */
 export function activeSet(
   problem: QuadraticProgram,
@@ -449,7 +576,11 @@ export function activeSet(
 
 /** Options for `quadraticInteriorPoint`. */
 export interface QuadraticInteriorPointOptions {
-  /** Stop when residuals and the complementarity measure μ are below this, relative to the data (default 1e-9). */
+  /**
+   * Stop when the residuals and the complementarity measure $\mu$ are below this times $1 + d$, with $d$ the largest
+   * absolute entry of $\cvec$, $\bvec$, $\evec$ and $\Qmat$ (default 1e-9). It is also the tolerance of the convexity
+   * check.
+   */
   tolerance?: Scalar
   /** Fraction of the step to the boundary taken (default 0.99). */
   stepFraction?: Scalar
@@ -457,30 +588,57 @@ export interface QuadraticInteriorPointOptions {
 
 /** One iterate of the QP interior-point method. */
 export interface QuadraticInteriorPointState extends Status {
+  /** The primal iterate $\xvec$, length $n$ (not necessarily feasible before convergence). */
   x: Tensor
-  /** Slacks s = b − A x of the inequalities, length m (strictly positive). */
+  /**
+   * Slacks $\svec$ of the inequalities, length $m$ (strictly positive), with $\Amat\xvec + \svec = \bvec$ at
+   * convergence.
+   */
   s: Tensor
-  /** Multipliers λ of the inequalities, length m (strictly positive). */
+  /** Multipliers $\lambdavec$ of the inequalities, length $m$ (strictly positive). */
   lambda: Tensor
-  /** Multipliers ν of the equalities, length p. */
+  /** Multipliers $\nuvec$ of the equalities, length $p$. */
   nu: Tensor
-  /** Complementarity measure μ = sᵀλ / m. */
+  /** Complementarity measure $\mu = \svec^\top\lambdavec / m$ (0 when there are no inequalities). */
   mu: Scalar
+  /** The centring parameter $\sigma = \min(1, (\mu_{\text{aff}}/\mu)^3)$ of the last step; NaN at the start. */
   sigma: Scalar
+  /** The step length of the last step, the same for all variables (0 at the start). */
   alpha: Scalar
-  /** ‖Qx + c + Aᵀλ + Eᵀν‖∞. */
+  /** $\lVert \Qmat\xvec + \cvec + \Amat^\top\lambdavec + \Emat^\top\nuvec \rVert_\infty$. */
   stationarity: Scalar
-  /** max(‖Ax + s − b‖∞, ‖Ex − e‖∞). */
+  /**
+   * $\max(\lVert \Amat\xvec + \svec - \bvec \rVert_\infty, \lVert \Emat\xvec - \evec \rVert_\infty)$.
+   */
   primalResidual: Scalar
+  /** The objective at `x`. */
   objective: Scalar
+  /** True when `status` is `optimal`. */
   converged: boolean
+  /**
+   * True on failure: the Newton system was singular (`status` is then `singular`) or the iterates grew past $10^{12}$
+   * or became non-finite (`diverged`).
+   */
   diverged: boolean
-  /** True when the run stopped without converging or diverging: Q is not convex on the null space of E. */
+  /** True when the run stopped without converging or diverging: $\Qmat$ is not convex on the null space of $\Emat$. */
   terminated: boolean
+  /** Whether the run goes on, or how it ended. */
   status: QuadraticProgramStatus
+  /** The problem as parsed. */
   problem: ParsedQP
 }
 
+/**
+ * The residuals of the QP's KKT conditions (without complementarity) at an iterate.
+ *
+ * @param qp The parsed quadratic program.
+ * @param x The primal iterate $\xvec$, $n$ values.
+ * @param s The slacks $\svec$, $m$ values.
+ * @param l The inequality multipliers $\lambdavec$, $m$ values.
+ * @param v The equality multipliers $\nuvec$, $p$ values.
+ * @returns `rd` $= \Qmat\xvec + \cvec + \Amat^\top\lambdavec + \Emat^\top\nuvec$, `rp` $= \Amat\xvec + \svec - \bvec$
+ *   and `re` $= \Emat\xvec - \evec$.
+ */
 function qpResiduals(qp: ParsedQP, x: Float64Array, s: Float64Array, l: Float64Array, v: Float64Array) {
   const rd = matVec(qp.Q, x)
   const Al = matTVec(qp.A, l)
@@ -494,9 +652,22 @@ function qpResiduals(qp: ParsedQP, x: Float64Array, s: Float64Array, l: Float64A
 }
 
 /**
- * Solve the QP Newton system by eliminating Δs and Δλ:
- * (Q + Aᵀ S⁻¹Λ A) Δx + EᵀΔν = −r_d − Aᵀ S⁻¹(−r_sl + Λ r_p), E Δx = −r_e, then Δs = −r_p − AΔx and
- * Δλ = S⁻¹(−r_sl − Λ Δs).
+ * Solve the QP Newton system by eliminating $\Delta\svec$ and $\Delta\lambdavec$:
+ * $\Kmat\Delta\xvec + \Emat^\top\Delta\nuvec = -\rvec_d - \Amat^\top\Smat^{-1}(-\rvec_{sl} + \Lambdamat\rvec_p)$ with
+ * $\Kmat = \Qmat + \Amat^\top\Smat^{-1}\Lambdamat\Amat$, and
+ * $\Emat\Delta\xvec = -\rvec_e$, then $\Delta\svec = -\rvec_p - \Amat\Delta\xvec$ and
+ * $\Delta\lambdavec = \Smat^{-1}(-\rvec_{sl} - \Lambdamat\Delta\svec)$.
+ *
+ * @param qp The parsed quadratic program.
+ * @param s The slacks $\svec$, $m$ positive values (the diagonal of $\Smat$).
+ * @param l The inequality multipliers $\lambdavec$, $m$ positive values (the diagonal of $\Lambdamat$).
+ * @param rd The stationarity residual $\rvec_d$, $n$ values.
+ * @param rp The inequality residual $\rvec_p$, $m$ values.
+ * @param re The equality residual $\rvec_e$, $p$ values.
+ * @param rsl The complementarity residual $\rvec_{sl}$ to remove ($s_i\lambda_i$ for the predictor; less the centring
+ *   target and plus the second-order term for the corrector), $m$ values.
+ * @returns The direction `dx`, `dv`, `ds`, `dl`, and `singular`, true when the reduced system could not be solved
+ *   (`dx` and `dv` are then zero).
  */
 function qpNewton(
   qp: ParsedQP,
@@ -545,12 +716,33 @@ function qpNewton(
   return { dx, dv, ds, dl, singular }
 }
 
+/**
+ * The largest $\alpha \le 1$ with $\vvec + \alpha\,\Delta\vvec \ge \zeros$.
+ *
+ * @param v The current point $\vvec$, non-negative.
+ * @param dv The direction $\Delta\vvec$, of the same length.
+ * @returns $\alpha$, 1 when no entry of the direction is negative.
+ */
 function maxStep(v: Float64Array, dv: Float64Array): number {
   let a = 1
   for (let j = 0; j < v.length; j++) if (dv[j] < 0) a = Math.min(a, -v[j] / dv[j])
   return a
 }
 
+/**
+ * Assemble an interior-point state: residuals, $\mu$, the objective, and the status (`nonconvex` when flagged, else
+ * `optimal` when the residuals and $\mu$ meet the tolerance, else `singular`, `diverged` or `running`).
+ *
+ * @param qp The parsed quadratic program.
+ * @param tol The convergence tolerance, relative to the data's scale.
+ * @param x The primal iterate, $n$ values; copied into the state.
+ * @param s The slacks, $m$ values; copied into the state.
+ * @param l The inequality multipliers, $m$ values; copied into the state.
+ * @param v The equality multipliers, $p$ values; copied into the state.
+ * @param extra The fields the caller sets: `sigma`, `alpha`, the step count `t`, whether the Newton system was
+ *   `singular`, and `nonconvex` for the initial state of a nonconvex problem.
+ * @returns The state.
+ */
 function qpState(
   qp: ParsedQP,
   tol: Scalar,
@@ -604,13 +796,33 @@ function qpState(
 
 /**
  * A primal–dual interior-point method for the convex QP `problem` with Mehrotra's predictor–corrector (Nocedal and
- * Wright, 2006, §16.6) as a traceable algorithm with no start. It starts from x = 0 with slacks and
- * multipliers of 1 (it need not be feasible) and each step is one predictor–corrector iteration; the iterates x trace a
- * path through the interior towards the optimum. The run is done when `converged`; it stops `diverged` when the
- * iterates grow without bound (an infeasible problem) or the Newton system is singular. The method assumes convexity:
- * when Q has negative curvature on the null space of E (an eigenvalue of the reduced Hessian ZᵀQZ below −tolerance
- * relative to Q's scale) the initial state is `nonconvex` and `terminated`, and no step is taken, because the
- * iterates could converge to a saddle or a maximiser and report it optimal. A singular positive semi-definite Q passes.
+ * Wright, 2006, §16.6) as a traceable algorithm with no start. It starts from $\xvec = \zeros$ with slacks
+ * $\max(b_i, 1)$ and multipliers of 1 (it need not be feasible) and each step is one predictor–corrector iteration
+ * with one step length for all variables; the iterates $\xvec$ trace a path through the interior towards the optimum.
+ * The run is done when `converged`; it stops `diverged` when the iterates grow without bound (an infeasible problem),
+ * or `singular` (with the `diverged` flag) when the Newton system is singular. The method assumes convexity: when
+ * $\Qmat$ has negative curvature on the null space of $\Emat$ (an eigenvalue of the reduced Hessian
+ * $\Zmat^\top\Qmat\Zmat$ below $-$`tolerance` relative to $\Qmat$'s scale) the initial state is `nonconvex` and
+ * `terminated`, and no step is taken, because the iterates could converge to a saddle or a maximiser and report it
+ * optimal. A singular positive semi-definite $\Qmat$ passes.
+ *
+ * @param problem The quadratic program.
+ * @param options The tolerance and the fraction of the step to the boundary taken.
+ * @returns The algorithm. Once the run has ended, a step returns the state unchanged.
+ *
+ * @example The complementarity measure falls to zero
+ * // Minimise (x - 1)^2 + (y - 2.5)^2 subject to five linear inequalities (Nocedal and Wright, Example 16.4).
+ * const A = [[-1, 2], [1, 2], [1, -2], [-1, 0], [0, -1]]
+ * const problem = { Q: [[2, 0], [0, 2]], c: [-2, -5], A, b: [2, 6, 2, 0, 0] }
+ * const tr = trace(quadraticInteriorPoint(problem), {}, 50)
+ * print('mu =', tr.steps.map((s) => s.mu))
+ * const s = tr.steps.at(-1)
+ * print('status =', s.status, ' x =', s.x)
+ * print('multipliers =', s.lambda)
+ *
+ * @example A nonconvex problem is refused before the first step
+ * const s = run(quadraticInteriorPoint({ Q: [[1, 0], [0, -1]], c: [0, 0], A: [[0, 1], [0, -1]], b: [1, 1] }), {}, 50)
+ * print('status =', s.status, ' steps =', s.t)
  */
 export function quadraticInteriorPoint(
   problem: QuadraticProgram,
@@ -668,11 +880,15 @@ export function quadraticInteriorPoint(
 
 /** The result of `quadprog`. */
 export interface QuadraticProgramResult {
+  /** How the method ended, or `limit` when it stopped at `maxSteps`. */
   status: Exclude<QuadraticProgramStatus, 'running'> | 'limit'
+  /** The last iterate: the minimiser when `status` is `optimal` (NaN when `infeasible` by the active set). */
   x: Tensor
+  /** The objective at `x`. */
   objective: Scalar
   /** Steps taken by the method. */
   steps: Size
+  /** The method that produced the result. */
   method: 'active-set' | 'interior-point'
   /** The KKT residuals and multipliers at the returned point. */
   report: KKTReport
@@ -682,14 +898,34 @@ export interface QuadraticProgramResult {
 export interface QuadprogOptions extends Pick<RunOptions, 'maxSteps'> {
   /** `active-set` (default) or `interior-point`. */
   method?: 'active-set' | 'interior-point'
+  /** The method's tolerance (default 1e-10 for the active set, 1e-9 for the interior point). */
   tolerance?: Scalar
-  /** A feasible start for the active-set method. */
+  /** A feasible start for the active-set method (ignored by the interior point). */
   x0?: VectorLike
 }
 
 /**
- * Solve a convex quadratic program min ½xᵀQx + cᵀx s.t. Ax ≤ b, Ex = e by the primal active-set method (default) or
- * the interior-point method. The result carries the multipliers and KKT residuals.
+ * Solve a convex quadratic program: minimise $\frac{1}{2}\xvec^\top\Qmat\xvec + \cvec^\top\xvec$ subject to
+ * $\Amat\xvec \le \bvec$, $\Emat\xvec = \evec$, by the primal active-set method (default) or the interior-point method.
+ * The result carries the multipliers and KKT residuals. Throws as `parseQP` does for an ill-formed problem; every
+ * other failure is reported in `status`.
+ *
+ * @param problem The quadratic program.
+ * @param options The method, its tolerance, `maxSteps`, and the active set's start `x0`.
+ * @returns The point, its objective, the status and the KKT report.
+ *
+ * @example The minimiser of a small QP by both methods
+ * // Minimise (x - 1)^2 + (y - 2.5)^2 subject to five linear inequalities (Nocedal and Wright, Example 16.4).
+ * const A = [[-1, 2], [1, 2], [1, -2], [-1, 0], [0, -1]]
+ * const problem = { Q: [[2, 0], [0, 2]], c: [-2, -5], A, b: [2, 6, 2, 0, 0] }
+ * const r = quadprog(problem)
+ * print('active set:', r.x, ' objective =', r.objective, ' multipliers =', r.report.lambda)
+ * print('interior point:', quadprog(problem, { method: 'interior-point' }).x)
+ *
+ * @example The nearest point on a line
+ * // Minimise (x^2 + y^2) / 2 subject to x + y = 1: the answer is (0.5, 0.5), with multiplier -0.5.
+ * const r = quadprog({ Q: [[1, 0], [0, 1]], c: [0, 0], E: [[1, 1]], e: [1] })
+ * print('x =', r.x, ' nu =', r.report.nu)
  */
 export function quadprog(problem: QuadraticProgram, options: QuadprogOptions = {}): QuadraticProgramResult {
   const qp = parseQP(problem)
@@ -719,48 +955,84 @@ export function quadprog(problem: QuadraticProgram, options: QuadprogOptions = {
 // ---------------------------------------------------------------------------------------------------------------------
 // Box-constrained QP.
 
-/** A box-constrained QP: minimise ½xᵀQx + cᵀx subject to lower ≤ x ≤ upper (±Infinity for no bound). */
+/**
+ * A box-constrained QP: minimise $\frac{1}{2}\xvec^\top\Qmat\xvec + \cvec^\top\xvec$ subject to
+ * $\mathbf{l} \le \xvec \le \uvec$ (`-Infinity` or `Infinity` for no bound).
+ */
 export interface BoxQuadraticProblem {
+  /** Symmetric Hessian $\Qmat$, $n \times n$ (positive semi-definite for a convex problem). */
   Q: MatrixLike
+  /** Linear term $\cvec$, length $n$. */
   c: VectorLike
+  /** Lower bounds $\mathbf{l}$, length $n$. */
   lower: VectorLike
+  /** Upper bounds $\uvec$, length $n$, each at least its lower bound. */
   upper: VectorLike
 }
 
 /** Options for `boxQuadraticProgram`. */
 export interface BoxQuadraticProgramOptions {
-  /** Stop when ‖x − P(x − ∇f)‖∞ is at most this, relative to 1 + ‖∇f‖∞ (default 1e-10). */
+  /**
+   * Stop when $\lVert \xvec - P(\xvec - \nabla f) \rVert_\infty$ is at most this times
+   * $1 + \lVert \nabla f \rVert_\infty$ (default 1e-10), $P$ the projection onto the box.
+   */
   tolerance?: Scalar
 }
 
-/** The start of `boxQuadraticProgram`: a point projected onto the box (default: the projection of 0). */
+/** The start of `boxQuadraticProgram`: `x0`, a point projected onto the box (default: the projection of 0). */
 export type BoxQuadraticProgramStart = { x0?: VectorLike }
 
 /** One iterate of the box-QP solver. */
 export interface BoxQuadraticProgramState extends Status {
+  /** The iterate $\xvec$, inside the box, length $n$. */
   x: Tensor
-  /** ∇f = Qx + c. */
+  /** $\nabla f = \Qmat\xvec + \cvec$. */
   grad: Tensor
-  /** ‖x − P(x − ∇f)‖∞: zero exactly at a KKT point. */
+  /** $\lVert \xvec - P(\xvec - \nabla f) \rVert_\infty$: zero exactly at a KKT point. */
   projectedGradient: Scalar
-  /** Where each variable sits: −1 at its lower bound, 1 at its upper bound, 0 free; int32. */
+  /** Where each variable sits: $-1$ at its lower bound, 1 at its upper bound, 0 free; int32. */
   bounds: Tensor
   /** The point after the projected-gradient (Cauchy) half of the last step. */
   cauchy: Tensor
   /** Whether the last step's subspace Newton half was taken. */
   newton: boolean
+  /** The objective at `x`. */
   objective: Scalar
+  /** True when the projected gradient meets the tolerance. */
   converged: boolean
+  /** True when `x` has a non-finite entry. */
   diverged: boolean
+  /** The lower bounds, as read. */
   lower: Tensor
+  /** The upper bounds, as read. */
   upper: Tensor
+  /** The Hessian, as read. */
   Q: Tensor
+  /** The linear term, as read. */
   c: Tensor
 }
 
+/**
+ * Project a point onto a box, entry by entry.
+ *
+ * @param x The point (not modified).
+ * @param lo The lower bounds.
+ * @param hi The upper bounds.
+ * @returns A new array, each entry clipped to its bounds.
+ */
 const project = (x: Float64Array, lo: ArrayLike<number>, hi: ArrayLike<number>) =>
   x.map((v, j) => Math.min(hi[j], Math.max(lo[j], v)))
 
+/**
+ * Assemble a box-QP state: the gradient, the projected-gradient measure, which bounds are active, and the objective.
+ *
+ * @param base The problem's data, carried from state to state.
+ * @param tol The convergence tolerance.
+ * @param x The iterate, inside the box; copied into the state.
+ * @param extra The fields the caller sets: the Cauchy point of the last step, whether its Newton half was taken, and
+ *   the step count `t`.
+ * @returns The state.
+ */
 function boxState(
   base: Pick<BoxQuadraticProgramState, 'Q' | 'c' | 'lower' | 'upper'>,
   tol: Scalar,
@@ -800,11 +1072,26 @@ function boxState(
 
 /**
  * Box-constrained convex QP by projected gradient with subspace Newton steps (after Moré and Toraldo, 1991) as a
- * traceable algorithm; `init` takes `{ x0? }`, projected onto the box. Each step (1) takes a projected-gradient step along the
- * projection arc P(x − t∇f) with an Armijo backtracking search, which identifies the bounds that are active, and
- * (2) solves Q_FF d = −∇f_F on the free variables F and searches along P(x + t d). With Q positive definite it finds
- * the active set in finitely many steps and then converges in one Newton step. Bound multipliers at the end are
- * max(∇f, 0) at lower bounds and max(−∇f, 0) at upper bounds.
+ * traceable algorithm; `init` takes `{ x0? }`, projected onto the box. Each step (1) takes a projected-gradient step
+ * along the projection arc $P(\xvec - t\nabla f)$ with an Armijo backtracking search (from the exact minimiser along
+ * $-\nabla f$, halving $t$ at most 60 times), which identifies the bounds that are active, and (2) solves
+ * $\Qmat_{FF}\dvec = -\nabla f_F$ on the variables $F$ strictly inside their bounds and halves $t$ along
+ * $P(\xvec + t\dvec)$ until the objective does not increase. With $\Qmat$ positive definite it finds the active set
+ * in finitely many steps and then converges in one Newton step. Bound multipliers at the end are $\max(\nabla f, 0)$
+ * at lower bounds and $\max(-\nabla f, 0)$ at upper bounds. Throws `DomainError` for a lower bound above its upper
+ * bound (or NaN), and `ShapeError` when a length disagrees with `c`.
+ *
+ * @param problem The box-constrained QP.
+ * @param options The tolerance on the projected gradient.
+ * @returns The algorithm. Once converged, a step returns the state unchanged.
+ *
+ * @example A Cauchy step finds the active bound, a Newton step the free variable
+ * // Minimise x^2 + xy + y^2 - 4x + y over the box [0, 3]^2: y rests on its lower bound and x = 2.
+ * const box = { Q: [[2, 1], [1, 2]], c: [-4, 1], lower: [0, 0], upper: [3, 3] }
+ * const tr = trace(boxQuadraticProgram(box), { x0: [3, 3] }, 10)
+ * print('Cauchy points =', tr.steps.map((s) => Array.from(s.cauchy.data)))
+ * print('x =', tr.steps.map((s) => Array.from(s.x.data)))
+ * print('at bound =', tr.steps.at(-1).bounds, ' gradient =', tr.steps.at(-1).grad)
  */
 export function boxQuadraticProgram(
   problem: BoxQuadraticProblem,
@@ -901,6 +1188,16 @@ export function boxQuadraticProgram(
 /**
  * Solve a box-constrained QP (a `run` of `boxQuadraticProgram`, at most `maxSteps` steps, default 1000); returns the
  * final state, whose `converged` says whether it met `tolerance`.
+ *
+ * @param problem The box-constrained QP.
+ * @param options The tolerance, `maxSteps`, and the start `x0` (projected onto the box; default the projection of 0).
+ * @returns The final state.
+ *
+ * @example The minimiser of a quadratic on a box
+ * // Unconstrained, x^2 + xy + y^2 - 4x + y is least at (3, -2); on [0, 3]^2 the minimiser is (2, 0).
+ * const s = boxQuadprog({ Q: [[2, 1], [1, 2]], c: [-4, 1], lower: [0, 0], upper: [3, 3] })
+ * print('x =', s.x, ' objective =', s.objective)
+ * print('converged =', s.converged, ' steps =', s.t)
  */
 export function boxQuadprog(
   problem: BoxQuadraticProblem,

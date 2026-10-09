@@ -29,7 +29,7 @@ export interface SearchSpace<N> {
   readonly root: N
   /** The immediate refinements of a node. A canonical operator reaches each node once; otherwise give `key`. */
   refine(node: N): readonly N[]
-  /** The quality of a node, higher is better; −∞ (or NaN) for a node that may not be a result. */
+  /** The quality of a node, higher is better; $-\infty$ (or NaN, read as such) for a node that may not be a result. */
   quality(node: N): number
   /**
    * An optimistic estimate: an upper bound on the quality of every refinement of `node`, at any depth. Branch and
@@ -42,7 +42,7 @@ export interface SearchSpace<N> {
   expandable?(node: N): boolean
 }
 
-/** How the frontier is ordered: see the module comment. */
+/** How the frontier is ordered and taken: see the file comment. */
 export type SearchStrategy = 'beam' | 'best-first' | 'depth-first' | 'breadth-first'
 
 /** True when two nodes describe the same pattern, so only the better is kept (e.g. their covers overlap enough). */
@@ -50,7 +50,7 @@ export type RedundancyTest<N> = (a: N, b: N) => boolean
 
 /** Options of `refinementSearchSteps`. */
 export interface SearchOptions<N> {
-  /** Default `beam`. */
+  /** How the frontier is ordered and taken (see the file comment). Default `beam`. */
   strategy?: SearchStrategy
   /** Nodes kept per level by beam search (default 10). */
   beamWidth?: Size
@@ -58,15 +58,21 @@ export interface SearchOptions<N> {
   maxDepth?: Size
   /** Results kept (default 10). */
   k?: Size
-  /** Branch and bound: skip a node whose bound is ≤ the k-th best quality. Default true when the space has `bound`. */
+  /**
+   * Branch and bound: skip a node whose bound is at most the threshold, the $k$-th best quality (or NaN). Default true
+   * when the space has `bound`.
+   */
   prune?: boolean
-  /** Only nodes of quality above this are results; also the pruning threshold until k results are held. Default −∞. */
+  /**
+   * Only nodes of quality above this are results; also the pruning threshold until $k$ results are held. Default
+   * $-\infty$.
+   */
   minQuality?: number
   /** A redundancy filter for the results; with one, pruning is exact for the filtered set only approximately. */
   redundant?: RedundancyTest<N>
   /** Offer the root as a result too (default false). */
   includeRoot?: boolean
-  /** Stop (terminated) after evaluating this many nodes (default unlimited). */
+  /** Stop (terminated) after evaluating this many nodes, the root included (default unlimited). */
   maxNodes?: Size
 }
 
@@ -81,21 +87,28 @@ export type VisitFate = 'root' | 'queued' | 'dropped' | 'pruned' | 'duplicate' |
 export interface SearchVisit<N> {
   /** Order of evaluation, from 0 (the root). */
   readonly id: number
-  /** The id of the node it refines; −1 for the root. */
+  /** The id of the node it refines; $-1$ for the root. */
   readonly parent: number
+  /** The number of refinements from the root (0 for the root). */
   readonly depth: number
+  /** The node itself. */
   readonly node: N
+  /** The node's canonical key, from the space's `key` (or `JSON.stringify`). */
   readonly key: string
-  /** NaN for a duplicate (not evaluated). */
+  /** The node's quality: $-\infty$ when `quality` gave NaN, and NaN for a duplicate (not evaluated). */
   readonly quality: number
-  /** The optimistic estimate; +∞ without one. */
+  /** The optimistic estimate; $+\infty$ without one, and NaN for a duplicate. */
   readonly bound: number
+  /** What became of the node on the step that generated it (or, in `searchHistory`, in the end). */
   readonly fate: VisitFate
 }
 
 /** A state of `refinementSearchSteps`. */
 export interface SearchState<N> extends Status {
-  /** Open nodes after the step: the beam; best-first by priority (highest first); depth-first top last; queue front first. */
+  /**
+   * Open nodes after the step: the beam (best first); for best-first, by priority (highest first); for depth-first, a
+   * stack with its top last; for breadth-first, a queue with its front first.
+   */
   readonly frontier: readonly SearchVisit<N>[]
   /** The top k, best first (ties by evaluation order). */
   readonly results: readonly SearchVisit<N>[]
@@ -103,7 +116,7 @@ export interface SearchState<N> extends Status {
   readonly expanded: readonly SearchVisit<N>[]
   /** The refinements this step generated, each with its fate. */
   readonly generated: readonly SearchVisit<N>[]
-  /** Open nodes this step removed unexpanded because the threshold rose above their bound. */
+  /** Open nodes this step removed unexpanded because the threshold rose to their bound (not in beam search). */
   readonly discarded: readonly SearchVisit<N>[]
   /** The quality a bound must exceed to be explored: the k-th best once k results are held, else `minQuality`. */
   readonly threshold: number
@@ -119,10 +132,13 @@ export interface SearchState<N> extends Status {
   readonly pruned: number
   /** Keys of every node evaluated, for duplicate detection. */
   readonly seen: readonly string[]
+  /** The id the next node evaluated will get. */
   readonly nextId: number
+  /** The frontier is empty or `maxNodes` nodes have been evaluated: the search is over. */
   readonly terminated: boolean
 }
 
+/** The options of `refinementSearchSteps` with their defaults filled in. */
 interface Resolved<N> {
   strategy: SearchStrategy
   beamWidth: number
@@ -135,6 +151,14 @@ interface Resolved<N> {
   maxNodes: number
 }
 
+/**
+ * The options with their defaults filled in, checked: throws `DomainError` for an unknown strategy, a `beamWidth` or
+ * `k` that is not a positive integer, or a negative `maxDepth`.
+ *
+ * @param space The search space, read only for whether it has a `bound` (the default of `prune`).
+ * @param o The caller's options.
+ * @returns Every option, with its default where it was left out.
+ */
 function resolve<N>(space: SearchSpace<N>, o: SearchOptions<N>): Resolved<N> {
   const r = {
     strategy: o.strategy ?? 'beam',
@@ -157,13 +181,39 @@ function resolve<N>(space: SearchSpace<N>, o: SearchOptions<N>): Resolved<N> {
   return r
 }
 
-/** Results order: higher quality first, then earlier evaluation. */
+/**
+ * Results order, as a comparator for `sort`: higher quality first, then earlier evaluation.
+ *
+ * @param a A visit.
+ * @param b Another visit.
+ * @returns Negative when `a` ranks before `b`, positive when after, 0 for the same visit.
+ */
 const byQuality = <N>(a: SearchVisit<N>, b: SearchVisit<N>) => b.quality - a.quality || a.id - b.id
 
 /**
  * `results` with `visit` offered: kept when its quality exceeds `minQuality` and it ranks in the top `k`. With a
  * redundancy test, a visit redundant with a better-or-equal result is refused, and results redundant with it and worse
- * are removed.
+ * are removed. Neither `results` nor `visit` is modified.
+ *
+ * @param results The current result set, best first (as this function returns it); not modified.
+ * @param visit The evaluated node to offer.
+ * @param k The most results to keep.
+ * @param options `minQuality`, the quality a result must exceed (default $-\infty$), and `redundant`, the redundancy
+ *   test, called as `redundant(visit.node, result.node)` (default none).
+ * @returns The new result set, best first (ties by evaluation order), at most `k` long; `results` itself when the
+ *   visit is refused.
+ *
+ * @example A result set of two that keeps no overlapping intervals
+ * const visit = (id, node, quality) =>
+ *   ({ id, parent: 0, depth: 1, node, key: String(node), quality, bound: Infinity, fate: 'queued' })
+ * const overlap = (a, b) => a[0] < b[1] && b[0] < a[1]
+ * const r1 = offerResult([], visit(1, [0, 4], 0.9), 2, { redundant: overlap })
+ * const r2 = offerResult(r1, visit(2, [6, 9], 0.5), 2, { redundant: overlap })
+ * print('two disjoint intervals:', r2.map((v) => v.node))
+ * const r3 = offerResult(r2, visit(3, [2, 5], 0.7), 2, { redundant: overlap })
+ * print('[2, 5] overlaps the better [0, 4]:', r3.map((v) => v.node))
+ * const r4 = offerResult(r3, visit(4, [5, 8], 0.8), 2, { redundant: overlap })
+ * print('[5, 8] overlaps the worse [6, 9]:', r4.map((v) => v.node))
  */
 export function offerResult<N>(
   results: readonly SearchVisit<N>[],
@@ -184,7 +234,29 @@ export function offerResult<N>(
   return out.length > k ? out.slice(0, k) : out
 }
 
-/** The top `k` of `visits` with the redundancy filter applied greedily from the best down. */
+/**
+ * The top `k` of `visits` with the redundancy filter applied greedily from the best down: a visit is kept unless it is
+ * redundant with one already kept.
+ *
+ * @param visits The visits to filter, in any order; not modified.
+ * @param redundant The redundancy test, called as `redundant(candidate.node, kept.node)`.
+ * @param k The most visits to keep (default all).
+ * @returns The visits kept, best first (ties by evaluation order).
+ *
+ * @example Keep the best of each group of overlapping intervals
+ * const visit = (id, node, quality) =>
+ *   ({ id, parent: 0, depth: 1, node, key: String(node), quality, bound: Infinity, fate: 'queued' })
+ * const overlap = (a, b) => a[0] < b[1] && b[0] < a[1]
+ * const visits = [
+ *   visit(1, [0, 4], 0.9),
+ *   visit(2, [2, 5], 0.7),
+ *   visit(3, [5, 8], 0.8),
+ *   visit(4, [6, 9], 0.5),
+ *   visit(5, [9, 12], 0.4),
+ * ]
+ * print('filtered:', filterRedundant(visits, overlap).map((v) => v.node))
+ * print('filtered, top 2:', filterRedundant(visits, overlap, 2).map((v) => v.node))
+ */
 export function filterRedundant<N>(
   visits: readonly SearchVisit<N>[],
   redundant: RedundancyTest<N>,
@@ -198,13 +270,53 @@ export function filterRedundant<N>(
   return out
 }
 
+/**
+ * The quality a node's bound must exceed to be explored: the $k$-th best quality once $k$ results are held (and at
+ * least `minQuality`), else `minQuality`.
+ *
+ * @param results The current result set, best first.
+ * @param o The resolved options, for `k` and `minQuality`.
+ * @returns The threshold.
+ */
 const thresholdOf = <N>(results: readonly SearchVisit<N>[], o: Resolved<N>) =>
   results.length >= o.k ? Math.max(o.minQuality, results[o.k - 1].quality) : o.minQuality
 
 /**
- * Search a refinement space step by step (see the module comment). Each step of beam search refines a whole level;
+ * Search a refinement space step by step (see the file comment). Each step of beam search refines a whole level;
  * each step of the other strategies takes one node from the frontier and expands it, or discards it when its bound no
- * longer beats the threshold. The state's `results` are the top k.
+ * longer beats the threshold. The state's `results` are the top $k$. A node reached a second time (by its key) is
+ * recorded as a duplicate and not evaluated again. The run ends (`terminated`) when the frontier is empty or
+ * `maxNodes` nodes have been evaluated. Throws `DomainError` for invalid options, when the algorithm is built.
+ *
+ * @param space The search space: its root, refinement operator, quality and, optionally, an optimistic estimate,
+ *   canonical key and expandability test. Its functions are called as the search runs.
+ * @param options The strategy, the beam width, the depth and size limits, the number of results, pruning and the
+ *   redundancy filter.
+ * @returns The algorithm, started with `undefined`, to step with `run` or `trace`.
+ *
+ * @example Beam search keeps the two best subsets of each size
+ * // Subsets of five weighted items, each grown by adding a later item; a subset's quality is its total weight.
+ * const w = [5, -2, 4, 3, -1]
+ * const total = (s) => s.reduce((a, i) => a + w[i], 0)
+ * const after = (s) => (s.length ? s[s.length - 1] + 1 : 0)
+ * const space = { root: [], refine: (s) => w.slice(after(s)).map((_, j) => [...s, after(s) + j]), quality: total }
+ * const tr = trace(refinementSearchSteps(space, { strategy: 'beam', beamWidth: 2, k: 1 }), undefined, 10)
+ * for (const s of tr.steps) print(`step ${s.t}: beam =`, s.frontier.map((v) => v.node), 'best =', s.best)
+ *
+ * @example Best-first branch and bound discards what cannot beat the best
+ * // Subsets of five weighted items, each grown by adding a later item; a subset's quality is its total weight.
+ * const w = [5, -2, 4, 3, -1]
+ * const total = (s) => s.reduce((a, i) => a + w[i], 0)
+ * const after = (s) => (s.length ? s[s.length - 1] + 1 : 0)
+ * // No refinement can gain more than the positive weights still to come.
+ * const bound = (s) => total(s) + w.slice(after(s)).reduce((a, x) => a + Math.max(x, 0), 0)
+ * const refine = (s) => w.slice(after(s)).map((_, j) => [...s, after(s) + j])
+ * const space = { root: [], refine, quality: total, bound }
+ * const tr = trace(refinementSearchSteps(space, { strategy: 'best-first', k: 1 }), undefined, 100)
+ * for (const s of tr.steps.slice(1)) {
+ *   print(`step ${s.t}: expanded`, s.expanded.map((v) => v.node), 'discarded', s.discarded.map((v) => v.node))
+ *   print('  best =', s.best, 'threshold =', s.threshold)
+ * }
  */
 export function refinementSearchSteps<N>(
   space: SearchSpace<N>,
@@ -394,23 +506,70 @@ export function refinementSearchSteps<N>(
   }
 }
 
-/** The final state of `refinementSearchSteps`: its `results` are the top k. */
+/**
+ * The final state of `refinementSearchSteps`, run until it terminates: its `results` are the top $k$, with counts of
+ * the nodes evaluated, expanded and pruned. Throws `DomainError` for invalid options.
+ *
+ * @param space The search space, as `refinementSearchSteps` takes it.
+ * @param options The search options, as `refinementSearchSteps` takes them.
+ * @returns The state the search ended in.
+ *
+ * @example The best subsets, with and without branch and bound
+ * // Subsets of five weighted items, each grown by adding a later item; a subset's quality is its total weight.
+ * const w = [5, -2, 4, 3, -1]
+ * const total = (s) => s.reduce((a, i) => a + w[i], 0)
+ * const after = (s) => (s.length ? s[s.length - 1] + 1 : 0)
+ * const space = {
+ *   root: [],
+ *   refine: (s) => w.slice(after(s)).map((_, j) => [...s, after(s) + j]),
+ *   quality: total,
+ *   // No refinement can gain more than the positive weights still to come.
+ *   bound: (s) => total(s) + w.slice(after(s)).reduce((a, x) => a + Math.max(x, 0), 0),
+ * }
+ * for (const prune of [false, true]) {
+ *   const s = refinementSearch(space, { strategy: 'depth-first', k: 3, prune })
+ *   print(`prune ${prune}: top 3 =`, s.results.map((v) => v.node), 'qualities', s.results.map((v) => v.quality))
+ *   print('  evaluated =', s.evaluated, 'pruned =', s.pruned)
+ * }
+ */
 export function refinementSearch<N>(space: SearchSpace<N>, options: SearchOptions<N> = {}): SearchState<N> {
   return run(refinementSearchSteps(space, options), undefined, Infinity)
 }
 
 /** Every node a search evaluated, by id, with its final fate, and the step at which each was generated and expanded. */
 export interface SearchHistory<N> {
+  /**
+   * The visits indexed by id, each with its final fate: `expanded` if it was, `pruned` if it was discarded from the
+   * frontier, else the fate it was generated with. Duplicates are left out.
+   */
   readonly visits: readonly SearchVisit<N>[]
   /** Step that generated each visit (0 for the root). */
   readonly generatedAt: Int32Array
-  /** Step that expanded each visit, −1 if never. */
+  /** Step that expanded each visit, $-1$ if never. */
   readonly expandedAt: Int32Array
-  /** Step that discarded each visit from the frontier (its bound fell to the threshold), −1 if never. */
+  /** Step that discarded each visit from the frontier (its bound fell to the threshold), $-1$ if never. */
   readonly discardedAt: Int32Array
 }
 
-/** The search tree recorded by a sequence of states (`trace(...).steps`, every step kept). */
+/**
+ * The search tree recorded by a sequence of states (`trace(...).steps`, every step kept).
+ *
+ * @param states The states of a run of `refinementSearchSteps` in order, from the initial state on; a step left out
+ *   loses the nodes it generated.
+ * @returns The visits by id with their final fates, and the step at which each was generated, expanded and discarded.
+ *
+ * @example The tree a narrow beam search grew
+ * const w = [5, -2, 4, 3, -1]
+ * const total = (s) => s.reduce((a, i) => a + w[i], 0)
+ * const after = (s) => (s.length ? s[s.length - 1] + 1 : 0)
+ * const space = { root: [], refine: (s) => w.slice(after(s)).map((_, j) => [...s, after(s) + j]), quality: total }
+ * const tr = trace(refinementSearchSteps(space, { strategy: 'beam', beamWidth: 1, maxDepth: 2, k: 1 }), undefined, 10)
+ * const h = searchHistory(tr.steps)
+ * print('nodes =', h.visits.map((v) => v.node))
+ * print('fates =', h.visits.map((v) => v.fate))
+ * print('generated at step', h.generatedAt)
+ * print('expanded at step', h.expandedAt)
+ */
 export function searchHistory<N>(states: readonly SearchState<N>[]): SearchHistory<N> {
   const visits: SearchVisit<N>[] = []
   const generated: number[] = []
