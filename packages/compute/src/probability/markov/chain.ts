@@ -1,9 +1,14 @@
 /**
- * Finite Markov chains on states 0 … n − 1 with a row-stochastic transition matrix P (P_ij = P(X_{t+1} = j | X_t = i)):
- * the classification of states (communicating classes, closed classes, periods), the stationary distribution
- * πP = π, absorption and hitting probabilities and times by first-step analysis, the distance to stationarity and the
- * mixing time, the spectral gap and the reversibility check, and a simulator. Matrices are small and dense; every
- * quantity is computed exactly (linear solves and matrix powers), never by simulation.
+ * Finite Markov chains on states $0, \dots, n - 1$ with a row-stochastic transition matrix $\Pmat$,
+ * $P_{ij} = \pr(X_{t+1} = j \mid X_t = i)$: the classification of states, stationary distributions, absorption and
+ * hitting by first-step analysis, convergence to stationarity, and simulation.
+ *
+ * The notation and results are those of Norris (1997), "Markov Chains", and Levin, Peres and Wilmer (2017), "Markov
+ * Chains and Mixing Times". Distributions are row vectors, so the stationary distribution solves
+ * $\pivec\Pmat = \pivec$ and the distribution after $t$ steps is $\pvec_0\Pmat^t$. Matrices are small and dense;
+ * every quantity other than a simulated path is computed exactly (linear solves and matrix powers), never by
+ * simulation. Every function validates the matrix first (square, entries non-negative, each row summing to 1 within
+ * $10^{-9} n$) and throws `DomainError` otherwise, as it does for an unknown state or an invalid step count.
  */
 
 import type { MatrixLike, Status, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -16,12 +21,20 @@ import { stronglyConnectedComponents } from 'aifn-compute/graph/traversal'
 import { eig, solveDense } from 'aifn-compute/numerics/linalg'
 import { totalVariation } from 'aifn-compute/probability/information'
 
+/** A row-major `Float64Array` of the dense helpers. */
 type F64 = dense.F64
 
-/** Rows must sum to one within this. */
+/** Rows must sum to one within this, times the number of states. */
 const ROW_TOLERANCE = 1e-9
 
-/** The validated matrix of a chain as row-major data. */
+/**
+ * The validated matrix of a chain as row-major data. Throws `DomainError` when it is not square, has no states, has an
+ * entry that is negative or NaN, or has a row whose sum differs from 1 by more than $10^{-9} n$.
+ *
+ * @param P The transition matrix $\Pmat$, a tensor or nested array.
+ * @param where The caller's name, for error messages.
+ * @returns `p`, the entries of $\Pmat$ row-major ($n^2$ values), and `n`, the number of states.
+ */
 function readChain(P: MatrixLike, where: string): { p: F64; n: number } {
   const { data, m, n } = dense.toMatrixF64(P, where)
   if (m !== n) throw new DomainError(where, `${where}: the transition matrix must be square, got ${m}×${n}`)
@@ -38,6 +51,15 @@ function readChain(P: MatrixLike, where: string): { p: F64; n: number } {
   return { p: data, n }
 }
 
+/**
+ * An initial distribution as a fresh array. A state index becomes the point mass on that state; a vector must have $n$
+ * non-negative entries summing to 1 within $10^{-9} n$. Throws `DomainError` otherwise.
+ *
+ * @param p0 A state (an integer in $[0, n)$) or a distribution over the $n$ states.
+ * @param n The number of states.
+ * @param where The caller's name, for error messages.
+ * @returns The distribution, $n$ values.
+ */
 function readDistribution(p0: VectorLike | number, n: number, where: string): F64 {
   if (typeof p0 === 'number') {
     if (!Number.isInteger(p0) || p0 < 0 || p0 >= n) throw new DomainError(where, `${where}: no state ${p0}`)
@@ -53,6 +75,15 @@ function readDistribution(p0: VectorLike | number, n: number, where: string): F6
   return Float64Array.from(v)
 }
 
+/**
+ * A set of states, checked and normalised: duplicates removed and sorted ascending. Throws `DomainError` when the set
+ * is empty or holds something other than an integer in $[0, n)$.
+ *
+ * @param states The states, an array or a vector.
+ * @param n The number of states of the chain.
+ * @param where The caller's name, for error messages.
+ * @returns The distinct states, in ascending order.
+ */
 function readStates(states: readonly number[] | VectorLike, n: number, where: string): number[] {
   const list = Array.from(dense.toF64(states as VectorLike, where))
   if (list.length === 0) throw new DomainError(where, `${where}: the target set is empty`)
@@ -61,16 +92,37 @@ function readStates(states: readonly number[] | VectorLike, n: number, where: st
   return [...new Set(list)].sort((a, b) => a - b)
 }
 
-/** p ↦ pP for a row vector p. */
+/**
+ * One step of a distribution, $\pvec \mapsto \pvec\Pmat$ for a row vector $\pvec$.
+ *
+ * @param p The distribution $\pvec$, $n$ values; not modified.
+ * @param P The transition matrix, row-major, $n^2$ values.
+ * @param n The number of states.
+ * @returns $\pvec\Pmat$, a new array of $n$ values.
+ */
 const stepRow = (p: ArrayLike<number>, P: F64, n: number): F64 => dense.matTVec(P, p, n, n)
 
-/** ‖p − q‖_TV for one distribution p [n], or for each row of p [m, n], against q [n]. */
+/**
+ * The total-variation distance $\lVert \pvec - \qvec \rVert_{TV}$ for one distribution $\pvec$, or for each row of
+ * a matrix of distributions, against $\qvec$.
+ *
+ * @param p One distribution of $n$ values, or (with `rows`) a row-major matrix of `rows` distributions.
+ * @param q The reference distribution, $n$ values.
+ * @param rows The number of rows of `p`; left out, `p` is one distribution.
+ * @returns The distances: one value, or one per row.
+ */
 function tv(p: F64, q: F64, rows?: number): F64 {
   const d = totalVariation(rows === undefined ? dense.vec(p) : dense.mat(p, rows, q.length), dense.vec(q))
   return typeof d === 'number' ? Float64Array.of(d) : dense.data(d as Tensor)
 }
 
-/** The transition graph: an edge i → j wherever P_ij > 0. */
+/**
+ * The transition graph: a directed edge $i \to j$ wherever $P_{ij} > 0$.
+ *
+ * @param P The transition matrix, row-major, $n^2$ values.
+ * @param n The number of states (the graph's nodes).
+ * @returns The directed graph.
+ */
 function graphOf(P: F64, n: number) {
   const edges: [number, number][] = []
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (P[i * n + j] > 0) edges.push([i, j])
@@ -78,8 +130,15 @@ function graphOf(P: F64, n: number) {
 }
 
 /**
- * The states from which some state of `targets` can be reached (in zero or more steps), as a mask. Paths may not pass
- * through a `blocked` state (one where the chain is stopped), though a blocked state is itself marked when it reaches.
+ * The states from which some state of `targets` can be reached (in zero or more steps), as a mask, by a backward search
+ * along positive transitions. Paths may not pass through a `blocked` state (one where the chain is stopped), though a
+ * blocked state is itself marked when it reaches.
+ *
+ * @param P The transition matrix, row-major, $n^2$ values.
+ * @param n The number of states.
+ * @param targets The target states; each is marked.
+ * @param blocked A mask of $n$ entries, nonzero where the chain is stopped; left out, no state is blocked.
+ * @returns A mask of $n$ entries, 1 where a target can be reached.
  */
 function canReach(P: F64, n: number, targets: readonly number[], blocked?: Uint8Array): Uint8Array {
   const mask = new Uint8Array(n)
@@ -96,7 +155,14 @@ function canReach(P: F64, n: number, targets: readonly number[], blocked?: Uint8
   return mask
 }
 
-/** The absorbing states: no positive transition to another state (so P_ii = 1 within the row tolerance). */
+/**
+ * The absorbing states: those with no positive transition to another state (so $P_{ii} = 1$ within the row
+ * tolerance).
+ *
+ * @param P The transition matrix, row-major, $n^2$ values.
+ * @param n The number of states.
+ * @returns The absorbing states, in ascending order.
+ */
 function absorbingStates(P: F64, n: number): number[] {
   const out: number[] = []
   for (let i = 0; i < n; i++) {
@@ -110,15 +176,39 @@ function absorbingStates(P: F64, n: number): number[] {
 // ── Construction ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The transition matrix of a chain as a float64 tensor [n, n], after checking that it is square, non-negative and
- * row-stochastic (each row sums to 1 within 1e-9 · n). Throws a `DomainError` naming the offending row otherwise.
+ * The transition matrix of a chain as a float64 tensor, after checking that it is square, non-negative and
+ * row-stochastic (each row sums to 1 within $10^{-9} n$). Throws a `DomainError` naming the offending entry or row
+ * otherwise.
+ *
+ * @param P The candidate transition matrix ($n \times n$), a tensor or nested array.
+ * @returns A copy of $\Pmat$ as an $n \times n$ float64 tensor.
+ *
+ * @example A valid chain, and a row that does not sum to 1
+ * print('P =', transitionMatrix([[0.9, 0.1], [0.5, 0.5]]))
+ * try {
+ *   transitionMatrix([[0.9, 0.2], [0.5, 0.5]])
+ * } catch (e) {
+ *   print('error:', e.message)
+ * }
  */
 export function transitionMatrix(P: MatrixLike): Tensor {
   const { p, n } = readChain(P, 'transitionMatrix')
   return dense.mat(Float64Array.from(p), n, n)
 }
 
-/** The n-step transition matrix Pⁿ (P⁰ = I), by repeated squaring. */
+/**
+ * The $k$-step transition matrix $\Pmat^k$ ($\Pmat^0 = \Imat$), by repeated squaring: entry $(i, j)$ is the
+ * probability of being in $j$ after $k$ steps from $i$.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param steps The number of steps $k$, an integer $\ge 0$ (else `DomainError`).
+ * @returns $\Pmat^k$, an $n \times n$ float64 tensor.
+ *
+ * @example The rows approach the stationary distribution $(5/6, 1/6)$
+ * const P = [[0.9, 0.1], [0.5, 0.5]]
+ * print('P^2 =', nStepTransition(P, 2))
+ * print('P^20 =', nStepTransition(P, 20))
+ */
 export function nStepTransition(P: MatrixLike, steps: number): Tensor {
   const where = 'nStepTransition'
   const { p, n } = readChain(P, where)
@@ -132,7 +222,23 @@ export function nStepTransition(P: MatrixLike, steps: number): Tensor {
   return dense.mat(result, n, n)
 }
 
-/** The distribution p₀Pᵗ of X_t for an initial distribution p₀ (or a start state). */
+/**
+ * The distribution $\pvec_0\Pmat^t$ of $X_t$ for an initial distribution $\pvec_0$ (or a start state), by $t$
+ * vector-matrix products.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param start The initial distribution $\pvec_0$ ($n$ probabilities summing to 1), or a state, which stands for the
+ *   point mass on it.
+ * @param steps The number of steps $t$, an integer $\ge 0$ (else `DomainError`).
+ * @returns $\pvec_0\Pmat^t$, $n$ values.
+ *
+ * @example From state 1 of a two-state chain
+ * const P = [[0.9, 0.1], [0.5, 0.5]]
+ * print('t = 0:', distributionAfter(P, 1, 0))
+ * print('t = 1:', distributionAfter(P, 1, 1))
+ * print('t = 10:', distributionAfter(P, 1, 10))
+ * print('from (0.5, 0.5), t = 1:', distributionAfter(P, [0.5, 0.5], 1))
+ */
 export function distributionAfter(P: MatrixLike, start: VectorLike | number, steps: number): Tensor {
   const where = 'distributionAfter'
   const { p, n } = readChain(P, where)
@@ -148,16 +254,23 @@ export function distributionAfter(P: MatrixLike, start: VectorLike | number, ste
 export interface ChainClasses {
   /** The communicating classes (each a sorted list of states), closed classes first, then by smallest state. */
   classes: number[][]
-  /** Whether each class is closed (no transition leaves it). In a finite chain, closed ⇔ recurrent. */
+  /**
+   * Whether each class is closed (no positive transition leaves it). In a finite chain, closed $\Leftrightarrow$
+   * recurrent.
+   */
   closed: boolean[]
-  /** The period of each class: the gcd of the lengths of its cycles (1 = aperiodic). */
+  /**
+   * The period of each class: the gcd of the lengths of its cycles (1 = aperiodic; 0 for a single state with no
+   * self-loop, which has no cycle).
+   */
   periods: number[]
-  /** The class index of each state. */
+  /** The class index of each state, an int32 tensor of $n$ values indexing `classes`. */
   classOf: Tensor
-  /** States in closed classes (recurrent) and the rest (transient), in order. */
+  /** The states in closed classes (recurrent), in ascending order. */
   recurrent: number[]
+  /** The states in classes that are not closed (transient), in ascending order. */
   transient: number[]
-  /** States with P_ii = 1. */
+  /** The states with no positive transition to another state ($P_{ii} = 1$). */
   absorbing: number[]
   /** One class: every state reaches every other. */
   irreducible: boolean
@@ -165,12 +278,34 @@ export interface ChainClasses {
   aperiodic: boolean
 }
 
+/**
+ * The greatest common divisor, by Euclid's algorithm; $\gcd(0, b) = \lvert b \rvert$.
+ *
+ * @param a An integer.
+ * @param b An integer.
+ * @returns The non-negative gcd of `a` and `b`.
+ */
 const gcd = (a: number, b: number): number => (b === 0 ? Math.abs(a) : gcd(b, a % b))
 
 /**
  * The communicating classes of a chain (the strongly connected components of its transition graph, Tarjan's
  * algorithm), which of them are closed (recurrent) and which transient, and the period of each: the gcd over edges
- * u → w inside the class of level(u) + 1 − level(w), with levels from a breadth-first search inside the class.
+ * $u \to w$ inside the class of $\ell(u) + 1 - \ell(w)$, with levels $\ell$ from a breadth-first search inside the
+ * class. A class is closed when no positive transition leaves it, however small, so a tiny leak makes it transient.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @returns The classes and the properties of each, the recurrent, transient and absorbing states, and whether the
+ *   chain is irreducible and aperiodic.
+ *
+ * @example A transient state leading into a closed class of period 2
+ * const c = classifyStates([[0.5, 0.5, 0], [0, 0, 1], [0, 1, 0]])
+ * print('classes:', c.classes, 'closed:', c.closed, 'periods:', c.periods)
+ * print('recurrent:', c.recurrent, 'transient:', c.transient)
+ * print('irreducible:', c.irreducible, 'aperiodic:', c.aperiodic)
+ *
+ * @example Two absorbing states
+ * const c = classifyStates([[1, 0, 0], [0.5, 0, 0.5], [0, 0, 1]])
+ * print('classes:', c.classes, 'absorbing:', c.absorbing)
  */
 export function classifyStates(P: MatrixLike): ChainClasses {
   const where = 'classifyStates'
@@ -227,7 +362,16 @@ export function classifyStates(P: MatrixLike): ChainClasses {
 
 // ── Stationary distributions ─────────────────────────────────────────────────────────────────────────────────────────
 
-/** Solve πP = π, Σπ = 1 on the states `members` of a closed class (π is zero elsewhere). */
+/**
+ * Solve $\pivec\Pmat = \pivec$, $\sum_i \pi_i = 1$ on the states `members` of a closed class ($\pivec$ is zero
+ * elsewhere), with the last balance equation replaced by the normalisation. Rounding below 0 is clipped and the
+ * result renormalised. Throws `DomainError` when the system is singular.
+ *
+ * @param p The transition matrix, row-major, $n^2$ values.
+ * @param n The number of states.
+ * @param members The states of the closed class.
+ * @returns $\pivec$ over all $n$ states.
+ */
 function stationaryOn(p: F64, n: number, members: number[]): F64 {
   const k = members.length
   // Equations j: Σᵢ πᵢ P_ij − π_j = 0 (one is redundant, since they sum to zero); the last is replaced by Σπ = 1.
@@ -246,8 +390,16 @@ function stationaryOn(p: F64, n: number, members: number[]): F64 {
 }
 
 /**
- * The stationary distributions of a chain that are supported on one closed class each, as rows of a tensor [k, n]
- * (k closed classes). Every stationary distribution is a mixture of these rows.
+ * The stationary distributions of a chain that are supported on one closed class each, as the rows of a
+ * $k \times n$ tensor ($k$ closed classes, in the order of `classifyStates`). Every stationary distribution is a
+ * mixture of these rows.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @returns A $k \times n$ float64 tensor, one stationary distribution per row.
+ *
+ * @example Gambler's ruin on $\{0, 1, 2, 3\}$: one row per absorbing end
+ * const P = [[1, 0, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0, 0.5], [0, 0, 0, 1]]
+ * print('rows:', stationaryDistributions(P))
  */
 export function stationaryDistributions(P: MatrixLike): Tensor {
   const { p, n } = readChain(P, 'stationaryDistributions')
@@ -259,9 +411,21 @@ export function stationaryDistributions(P: MatrixLike): Tensor {
 }
 
 /**
- * The stationary distribution π of a chain with one closed class: the unique probability vector with πP = π, found by
- * one linear solve (one balance equation replaced by Σπ = 1). Transient states get π = 0. Throws when the chain has
- * several closed classes (π is then not unique; see `stationaryDistributions`).
+ * The stationary distribution $\pivec$ of a chain with one closed class: the unique probability vector with
+ * $\pivec\Pmat = \pivec$, found by one linear solve (one balance equation replaced by $\sum_i \pi_i = 1$).
+ * Transient states get $\pi_i = 0$. Throws `DomainError` when the chain has several closed classes ($\pivec$ is then
+ * not unique; see `stationaryDistributions`).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @returns $\pivec$, $n$ values.
+ *
+ * @example A two-state chain: $\pi_0 P_{01} = \pi_1 P_{10}$ gives $(5/6, 1/6)$
+ * const pi = stationaryDistribution([[0.9, 0.1], [0.5, 0.5]])
+ * print('pi =', pi)
+ * print('5/6, 1/6 =', 5 / 6, 1 / 6)
+ *
+ * @example A transient state gets no mass
+ * print('pi =', stationaryDistribution([[0.5, 0.5, 0], [0, 0, 1], [0, 1, 0]]))
  */
 export function stationaryDistribution(P: MatrixLike): Tensor {
   const where = 'stationaryDistribution'
@@ -276,7 +440,16 @@ export function stationaryDistribution(P: MatrixLike): Tensor {
   return dense.vec(stationaryOn(p, n, closedClasses[0]))
 }
 
-/** Kac's formula: the mean return time to each state of an irreducible chain, 1/πᵢ. */
+/**
+ * Kac's formula: the mean return time to each state of an irreducible chain, $1/\pi_i$. A transient state of a chain
+ * with one closed class gets $\infty$; a chain with several closed classes throws (see `stationaryDistribution`).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @returns The expected number of steps to return to each state, $n$ values.
+ *
+ * @example With $\pivec = (5/6, 1/6)$, the returns take $6/5$ and 6 steps
+ * print('mean return times:', meanReturnTimes([[0.9, 0.1], [0.5, 0.5]]))
+ */
 export function meanReturnTimes(P: MatrixLike): Tensor {
   const pi = dense.data(stationaryDistribution(P))
   return dense.vec(pi.map((v) => (v > 0 ? 1 / v : Infinity)))
@@ -290,22 +463,51 @@ export interface Absorption {
   transient: number[]
   /** The absorbing states, in order: the columns of `probabilities`. */
   absorbing: number[]
-  /** The fundamental matrix N = (I − Q)⁻¹ [t, t]: N_ij is the expected number of visits to j starting from i. */
+  /**
+   * The fundamental matrix $\Nmat = (\Imat - \Qmat)^{-1}$ ($t \times t$ for $t$ transient states): $N_{ij}$ is the
+   * expected number of visits to $j$ starting from $i$.
+   */
   fundamental: Tensor
-  /** B = NR [t, a]: the probability of being absorbed in each absorbing state, from each transient state. */
+  /**
+   * $\Bmat = \Nmat\Rmat$ ($t \times a$ for $a$ absorbing states): the probability of being absorbed in each absorbing
+   * state, from each transient state.
+   */
   probabilities: Tensor
-  /** t = N1 [t]: the expected number of steps before absorption. */
+  /** $\tvec = \Nmat\ones$ ($t$ values): the expected number of steps before absorption. */
   expectedSteps: Tensor
-  /** The variance of the number of steps before absorption, (2N − I)t − t∘t [t]. */
+  /**
+   * The variance of the number of steps before absorption, $(2\Nmat - \Imat)\tvec - \tvec \circ \tvec$ ($t$ values,
+   * rounding below 0 clipped).
+   */
   varianceSteps: Tensor
 }
 
 /**
  * Absorption analysis by first-step analysis (Kemeny and Snell, 1960). With the states ordered transient first,
- * P = [[Q, R], [0, I]], the fundamental matrix N = (I − Q)⁻¹ counts expected visits, B = NR gives the absorption
- * probabilities and t = N1 the expected time to absorption. The absorbing states default to those with P_ii = 1; any
- * set may be given instead, in which case the chain is stopped on first entering it. Throws when a non-absorbing state
- * cannot reach the absorbing set (I − Q is then singular).
+ * $\Pmat = \begin{bmatrix} \Qmat & \Rmat \\ \zeros & \Imat \end{bmatrix}$, the fundamental matrix
+ * $\Nmat = (\Imat - \Qmat)^{-1}$ counts expected visits, $\Bmat = \Nmat\Rmat$ gives the absorption probabilities
+ * and $\tvec = \Nmat\ones$ the expected time to absorption. The absorbing states default to those with
+ * $P_{ii} = 1$; any set may be given instead, in which case the chain is stopped on first entering it. Throws
+ * `DomainError` when there is no absorbing state, or when a non-absorbing state cannot reach the absorbing set
+ * ($\Imat - \Qmat$ is then singular).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param options `absorbing`, the states at which the chain is stopped (default: the states with no positive
+ *   transition to another state).
+ * @returns The transient and absorbing states, which index the rows and columns of the results, with
+ *   $\Nmat$, $\Bmat$, $\tvec$ and the variance of the time to absorption.
+ *
+ * @example Gambler's ruin on $\{0, 1, 2, 3\}$ with a fair coin
+ * const P = [[1, 0, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0, 0.5], [0, 0, 0, 1]]
+ * const a = absorption(P)
+ * print('transient:', a.transient, 'absorbing:', a.absorbing)
+ * print('B =', a.probabilities)
+ * print('expected steps:', a.expectedSteps)
+ * print('variance:', a.varianceSteps)
+ *
+ * @example Stopping a chain on a chosen set
+ * const a = absorption([[0.9, 0.1], [0.5, 0.5]], { absorbing: [1] })
+ * print('steps from 0 to reach 1:', a.expectedSteps)
  */
 export function absorption(P: MatrixLike, options: { absorbing?: readonly number[] } = {}): Absorption {
   const where = 'absorption'
@@ -353,8 +555,18 @@ export function absorption(P: MatrixLike, options: { absorbing?: readonly number
 }
 
 /**
- * The hitting probabilities hᵢ = P(X_t ∈ A for some t ≥ 0 | X₀ = i) of a target set A: 1 on A, 0 on the states that
- * cannot reach A, and on the rest the solution of h = Ph (the minimal non-negative solution, by one linear solve).
+ * The hitting probabilities $h_i = \pr(X_t \in A \text{ for some } t \ge 0 \mid X_0 = i)$ of a target set $A$: 1
+ * on $A$, 0 on the states that cannot reach $A$, and on the rest the solution of $\hvec = \Pmat\hvec$ (the minimal
+ * non-negative solution, by one linear solve once the states that cannot reach $A$ are removed). Values are clipped to
+ * $[0, 1]$; a singular system gives NaN.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param target The target set $A$: a non-empty list of states (duplicates allowed).
+ * @returns $\hvec$, $n$ values.
+ *
+ * @example Gambler's ruin on $\{0, 1, 2, 3\}$: the chance of reaching 3
+ * const P = [[1, 0, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0, 0.5], [0, 0, 0, 1]]
+ * print('h =', hittingProbabilities(P, [3]))
  */
 export function hittingProbabilities(P: MatrixLike, target: readonly number[] | VectorLike): Tensor {
   const where = 'hittingProbabilities'
@@ -381,8 +593,21 @@ export function hittingProbabilities(P: MatrixLike, target: readonly number[] | 
 }
 
 /**
- * The expected hitting times kᵢ = E[min{t ≥ 0 : X_t ∈ A} | X₀ = i] of a target set A: 0 on A, ∞ where the chain may
- * never reach A (hᵢ < 1), and on the rest the solution of k = 1 + Pk.
+ * The expected hitting times $k_i = \expect[\min\{t \ge 0 : X_t \in A\} \mid X_0 = i]$ of a target set $A$: 0 on
+ * $A$, $\infty$ where the chain may never reach $A$ ($h_i < 1$: it can reach a state that cannot reach $A$ without
+ * entering $A$ first), and on the rest the solution of $\kvec = \ones + \Pmat\kvec$. A singular system gives NaN.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param target The target set $A$: a non-empty list of states (duplicates allowed).
+ * @returns $\kvec$, $n$ values.
+ *
+ * @example Gambler's ruin: either end is reached in 2 steps on average, but 3 alone may never be
+ * const P = [[1, 0, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0, 0.5], [0, 0, 0, 1]]
+ * print('to {0, 3}:', expectedHittingTimes(P, [0, 3]))
+ * print('to {3}:', expectedHittingTimes(P, [3]))
+ *
+ * @example A two-state chain: from 0, state 1 is reached after $1/P_{01} = 10$ steps
+ * print('to {1}:', expectedHittingTimes([[0.9, 0.1], [0.5, 0.5]], [1]))
  */
 export function expectedHittingTimes(P: MatrixLike, target: readonly number[] | VectorLike): Tensor {
   const where = 'expectedHittingTimes'
@@ -417,18 +642,30 @@ export function expectedHittingTimes(P: MatrixLike, target: readonly number[] | 
 
 /** The result of `distanceToStationarity`. */
 export interface StationarityDistance {
-  /** d(t) = maxₓ ‖Pᵗ(x, ·) − π‖_TV for t = 0 … steps [steps + 1]. */
+  /** $d(t) = \max_x \lVert \Pmat^t(x, \cdot) - \pivec \rVert_{TV}$ for $t = 0, \dots, T$ ($T + 1$ values). */
   worst: Tensor
-  /** ‖Pᵗ(x, ·) − π‖_TV for each start x: [steps + 1, n]. */
+  /**
+   * $\lVert \Pmat^t(x, \cdot) - \pivec \rVert_{TV}$ for each start $x$: a $(T + 1) \times n$ tensor, row $t$ for
+   * step $t$.
+   */
   perStart: Tensor
   /** The stationary distribution used. */
   stationary: Tensor
 }
 
 /**
- * The total-variation distance to stationarity of the chain started from each state, for t = 0 … steps, and its worst
- * case d(t) = maxₓ ‖Pᵗ(x, ·) − π‖_TV, which never increases (Levin, Peres and Wilmer, 2017, §4.4). Needs a unique
- * stationary distribution.
+ * The total-variation distance to stationarity of the chain started from each state, for $t = 0, \dots, T$, and its
+ * worst case $d(t) = \max_x \lVert \Pmat^t(x, \cdot) - \pivec \rVert_{TV}$, which never increases (Levin, Peres
+ * and Wilmer, 2017, §4.4). Needs a unique stationary distribution (else `DomainError`).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param steps The last step $T$, an integer $\ge 0$ (else `DomainError`).
+ * @returns The worst-case and per-start distances for each step, and the stationary distribution used.
+ *
+ * @example The worst case shrinks by the factor 0.4, the second eigenvalue, each step
+ * const d = distanceToStationarity([[0.9, 0.1], [0.5, 0.5]], 4)
+ * print('d(t) =', d.worst)
+ * print('from each start:', d.perStart)
  */
 export function distanceToStationarity(P: MatrixLike, steps: number): StationarityDistance {
   const where = 'distanceToStationarity'
@@ -449,23 +686,46 @@ export function distanceToStationarity(P: MatrixLike, steps: number): Stationari
 
 /** The result of `spectralGap`. */
 export interface SpectralGap {
-  /** The eigenvalues of P, real and imaginary parts, sorted by modulus (descending); the first is 1. */
+  /**
+   * The real parts of the eigenvalues of $\Pmat$: first the eigenvalue nearest 1 (which is 1), then the others by
+   * modulus, descending.
+   */
   real: Tensor
+  /** The imaginary parts of the eigenvalues, in the order of `real`. */
   imag: Tensor
-  /** The largest modulus among the eigenvalues other than the first 1: λ⋆ = max_{k ≥ 2} |λ_k|. */
+  /**
+   * The largest modulus among the eigenvalues other than the first 1:
+   * $\lambda_\star = \max_{k \ge 2} \lvert \lambda_k \rvert$ (0 for a one-state chain).
+   */
   secondModulus: number
-  /** The spectral gap 1 − λ₂, with λ₂ the largest real part among the other eigenvalues. */
+  /** The spectral gap $1 - \lambda_2$, with $\lambda_2$ the largest real part among the other eigenvalues. */
   gap: number
-  /** The absolute spectral gap 1 − λ⋆. */
+  /** The absolute spectral gap $1 - \lambda_\star$. */
   absoluteGap: number
-  /** The relaxation time 1/(1 − λ⋆) (∞ for a periodic or reducible chain). */
+  /**
+   * The relaxation time $1/(1 - \lambda_\star)$ ($\infty$ when the absolute gap is below $10^{-12}$, as for a
+   * periodic chain or one with several closed classes).
+   */
   relaxationTime: number
 }
 
 /**
- * The eigenvalues of P and its spectral gaps. For an irreducible, aperiodic chain λ⋆ < 1, and the distance to
- * stationarity falls like λ⋆ᵗ; for a reversible chain the relaxation time 1/(1 − λ⋆) bounds the mixing time on both
- * sides (see `mixingTime`).
+ * The eigenvalues of $\Pmat$ (by `eig`) and its spectral gaps (Levin, Peres and Wilmer, 2017, §12.2). For an
+ * irreducible, aperiodic chain $\lambda_\star < 1$, and the distance to stationarity falls like $\lambda_\star^t$;
+ * for a reversible chain the relaxation time $1/(1 - \lambda_\star)$ bounds the mixing time on both sides (see
+ * `mixingTime`).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @returns The eigenvalues, $\lambda_\star$, the spectral and absolute spectral gaps, and the relaxation time.
+ *
+ * @example A two-state chain has eigenvalues 1 and $1 - P_{01} - P_{10} = 0.4$
+ * const g = spectralGap([[0.9, 0.1], [0.5, 0.5]])
+ * print('eigenvalues:', g.real)
+ * print('gap:', g.gap, 'relaxation time:', g.relaxationTime)
+ *
+ * @example A periodic chain has $\lambda_\star = 1$
+ * const g = spectralGap([[0, 1], [1, 0]])
+ * print('eigenvalues:', g.real, 'absolute gap:', g.absoluteGap, 'relaxation time:', g.relaxationTime)
  */
 export function spectralGap(P: MatrixLike): SpectralGap {
   const where = 'spectralGap'
@@ -494,13 +754,27 @@ export function spectralGap(P: MatrixLike): SpectralGap {
 
 /** The result of `isReversible`. */
 export interface Reversibility {
+  /** Whether `maxViolation` is within the tolerance. */
   reversible: boolean
-  /** maxᵢⱼ |πᵢP_ij − πⱼP_ji|. */
+  /** $\max_{i, j} \lvert \pi_i P_{ij} - \pi_j P_{ji} \rvert$. */
   maxViolation: number
+  /** The stationary distribution $\pivec$ that was checked. */
   stationary: Tensor
 }
 
-/** Detailed balance: whether πᵢP_ij = πⱼP_ji for all i, j (within `tolerance`, default 1e-10). */
+/**
+ * Detailed balance: whether $\pi_i P_{ij} = \pi_j P_{ji}$ for all $i, j$, with $\pivec$ the stationary
+ * distribution (which must be unique, else `DomainError`).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param options `tolerance`, the largest violation still counted as balanced (default $10^{-10}$).
+ * @returns Whether the chain is reversible, the largest violation, and $\pivec$.
+ *
+ * @example Every two-state chain is reversible; a cycle with a drift is not
+ * print('two-state:', isReversible([[0.9, 0.1], [0.5, 0.5]]).reversible)
+ * const drift = isReversible([[0, 0.9, 0.1], [0.1, 0, 0.9], [0.9, 0.1, 0]])
+ * print('drifting cycle:', drift.reversible, 'violation:', drift.maxViolation)
+ */
 export function isReversible(P: MatrixLike, options: { tolerance?: number } = {}): Reversibility {
   const { p, n } = readChain(P, 'isReversible')
   const pi = dense.data(stationaryDistribution(P))
@@ -512,22 +786,47 @@ export function isReversible(P: MatrixLike, options: { tolerance?: number } = {}
 
 /** The result of `mixingTime`. */
 export interface MixingTime {
-  /** t_mix(ε) = min{t : d(t) ≤ ε}; ∞ when not reached within `maxSteps` (a periodic chain never mixes). */
+  /**
+   * $t_{mix}(\varepsilon) = \min\{t : d(t) \le \varepsilon\}$; $\infty$ when not reached within `maxSteps` (a
+   * periodic chain never mixes).
+   */
   time: number
+  /** The threshold $\varepsilon$ used. */
   epsilon: number
-  /** d(t) for t = 0 … time (or … maxSteps when not reached). */
+  /** $d(t)$ for $t = 0$ up to `time` (or up to `maxSteps` when not reached). */
   distances: Tensor
   /**
-   * For a reversible chain: (t_rel − 1) ln(1/(2ε)) ≤ t_mix(ε) ≤ ⌈t_rel ln(1/(ε π_min))⌉ (Levin, Peres and Wilmer,
-   * 2017, Theorems 12.4 and 12.5); undefined otherwise.
+   * For a reversible chain, the lower bound $(t_{rel} - 1) \ln(1/(2\varepsilon)) \le t_{mix}(\varepsilon)$ (Levin,
+   * Peres and Wilmer, 2017, Theorem 12.5), with $t_{rel}$ the relaxation time; undefined otherwise.
    */
   lower?: number
+  /**
+   * For a reversible chain, the upper bound
+   * $t_{mix}(\varepsilon) \le \lceil t_{rel} \ln(1/(\varepsilon \pi_{min})) \rceil$ (Theorem 12.4), with
+   * $\pi_{min}$ the smallest positive $\pi_i$; undefined otherwise.
+   */
   upper?: number
 }
 
 /**
- * The mixing time t_mix(ε) = min{t : maxₓ ‖Pᵗ(x, ·) − π‖_TV ≤ ε} (default ε = 1/4), by computing Pᵗ until the worst
- * distance falls below ε; with the relaxation-time bounds when the chain is reversible.
+ * The mixing time
+ * $t_{mix}(\varepsilon) = \min\{t : \max_x \lVert \Pmat^t(x, \cdot) - \pivec \rVert_{TV} \le \varepsilon\}$
+ * (default $\varepsilon = 1/4$), by computing $\Pmat^t$ until the worst distance falls to $\varepsilon$; with the relaxation-time bounds when the chain is reversible (detailed balance within $10^{-9}$).
+ * Needs a unique stationary distribution (else `DomainError`).
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param options `epsilon`, the threshold $\varepsilon$, in $(0, 1)$ (default 0.25; else `DomainError`); `maxSteps`,
+ *   the last $t$ tried (default 10000).
+ * @returns The mixing time, the distances $d(t)$ computed, and for a reversible chain the bounds.
+ *
+ * @example A two-state chain mixes in a few steps, within its bounds
+ * const m = mixingTime([[0.9, 0.1], [0.5, 0.5]])
+ * print('t_mix =', m.time, 'bounds:', m.lower, m.upper)
+ * print('d(t) =', m.distances)
+ * print('t_mix(0.01) =', mixingTime([[0.9, 0.1], [0.5, 0.5]], { epsilon: 0.01 }).time)
+ *
+ * @example A periodic chain never mixes
+ * print('t_mix =', mixingTime([[0, 1], [1, 0]], { maxSteps: 20 }).time)
  */
 export function mixingTime(P: MatrixLike, options: { epsilon?: number; maxSteps?: number } = {}): MixingTime {
   const where = 'mixingTime'
@@ -560,7 +859,19 @@ export function mixingTime(P: MatrixLike, options: { epsilon?: number; maxSteps?
 
 // ── Simulation ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** A path X₀, X₁, …, X_steps of the chain (int32 [steps + 1]), X₀ drawn from `start` (a state or a distribution). */
+/**
+ * A path $X_0, X_1, \dots, X_T$ of the chain, each step a categorical draw from the current state's row of $\Pmat$.
+ *
+ * @param s The stream the path is drawn from; advanced by every draw.
+ * @param P The transition matrix ($n \times n$).
+ * @param start $X_0$ itself (a state, not drawn), or a distribution to draw it from.
+ * @param steps The number of transitions $T$, an integer $\ge 0$ (else `DomainError`).
+ * @returns The path as an int32 tensor of $T + 1$ states.
+ *
+ * @example Twenty steps of a sticky two-state chain
+ * print('path:', simulateChain(stream(0), [[0.9, 0.1], [0.5, 0.5]], 0, 20))
+ * print('from (0.5, 0.5):', simulateChain(stream(1), [[0.9, 0.1], [0.5, 0.5]], [0.5, 0.5], 10))
+ */
 export function simulateChain(s: Stream, P: MatrixLike, start: VectorLike | number, steps: number): Tensor {
   const where = 'simulateChain'
   const { p, n } = readChain(P, where)
@@ -574,23 +885,43 @@ export function simulateChain(s: Stream, P: MatrixLike, start: VectorLike | numb
 
 /** One state of `markovChainSteps`. */
 export interface MarkovChainState extends Status {
-  /** The walker's current state X_t. */
+  /** The walker's current state $X_t$. */
   state: number
-  /** Visits to each state among X₀ … X_t [n]. */
+  /** The visits to each state among $X_0, \dots, X_t$ ($n$ counts). */
   visits: Tensor
-  /** The exact distribution p₀Pᵗ of X_t [n]. */
+  /** The exact distribution $\pvec_0\Pmat^t$ of $X_t$ ($n$ values). */
   distribution: Tensor
-  /** ‖p₀Pᵗ − π‖_TV (NaN when π is not unique). */
+  /** $\lVert \pvec_0\Pmat^t - \pivec \rVert_{TV}$ (NaN when $\pivec$ is not unique). */
   distance: number
-  /** ‖visits/(t + 1) − π‖_TV, the distance of the occupation measure (NaN when π is not unique). */
+  /**
+   * $\lVert \vvec/(t + 1) - \pivec \rVert_{TV}$ with $\vvec$ the `visits`: the distance of the occupation measure
+   * (NaN when $\pivec$ is not unique).
+   */
   occupationDistance: number
 }
 
 /**
  * A chain stepped one transition at a time: a walker drawn from the chain (its stream is the runner's), its visit
- * counts, and beside it the exact distribution p₀Pᵗ and both distances to π. The walker's occupation measure
- * converges to π for any irreducible chain (the ergodic theorem); p₀Pᵗ converges only when the chain is also
- * aperiodic. `init` draws X₀ from `start` (a state, or a distribution; default state 0).
+ * counts, and beside it the exact distribution $\pvec_0\Pmat^t$ and both distances to $\pivec$. The walker's
+ * occupation measure converges to $\pivec$ for any irreducible chain (the ergodic theorem); $\pvec_0\Pmat^t$
+ * converges only when the chain is also aperiodic. `init` takes $X_0$ from `start`: the state itself, or a draw from
+ * the distribution given. The algorithm has no starting point (`run` is given `undefined`) and never stops by itself.
+ *
+ * @param P The transition matrix ($n \times n$).
+ * @param options `start`, the state $X_0$ or the distribution $\pvec_0$ it is drawn from (default state 0).
+ * @returns The algorithm, whose state at step $t$ is the walker's state, visit counts, $\pvec_0\Pmat^t$ and the two
+ *   distances.
+ *
+ * @example The occupation measure and $\pvec_0\Pmat^t$ after 200 steps
+ * const s = run(markovChainSteps([[0.9, 0.1], [0.5, 0.5]]), undefined, 200)
+ * print('t =', s.t, 'state:', s.state, 'visits:', s.visits)
+ * print('distance of p0 P^t:', s.distance)
+ * print('distance of the occupation measure:', s.occupationDistance)
+ *
+ * @example A periodic chain: the occupation measure converges, $\pvec_0\Pmat^t$ does not
+ * const s = run(markovChainSteps([[0, 1], [1, 0]]), undefined, 101)
+ * print('distribution:', s.distribution, 'distance:', s.distance)
+ * print('occupation distance:', s.occupationDistance)
  */
 export function markovChainSteps(
   P: MatrixLike,

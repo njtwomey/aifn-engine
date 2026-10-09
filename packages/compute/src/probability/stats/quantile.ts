@@ -1,3 +1,11 @@
+/**
+ * Sample quantiles by the thirteen methods of `numpy.quantile` (the nine of Hyndman and Fan, 1996, and four numpy
+ * extras), with the median, the interquartile range and sorting built on them.
+ *
+ * A tensor contributes every element unless an axis is given; NaN in the data gives NaN, as in numpy; probabilities
+ * outside $[0, 1]$ and empty data throw `DomainError`.
+ */
+
 import type { Scalar } from 'aifn-compute/foundation/contracts'
 import type { Tensor } from 'aifn-compute/foundation/tensor'
 import { requireNonEmpty, type Along, type Whole } from './descriptive'
@@ -10,9 +18,10 @@ import { DomainError } from 'aifn-compute/foundation/errors'
  *
  * - Discontinuous: `inverted-cdf` (H&F 1), `averaged-inverted-cdf` (H&F 2), `closest-observation` (H&F 3),
  *   `lower`, `higher`, `nearest` (round half to even) and `midpoint`.
- * - Continuous, of the form x(k) with k = nq + α + q(1 − α − β) − 1 (0-based) and linear interpolation:
- *   `interpolated-inverted-cdf` (H&F 4, α=0, β=1), `hazen` (H&F 5, ½, ½), `weibull` (H&F 6, 0, 0), `linear` (H&F 7,
- *   1, 1), `median-unbiased` (H&F 8, ⅓, ⅓) and `normal-unbiased` (H&F 9, ⅜, ⅜).
+ * - Continuous, of the form $x_{(k)}$ with $k = nq + \alpha + q(1 - \alpha - \beta) - 1$ (0-based) and linear
+ *   interpolation: `interpolated-inverted-cdf` (H&F 4, $\alpha = 0, \beta = 1$), `hazen` (H&F 5, $\tfrac12, \tfrac12$),
+ *   `weibull` (H&F 6, $0, 0$), `linear` (H&F 7, $1, 1$), `median-unbiased` (H&F 8, $\tfrac13, \tfrac13$) and
+ *   `normal-unbiased` (H&F 9, $\tfrac38, \tfrac38$).
  */
 export type QuantileMethod =
   | 'inverted-cdf'
@@ -46,7 +55,7 @@ export const quantileMethods: readonly QuantileMethod[] = [
   'nearest',
 ]
 
-// α and β of the continuous methods (Hyndman and Fan 1996, §3; numpy's `_QuantileMethods`).
+/** $\alpha$ and $\beta$ of the continuous methods (Hyndman and Fan 1996, §3; numpy's `_QuantileMethods`). */
 const continuous: Partial<Record<QuantileMethod, [number, number]>> = {
   'interpolated-inverted-cdf': [0, 1],
   hazen: [0.5, 0.5],
@@ -56,7 +65,12 @@ const continuous: Partial<Record<QuantileMethod, [number, number]>> = {
   'normal-unbiased': [3 / 8, 3 / 8],
 }
 
-/** Round half to even, as `np.around`. */
+/**
+ * Round half to even, as `np.around`.
+ *
+ * @param v The number to round.
+ * @returns The nearest integer, the even one on a tie.
+ */
 function roundHalfEven(v: number): number {
   const f = Math.floor(v)
   const d = v - f
@@ -65,13 +79,27 @@ function roundHalfEven(v: number): number {
   return f % 2 === 0 ? f : f + 1
 }
 
-/** numpy's `_lerp`: a + (b − a)t, computed from the nearer end for accuracy (and exactness at t = 0 and 1). */
+/**
+ * numpy's `_lerp`: $a + (b - a)t$, computed from the nearer end for accuracy (and exactness at $t = 0$ and $1$).
+ *
+ * @param a The value at $t = 0$.
+ * @param b The value at $t = 1$.
+ * @param t The interpolation weight, in $[0, 1]$.
+ * @returns The interpolated value.
+ */
 function lerp(a: number, b: number, t: number): number {
   const d = b - a
   return t >= 0.5 ? b - d * (1 - t) : a + d * t
 }
 
-/** One quantile of sorted data (ascending, no NaN). */
+/**
+ * One quantile of sorted data (ascending, no NaN). An unknown method throws `DomainError`.
+ *
+ * @param sorted The data, sorted ascending, with no NaN; at least one value.
+ * @param q The probability, in $[0, 1]$ (not checked here).
+ * @param method The quantile method.
+ * @returns The quantile.
+ */
 function quantileSorted(sorted: ArrayLike<number>, q: number, method: QuantileMethod): number {
   const n = sorted.length
   const at = (i: number) => sorted[Math.min(n - 1, Math.max(0, i))]
@@ -120,20 +148,44 @@ function quantileSorted(sorted: ArrayLike<number>, q: number, method: QuantileMe
   }
 }
 
-/** The values sorted ascending (NaN last), as a Float64Array; private to stats. */
+/**
+ * The values sorted ascending (NaN last), as a Float64Array; private to stats.
+ *
+ * @param x The data: an array, or a tensor of any rank (every element). Not modified.
+ * @returns A sorted copy.
+ */
 export function sortedValues(x: Data): Float64Array {
   return Float64Array.from(allValues(x)).sort()
 }
 
-/** A sorted copy (ascending, NaN last) as a rank-1 tensor; a tensor contributes every element. */
+/**
+ * A sorted copy (ascending, NaN last) as a rank-1 tensor; a tensor contributes every element.
+ *
+ * @param x The data: an array, or a tensor of any rank. Not modified.
+ * @returns The values in ascending order.
+ *
+ * @example Sort the elements of a matrix
+ * print('sorted =', sorted(tensor([[3, 1], [NaN, 2]])))
+ */
 export function sorted(x: Data): Tensor {
   return vectorOf(sortedValues(x))
 }
 
-/** Options of `quantile`, `median` and `interquartileRange` when reducing along an axis. */
+/**
+ * Options of `quantile`, `median` and `interquartileRange` when reducing along an axis: `method`, the quantile method
+ * (default `linear`).
+ */
 export type QuantileOptions = { method?: QuantileMethod }
 
-/** Quantiles of one sequence at each probability. */
+/**
+ * Quantiles of one sequence at each probability. Throws `DomainError` when the sequence is empty or a probability lies
+ * outside $[0, 1]$.
+ *
+ * @param x The values, in any order (copied and sorted); every quantile is NaN if any value is NaN.
+ * @param qs The probabilities, each in $[0, 1]$.
+ * @param method The quantile method.
+ * @returns The quantile at each probability, in the order of `qs`.
+ */
 function quantilesOf(x: ArrayLike<number>, qs: ArrayLike<number>, method: QuantileMethod): Float64Array {
   requireNonEmpty(x, 'quantile')
   for (let i = 0; i < qs.length; i++)
@@ -145,11 +197,30 @@ function quantilesOf(x: ArrayLike<number>, qs: ArrayLike<number>, method: Quanti
 }
 
 /**
- * Sample quantiles of x at probabilities q ∈ [0, 1], by the named method (default `linear`, numpy's default). Returns
- * a number for a number and a rank-1 tensor for an array (or rank-1 tensor) of probabilities. Matches
- * `numpy.quantile(x, q, method=...)`, with hyphens in place of underscores in the method names. NaN values in x give
- * NaN, as in numpy. A tensor x contributes every element; with a number q and `{ axis, keepDims, method }` in place of
- * the method, the quantile is taken along one axis of a tensor and returned as a tensor.
+ * Sample quantiles of $\xvec$ at probabilities $q \in [0, 1]$, by the named method (default `linear`, numpy's
+ * default). Returns a number for a number and a rank-1 tensor for an array (or rank-1 tensor) of probabilities.
+ * Matches `numpy.quantile(x, q, method=...)`, with hyphens in place of underscores in the method names. NaN values in
+ * $\xvec$ give NaN, as in numpy. A tensor $\xvec$ contributes every element; with a number $q$ and
+ * `{ axis, keepDims, method }` in place of the method, the quantile is taken along one axis of a tensor and returned as
+ * a tensor. Throws `DomainError` for empty data, a probability outside $[0, 1]$, or an axis with several probabilities.
+ *
+ * @param x The data: an array, or a tensor of any rank.
+ * @param q The probability, or an array or rank-1 tensor of them.
+ * @param method The quantile method (see `QuantileMethod`), or with one probability the options `{ method, axis,
+ *   keepDims }` to reduce along an axis of a tensor.
+ * @returns The quantile as a number for one probability over every element; otherwise a tensor (one entry per
+ *   probability, or the other axes of `x` along an axis).
+ *
+ * @example Quartiles, as np.quantile(x, [0, 0.25, 0.5, 1])
+ * print('quantiles =', quantile([7, 1, 3, 5], [0, 0.25, 0.5, 1]))
+ *
+ * @example The methods differ on a small sample
+ * const x = [7, 1, 3, 5]
+ * for (const m of ['linear', 'lower', 'higher', 'nearest', 'midpoint', 'inverted-cdf', 'hazen', 'weibull'])
+ *   print(m, quantile(x, 0.4, m))
+ *
+ * @example The median of each row
+ * print('row medians =', quantile(tensor([[1, 2, 3], [4, 6, 8]]), 0.5, { axis: 1 }))
  */
 export function quantile(x: Data, q: number, method?: QuantileMethod | Whole<QuantileOptions>): number
 export function quantile(x: Data, q: Data, method?: QuantileMethod): Tensor
@@ -170,8 +241,17 @@ export function quantile(
 }
 
 /**
- * The median: the `linear` quantile at ½, i.e. the middle value or the mean of the two middle values. Over every
- * element, or along `axis` of a tensor.
+ * The median: the `linear` quantile at $\tfrac12$, i.e. the middle value or the mean of the two middle values. Over
+ * every element, or along `axis` of a tensor. NaN in the data gives NaN; throws `DomainError` on empty data.
+ *
+ * @param x The data: an array, or a tensor of any rank.
+ * @param options The axis of a tensor to reduce along (none: every element) and `keepDims`.
+ * @returns The median, or a tensor of medians along the axis.
+ *
+ * @example Odd and even counts
+ * print('median of 5 values =', median([9, 1, 5, 3, 7]))
+ * print('median of 4 values =', median([9, 1, 5, 3]))
+ * print('column medians =', median(tensor([[1, 10], [2, 20], [9, 30]]), { axis: 0 }))
  */
 export function median(x: Data, options?: Whole): number
 export function median(x: Tensor, options: Along): Tensor
@@ -180,8 +260,17 @@ export function median(x: Data, options: AxisOption = {}): Scalar | Tensor {
 }
 
 /**
- * The interquartile range q(0.75) − q(0.25) by the given quantile method (default `linear`), over every element, or
- * along an axis of a tensor with `{ axis, keepDims, method }` in place of the method.
+ * The interquartile range $q(0.75) - q(0.25)$ by the given quantile method (default `linear`), over every element, or
+ * along an axis of a tensor with `{ axis, keepDims, method }` in place of the method. As `scipy.stats.iqr`.
+ *
+ * @param x The data: an array, or a tensor of any rank.
+ * @param method The quantile method, or the options `{ method, axis, keepDims }` to reduce along an axis of a tensor.
+ * @returns The interquartile range, or a tensor of it along the axis.
+ *
+ * @example By two methods
+ * const x = [1, 2, 3, 4, 5, 6, 7, 8]
+ * print('linear IQR =', interquartileRange(x))
+ * print('lower IQR =', interquartileRange(x, 'lower'))
  */
 export function interquartileRange(x: Data, method?: QuantileMethod | Whole<QuantileOptions>): number
 export function interquartileRange(x: Tensor, options: Along<QuantileOptions>): Tensor

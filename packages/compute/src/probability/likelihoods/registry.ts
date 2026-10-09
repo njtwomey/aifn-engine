@@ -22,6 +22,13 @@ const defineFamily = definer<LikelihoodInfo>('likelihood', 'probability/likeliho
 const cite = ['mccullagh1989', 'nelder1972']
 const notes = ['generalised-linear-model']
 
+/**
+ * Register a link with its metadata, citing McCullagh and Nelder and the GLM note unless `spec` overrides them.
+ *
+ * @param name The link's name, its registry key.
+ * @param spec The link's metadata: display name, TeX, mean space, and optionally its own notes.
+ * @returns The registered entry.
+ */
 const linkEntry = (name: LinkName, spec: Omit<LinkInfo, 'key' | 'kind' | 'module' | 'stability'>) =>
   defineLink({ key: name, cite, notes, ...spec }, link(name))
 
@@ -55,6 +62,7 @@ export const linkRegistry: Readonly<Record<LinkName, Entry<Link, LinkInfo>>> = e
   sqrt: linkEntry('sqrt', { name: 'square root', tex: '\\eta = \\sqrt{\\mu}', meanSpace: 'non-negative' }),
 }) as Readonly<Record<LinkName, Entry<Link, LinkInfo>>>
 
+/** The parameter space of a family with no parameters. */
 const none = space({})
 
 defineFamily(
@@ -152,6 +160,16 @@ export const likelihoodRegistry: Readonly<Record<string, Entry<() => families.Fa
 
 const defineFunction = definer<FunctionInfo>('function', 'probability/likelihoods')
 const GAMLSS = ['generalised-additive-models-for-location-scale-and-shape']
+/**
+ * Register a distributional family factory of `./distributional` as a construction function with the GAMLSS note,
+ * citing Rigby and Stasinopoulos (2005), Stasinopoulos and Rigby (2007) and `cites`.
+ *
+ * @param key The factory's export name, its registry key.
+ * @param name The display name.
+ * @param summary One sentence on the family.
+ * @param cites Further citation keys.
+ * @returns The registered entry.
+ */
 const gamlssFamily = (key: string, name: string, summary: string, cites: string[] = []) =>
   defineFunction(
     { key, name, summary, role: 'construction', notes: GAMLSS, cite: ['rigby2005', 'stasinopoulos2007', ...cites] },

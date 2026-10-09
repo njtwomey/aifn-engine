@@ -1,8 +1,8 @@
 /**
- * The registry of `aifn-compute/probability/tests`: every hypothesis test (`kind: 'test'`, with what it reads, its statistic,
- * the family of its null law and the alternatives it accepts) and every multiple-testing procedure; the sequential
- * tests as algorithms over a data stream (`problem: 'sequence'`); and the intervals, effect sizes, null laws and
- * design calculations as functions.
+ * The registry of `aifn-compute/probability/tests`: every hypothesis test (`kind: 'test'`, with what it reads, its
+ * statistic, the family of its null law and the alternatives it accepts) and every multiple-testing procedure; the
+ * sequential tests as algorithms over a data stream (`problem: 'sequence'`); and the intervals, effect sizes, null
+ * laws and design calculations as functions.
  */
 
 import {
@@ -340,6 +340,14 @@ test(
 // ── Multiple testing ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 const MT = ['multiple-testing', 'many-metrics-and-variants']
+/**
+ * Register a multiple-testing procedure as a test on p-values, with the fields every procedure shares.
+ *
+ * @param key The procedure's registry key, its function's name.
+ * @param name Its display name.
+ * @param cite The keys of its references, or undefined for none.
+ * @param f The procedure's function.
+ */
 const procedure = (key: string, name: string, cite: string[] | undefined, f: object) =>
   test(
     {

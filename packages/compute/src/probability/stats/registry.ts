@@ -1,6 +1,7 @@
 /**
  * The functions of `aifn-compute/probability/stats`, registered with their role and the notes they serve. The
- * Kolmogorov–Smirnov functions of `goodness.ts` are left to `aifn-compute/probability/tests`, which owns the test protocol.
+ * Kolmogorov–Smirnov functions are not here: they live in `aifn-compute/probability/tests` (its `goodness.ts`), which
+ * owns the test protocol.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

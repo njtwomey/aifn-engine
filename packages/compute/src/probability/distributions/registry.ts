@@ -29,6 +29,11 @@ const family = definer<DistributionInfo>('distribution', 'probability/distributi
 const loc = real(-5, 5, { default: 0, label: '\\mu', doc: 'location' })
 const scale = real(0.1, 5, { default: 1, scale: 'log', label: '\\sigma', doc: 'scale' })
 const ls = space({ loc, scale })
+/**
+ * A success probability $p \in [0, 1]$ as a `Space` dimension.
+ *
+ * @param d Its default value.
+ */
 const prob = (d: number) => real(0, 1, { default: d, label: 'p', doc: 'success probability' })
 const none = space({})
 

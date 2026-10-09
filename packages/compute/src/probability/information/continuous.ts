@@ -1,6 +1,7 @@
 /**
- * Mutual information of continuous variables: the Gaussian closed form, and the Kraskov–Stögbauer–Grassberger
- * k-nearest-neighbour estimator from samples.
+ * Mutual information of continuous variables: the Gaussian closed form from a covariance matrix, and the
+ * Kraskov–Stögbauer–Grassberger $k$-nearest-neighbour estimator from samples. The closed form is a composition of
+ * primitives (differentiable in the covariance); the estimator works on plain numbers.
  */
 
 import { logDet } from 'aifn-compute/numerics/linalg'
@@ -21,7 +22,14 @@ import {
 } from 'aifn-compute/foundation/tensor'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** Selection matrix picking the coordinates `indices` of a d-vector. */
+/**
+ * The selection matrix $\Smat$ that picks the coordinates `indices` of a vector of length $d$: $\Smat\zvec$ is those
+ * coordinates, in order. Throws a `DomainError` for an index that is not an integer in $0, \dots, d - 1$.
+ *
+ * @param indices The coordinates to pick, in the order wanted.
+ * @param d The length $d$ of the vector.
+ * @returns $\Smat$, of shape $[k, d]$ for $k$ indices, with a single 1 in each row.
+ */
 function selector(indices: readonly Index[], d: Size): Tensor {
   const out = new Float64Array(indices.length * d)
   indices.forEach((j, i) => {
@@ -32,8 +40,26 @@ function selector(indices: readonly Index[], d: Size): Tensor {
 }
 
 /**
- * I(X; Y) of jointly Gaussian X = z[x] and Y = z[y] with covariance Σ of z (d × d): ½ log(|Σ_XX| |Σ_YY| / |Σ_(X,Y)|),
- * in nats (Cover and Thomas, 2006, §8.5). For scalars with correlation ρ this is −½ log(1 − ρ²). Differentiable in Σ.
+ * The mutual information $I(X; Y)$ of jointly Gaussian blocks $X$ and $Y$ of a vector $\zvec$ with covariance
+ * $\Sigmamat$ ($d \times d$):
+ * $\tfrac{1}{2} \log(\lvert \Sigmamat_{XX} \rvert \lvert \Sigmamat_{YY} \rvert / \lvert \Sigmamat_{(X,Y)} \rvert)$,
+ * in nats unless `base` is given (Cover and Thomas, 2006, §8.5). For scalars with correlation $\rho$ this is
+ * $-\tfrac{1}{2} \log(1 - \rho^2)$. Differentiable in $\Sigmamat$. The blocks should not share coordinates (a shared
+ * one makes $\Sigmamat_{(X,Y)}$ singular).
+ *
+ * @param covariance The covariance $\Sigmamat$ of $\zvec$, a $d \times d$ matrix.
+ * @param x The coordinates of $\zvec$ that make up $X$.
+ * @param y The coordinates of $\zvec$ that make up $Y$.
+ * @param options The units.
+ * @param options.base The base of the logarithm (default $e$, nats; 2 for bits). Not checked.
+ * @returns The mutual information, a number (a traced value under `grad`).
+ *
+ * @example Correlation 0.6, and one variable against a pair
+ * const cov = tensor([[1, 0.6], [0.6, 1]])
+ * print('I (nats):', gaussianMutualInformation(cov, [0], [1]))
+ * print('-0.5 log(1 - 0.36):', -0.5 * Math.log(1 - 0.36))
+ * const three = tensor([[1, 0.5, 0], [0.5, 1, 0], [0, 0, 1]])
+ * print('I(z0; (z1, z2)) (bits):', gaussianMutualInformation(three, [0], [1, 2], { base: 2 }))
  */
 export function gaussianMutualInformation(
   covariance: Value,
@@ -50,7 +76,14 @@ export function gaussianMutualInformation(
   return base === undefined ? nats : mul(nats, 1 / Math.log(base))
 }
 
-/** Samples as rows of a flat buffer: [n] (d = 1) or [n, d], read through tensor's dense kernels. */
+/**
+ * Samples as rows of a flat buffer, read through tensor's dense kernels: a matrix (a rank-2 tensor or an array of
+ * rows) has a sample per row, and anything else is a vector of scalar samples ($d = 1$).
+ *
+ * @param x The samples: $n$ values, or an $n \times d$ matrix.
+ * @param where The caller's name, for error messages.
+ * @returns `n` samples of dimension `d`, with sample $i$ at entries `i * d` to `i * d + d - 1` of `values`.
+ */
 function rows(x: VectorLike | MatrixLike, where: string): { n: Size; d: Size; values: Float64Array } {
   const first = isTensor(x) ? null : (x as ArrayLike<unknown>)[0]
   if (isTensor(x) ? x.shape.length === 2 : typeof first === 'object' && first !== null) {
@@ -62,12 +95,27 @@ function rows(x: VectorLike | MatrixLike, where: string): { n: Size; d: Size; va
 }
 
 /**
- * The Kraskov–Stögbauer–Grassberger estimate of I(X; Y) from n paired samples (their estimator 1): with εᵢ the
- * max-norm distance from sample i to its k-th nearest neighbour in the joint space, and n_x(i), n_y(i) the numbers of
- * other samples strictly within εᵢ in each marginal space,
- * Î = ψ(k) + ψ(n) − ⟨ψ(n_x + 1) + ψ(n_y + 1)⟩ (Kraskov, Stögbauer and Grassberger, 2004, "Estimating mutual
- * information", Phys. Rev. E 69, eq. 8). In nats; O(n²) time. The estimate can be slightly negative for independent
- * variables. `x` and `y` are [n] or [n, d] (rows are samples).
+ * The Kraskov–Stögbauer–Grassberger estimate of $I(X; Y)$ from $n$ paired samples (their estimator 1): with
+ * $\varepsilon_i$ the max-norm distance from sample $i$ to its $k$-th nearest neighbour in the joint space, and
+ * $n_x(i)$, $n_y(i)$ the numbers of other samples strictly within $\varepsilon_i$ in each marginal space,
+ * $\hat I = \psi(k) + \psi(n) - \langle \psi(n_x + 1) + \psi(n_y + 1) \rangle$ ($\psi$ the digamma function, the
+ * angle brackets the mean over samples; Kraskov, Stögbauer and Grassberger, 2004, "Estimating mutual information",
+ * Phys. Rev. E 69, eq. 8). In nats; $O(n^2 \log n)$ time. The estimate can be slightly negative for independent
+ * variables. Not differentiable. Throws a `ShapeError` when `x` and `y` have different numbers of samples, and a
+ * `DomainError` unless $1 \le k < n$.
+ *
+ * @param x The samples of $X$: $n$ values, or an $n \times d_x$ matrix with one sample per row.
+ * @param y The paired samples of $Y$: $n$ values, or an $n \times d_y$ matrix.
+ * @param options The estimator's setting.
+ * @param options.k The number of neighbours $k$: small $k$ has less bias, large $k$ less variance.
+ * @returns The estimate, in nats.
+ *
+ * @example Correlated Gaussian samples, against the closed form
+ * const s = stream(1)
+ * const x = normal(s, 0, 1, { shape: [300] })
+ * const y = add(x, normal(s, 0, 1, { shape: [300] }))
+ * print('KSG estimate:', ksgMutualInformation(x, y))
+ * print('exact, rho^2 = 1/2:', -0.5 * Math.log(0.5))
  */
 export function ksgMutualInformation(
   x: VectorLike | MatrixLike,

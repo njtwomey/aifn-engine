@@ -1,6 +1,6 @@
 /**
- * The samplers of `aifn-compute/probability/samplers`, registered as functions that draw (`random: true`) with the notes they
- * serve.
+ * The samplers of `aifn-compute/probability/samplers`, registered as functions that draw (`random: true`) with the
+ * notes they serve and the works they cite.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

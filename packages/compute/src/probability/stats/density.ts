@@ -1,3 +1,13 @@
+/**
+ * Estimates of a sample's distribution: histograms with an explicit bin rule, the empirical CDF, and Gaussian kernel
+ * density estimates in one dimension and in $d$, with the bandwidth rules of Scott and Silverman (and likelihood
+ * cross-validation in $d$ dimensions).
+ *
+ * Each matches its numpy or scipy counterpart (`numpy.histogram`, `scipy.stats.ecdf`, `scipy.stats.gaussian_kde`).
+ * Values a histogram cannot place are reported in `dropped`, never clipped into the end bins, and a KDE of constant
+ * data is flagged rather than hidden.
+ */
+
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { allValues, toSequence, vectorOf, type Data } from './input'
 import { requireNonEmpty, requireSameLength, weightedVariance, variance } from './descriptive'
@@ -5,30 +15,44 @@ import { interquartileRange, sortedValues } from './quantile'
 import { DomainError, NumericalError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /**
- * How `histogram` chooses its bins. Every rule gives equal-width bins over [first, last] (the data's min and max, or
- * `range`), except explicit edges.
+ * How `histogram` chooses its bins. Every rule gives equal-width bins over $[\text{first}, \text{last}]$ (the data's
+ * min and max, or `range`; widened by $\tfrac12$ each way when they are equal), except explicit edges.
  * - a number: that many bins.
- * - `{ width }`: bins of that width starting at `first`; the last edge is the first multiple at or past `last`.
- * - `sturges`: width = (last − first) / (log₂ n + 1) (Sturges 1926), then ⌈(last − first) / width⌉ bins.
- * - `freedman-diaconis`: width = 2·IQR·n^{−1/3} (Freedman and Diaconis 1981); one bin when the IQR is 0.
+ * - `{ width }`: bins of that width starting at first; the last edge is the first one at or past last.
+ * - `sturges`: width $= s / (\log_2 n + 1)$ (Sturges 1926), then $\lceil (\text{last} - \text{first}) /
+ *   \text{width} \rceil$ bins.
+ * - `freedman-diaconis`: width $= 2 \cdot \text{IQR} \cdot n^{-1/3}$ (Freedman and Diaconis 1981), then bins as for
+ *   `sturges`; one bin when the IQR is 0.
  * - an array or rank-1 tensor: explicit, strictly increasing edges.
- * The number, `sturges` and `freedman-diaconis` rules match `numpy.histogram_bin_edges` (`bins=k`, `'sturges'`,
- * `'fd'`).
+ *
+ * Here $n$, the spread $s$ (max minus min) and the IQR are those of the data inside the range. The number, `sturges`
+ * and `freedman-diaconis` rules match `numpy.histogram_bin_edges` (`bins=k`, `'sturges'`, `'fd'`).
  */
 export type BinRule = number | { width: number } | 'sturges' | 'freedman-diaconis' | Data
 
 /** A histogram: `edges` (rank 1) has one more entry than `counts` and `density`. */
 export type Histogram = {
+  /** The bin edges, ascending (rank 1, $k + 1$ entries for $k$ bins). */
   edges: Tensor
-  /** Values (or summed weights) per bin. Bin i is [edges[i], edges[i+1]), except the last, which includes its right edge. */
+  /**
+   * Values (or summed weights) per bin. Bin $i$ is $[e_i, e_{i+1})$, except the last, which includes its right edge.
+   */
   counts: Tensor
-  /** counts / (total counted × bin width): integrates to 1 over the bins. */
+  /** counts / (total counted $\times$ bin width): integrates to 1 over the bins (NaN when nothing was counted). */
   density: Tensor
   /** Values (or weight) outside the edges, or NaN, which were not counted. */
   dropped: number
 }
 
-/** numpy's `linspace(first, last, count + 1)`: i·step + first, with the last edge exactly `last`. */
+/**
+ * numpy's `linspace(first, last, count + 1)`: $i \cdot \text{step} + \text{first}$, with the last edge exactly
+ * `last`.
+ *
+ * @param first The first edge.
+ * @param last The last edge.
+ * @param count The number of bins (one fewer than the edges).
+ * @returns The $\text{count} + 1$ edges.
+ */
 function evenEdges(first: number, last: number, count: number): Float64Array {
   const step = (last - first) / count
   const edges = Float64Array.from({ length: count + 1 }, (_, i) => i * step + first)
@@ -37,10 +61,35 @@ function evenEdges(first: number, last: number, count: number): Float64Array {
 }
 
 /**
- * Bins the values x and returns `{ edges, counts, density, dropped }`. Values equal to the last edge fall in the last
- * bin (the aifn convention, as in numpy); values outside `range` or the explicit edges, and NaN, are dropped and
+ * Bins the values $\xvec$ and returns `{ edges, counts, density, dropped }`. Values equal to the last edge fall in the
+ * last bin (the aifn convention, as in numpy); values outside `range` or the explicit edges, and NaN, are dropped and
  * reported in `dropped`, never clipped into the end bins. `weights` replace unit counts. The default rule is 10 bins,
- * as in numpy. Matches `numpy.histogram`.
+ * as in numpy. Matches `numpy.histogram`. Throws `DomainError` for a bad rule, range or edges, and (as numpy) for NaN
+ * in the data when the range comes from the data; `ShapeError` when the weights do not match the values.
+ *
+ * @param xData The values: an array, or a tensor of any rank (every element).
+ * @param options The bins, the range and the weights.
+ * @param options.bins The bin rule (see `BinRule`; default 10 bins).
+ * @param options.range The interval $[\text{first}, \text{last}]$ the equal-width bins cover (default: the data's min
+ *   and max, or $[0, 1]$ for no data). Ignored with explicit edges.
+ * @param options.weights One weight per value (an array or rank-1 tensor), counted in place of 1.
+ * @returns The `edges`, the `counts` and `density` per bin, and the count (or weight) `dropped`.
+ *
+ * @example Three bins, as np.histogram(x, bins=3)
+ * const h = histogram([1, 2, 2, 3, 3, 3, 4, 4, 4, 4], { bins: 3 })
+ * print('edges =', h.edges)
+ * print('counts =', h.counts)
+ * print('density =', h.density)
+ *
+ * @example A range drops what lies outside it
+ * const h = histogram([1, 2, 2, 3, 3, 3, 4, 4, 4, 4], { bins: 2, range: [1, 3] })
+ * print('edges =', h.edges)
+ * print('counts =', h.counts)
+ * print('dropped =', h.dropped)
+ *
+ * @example Explicit edges, and weights
+ * print('counts =', histogram([1, 2, 2, 3, 3, 3, 4, 4, 4, 4], { bins: [0, 2, 3, 10] }).counts)
+ * print('weighted =', histogram([1, 2, 3, 4], { bins: 2, weights: [1, 1, 1, 3] }).counts)
  */
 export function histogram(
   xData: Data,
@@ -145,8 +194,16 @@ export function histogram(
 }
 
 /**
- * The empirical CDF as a step function: the distinct sorted values and F̂(v) = #{xᵢ ≤ v} / n at each. Matches
- * `scipy.stats.ecdf(x).cdf` (`quantiles`, `probabilities`).
+ * The empirical CDF as a step function: the distinct sorted values and $\hat{F}(v) = \#\{i : x_i \le v\} / n$ at
+ * each. Matches `scipy.stats.ecdf(x).cdf` (`quantiles`, `probabilities`). Throws `DomainError` on empty data.
+ *
+ * @param xData The sample: an array, or a tensor of any rank (every element).
+ * @returns The distinct `values` in ascending order and the `probabilities` $\hat{F}$ at each (rank-1 tensors).
+ *
+ * @example Steps at the distinct values
+ * const { values, probabilities } = ecdf([3, 1, 2, 2])
+ * print('values =', values)
+ * print('F =', probabilities)
  */
 export function ecdf(xData: Data): { values: Tensor; probabilities: Tensor } {
   const x = allValues(xData)
@@ -162,7 +219,17 @@ export function ecdf(xData: Data): { values: Tensor; probabilities: Tensor } {
   return { values: vectorOf(values), probabilities: vectorOf(probabilities) }
 }
 
-/** The empirical CDF of x evaluated at each point t: #{xᵢ ≤ t} / n. */
+/**
+ * The empirical CDF of $\xvec$ evaluated at each point $t$: $\#\{i : x_i \le t\} / n$. Throws `DomainError` on an
+ * empty sample.
+ *
+ * @param xData The sample: an array or a rank-1 tensor.
+ * @param tData The points at which to evaluate it: an array or a rank-1 tensor, in any order.
+ * @returns $\hat{F}(t)$ at each point, in the order of the points.
+ *
+ * @example Between, at and beyond the sample
+ * print('F =', ecdfAt([1, 2, 3, 4], [0, 2, 2.5, 4, 9]))
+ */
 export function ecdfAt(xData: Data, tData: Data): Tensor {
   const x = toSequence(xData, 'ecdfAt')
   const t = toSequence(tData, 'ecdfAt')
@@ -184,18 +251,32 @@ export function ecdfAt(xData: Data, tData: Data): Tensor {
 }
 
 /**
- * A bandwidth rule for the Gaussian KDE, in scipy's form h = factor × σ̂, with σ̂ the sample standard deviation
- * (n − 1) and n the (effective) sample size:
- * - `scott`: factor n^{−1/5} (Scott 1992).
- * - `silverman`: factor (3n/4)^{−1/5} (Silverman 1986, eq. 3.28 in scipy's form).
- * - a number: the bandwidth h itself (the kernel's standard deviation).
+ * A bandwidth rule for the Gaussian KDE, in scipy's form $h = \text{factor} \times \hat{\sigma}$, with
+ * $\hat{\sigma}$ the sample standard deviation ($n - 1$ divisor) and $n$ the (effective) sample size:
+ * - `scott`: factor $n^{-1/5}$ (Scott 1992).
+ * - `silverman`: factor $(3n/4)^{-1/5}$ (Silverman 1986, eq. 3.28 in scipy's form).
+ * - a number: the bandwidth $h$ itself (the kernel's standard deviation) for `kde`; for `multivariateKde`, the factor.
  */
 export type BandwidthRule = 'scott' | 'silverman' | number
 
 /**
- * The Gaussian KDE bandwidth h (the kernel's standard deviation) for a sample, as `scipy.stats.gaussian_kde`
- * computes `sqrt(covariance)`. With weights, n is Kish's effective size (Σw)²/Σw² and σ̂² the reliability-weighted
- * variance, as in scipy.
+ * The Gaussian KDE bandwidth $h$ (the kernel's standard deviation) for a sample, as `scipy.stats.gaussian_kde`
+ * computes `sqrt(covariance)`. With weights, $n$ is Kish's effective size $(\sum_i w_i)^2 / \sum_i w_i^2$ and
+ * $\hat{\sigma}^2$ the reliability-weighted variance, as in scipy. Throws `DomainError` on an empty sample or a
+ * bandwidth that is not positive. Constant data give $h = 0$.
+ *
+ * @param xData The sample: an array or a rank-1 tensor.
+ * @param rule The bandwidth rule (see `BandwidthRule`); a number is returned as it is.
+ * @param weightsData One non-negative weight per value (an array or rank-1 tensor); left out, the values count
+ *   equally.
+ * @returns The bandwidth $h$.
+ *
+ * @example Scott and Silverman, as scipy's gaussian_kde
+ * const x = [1, 2, 3, 4, 5]
+ * print('Scott h =', kdeBandwidth(x))
+ * print('Silverman h =', kdeBandwidth(x, 'silverman'))
+ * // Weight on one value lowers the effective size, here to 3.2.
+ * print('weighted Scott h =', kdeBandwidth(x, 'scott', [1, 1, 1, 1, 4]))
  */
 export function kdeBandwidth(xData: Data, rule: BandwidthRule = 'scott', weightsData?: Data): number {
   const x = toSequence(xData, 'kdeBandwidth')
@@ -213,6 +294,12 @@ export function kdeBandwidth(xData: Data, rule: BandwidthRule = 'scott', weights
   return factor * sd
 }
 
+/**
+ * Kish's effective sample size $(\sum_i w_i)^2 / \sum_i w_i^2$ of weights.
+ *
+ * @param w The weights.
+ * @returns The effective size (NaN when every weight is 0).
+ */
 function importanceSize(w: ArrayLike<number>): number {
   let s = 0
   let s2 = 0
@@ -224,10 +311,27 @@ function importanceSize(w: ArrayLike<number>): number {
 }
 
 /**
- * A Gaussian kernel density estimate of the sample x, evaluated at the points `at`:
- * f̂(t) = Σᵢ wᵢ φ((t − xᵢ)/h) / h with weights normalised to sum to 1 (uniform by default) and h from `bandwidth`
- * (default `scott`). Returns the densities (a rank-1 tensor) and the bandwidth used. Matches `scipy.stats.gaussian_kde(x, weights=w)`
- * evaluated at `at`. `degenerate` is true when h is 0 (constant data); the densities are then NaN.
+ * A Gaussian kernel density estimate of the sample $\xvec$, evaluated at the points `at`:
+ * $\hat{f}(t) = \sum_i w_i \varphi((t - x_i)/h) / h$ with weights normalised to sum to 1 (uniform by default) and $h$
+ * from `bandwidth` (default `scott`). Returns the densities (a rank-1 tensor) and the bandwidth used. Matches
+ * `scipy.stats.gaussian_kde(x, weights=w)` evaluated at `at`. `degenerate` is true when $h$ is 0 (constant data); the
+ * densities are then NaN.
+ *
+ * @param xData The sample $x_i$: an array or a rank-1 tensor.
+ * @param atData The points $t$ at which to evaluate the density: an array or a rank-1 tensor.
+ * @param options The bandwidth and the weights.
+ * @param options.bandwidth The bandwidth rule (see `BandwidthRule`; default `scott`), or $h$ itself.
+ * @param options.weights One non-negative weight per sample value (an array or rank-1 tensor), normalised to sum to 1.
+ * @returns The `density` at each point, the `bandwidth` $h$ used, and whether it is `degenerate`.
+ *
+ * @example As scipy's gaussian_kde([0, 1, 2]) at four points
+ * const { density, bandwidth } = kde([0, 1, 2], [0, 1, 2, 5])
+ * print('density =', density)
+ * print('h =', bandwidth)
+ *
+ * @example A fixed bandwidth, and constant data
+ * print('h = 0.5:', kde([0, 1, 2], [0, 1], { bandwidth: 0.5 }).density)
+ * print('degenerate =', kde([3, 3, 3], [3]).degenerate)
  */
 export function kde(
   xData: Data,
@@ -253,7 +357,14 @@ export function kde(
   return { density: vectorOf(density), bandwidth: h, degenerate: !(h > 0) }
 }
 
-/** The sample covariance (n − 1) of row-major points [n × d]. */
+/**
+ * The sample covariance ($n - 1$ divisor) of row-major points ($n \times d$).
+ *
+ * @param x The points: row $i$ occupies entries `i * d` to `i * d + d - 1`.
+ * @param n The number of points.
+ * @param d The dimension.
+ * @returns The $d \times d$ covariance, row-major.
+ */
 function sampleCovariance(x: ArrayLike<number>, n: number, d: number): Float64Array {
   const mu = new Float64Array(d)
   for (let i = 0; i < n; i++) for (let j = 0; j < d; j++) mu[j] += x[i * d + j] / n
@@ -266,8 +377,18 @@ function sampleCovariance(x: ArrayLike<number>, n: number, d: number): Float64Ar
 }
 
 /**
- * The kernel N(0, c²Σ̂) of a sample: its covariance, log of 1/(n (2π)^{d/2} |c²Σ̂|^{1/2}), the whitened sample L⁻¹xᵢ
- * (LLᵀ = c²Σ̂) and the whitening map, so a quadratic form is a squared distance between whitened points.
+ * The kernel $\Gauss(\zeros, c^2\hat{\Sigmamat})$ of a sample: its covariance, the log of
+ * $1/(n (2\pi)^{d/2} \lvert c^2\hat{\Sigmamat} \rvert^{1/2})$, the whitened sample $\Lmat^{-1}\xvec_i$
+ * ($\Lmat\Lmat^\top = c^2\hat{\Sigmamat}$) and the whitening map, so a quadratic form is a squared distance between
+ * whitened points. Throws `NumericalError` 'singular' when the covariance is not positive definite (the points lie on a
+ * subspace).
+ *
+ * @param x The sample points, row-major: row $i$ occupies entries `i * d` to `i * d + d - 1`.
+ * @param n The number of points (at least 2).
+ * @param d The dimension.
+ * @param factor The bandwidth factor $c$.
+ * @returns `cov` ($c^2\hat{\Sigmamat}$, row-major), `logNorm` (the log normaliser above), `wx` (the whitened points,
+ *   row-major) and `whiten(src, off, out, o)`, which whitens the $d$ values of `src` from `off` into `out` from `o`.
  */
 function whitened(x: ArrayLike<number>, n: number, d: number, factor: number) {
   const cov = sampleCovariance(x, n, d).map((v) => v * factor * factor)
@@ -302,9 +423,15 @@ function whitened(x: ArrayLike<number>, n: number, d: number, factor: number) {
 }
 
 /**
- * The bandwidth factor maximising the leave-one-out log-likelihood Σᵢ log f̂₋ᵢ(xᵢ) over 25 log-spaced factors in
- * [0.01, 2] (likelihood cross-validation; Duin, 1976; Silverman, 1986, §3.4.4). Unlike Scott's rule, which assumes one
- * Gaussian bump, it follows the scale of narrow, separated modes.
+ * The bandwidth factor maximising the leave-one-out log-likelihood $\sum_i \log \hat{f}_{-i}(\xvec_i)$ over 25
+ * log-spaced factors in $[0.01, 2]$ (likelihood cross-validation; Duin, 1976; Silverman, 1986, §3.4.4). Unlike Scott's
+ * rule, which assumes one Gaussian bump, it follows the scale of narrow, separated modes. It costs $O(n^2)$ memory and
+ * $O(25 n^2)$ time.
+ *
+ * @param x The sample points, row-major: row $i$ occupies entries `i * d` to `i * d + d - 1`.
+ * @param n The number of points (at least 2).
+ * @param d The dimension.
+ * @returns The best factor $c$ of the 25.
  */
 function crossValidatedFactor(x: ArrayLike<number>, n: number, d: number): number {
   // Squared distances under the unscaled covariance (factor 1); a factor c divides them by c².
@@ -338,20 +465,52 @@ function crossValidatedFactor(x: ArrayLike<number>, n: number, d: number): numbe
 
 /** What `multivariateKde` returns. */
 export type MultivariateKde = {
-  /** f̂ at each query row (rank 1). */
+  /** $\hat{f}$ at each query row (rank 1). */
   density: Tensor
-  /** log f̂ at each query row (rank 1), computed stably (finite far from the sample). */
+  /** $\log \hat{f}$ at each query row (rank 1), computed stably (finite far from the sample). */
   logDensity: Tensor
-  /** The bandwidth factor c: the kernel covariance is c²Σ̂. */
+  /** The bandwidth factor $c$: the kernel covariance is $c^2\hat{\Sigmamat}$. */
   factor: number
-  /** The kernel covariance c²Σ̂ (d × d, row-major). */
+  /** The kernel covariance $c^2\hat{\Sigmamat}$ ($d \times d$). */
   covariance: Tensor
 }
 
 /**
- * A Gaussian kernel density estimate in d dimensions, as `scipy.stats.gaussian_kde`: the kernel is N(0, c²Σ̂) with Σ̂
- * the sample covariance (n − 1 denominator) and c the bandwidth factor, Scott's n^{−1/(d+4)} (default), Silverman's
- * (n(d + 2)/4)^{−1/(d+4)}, `cross-validation` (the leave-one-out likelihood's best factor) or a given number; f̂(t) = (1/n) Σᵢ N(t; xᵢ, c²Σ̂). `sample` is [n, d] and `at` is [m, d].
+ * A Gaussian kernel density estimate in $d$ dimensions, as `scipy.stats.gaussian_kde`: the kernel is
+ * $\Gauss(\zeros, c^2\hat{\Sigmamat})$ with $\hat{\Sigmamat}$ the sample covariance ($n - 1$ denominator) and $c$
+ * the bandwidth factor, Scott's $n^{-1/(d+4)}$ (default), Silverman's $(n(d + 2)/4)^{-1/(d+4)}$, `cross-validation`
+ * (the leave-one-out likelihood's best factor) or a given number;
+ * $\hat{f}(\tvec) = \frac{1}{n} \sum_i \Gauss(\tvec; \xvec_i, c^2\hat{\Sigmamat})$. `sample` is $[n, d]$ and
+ * `at` is $[m, d]$. Throws `ShapeError` for fewer than two points or mismatched dimensions, `DomainError` for a factor
+ * that is not positive, and `NumericalError` 'singular' when the points lie on a subspace.
+ *
+ * @param sample The sample, an $n \times d$ tensor with one point per row ($n \ge 2$).
+ * @param at The query points, an $m \times d$ tensor with one point per row.
+ * @param options The bandwidth.
+ * @param options.bandwidth `scott` (default), `silverman`, `cross-validation`, or the factor $c$ itself (not $h$, as in
+ *   `kde`).
+ * @returns The `density` and `logDensity` at each query row, the `factor` $c$ and the kernel `covariance`.
+ *
+ * @example As scipy's gaussian_kde on five points in the plane
+ * const sample = tensor([[0, 0], [1, 0], [0, 1], [1, 1], [0.5, 0.5]])
+ * const fit = multivariateKde(sample, tensor([[0.5, 0], [0.5, 3]]))
+ * print('density =', fit.density)
+ * print('log density =', fit.logDensity)
+ * print('factor =', fit.factor)
+ * print('kernel covariance =', fit.covariance)
+ *
+ * @example Cross-validation picks a narrow kernel for three tight clusters
+ * const sample = tensor([
+ *   [0, 0], [0.2, 0.1], [0.1, 0.3], [-0.1, 0.1],
+ *   [4, 0], [4.2, 0.2], [3.9, 0.1], [4.1, -0.2],
+ *   [0, 4], [0.1, 4.2], [-0.2, 3.9], [0.2, 4.1],
+ * ])
+ * // A point in a cluster, and one in the gap between two.
+ * const at = tensor([[0, 0], [2, 0]])
+ * const scott = multivariateKde(sample, at)
+ * const cv = multivariateKde(sample, at, { bandwidth: 'cross-validation' })
+ * print('Scott: factor', scott.factor, ' density', scott.density)
+ * print('cross-validated: factor', cv.factor, ' density', cv.density)
  */
 export function multivariateKde(
   sample: Tensor,

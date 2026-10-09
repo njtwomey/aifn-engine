@@ -1,17 +1,19 @@
 /**
- * Discrete univariate families (mass functions on the integers). Log-masses are compositions of primitives,
- * differentiable in the continuous parameters (probabilities and rates); counts (n, r, population sizes) are treated as
- * constants. Cdfs use the regularised incomplete beta and gamma functions where a closed form exists (differentiable in
- * the probability or rate) and summation otherwise. Entropies without a closed form are exact sums over the support
- * (truncated where the remaining mass is below 1e-17) and are not differentiable.
+ * Discrete univariate families: mass functions on the integers. Log-masses are compositions of primitives,
+ * differentiable in the continuous parameters (probabilities and rates); counts ($n$, $r$, population sizes) are
+ * treated as constants. Cdfs use the regularised incomplete beta and gamma functions where a closed form exists
+ * (differentiable in the probability or rate) and summation otherwise. Entropies without a closed form are sums over
+ * the support (on an infinite support, cut off past the mean once a log-mass falls below $-45$) and are not
+ * differentiable.
  *
- * Conventions follow scipy.stats: Geometric counts trials up to and including the first success (k ≥ 1);
- * NegativeBinomial counts failures before the r-th success.
+ * Conventions follow scipy.stats: Geometric counts trials up to and including the first success ($k \ge 1$);
+ * NegativeBinomial counts failures before the $r$-th success.
  *
  * Draws follow Devroye (1986), "Non-Uniform Random Variate Generation": inversion for the geometric (§X.2), the
  * gamma–Poisson mixture for the negative binomial (§X.4.5), sequential sampling without replacement for the
- * hypergeometric (§X.5); Bernoulli, binomial, Poisson and categorical draws are those of `aifn-compute/foundation/random` and
- * `aifn-compute/probability/samplers`. Rejection-style draws key each element by its own child stream.
+ * hypergeometric (§X.5); Bernoulli, binomial, Poisson and categorical draws are those of
+ * `aifn-compute/foundation/random` and `aifn-compute/probability/samplers`. Rejection-style draws key each element by
+ * its own child stream.
  */
 
 import { ShapeError } from 'aifn-compute/foundation/errors'
@@ -68,15 +70,50 @@ import type { Univariate } from './types'
 import { atBatch, check, guard, isInteger, mask, outside, raw, rawMap, rawOnly, sumLast, univariate } from './util'
 import { xlog1py, xlogy } from 'aifn-compute/numerics/special'
 
+/**
+ * Whether a value is a probability, in $[0, 1]$.
+ *
+ * @param x The value to test.
+ */
 const probability = (x: number) => x >= 0 && x <= 1
+/**
+ * Whether a value is a count: a non-negative integer.
+ *
+ * @param x The value to test.
+ */
 const count = (x: number) => isInteger(x) && x >= 0
+/**
+ * The elementwise floor $\lfloor k \rfloor$ of the raw values (a constant: no derivative flows through it).
+ *
+ * @param k The values (a number, a tensor or a traced value, read through its raw value).
+ */
 const floorOf = (k: Value): Raw => rawMap([k], Math.floor)
+/**
+ * The number of elements of a shape, the product of its sizes (1 for `[]`).
+ *
+ * @param shape The shape.
+ */
 const sizeOf = (shape: readonly number[]): number => shape.reduce((a, b) => a * b, 1)
 
-/** A draw tensor (the samplers return a number when every parameter is a number and no shape is given). */
+/**
+ * A draw tensor (the samplers return a number when every parameter is a number and no shape is given).
+ *
+ * @param x A sampler's draws: a number, or a tensor of them.
+ * @returns `x` itself when it is a tensor, else a scalar (shape `[]`) tensor holding it.
+ */
 const drawn = (x: number | Tensor): Tensor => (typeof x === 'number' ? fromData(new Float64Array([x]), []) : x)
 
-/** −Σₖ pₖ log pₖ over k = lo, lo + 1, …, hi for a scalar log-mass, stopping early once the tail is negligible. */
+/**
+ * The entropy $-\sum_k p_k \log p_k$ over $k = \mathit{lo}, \mathit{lo} + 1, \dots, \mathit{hi}$ for a scalar
+ * log-mass, stopping early once the tail is negligible. Terms of zero mass contribute nothing.
+ *
+ * @param logPmf The log-mass $\log p_k$ at an integer $k$, as a number.
+ * @param lo The first $k$ of the sum.
+ * @param hi The last $k$ of the sum (inclusive).
+ * @param tailFrom Past this $k$ the sum stops at the first term whose log-mass is below $-45$; the mean of the
+ *   distribution, or `Infinity` (the default) to sum every term up to `hi`.
+ * @returns The entropy in nats.
+ */
 function entropyBySum(logPmf: (k: number) => number, lo: number, hi: number, tailFrom = Infinity): number {
   let h = 0
   for (let k = lo; k <= hi; k++) {
@@ -91,8 +128,25 @@ function entropyBySum(logPmf: (k: number) => number, lo: number, hi: number, tai
 // ── Bernoulli ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The Bernoulli distribution on {0, 1} with success probability p, or with log-odds `{ logits }` (stable for extreme
- * probabilities; `params` then holds the logits). An exponential family with η = logit p and T(k) = k.
+ * The Bernoulli distribution on $\{0, 1\}$ with success probability $p$, $\pr(k) = p^k (1 - p)^{1 - k}$, or with
+ * log-odds `{ logits }` (stable for extreme probabilities; `params` then holds the logits). The mean is $p$ and the
+ * variance $p(1 - p)$; the mode is 1 when $p > 1/2$, else 0. An exponential family with $\eta = \operatorname{logit} p$
+ * and $T(k) = k$. Throws `DomainError` when a probability is outside $[0, 1]$.
+ *
+ * @param p The success probability $p \in [0, 1]$ (a number, a tensor for a batch, or a traced value), or
+ *   `{ logits }`, the log-odds $\log(p / (1 - p))$ (any real), which keeps $\log p$ and $\log(1 - p)$ accurate when
+ *   $p$ is within rounding of 0 or 1.
+ * @returns The distribution, with batch shape that of `p`.
+ *
+ * @example Mass, mean and variance
+ * const d = Bernoulli(0.3)
+ * print('P(1) =', d.prob(1), ' P(0) =', d.prob(0))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example Logits keep the log-mass of an almost-certain event
+ * // sigmoid(40) rounds to 1, so the probability form loses log P(0); the logit form keeps it.
+ * print('from p:', Bernoulli(1 / (1 + Math.exp(-40))).logProb(0))
+ * print('from logits:', Bernoulli({ logits: 40 }).logProb(0))
  */
 export function Bernoulli<P extends Value>(p: P | { logits: P }): Univariate<P> {
   const fromLogits = typeof p === 'object' && p !== null && 'logits' in p
@@ -145,16 +199,43 @@ export function Bernoulli<P extends Value>(p: P | { logits: P }): Univariate<P> 
 
 // ── Binomial ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** log pmf of Binomial(n, p) at k, as a number. */
+/**
+ * The log-mass of $\Binom(n, p)$ at $k$, as a number: $\log\binom{n}{k} + k \log p + (n - k)\log(1 - p)$, with
+ * $0 \log 0 = 0$ so the ends of the support are finite at $p \in \{0, 1\}$.
+ *
+ * @param n The number of trials.
+ * @param p The success probability.
+ * @param k The number of successes, an integer in $0, \dots, n$ (not checked).
+ * @returns $\log \pr(K = k)$.
+ */
 function binomialLogPmf(n: number, p: number, k: number): number {
   return (unwrap(logChoose(n, k)) as number) + xlogyScalar(k, p) + (n - k === 0 ? 0 : (n - k) * Math.log1p(-p))
 }
 
+/**
+ * $x \log y$ for numbers, taken as 0 when $x = 0$ (even when $y = 0$).
+ *
+ * @param x The factor $x$.
+ * @param y The argument $y$ of the logarithm.
+ */
 const xlogyScalar = (x: number, y: number) => (x === 0 ? 0 : x * Math.log(y))
 
 /**
- * The binomial distribution: successes in n ≥ 0 trials (an integer, treated as a constant) with success probability
- * p. The cdf is I_{1−p}(n − k, k + 1), differentiable in p. An exponential family for fixed n, with η = logit p.
+ * The binomial distribution: the number of successes in $n \ge 0$ trials (an integer, treated as a constant) with
+ * success probability $p$, $\pr(k) = \binom{n}{k} p^k (1 - p)^{n - k}$ for $k = 0, \dots, n$. The mean is $np$ and
+ * the variance $np(1 - p)$. The cdf is $I_{1 - p}(n - k, k + 1)$, differentiable in $p$; the entropy is a sum over the
+ * support. An exponential family for fixed $n$, with $\eta = \operatorname{logit} p$ and $T(k) = k$. Throws
+ * `DomainError` when $n$ is not a non-negative integer or $p$ is outside $[0, 1]$.
+ *
+ * @param n The number of trials $n$, a non-negative integer.
+ * @param p The success probability of each trial, in $[0, 1]$.
+ * @returns The distribution, with batch shape the broadcast of `n` and `p`.
+ *
+ * @example Four fair coins
+ * const d = Binomial(4, 0.5)
+ * print('P(2 heads) =', d.prob(2))
+ * print('P(at most 2) =', d.cdf(2))
+ * print('mean =', d.mean(), ' variance =', d.variance())
  */
 export function Binomial<N extends Value, P extends Value>(n: N, p: P): Univariate<N | P> {
   check('Binomial', 'n', n, count, 'a non-negative integer')
@@ -208,8 +289,23 @@ export function Binomial<N extends Value, P extends Value>(n: N, p: P): Univaria
 // ── Poisson ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The Poisson distribution with rate λ > 0. The cdf is Q(⌊k⌋ + 1, λ), differentiable in λ. An exponential family with
- * η = log λ and T(k) = k.
+ * The Poisson distribution with rate $\lambda > 0$, $\pr(k) = \lambda^k e^{-\lambda} / k!$ for $k = 0, 1, \dots$
+ * The mean and variance are both $\lambda$, and the mode is $\lfloor \lambda \rfloor$. The cdf is
+ * $Q(\lfloor k \rfloor + 1, \lambda)$ (the regularised upper incomplete gamma function), differentiable in
+ * $\lambda$. An exponential family with $\eta = \log \lambda$ and $T(k) = k$. Throws `DomainError` when a rate is
+ * not positive.
+ *
+ * @param rate The rate $\lambda > 0$, the expected count.
+ * @returns The distribution, with batch shape that of `rate`.
+ *
+ * @example Mass and moments at rate 2
+ * const d = Poisson(2)
+ * print('P(0) =', d.prob(0), ' e^-2 =', Math.exp(-2))
+ * print('P(2) =', d.prob(2))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example Seeded draws
+ * print('draws =', Poisson(2).sample(stream(1), { shape: [8] }))
  */
 export function Poisson<L extends Value>(rate: L): Univariate<L> {
   check('Poisson', 'rate', rate, (x) => x > 0, 'positive')
@@ -258,8 +354,19 @@ export function Poisson<L extends Value>(rate: L): Univariate<L> {
 // ── Geometric ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The geometric distribution: the number of trials up to and including the first success, k ≥ 1, with success
- * probability p ∈ (0, 1] (scipy's geom). An exponential family with η = log(1 − p) and T(k) = k.
+ * The geometric distribution: the number of trials up to and including the first success, $k \ge 1$, with success
+ * probability $p \in (0, 1]$ (scipy's geom): $\pr(k) = (1 - p)^{k - 1} p$. The mean is $1/p$, the variance
+ * $(1 - p)/p^2$ and the cdf $1 - (1 - p)^{\lfloor k \rfloor}$. Draws are by inversion. An exponential family with
+ * $\eta = \log(1 - p)$ and $T(k) = k$. Throws `DomainError` when $p$ is outside $(0, 1]$.
+ *
+ * @param p The success probability of each trial, in $(0, 1]$.
+ * @returns The distribution, with batch shape that of `p`.
+ *
+ * @example Tosses of a fair coin until the first head
+ * const d = Geometric(0.5)
+ * print('P(1) =', d.prob(1), ' P(3) =', d.prob(3))
+ * print('P(at most 3) =', d.cdf(3))
+ * print('mean =', d.mean(), ' variance =', d.variance())
  */
 export function Geometric<P extends Value>(p: P): Univariate<P> {
   check('Geometric', 'p', p, (x) => x > 0 && x <= 1, 'in (0, 1]')
@@ -304,9 +411,22 @@ export function Geometric<P extends Value>(p: P): Univariate<P> {
 // ── Negative binomial ────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The negative binomial distribution: the number of failures k ≥ 0 before the r-th success, for r > 0 (real r
- * allowed, treated as a constant) and success probability p ∈ (0, 1] (scipy's nbinom(r, p)). The cdf is
- * I_p(r, k + 1), differentiable in p. An exponential family for fixed r, with η = log(1 − p).
+ * The negative binomial distribution: the number of failures $k \ge 0$ before the $r$-th success, for $r > 0$ (real
+ * $r$ allowed, treated as a constant) and success probability $p \in (0, 1]$ (scipy's nbinom(r, p)):
+ * $\pr(k) = \frac{\Gamma(k + r)}{\Gamma(r)\, k!} p^r (1 - p)^k$. The mean is $r(1 - p)/p$ and the variance
+ * $r(1 - p)/p^2$. The cdf is $I_p(r, k + 1)$, differentiable in $p$; the entropy is a truncated sum. Draws are a
+ * gamma–Poisson mixture. An exponential family for fixed $r$, with $\eta = \log(1 - p)$ and $T(k) = k$. Throws
+ * `DomainError` when $r$ is not positive or $p$ is outside $(0, 1]$.
+ *
+ * @param r The number of successes $r > 0$ to wait for; a real $r$ gives the gamma–Poisson (overdispersed count)
+ *   form.
+ * @param p The success probability of each trial, in $(0, 1]$.
+ * @returns The distribution, with batch shape the broadcast of `r` and `p`.
+ *
+ * @example Failures before the second head of a fair coin
+ * const d = NegativeBinomial(2, 0.5)
+ * print('P(0) =', d.prob(0), ' P(1) =', d.prob(1), ' P(2) =', d.prob(2))
+ * print('mean =', d.mean(), ' variance =', d.variance())
  */
 export function NegativeBinomial<R extends Value, P extends Value>(r: R, p: P): Univariate<R | P> {
   check('NegativeBinomial', 'r', r, (x) => x > 0, 'positive')
@@ -366,9 +486,22 @@ export function NegativeBinomial<R extends Value, P extends Value>(r: R, p: P): 
 // ── Hypergeometric ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The hypergeometric distribution: successes in n draws without replacement from a population of N items of which K
- * are successes (all integers, constants). scipy's hypergeom(M = N, n = K, N = n). The cdf and entropy are sums over
- * the support max(0, n + K − N) … min(n, K).
+ * The hypergeometric distribution: the number of successes in $n$ draws without replacement from a population of $N$
+ * items of which $K$ are successes (all integers, constants), scipy's hypergeom($M = N$, $n = K$, $N = n$):
+ * $\pr(k) = \binom{K}{k}\binom{N - K}{n - k} / \binom{N}{n}$. The mean is $nK/N$ and the variance
+ * $n \frac{K}{N}\left(1 - \frac{K}{N}\right)\frac{N - n}{N - 1}$. The cdf and entropy are sums over the support
+ * $\max(0, n + K - N), \dots, \min(n, K)$ and are not differentiable; draws are sequential, one uniform per draw.
+ * Throws `DomainError` when a parameter is not a non-negative integer.
+ *
+ * @param population The population size $N$.
+ * @param successes The number $K$ of success items in the population.
+ * @param draws The number $n$ of items drawn.
+ * @returns The distribution, with batch shape the broadcast of the three parameters.
+ *
+ * @example Three cards from ten, four of them red
+ * const d = Hypergeometric(10, 4, 3)
+ * print('P(0 red) =', d.prob(0), ' P(1 red) =', d.prob(1))
+ * print('mean =', d.mean(), ' variance =', d.variance())
  */
 export function Hypergeometric<A extends Value, B extends Value, C extends Value>(
   population: A,
@@ -441,7 +574,21 @@ export function Hypergeometric<A extends Value, B extends Value, C extends Value
 
 // ── Discrete uniform ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The uniform distribution on the integers low, low + 1, …, high (inclusive; scipy's randint(low, high + 1)). */
+/**
+ * The uniform distribution on the integers $a, a + 1, \dots, b$ (inclusive; scipy's randint($a$, $b + 1$)):
+ * $\pr(k) = 1/(b - a + 1)$. The mean is $(a + b)/2$, the variance $((b - a + 1)^2 - 1)/12$ and the entropy
+ * $\log(b - a + 1)$; the mode is NaN, as every point is one. Throws `DomainError` when a bound is not an integer or
+ * $b < a$.
+ *
+ * @param low The smallest value $a$, an integer.
+ * @param high The largest value $b$, an integer, at least `low`.
+ * @returns The distribution, with batch shape the broadcast of `low` and `high`.
+ *
+ * @example A fair die
+ * const d = DiscreteUniform(1, 6)
+ * print('P(3) =', d.prob(3), ' P(at most 2) =', d.cdf(2))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ */
 export function DiscreteUniform<A extends Value, B extends Value>(low: A, high: B): Univariate<A | B> {
   check('DiscreteUniform', 'low', low, isInteger, 'an integer')
   check('DiscreteUniform', 'high', high, isInteger, 'an integer')
@@ -486,7 +633,14 @@ export function DiscreteUniform<A extends Value, B extends Value>(low: A, high: 
 
 // ── Categorical ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** One-hot rows [..., K] for integer indices (0 where the index is invalid). */
+/**
+ * One-hot rows for integer indices: a row of zeros with a 1 at the index (all zeros where the index is not an integer
+ * in $0, \dots, K - 1$).
+ *
+ * @param k The indices (a number or a tensor; read through a traced value).
+ * @param K The number of categories, the length of each row.
+ * @returns A tensor of shape `[...shape of k, K]`.
+ */
 function oneHot(k: Value, K: number): Tensor {
   const r = unwrap(k)
   const values = typeof r === 'number' ? [r] : toFlat(r)
@@ -499,10 +653,25 @@ function oneHot(k: Value, K: number): Tensor {
 }
 
 /**
- * The categorical distribution on {0, …, K − 1} with probabilities `probs` (last axis K, normalised here; a batch of
- * shape [..., K] gives batch shape [...]) or with `{ logits }` (unnormalised log-probabilities, the stable form). The
- * mean and variance treat the categories as the numbers 0 … K − 1. An exponential family with η = log-probabilities
- * and T(k) = one-hot(k).
+ * The categorical distribution on $\{0, \dots, K - 1\}$ with probabilities $\pr(k) = p_k / \sum_j p_j$ (the
+ * weights are normalised here), or with `{ logits }`, $\pr(k) = e^{\ell_k} / \sum_j e^{\ell_j}$ (the stable form).
+ * The mean and variance treat the categories as the numbers $0, \dots, K - 1$. An exponential family with
+ * $\eta$ the log-probabilities and $T(k)$ the one-hot vector of $k$. Throws `ShapeError` for a scalar and
+ * `DomainError` for a negative weight.
+ *
+ * @param p The weights $p_k \ge 0$ along the last axis (length $K$; a batch of shape `[..., K]` gives batch shape
+ *   `[...]`), or `{ logits }`, unnormalised log-probabilities of the same shape.
+ * @returns The distribution over category indices.
+ *
+ * @example Weights normalised to probabilities
+ * const d = Categorical(tensor([1, 2, 1]))
+ * print('P(1) =', d.prob(1), ' P(2) =', d.prob(2))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ * print('entropy =', d.entropy(), ' 1.5 log 2 =', 1.5 * Math.log(2))
+ *
+ * @example Seeded draws from logits
+ * const d = Categorical({ logits: tensor([0, 0, Math.log(2)]) })
+ * print('draws =', d.sample(stream(3), { shape: [10] }))
  */
 export function Categorical<P extends Value>(p: P | { logits: P }): Univariate<P> {
   const fromLogits = typeof p === 'object' && p !== null && 'logits' in p

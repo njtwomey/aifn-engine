@@ -2,6 +2,9 @@
  * Robust location and scatter: the minimum covariance determinant estimator (Rousseeuw, 1984) by the FastMCD
  * algorithm of Rousseeuw and Van Driessen (1999), with the consistency correction and reweighting step that
  * scikit-learn's `MinCovDet` applies, and the squared Mahalanobis distances it gives.
+ *
+ * Data are $n \times p$ matrices with one point per row. Covariances are factored by `cholesky` without jitter: a
+ * singular one is not repaired, and gives infinite distances.
  */
 
 import type { MatrixLike, Size } from 'aifn-compute/foundation/contracts'
@@ -11,23 +14,49 @@ import { cholesky, solveTriangular } from 'aifn-compute/numerics/linalg'
 import { regularisedGammaP, regularisedGammaPInverse } from 'aifn-compute/numerics/special'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** The χ²_p quantile at probability q: 2 P⁻¹(p/2, q). */
+/**
+ * The $\chi^2_p$ quantile at probability $q$: $2 P^{-1}(p/2, q)$, with $P$ the regularised lower incomplete gamma
+ * function.
+ *
+ * @param p The degrees of freedom.
+ * @param q The probability, in $[0, 1]$.
+ * @returns The quantile.
+ */
 const chiSquareQuantile = (p: number, q: number) => 2 * (regularisedGammaPInverse(p / 2, q) as number)
 
 /**
- * The factor that makes the covariance of the share α of normal points nearest the centre consistent for the full
- * covariance (Croux and Haesbroeck, 1999, eq. 4.2; Pison, Van Aelst and Willems, 2002): c_α = α / F_{χ²_{p+2}}(χ²_p(α)).
+ * The factor that makes the covariance of the share $\alpha$ of normal points nearest the centre consistent for the
+ * full covariance (Croux and Haesbroeck, 1999, eq. 4.2; Pison, Van Aelst and Willems, 2002):
+ * $c_\alpha = \alpha / F_{\chi^2_{p+2}}(\chi^2_p(\alpha))$, with $\chi^2_p(\alpha)$ the $\chi^2_p$ quantile at
+ * $\alpha$.
+ *
+ * @param p The dimension.
+ * @param alpha The share $\alpha$ of points kept, in $(0, 1]$.
+ * @returns $c_\alpha$ (at least 1).
  */
 const consistencyFactor = (p: number, alpha: number) =>
   alpha / (regularisedGammaP((p + 2) / 2, chiSquareQuantile(p, alpha) / 2) as number)
 
-/** Rows of a data matrix as one row-major Float64Array with its shape. */
+/**
+ * Rows of a data matrix as one row-major Float64Array with its shape.
+ *
+ * @param x The matrix: nested arrays or a rank-2 tensor.
+ * @param where The caller's name for error messages.
+ * @returns The values `a` (a copy, $n \cdot p$ entries), the number of rows `n` and of columns `p`.
+ */
 function rowsOf(x: MatrixLike, where: string): { a: Float64Array; n: Size; p: Size } {
   const m = dense.toMatrixF64(x, where)
   return { a: Float64Array.from(m.data), n: m.m, p: m.n }
 }
 
-/** The mean and maximum-likelihood covariance (divided by the count) of the rows `idx`. */
+/**
+ * The mean and maximum-likelihood covariance (divided by the count) of the rows `idx`.
+ *
+ * @param a The data, row-major: row $i$ occupies entries `i * p` to `i * p + p - 1`.
+ * @param p The number of columns.
+ * @param idx The indices of the rows to use (at least one).
+ * @returns The `mean` ($p$ values) and `cov` ($p \times p$, row-major) of those rows.
+ */
 function moments(a: Float64Array, p: Size, idx: ArrayLike<number>) {
   const k = idx.length
   const mean = new Float64Array(p)
@@ -45,8 +74,16 @@ function moments(a: Float64Array, p: Size, idx: ArrayLike<number>) {
 }
 
 /**
- * Squared Mahalanobis distances (x − μ)ᵀ Σ⁻¹ (x − μ) of every row, and log det Σ, through the Cholesky factor of Σ.
- * A singular Σ gives log det −∞ and infinite distances off its support.
+ * Squared Mahalanobis distances $(\xvec - \muvec)^\top \Sigmamat^{-1} (\xvec - \muvec)$ of every row, and
+ * $\log\det\Sigmamat$, through the Cholesky factor of $\Sigmamat$. A $\Sigmamat$ that does not factor (singular,
+ * or not positive definite) gives $\log\det = -\infty$ and every distance infinite.
+ *
+ * @param a The data, row-major: row $i$ occupies entries `i * p` to `i * p + p - 1`. Not modified.
+ * @param n The number of rows.
+ * @param p The number of columns.
+ * @param mean The location $\muvec$ ($p$ values).
+ * @param cov The covariance $\Sigmamat$ ($p \times p$, row-major).
+ * @returns The squared distances `d2` ($n$ values) and `logDet`.
  */
 function distances(a: Float64Array, n: Size, p: Size, mean: Float64Array, cov: Float64Array) {
   const ch = cholesky(fromData(cov, [p, p]), { jitter: false })
@@ -64,13 +101,27 @@ function distances(a: Float64Array, n: Size, p: Size, mean: Float64Array, cov: F
   return { d2, logDet }
 }
 
+/**
+ * The transpose of a row-major $n \times p$ matrix.
+ *
+ * @param a The matrix, row-major; not modified.
+ * @param n The number of rows.
+ * @param p The number of columns.
+ * @returns The $p \times n$ transpose, row-major.
+ */
 function transpose(a: Float64Array, n: Size, p: Size): Float64Array {
   const t = new Float64Array(n * p)
   for (let r = 0; r < n; r++) for (let j = 0; j < p; j++) t[j * n + r] = a[r * p + j]
   return t
 }
 
-/** The indices of the h smallest values. */
+/**
+ * The indices of the $h$ smallest values, ties going to the lower index.
+ *
+ * @param d2 The values (squared distances).
+ * @param h How many to keep.
+ * @returns Their indices, ascending.
+ */
 function smallest(d2: Float64Array, h: Size): Int32Array {
   const order = Array.from(d2.keys()).sort((i, j) => d2[i] - d2[j] || i - j)
   return Int32Array.from(order.slice(0, h)).sort()
@@ -78,7 +129,10 @@ function smallest(d2: Float64Array, h: Size): Int32Array {
 
 /** Options of `minimumCovarianceDeterminant`. */
 export type McdOptions = {
-  /** The share h/n of points in the support (default ⌈(n + p + 1)/2⌉/n, the maximal breakdown point). */
+  /**
+   * The share $h/n$ of points in the support, with $h = \lceil \text{fraction} \cdot n \rceil$ (default
+   * $h = \lceil (n + p + 1)/2 \rceil$, the maximal breakdown point).
+   */
   supportFraction?: number
   /** Random initial h-subsets (default 30). */
   starts?: Size
@@ -92,31 +146,58 @@ export type McdOptions = {
 
 /** The minimum covariance determinant estimate. */
 export type Mcd = {
-  /** The reweighted location and covariance (the robust estimates). */
+  /** The reweighted location (the robust estimate), $p$ values. */
   location: Tensor
+  /** The reweighted covariance (the robust estimate), $p \times p$. */
   covariance: Tensor
-  /** The raw MCD: the mean of the h-subset with the smallest determinant, and its covariance times c_{h/n}. */
+  /** The raw MCD location: the mean of the $h$-subset with the smallest determinant. */
   rawLocation: Tensor
+  /**
+   * The raw MCD covariance: the covariance of that $h$-subset times $c_{h/n}$ (scikit-learn's `raw_covariance_` is the
+   * uncorrected one).
+   */
   rawCovariance: Tensor
-  /** The h-subset of the raw estimate (int32 indices, ascending). */
+  /** The $h$-subset of the raw estimate (int32 indices, ascending). */
   support: Tensor
-  /** 1 for the points kept by the reweighting step (squared distance below the χ²_p 97.5% quantile), else 0. */
+  /**
+   * 1 for the points kept by the reweighting step (corrected squared distance below the $\chi^2_p$ 97.5% quantile),
+   * else 0 (int32).
+   */
   inliers: Tensor
   /** Squared Mahalanobis distances of every point under the reweighted estimate. */
   distances: Tensor
-  /** log det of the raw (uncorrected) covariance of the support. */
+  /** $\log\det$ of the raw (uncorrected) covariance of the support. */
   logDeterminant: number
+  /** The support size $h$. */
   h: Size
 }
 
 /**
- * The minimum covariance determinant estimator (Rousseeuw, 1984): the mean and covariance of the h of n points whose
- * covariance has the smallest determinant, found by FastMCD (Rousseeuw and Van Driessen, 1999). Each random h-subset is
- * improved by concentration steps: compute its mean and covariance, then keep the h points with the smallest Mahalanobis
- * distances under them; the determinant never increases, so the steps converge. The best start is then scaled to be
- * consistent at the normal (by c_α = α/F_{χ²_{p+2}}(χ²_p(α)) with α = h/n; Croux and Haesbroeck, 1999) and reweighted:
- * the mean and covariance of the points with corrected d² below the χ²_p 97.5% quantile, scaled by c_0.975, as in
- * scikit-learn's `MinCovDet`. Up to n − h outliers cannot move it far.
+ * The minimum covariance determinant estimator (Rousseeuw, 1984): the mean and covariance of the $h$ of $n$ points
+ * whose covariance has the smallest determinant, found by FastMCD (Rousseeuw and Van Driessen, 1999). Each random
+ * $h$-subset is improved by concentration steps: compute its mean and covariance, then keep the $h$ points with the
+ * smallest Mahalanobis distances under them; the determinant never increases, so the steps converge. All `starts` take
+ * two steps, and the best `keep` of them continue to convergence. The best is then scaled to be consistent at the
+ * normal (by $c_\alpha = \alpha/F_{\chi^2_{p+2}}(\chi^2_p(\alpha))$ with $\alpha = h/n$; Croux and Haesbroeck, 1999)
+ * and reweighted: the mean and covariance of the points with corrected $d^2$ below the $\chi^2_p$ 97.5% quantile,
+ * scaled by $c_{0.975}$, as in scikit-learn's `MinCovDet`. Up to $n - h$ outliers cannot move it far. Throws
+ * `DomainError` unless $p < h \le n$.
+ *
+ * @param x The data, an $n \times p$ matrix with one point per row: nested arrays or a rank-2 tensor.
+ * @param options The support fraction, the numbers of starts, kept starts and steps, and the random stream.
+ * @returns The reweighted `location`, `covariance` and `distances`, the `inliers`, and the raw estimate
+ *   (`rawLocation`, `rawCovariance`, `support`, `logDeterminant`, `h`).
+ *
+ * @example Two outliers among ten points, as scikit-learn's MinCovDet
+ * const X = tensor([
+ *   [0, 0], [1, 0], [0, 1], [1, 1], [0.5, 0.5],
+ *   [0.2, 0.8], [0.8, 0.3], [0.4, 0.1], [10, 10], [10, -10],
+ * ])
+ * const mcd = minimumCovarianceDeterminant(X)
+ * print('robust location =', mcd.location)
+ * print('plain mean =', mean(X, 0))
+ * print('inliers =', mcd.inliers)
+ * print('squared distances =', mcd.distances)
  */
 export function minimumCovarianceDeterminant(x: MatrixLike, options: McdOptions = {}): Mcd {
   const { a, n, p } = rowsOf(x, 'minimumCovarianceDeterminant')
@@ -184,7 +265,21 @@ export function minimumCovarianceDeterminant(x: MatrixLike, options: McdOptions 
   }
 }
 
-/** Squared Mahalanobis distances (xᵢ − μ)ᵀ Σ⁻¹ (xᵢ − μ) of the rows of x under a location and covariance. */
+/**
+ * Squared Mahalanobis distances $(\xvec_i - \muvec)^\top \Sigmamat^{-1} (\xvec_i - \muvec)$ of the rows of
+ * $\Xmat$ under a location and covariance. Throws `ShapeError` when their sizes do not match the columns of $\Xmat$;
+ * a covariance that is not positive definite gives every distance infinite.
+ *
+ * @param x The points, an $n \times p$ matrix with one per row: nested arrays or a rank-2 tensor.
+ * @param location The location $\muvec$: $p$ values, as an array or a tensor.
+ * @param covariance The covariance $\Sigmamat$, $p \times p$ and positive definite: nested arrays or a rank-2 tensor.
+ * @returns The squared distance of each row ($n$ values).
+ *
+ * @example Under the identity they are squared Euclidean distances
+ * const X = tensor([[0, 0], [1, 1], [3, 0.5]])
+ * print('identity =', squaredMahalanobis(X, [0, 0], [[1, 0], [0, 1]]))
+ * print('scaled =', squaredMahalanobis(X, [0, 0], [[4, 0], [0, 1]]))
+ */
 export function squaredMahalanobis(
   x: MatrixLike,
   location: Tensor | ArrayLike<number>,

@@ -3,16 +3,18 @@
  * or two samples; two- and one-sided, as scipy's `ks_1samp` and `ks_2samp`) with its exact null laws, and the
  * Shapiro–Wilk test of normality (Royston's 1995 algorithm AS R94, as scipy's `shapiro`).
  *
- * - One sample: D = supₓ |Fₙ(x) − F(x)|, attained at a sorted draw x₍ᵢ₎ as max(i/n − F(x₍ᵢ₎), F(x₍ᵢ₎) − (i − 1)/n);
- *   the one-sided D⁺ and D⁻ are the two halves. The exact law of D for continuous F is computed by Marsaglia, Tsang
- *   and Wang's matrix-power algorithm (2003, J. Stat. Softw. 8(18)); far in the tail (n d² > 7.24, or > 3.76 with
- *   n > 99) their asymptotic expansion is used, as in their paper, and for n d ≥ 100 Kolmogorov's limit with Stephens'
- *   correction (≈0.3% relative). The one-sided D⁺ has the exact Birnbaum–Tingey law (Smirnov's).
- * - Two samples of sizes m and n: D = supₓ |F_m(x) − G_n(x)| (D⁺ = sup (F_m − G_n) one-sided). Under the null every
- *   interleaving of the pooled sorted samples is equally likely, so P(D ≥ d) is one minus the probability that a
- *   uniformly random monotone lattice path from (0, 0) to (m, n) keeps i/m − j/n inside the band, computed exactly by
- *   dynamic programming (Hodges, 1958, Ark. Mat. 3). Above m·n = 10⁶ the one-sample law at n = round(mn/(m + n)) is
- *   used for two-sided tests (scipy's 'asymp'), and Hodges' corrected limit (scipy's) for one-sided ones.
+ * - One sample: $D = \sup_x \lvert F_n(x) - F(x) \rvert$, attained at a sorted draw $x_{(i)}$ as
+ *   $\max(i/n - F(x_{(i)}), F(x_{(i)}) - (i - 1)/n)$; the one-sided $D^+$ and $D^-$ are the two halves. The exact law
+ *   of $D$ for continuous $F$ is computed by Marsaglia, Tsang and Wang's matrix-power algorithm (2003, J. Stat. Softw.
+ *   8(18)); far in the tail ($n d^2 > 7.24$, or $> 3.76$ with $n > 99$) their asymptotic expansion is used, as in their
+ *   paper, and for $n d \ge 100$ Kolmogorov's limit with Stephens' correction (about 0.3% relative). The one-sided
+ *   $D^+$ has the exact Birnbaum–Tingey law (Smirnov's).
+ * - Two samples of sizes $m$ and $n$: $D = \sup_x \lvert F_m(x) - G_n(x) \rvert$ ($D^+ = \sup_x (F_m - G_n)$
+ *   one-sided). Under the null every interleaving of the pooled sorted samples is equally likely, so $\pr(D \ge d)$ is
+ *   one minus the probability that a uniformly random monotone lattice path from $(0, 0)$ to $(m, n)$ keeps
+ *   $i/m - j/n$ inside the band, computed exactly by dynamic programming (Hodges, 1958, Ark. Mat. 3). Above
+ *   $mn = 10^6$ the one-sample law at $n = \operatorname{round}(mn/(m + n))$ is used for two-sided tests (scipy's
+ *   'asymp'), and Hodges' corrected limit (scipy's) for one-sided ones.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -26,22 +28,37 @@ import { continuousLaw, pValueOf, result, sample, type Alternative, type TestRes
 
 /** The Kolmogorov–Smirnov statistic with where it is attained. */
 export type KsStatistic = {
-  /** D (two-sided), D⁺ (greater) or D⁻ (less). */
+  /** $D$ (two-sided), $D^+$ (greater) or $D^-$ (less). */
   statistic: number
   /** The x at which it is attained. */
   location: number
-  /** +1 when the (first) empirical cdf is above the reference there, −1 when below. */
+  /** $+1$ when the (first) empirical cdf is above the reference there, $-1$ when below. */
   sign: 1 | -1
 }
 
 /** A reference distribution: a continuous cdf (one-sample test) or a second sample (two-sample test). */
 export type KsReference = ((x: number) => number) | VectorLike
 
+/**
+ * A sample's values, checked (at least one, all finite) and sorted ascending.
+ *
+ * @param x The sample.
+ * @param what The caller's name, for error messages.
+ * @returns A new sorted Float64Array.
+ */
 function sortedValues(x: VectorLike, what: string): Float64Array {
   return sample(x, what).sort()
 }
 
-/** D (or D⁺, D⁻) for one sorted sample against a cdf. */
+/**
+ * $D$ (or $D^+$, $D^-$) for one sorted sample against a cdf: the largest of $i/n - F(x_{(i)})$ (the empirical cdf
+ * above) and $F(x_{(i)}) - (i - 1)/n$ (below) over the sorted values.
+ *
+ * @param x The sample, sorted ascending.
+ * @param cdf The reference cdf $F$.
+ * @param alternative `two-sided` for $D$, `greater` for $D^+$ (above only), `less` for $D^-$ (below only).
+ * @returns The statistic, its location and its sign.
+ */
 function oneSample(x: Float64Array, cdf: (x: number) => number, alternative: Alternative): KsStatistic {
   const n = x.length
   let best: KsStatistic = { statistic: -1, location: x[0], sign: 1 }
@@ -55,7 +72,15 @@ function oneSample(x: Float64Array, cdf: (x: number) => number, alternative: Alt
   return best
 }
 
-/** D (or D⁺, D⁻) for two sorted samples: the gaps between the empirical cdfs, read just after each distinct value. */
+/**
+ * $D$ (or $D^+$, $D^-$) for two sorted samples: the gaps between the empirical cdfs, read just after each distinct
+ * value. A one-sided statistic is at least 0.
+ *
+ * @param x The first sample, sorted ascending.
+ * @param y The second sample, sorted ascending.
+ * @param alternative `two-sided` for $D$, `greater` for $D^+ = \sup (F_m - G_n)$, `less` for $D^- = \sup (G_n - F_m)$.
+ * @returns The statistic, its location and its sign.
+ */
 function twoSample(x: Float64Array, y: Float64Array, alternative: Alternative): KsStatistic {
   const m = x.length
   const n = y.length
@@ -74,9 +99,20 @@ function twoSample(x: Float64Array, y: Float64Array, alternative: Alternative): 
 }
 
 /**
- * The Kolmogorov–Smirnov statistic of a sample against a continuous cdf, or of two samples, with the x at which it is
- * attained (scipy's `statistic_location` and `statistic_sign`): D for `two-sided` (default), D⁺ = sup (Fₙ − F) for
- * `greater`, D⁻ = sup (F − Fₙ) for `less`.
+ * The Kolmogorov–Smirnov statistic of a sample against a continuous cdf, or of two samples, with the $x$ at which it
+ * is attained (scipy's `statistic_location` and `statistic_sign`): $D$ for `two-sided` (default),
+ * $D^+ = \sup_x (F_n - F)$ for `greater`, $D^- = \sup_x (F - F_n)$ for `less`.
+ *
+ * @param x The sample (finite values; sorted here).
+ * @param reference A continuous cdf, for the one-sample statistic, or a second sample.
+ * @param alternative Which statistic.
+ * @returns The statistic with its location and sign.
+ *
+ * @example Ten values against the uniform cdf on [0, 1]
+ * const x = [0.05, 0.12, 0.31, 0.44, 0.52, 0.63, 0.71, 0.85, 0.93, 0.98]
+ * const uniformCdf = (t) => Math.min(1, Math.max(0, t))
+ * print(ksStatistic(x, uniformCdf))
+ * print('D+ =', ksStatistic(x, uniformCdf, 'greater').statistic)
  */
 export function ksStatistic(
   x: VectorLike,
@@ -91,7 +127,16 @@ export function ksStatistic(
 
 // ── Null laws ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Kolmogorov's limit P(K > λ) = 2 Σₖ (−1)ᵏ⁻¹ e^{−2k²λ²} (scipy's `kstwobign.sf`). */
+/**
+ * Kolmogorov's limit $\pr(K > \lambda) = 2\sum_{k \ge 1} (-1)^{k-1} e^{-2k^2\lambda^2}$ (scipy's `kstwobign.sf`),
+ * the law of $\sqrt n D_n$ as $n \to \infty$. Below $\lambda = 1$ the Jacobi-transformed series is summed instead.
+ *
+ * @param lambda The scaled distance $\lambda = \sqrt n\, d$.
+ * @returns The survival probability, 1 for $\lambda \le 0$.
+ *
+ * @example The asymptotic 5% critical value is 1.36
+ * for (const l of [0.5, 1, 1.36, 2]) print('P(K >', l, ') =', kolmogorovLimitSf(l))
+ */
 export function kolmogorovLimitSf(lambda: number): number {
   if (!(lambda > 0)) return 1
   // For small λ the alternating series converges slowly; use the Jacobi-transformed form √(2π)/λ Σ e^{−(2k−1)²π²/(8λ²)}.
@@ -110,9 +155,19 @@ export function kolmogorovLimitSf(lambda: number): number {
 }
 
 /**
- * P(Dₙ ≥ d) for the one-sample statistic of n draws from a continuous distribution (scipy's `kstwo.sf`), by
- * Marsaglia, Tsang and Wang (2003): P(Dₙ < d) = n!/nⁿ · (Hⁿ)ₖₖ with k = ⌊nd⌋ + 1 and H the (2k − 1)-square matrix of
- * their paper, its power taken by squaring with a decimal exponent kept aside so that nothing overflows.
+ * $\pr(D_n \ge d)$ for the one-sample statistic of $n$ draws from a continuous distribution (scipy's `kstwo.sf`), by
+ * Marsaglia, Tsang and Wang (2003): $\pr(D_n < d) = \frac{n!}{n^n} (\Hmat^n)_{kk}$ with $k = \lfloor nd \rfloor + 1$
+ * and $\Hmat$ the $(2k - 1) \times (2k - 1)$ matrix of their paper, its power taken by squaring with a decimal
+ * exponent kept aside so that nothing overflows. Far in the tail their asymptotic expansion is used, and past
+ * $k = 100$ Kolmogorov's limit with Stephens' correction (see the file's notes).
+ *
+ * @param d The observed distance, in $[0, 1]$.
+ * @param n The sample size.
+ * @returns The survival probability: 1 for $d \le 0$ and 0 for $d \ge 1$.
+ *
+ * @example The exact tail beside Kolmogorov's limit at n = 20
+ * print('exact P(D >= 0.3) =', kolmogorovSf(0.3, 20))
+ * print('limit at sqrt(20) * 0.3:', kolmogorovLimitSf(Math.sqrt(20) * 0.3))
  */
 export function kolmogorovSf(d: number, n: number): number {
   if (!(d > 0)) return 1
@@ -147,7 +202,14 @@ export function kolmogorovSf(d: number, n: number): number {
   return 1 - v * 10 ** e
 }
 
-/** A·B for m-square row-major matrices. */
+/**
+ * The product $\Amat\Bmat$ of two $m \times m$ matrices.
+ *
+ * @param a $\Amat$, row-major, $m^2$ values; not modified.
+ * @param b $\Bmat$, row-major, $m^2$ values; not modified.
+ * @param m The order of the matrices.
+ * @returns A new row-major array of the product.
+ */
 function square(a: Float64Array, b: Float64Array, m: number): Float64Array {
   const out = new Float64Array(m * m)
   for (let i = 0; i < m; i++)
@@ -158,7 +220,15 @@ function square(a: Float64Array, b: Float64Array, m: number): Float64Array {
   return out
 }
 
-/** Aᵖ as Q · 10^exponent, by repeated squaring, rescaling by 10⁻¹⁴⁰ whenever the centre entry exceeds 10¹⁴⁰. */
+/**
+ * $\Amat^p$ as $\Qmat \cdot 10^{e}$, by repeated squaring, rescaling by $10^{-140}$ whenever the centre entry
+ * exceeds $10^{140}$.
+ *
+ * @param a $\Amat$, row-major, $m^2$ values; not modified.
+ * @param m The order of $\Amat$.
+ * @param p The power, at least 1.
+ * @returns `Q`, the scaled power (row-major), and `exponent`, the decimal exponent $e$ set aside.
+ */
 function matrixPower(a: Float64Array, m: number, p: number): { Q: Float64Array; exponent: number } {
   if (p === 1) return { Q: Float64Array.from(a), exponent: 0 }
   const half = matrixPower(a, m, Math.floor(p / 2))
@@ -174,8 +244,17 @@ function matrixPower(a: Float64Array, m: number, p: number): { Q: Float64Array; 
 }
 
 /**
- * P(D⁺ₙ ≥ d), the one-sided statistic's exact law (scipy's `smirnov`), by the Birnbaum–Tingey formula
- * d Σⱼ C(n, j) (1 − d − j/n)ⁿ⁻ʲ (d + j/n)ʲ⁻¹ over 0 ≤ j ≤ ⌊n(1 − d)⌋, summed in logs.
+ * $\pr(D^+_n \ge d)$, the one-sided statistic's exact law (scipy's `smirnov`), by the Birnbaum–Tingey formula
+ * $d \sum_j \binom{n}{j} (1 - d - j/n)^{n-j} (d + j/n)^{j-1}$ over $0 \le j \le \lfloor n(1 - d) \rfloor$, each term
+ * computed in logs. $D^-_n$ has the same law.
+ *
+ * @param d The observed distance, in $[0, 1]$.
+ * @param n The sample size.
+ * @returns The survival probability: 1 for $d \le 0$ and 0 for $d \ge 1$.
+ *
+ * @example A one-sided tail is about half the two-sided one
+ * print('P(D+ >= 0.3) =', smirnovSf(0.3, 20))
+ * print('P(D >= 0.3) =', kolmogorovSf(0.3, 20))
  */
 export function smirnovSf(d: number, n: number): number {
   if (!(d > 0)) return 1
@@ -191,11 +270,22 @@ export function smirnovSf(d: number, n: number): number {
 }
 
 /**
- * P(D ≥ d) for two samples of sizes m and n under the null, exactly: one minus the probability that a uniformly random
- * monotone lattice path from (0, 0) to (m, n) stays strictly inside the band (|i/m − j/n| < d two-sided, i/m − j/n < d
- * one-sided). Compared in integers, i·n − j·m < d·m·n, since every attainable D is a multiple of 1/(mn). Each point's
- * probability is accumulated with the path's step probabilities, (m − i)/(m − i + n − j) for a step in i, so nothing
- * overflows.
+ * $\pr(D \ge d)$ for two samples of sizes $m$ and $n$ under the null, exactly: one minus the probability that a
+ * uniformly random monotone lattice path from $(0, 0)$ to $(m, n)$ stays strictly inside the band
+ * ($\lvert i/m - j/n \rvert < d$ two-sided, $i/m - j/n < d$ one-sided). Compared in integers, $in - jm < dmn$ with
+ * $dmn$ rounded, since every attainable $D$ is a multiple of $1/(mn)$. Each point's probability is accumulated with
+ * the path's step probabilities, $(m - i)/(m - i + n - j)$ for a step in $i$, so nothing overflows. $O(mn)$
+ * operations.
+ *
+ * @param d The observed distance.
+ * @param m The size of the first sample.
+ * @param n The size of the second sample.
+ * @param oneSided Whether $d$ is the one-sided $D^+$ (the band is open on one side only).
+ * @returns The survival probability, 1 for $d \le 0$.
+ *
+ * @example Two samples of five that overlap in one value
+ * print('two-sided:', twoSampleKsSf(0.8, 5, 5))
+ * print('one-sided:', twoSampleKsSf(0.8, 5, 5, true))
  */
 export function twoSampleKsSf(d: number, m: number, n: number, oneSided = false): number {
   if (!(d > 0)) return 1
@@ -220,9 +310,15 @@ export function twoSampleKsSf(d: number, m: number, n: number, oneSided = false)
 }
 
 /**
- * Hodges' (1958, eq. 5.3) corrected limit for the one-sided two-sample D⁺: exp(−2z² − 2z(M + 2N)/(3√(MN(M + N))))
- * with z = d√(MN/(M + N)) and M ≥ N the larger and smaller sizes (scipy's `ks_2samp`, `method='asymp'`). The
- * correction term makes it far closer to the exact law than Smirnov's plain exp(−2z²) at small sizes.
+ * Hodges' (1958, eq. 5.3) corrected limit for the one-sided two-sample $D^+$:
+ * $\exp(-2z^2 - 2z(M + 2N)/(3\sqrt{MN(M + N)}))$ with $z = d\sqrt{MN/(M + N)}$ and $M \ge N$ the larger and smaller
+ * sizes (scipy's `ks_2samp`, `method='asymp'`). The correction term makes it far closer to the exact law than
+ * Smirnov's plain $\exp(-2z^2)$ at small sizes.
+ *
+ * @param d The observed distance.
+ * @param m The size of the first sample.
+ * @param n The size of the second sample.
+ * @returns The approximate survival probability, in $[0, 1]$.
  */
 function hodgesOneSidedSf(d: number, m: number, n: number): number {
   const [big, small] = m >= n ? [m, n] : [n, m]
@@ -231,7 +327,21 @@ function hodgesOneSidedSf(d: number, m: number, n: number): number {
   return Math.min(1, Math.max(0, Math.exp(e)))
 }
 
-/** The exact law of the one-sample D (two-sided) or D⁺ (one-sided) for n draws, on [0, 1]. */
+/**
+ * The exact law of the one-sample $D$ (two-sided) or $D^+$ (one-sided) for $n$ draws, on $[0, 1]$; with `limit`, the
+ * two-sided law is instead Kolmogorov's limit at $\sqrt n\, d$.
+ *
+ * @param n The sample size.
+ * @param options Which law.
+ * @param options.oneSided The law of $D^+$ (Smirnov's), rather than of $D$.
+ * @param options.limit Use Kolmogorov's limit for $D$ (ignored when `oneSided`).
+ * @returns The law, whose survival function is `kolmogorovSf`, `smirnovSf` or `kolmogorovLimitSf`.
+ *
+ * @example The 5% critical value of D for ten draws
+ * const law = kolmogorovNull(10)
+ * print('exact:', law.isf(0.05))
+ * print('limit:', kolmogorovNull(10, { limit: true }).isf(0.05))
+ */
 export function kolmogorovNull(n: number, { oneSided = false, limit = false } = {}): Univariate {
   const sf = oneSided
     ? (d: number) => smirnovSf(d, n)
@@ -249,8 +359,22 @@ export function kolmogorovNull(n: number, { oneSided = false, limit = false } = 
 }
 
 /**
- * The law of the two-sample D (or D⁺) for sizes m and n: exact up to m·n = 10⁶ (or when `exact` is false), then the
- * approximations above.
+ * The law of the two-sample $D$ (or $D^+$) for sizes $m$ and $n$: exact (`twoSampleKsSf`) up to $mn = 10^6$, and
+ * beyond that or when `exact` is false the approximations of the file's notes: the one-sample law at the effective
+ * size $\operatorname{round}(mn/(m + n))$ for $D$, Hodges' limit for $D^+$.
+ *
+ * @param m The size of the first sample.
+ * @param n The size of the second sample.
+ * @param options `oneSided`, the law of $D^+$ rather than $D$ (default false); `exact`, whether to use the exact law
+ *   where it is affordable (default true).
+ * @returns The law on $[0, 1]$.
+ *
+ * @example The tail of D for two samples of ten
+ * // D is a multiple of 1/10 here: D >= 0.7 is the exact 5% region, D >= 0.6 is just outside it.
+ * const exact = twoSampleKsNull(10, 10)
+ * print('exact: P(D >= 0.6) =', exact.survival(0.6), ' P(D >= 0.7) =', exact.survival(0.7))
+ * const approx = twoSampleKsNull(10, 10, { exact: false })
+ * print('approximate: P(D >= 0.6) =', approx.survival(0.6), ' P(D >= 0.7) =', approx.survival(0.7))
  */
 export function twoSampleKsNull(
   m: number,
@@ -277,15 +401,41 @@ export function twoSampleKsNull(
 
 // ── The test ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The result of `ksTest`: the protocol's fields with where the statistic is attained. */
+/**
+ * The result of `ksTest`: the protocol's fields with where the statistic is attained, `location`, and the side of the
+ * reference the empirical cdf is on there, `sign` ($+1$ above, $-1$ below).
+ */
 export type KsTest = TestResult & { location: number; sign: 1 | -1 }
 
 /**
  * The Kolmogorov–Smirnov test of a sample against a continuous cdf (`scipy.stats.ks_1samp`) or of two samples
- * (`scipy.stats.ks_2samp`). `two-sided` (default) uses D; `greater` uses D⁺ (the first sample's cdf above the
- * reference: its values tend to be smaller) and `less` uses D⁻. `method` 'exact' (default: the exact null laws; see
- * the module notes for the tail and large two-sample cases) or 'asymp' (Kolmogorov's limit for one sample; the
- * one-sample exact law at the effective size for two). Ties in a two-sample test make the p-value conservative.
+ * (`scipy.stats.ks_2samp`). `two-sided` (default) uses $D$; `greater` uses $D^+$ (the first sample's cdf above the
+ * reference: its values tend to be smaller) and `less` uses $D^-$. `method` is `exact` (default: the exact null
+ * laws; see the file's notes for the tail and large two-sample cases) or `asymp`: Kolmogorov's limit for a two-sided
+ * one-sample test, the one-sample exact law at the effective size for a two-sided two-sample test, and Hodges' limit
+ * for a one-sided two-sample test (a one-sided one-sample test always uses Smirnov's exact law). Ties in a two-sample
+ * test make the p-value conservative.
+ *
+ * @param x The sample (finite values).
+ * @param reference A continuous cdf for the one-sample test, or a second sample for the two-sample test.
+ * @param options `alternative` and `method`, as above.
+ * @returns The test result, with the statistic's location and sign.
+ *
+ * @example Ten values against the uniform cdf: a fit, and a misfit that one side detects better
+ * const x = [0.05, 0.12, 0.31, 0.44, 0.52, 0.63, 0.71, 0.85, 0.93, 0.98]
+ * const uniformCdf = (t) => Math.min(1, Math.max(0, t))
+ * const fit = ksTest(x, uniformCdf)
+ * print('D =', fit.statistic, ' p =', fit.pValue)
+ * const cubes = x.map((v) => v ** 3) // piled up near 0
+ * print('cubes, two-sided: p =', ksTest(cubes, uniformCdf).pValue)
+ * print('cubes, greater: p =', ksTest(cubes, uniformCdf, { alternative: 'greater' }).pValue)
+ *
+ * @example Two samples with shifted centres
+ * const a = [0.61, 0.29, 0.06, 0.59, -1.73, -0.74, 0.51, -0.56, 0.39, 1.64]
+ * const b = [2.13, 1.65, 2.62, 0.85, 1.49, 2.32, 1.97, 0.11, 1.68, 2.86]
+ * const r = ksTest(a, b)
+ * print(r.method)
+ * print('D =', r.statistic, ' at', r.location, ' p =', r.pValue)
  */
 export function ksTest(
   x: VectorLike,
@@ -343,12 +493,28 @@ export function ksTest(
 
 // ── Shapiro–Wilk ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The polynomial $\sum_i c_i x^i$, by Horner's rule.
+ *
+ * @param c The coefficients, constant term first.
+ * @param x The point.
+ * @returns The polynomial's value at $x$.
+ */
 const poly = (c: readonly number[], x: number) => c.reduceRight((acc, ci) => acc * x + ci, 0)
 
 /**
- * The Shapiro–Wilk coefficients aᵢ for a sample of size n ≥ 3 (Royston, 1995, AS R94): the normal scores
- * mᵢ = Φ⁻¹((i − 3/8)/(n + 1/4)) normalised, with the two most extreme corrected by polynomials in 1/√n. Returned
- * for the upper half (a₁ ≥ a₂ ≥ …), the lower half being their negatives.
+ * The Shapiro–Wilk coefficients $a_i$ for a sample of size $n \ge 3$ (Royston, 1995, AS R94): the normal scores
+ * $m_i = \Phi^{-1}((i - 3/8)/(n + 1/4))$ normalised, with the two most extreme (one when $n \le 5$) corrected by
+ * polynomials in $1/\sqrt n$; for $n = 3$ the exact $\sqrt{1/2}$. Returned for the upper half, positive and
+ * decreasing: the $i$-th weighs $x_{(n+1-i)} - x_{(i)}$, the lower half being their negatives (and the middle
+ * coefficient of an odd $n$ zero). Throws `DomainError` unless $n$ is an integer of at least 3.
+ *
+ * @param n The sample size.
+ * @returns The $\lfloor n/2 \rfloor$ coefficients, largest first; their squares sum to $\tfrac12$.
+ *
+ * @example The weights of the sample's extremes for n = 5 and 10
+ * print('n = 5:', shapiroWilkCoefficients(5))
+ * print('n = 10:', shapiroWilkCoefficients(10))
  */
 export function shapiroWilkCoefficients(n: number): Float64Array {
   if (!(Number.isInteger(n) && n >= 3)) throw new DomainError('shapiroWilkCoefficients', 'needs n ≥ 3')
@@ -381,10 +547,17 @@ export function shapiroWilkCoefficients(n: number): Float64Array {
 }
 
 /**
- * The null law of W used for its p-value (Royston, 1995): for n = 3 the exact P(W ≤ w) = (6/π)(asin √w − asin √¾) on
- * [¾, 1]; for 4 ≤ n ≤ 11, −log(γ − log(1 − W)) is normal with mean and log-sd polynomial in n, and γ = −2.273 +
- * 0.459n; for n ≥ 12, log(1 − W) is normal with mean and log-sd polynomial in log n. Small W is evidence against
+ * The null law of $W$ used for its p-value (Royston, 1995): for $n = 3$ the exact
+ * $\pr(W \le w) = \frac{6}{\pi}(\arcsin\sqrt w - \arcsin\sqrt{3/4})$ on $[3/4, 1]$; for $4 \le n \le 11$,
+ * $-\log(\gamma - \log(1 - W))$ is normal with mean and log-sd polynomial in $n$, and $\gamma = -2.273 + 0.459n$;
+ * for $n \ge 12$, $\log(1 - W)$ is normal with mean and log-sd polynomial in $\log n$. Small $W$ is evidence against
  * normality, so the p-value is the lower tail.
+ *
+ * @param n The sample size, at least 3 (Royston's fit is for $n \le 5000$).
+ * @returns The law of $W$, a transformed normal (or, for $n = 3$, a `continuousLaw`).
+ *
+ * @example The 5% critical value of W grows towards 1 with n
+ * for (const n of [3, 10, 50]) print('n =', n, ' W at 5% =', shapiroWilkNull(n).quantile(0.05))
  */
 export function shapiroWilkNull(n: number): Univariate {
   if (n === 3) {
@@ -416,10 +589,24 @@ export function shapiroWilkNull(n: number): Univariate {
 }
 
 /**
- * The Shapiro–Wilk test of normality (Shapiro and Wilk, 1965) for 3 ≤ n ≤ 5000 values: W = (Σ aᵢ x₍ᵢ₎)²/Σ (xᵢ − x̄)²,
- * the squared correlation between the order statistics and the normal scores; its p-value is the lower tail of
- * Royston's (1995) approximation to the null law (scipy's `shapiro`, which computes in single precision, agrees to
- * about 10⁻⁵).
+ * The Shapiro–Wilk test of normality (Shapiro and Wilk, 1965) for $3 \le n \le 5000$ values:
+ * $W = (\sum_i a_i x_{(i)})^2/\sum_i (x_i - \bar x)^2$, the squared correlation between the order statistics and
+ * the normal scores; its p-value is the lower tail of Royston's (1995) approximation to the null law (scipy's
+ * `shapiro`, which computes in single precision, agrees to about $10^{-5}$). Throws `DomainError` for more than 5000
+ * values or when every value is equal.
+ *
+ * @param x The sample, 3 to 5000 finite values.
+ * @returns The test result, with $W \in (0, 1]$ as its statistic.
+ *
+ * @example Evenly spread values pass, a skewed sample does not
+ * const even = shapiroWilk([2.1, 2.9, 3.2, 3.5, 3.7, 4.0, 4.2, 4.6, 5.1, 5.8])
+ * print('even: W =', even.statistic, ' p =', even.pValue)
+ * const skewed = shapiroWilk([0.1, 0.2, 0.2, 0.3, 0.4, 0.6, 0.9, 1.5, 2.8, 6.0])
+ * print('skewed: W =', skewed.statistic, ' p =', skewed.pValue)
+ *
+ * @example Heights with one tall outlier
+ * const r = shapiroWilk([148, 154, 158, 160, 161, 162, 166, 170, 182, 195, 236])
+ * print('W =', r.statistic, ' p =', r.pValue)
  */
 export function shapiroWilk(x: VectorLike): TestResult {
   const v = sample(x, 'shapiroWilk', 3).sort()

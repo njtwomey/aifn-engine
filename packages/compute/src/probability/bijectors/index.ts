@@ -1,8 +1,24 @@
 /**
- * `aifn-compute/probability/bijectors`: bijectors and supports: intervals (`interval`, `REALS`, `POSITIVE`, `UNIT`),
- * invertible maps with log-Jacobians (exp, log, softplus, sigmoid, affine, power, the normal CDF, chains) and
- * many-to-one maps with their branches (`bijectorRegistry` lists the bijectors and factories), the ordered bijector onto increasing vectors (ordinal thresholds), the affine and additive coupling bijectors of normalising flows (RealNVP, NICE), for transformed distributions and constrained parameters, and `transformLogDensity`, a log-density reparameterised
- * through a bijector or a vector change of variables (non-centred parameterisations).
+ * `aifn-compute/probability/bijectors`: invertible maps of the real line with their log-Jacobians, for transformed
+ * distributions, constrained parameters and normalising flows.
+ *
+ * - Intervals and supports: `interval`, the constants `REALS`, `POSITIVE` and `UNIT_INTERVAL`, `intervalInside`,
+ *   `supportInterval` and `intervalSupport` (between an `Interval` and a distribution's `Support`),
+ *   `supportInteriorPoint` and `formatInterval`.
+ * - Scalar bijectors, each with its inverse, $\log \lvert f'(x) \rvert$, direction, domain and codomain:
+ *   `expBijector`, `logBijector`, `sigmoidBijector`, `tanhBijector`, `softplusBijector`, `normalCdfBijector`, and the
+ *   factories `affineBijector`, `powerBijector` and `chainBijectors` (a composition, checked link by link).
+ * - Vector bijectors along the last axis: `orderedBijector` onto increasing vectors (ordinal thresholds), and
+ *   `affineCouplingBijector`, the affine (RealNVP) and additive (NICE) coupling layers of normalising flows.
+ * - Many-to-one maps given by monotone branches: `squareMap`, `asManyToOne`; `imageOf` and `branchImages` give the
+ *   image of an interval, which is how `Transformed` and `Pushforward` find their supports.
+ * - `transformLogDensity`: a log-density reparameterised through a bijector or a vector change of variables
+ *   (non-centred parameterisations), with the log-Jacobian added.
+ * - `bijectorRegistry` lists the bijectors and factories with their metadata; `bijectorFunctions` the module's
+ *   functions.
+ *
+ * Every map is a composition of tensor primitives, so it is differentiable and accepts numbers, tensors and traced
+ * values. Bad parameters and intervals outside a map's domain throw a `DomainError`.
  */
 
 export {

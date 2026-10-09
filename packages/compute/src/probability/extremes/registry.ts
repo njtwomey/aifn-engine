@@ -1,4 +1,7 @@
-/** The registry of `aifn-compute/probability/extremes`: the generalised Pareto fit and the peaks-over-threshold estimates. */
+/**
+ * The registry of `aifn-compute/probability/extremes`: the generalised Pareto fit and the peaks-over-threshold
+ * estimates.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as extremes from './extremes'

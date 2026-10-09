@@ -1,9 +1,13 @@
 /**
- * Tests on counts: Pearson's χ² and the G-test (likelihood ratio) for goodness of fit and for independence in a
- * contingency table, both members of Cressie and Read's power-divergence family (scipy's `power_divergence`,
- * `chisquare`, `chi2_contingency`); Fisher's exact test of a 2 × 2 table (scipy's `fisher_exact`); and the table's
- * effect sizes, the odds ratio (sample, or conditional maximum likelihood with its exact interval, as scipy's
- * `contingency.odds_ratio`) and Cramér's V.
+ * Tests on counts: Pearson's $\chi^2$ and the $G$-test (likelihood ratio) for goodness of fit and for independence in
+ * a contingency table, both members of Cressie and Read's power-divergence family (scipy's `power_divergence`,
+ * `chisquare`, `chi2_contingency`); Fisher's exact test of a $2 \times 2$ table (scipy's `fisher_exact`); and the
+ * table's effect sizes, the odds ratio (sample, or conditional maximum likelihood with its exact interval, as scipy's
+ * `contingency.odds_ratio`) and Cramér's $V$.
+ *
+ * The $\chi^2$ and $G$ tests compare observed counts $o$ with the counts $e$ expected under the null, and their
+ * $\chi^2$ null laws are asymptotic (every $e$ should be at least about 5). Fisher's test conditions on the table's
+ * margins and is exact. Tables are matrices of non-negative counts, rows by columns; bad counts throw `DomainError`.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -21,11 +25,32 @@ import {
   type TestResult,
 } from './protocol'
 
+/**
+ * $x \log y$, taken as 0 when $x = 0$ (whatever $y$ is), so that empty cells add nothing to $G$.
+ *
+ * @param x The factor, a count.
+ * @param y The argument of the logarithm.
+ * @returns $x \log y$, or 0.
+ */
 const xlogy = (x: number, y: number) => (x === 0 ? 0 : x * Math.log(y))
 
 /**
- * The Cressie–Read power divergence 2/(λ(λ + 1)) Σ o[(o/e)^λ − 1] between observed and expected counts: λ = 1 is
- * Pearson's Σ (o − e)²/e, λ = 0 its limit 2 Σ o log(o/e), the G (log-likelihood ratio) statistic.
+ * The Cressie–Read power divergence $\frac{2}{\lambda(\lambda + 1)} \sum_i o_i[(o_i/e_i)^\lambda - 1]$ between
+ * observed and expected counts: $\lambda = 1$ is Pearson's $\sum_i (o_i - e_i)^2/e_i$, $\lambda = 0$ its limit
+ * $2\sum_i o_i \log(o_i/e_i)$, the $G$ (log-likelihood ratio) statistic, and $\lambda = 2/3$ Cressie and Read's
+ * recommended compromise. $\lambda = -1$ is not supported (it divides by zero).
+ *
+ * @param observed The observed counts $o_i$.
+ * @param expected The expected counts $e_i$, as many as `observed`, all positive.
+ * @param lambda The power $\lambda$.
+ * @returns The divergence, 0 when every $o_i = e_i$.
+ *
+ * @example Pearson's, the G and Cressie–Read's statistic for the same counts
+ * const o = [10, 20, 30]
+ * const e = [20, 20, 20]
+ * print('lambda = 1 (Pearson):', powerDivergence(o, e, 1))
+ * print('lambda = 0 (G):', powerDivergence(o, e, 0))
+ * print('lambda = 2/3:', powerDivergence(o, e, 2 / 3))
  */
 export function powerDivergence(observed: ArrayLike<number>, expected: ArrayLike<number>, lambda: number): number {
   let s = 0
@@ -39,7 +64,14 @@ export function powerDivergence(observed: ArrayLike<number>, expected: ArrayLike
   return s
 }
 
-/** Observed counts as a Float64Array of non-negative values. */
+/**
+ * Observed counts as a Float64Array of non-negative values: throws `DomainError` for fewer than two categories or a
+ * negative (or NaN) count.
+ *
+ * @param x The counts, one per category (need not be integers).
+ * @param where The caller's name, for error messages.
+ * @returns A new array of the counts.
+ */
 function countsOf(x: VectorLike, where: string): Float64Array {
   const v = dense.toF64(x, where)
   if (v.length < 2) throw new DomainError(where, `${where}: needs at least two categories`)
@@ -47,15 +79,30 @@ function countsOf(x: VectorLike, where: string): Float64Array {
   return v
 }
 
+/**
+ * Options of the goodness-of-fit tests: what the null hypothesis expects, given as counts or as probabilities (equal
+ * counts when both are left out; `expected` wins when both are given), and the degrees of freedom to remove.
+ */
 type GoodnessOptions = {
   /** Expected counts (summing to the observed total), or omitted for equal expected counts. */
   expected?: VectorLike
   /** Category probabilities, an alternative to `expected` (normalised here). */
   probabilities?: VectorLike
-  /** Degrees of freedom lost to parameters estimated from the data (df = k − 1 − ddof). */
+  /** Degrees of freedom lost to parameters estimated from the data: the test has $k - 1 - \text{ddof}$ (default 0). */
   ddof?: number
 }
 
+/**
+ * The goodness-of-fit test with statistic `powerDivergence` at `lambda` against $\chi^2(k - 1 - \text{ddof})$, upper
+ * tail. Throws `DomainError` when the expected counts do not sum to the observed total (to $10^{-8}$ relative) or
+ * their number differs from the observed.
+ *
+ * @param observed The observed counts of the $k$ categories.
+ * @param options The expected counts or probabilities, and `ddof`.
+ * @param lambda 1 for Pearson's $X^2$, 0 for $G$.
+ * @param test The registry key of the test, also used in error messages.
+ * @returns The test result, with Cohen's $w = \sqrt{\text{statistic}/N}$ as its effect size.
+ */
 function goodnessOfFit(observed: VectorLike, options: GoodnessOptions, lambda: 0 | 1, test: string): TestResult {
   const o = countsOf(observed, test)
   const total = o.reduce((a, b) => a + b, 0)
@@ -90,29 +137,79 @@ function goodnessOfFit(observed: VectorLike, options: GoodnessOptions, lambda: 0
 }
 
 /**
- * Pearson's χ² goodness-of-fit test (Pearson, 1900): X² = Σ (oᵢ − eᵢ)²/eᵢ over k categories, χ²(k − 1 − ddof) under
- * the null (asymptotically; every eᵢ should be at least about 5). Effect size: Cohen's w = √(X²/N).
+ * Pearson's $\chi^2$ goodness-of-fit test (Pearson, 1900): $X^2 = \sum_i (o_i - e_i)^2/e_i$ over $k$ categories,
+ * $\chi^2(k - 1 - \text{ddof})$ under the null (asymptotically; every $e_i$ should be at least about 5). Effect size:
+ * Cohen's $w = \sqrt{X^2/N}$ with $N$ the total count. As scipy's `chisquare`.
+ *
+ * @param observed The observed counts of the $k \ge 2$ categories.
+ * @param options The null hypothesis's expected counts or probabilities (default: all categories equally likely),
+ *   and `ddof`.
+ * @returns The test result.
+ *
+ * @example Is a die fair? 88 rolls that look fair, and 60 that do not
+ * const fair = chiSquareGoodnessOfFit([16, 18, 16, 14, 12, 12])
+ * print('X2 =', fair.statistic, ' df =', fair.df, ' p =', fair.pValue)
+ * const loaded = chiSquareGoodnessOfFit([5, 5, 5, 5, 5, 35])
+ * print('X2 =', loaded.statistic, ' p =', loaded.pValue)
+ *
+ * @example Against given probabilities
+ * // 100 plants against Mendel's 9 : 3 : 3 : 1 ratio.
+ * const r = chiSquareGoodnessOfFit([55, 20, 16, 9], { probabilities: [9, 3, 3, 1] })
+ * print('X2 =', r.statistic, ' p =', r.pValue)
  */
 export function chiSquareGoodnessOfFit(observed: VectorLike, options: GoodnessOptions = {}): TestResult {
   return goodnessOfFit(observed, options, 1, 'chiSquareGoodnessOfFit')
 }
 
-/** The G-test of goodness of fit: G = 2 Σ oᵢ log(oᵢ/eᵢ), with the same χ² null as Pearson's test. */
+/**
+ * The $G$-test of goodness of fit: $G = 2\sum_i o_i \log(o_i/e_i)$, the log-likelihood ratio of the multinomial, with
+ * the same $\chi^2(k - 1 - \text{ddof})$ null as Pearson's test (scipy's `power_divergence` with
+ * `lambda_='log-likelihood'`). Effect size: Cohen's $w = \sqrt{G/N}$.
+ *
+ * @param observed The observed counts of the $k \ge 2$ categories.
+ * @param options The null hypothesis's expected counts or probabilities (default: equal), and `ddof`.
+ * @returns The test result.
+ *
+ * @example G is close to Pearson's X2 when the fit is good, and further when it is not
+ * for (const counts of [[16, 18, 16, 14, 12, 12], [5, 5, 5, 5, 5, 35]]) {
+ *   const g = gTestGoodnessOfFit(counts)
+ *   print('G =', g.statistic, ' p =', g.pValue, ' X2 =', chiSquareGoodnessOfFit(counts).statistic)
+ * }
+ */
 export function gTestGoodnessOfFit(observed: VectorLike, options: GoodnessOptions = {}): TestResult {
   return goodnessOfFit(observed, options, 0, 'gTestGoodnessOfFit')
 }
 
-/** A contingency table with its expected counts under independence, eᵢⱼ = rᵢ cⱼ / N, and degrees of freedom. */
+/**
+ * A contingency table with its expected counts under independence, $e_{ij} = r_i c_j / N$, and degrees of freedom.
+ */
 export type Table = {
+  /** The number of rows $r$. */
   rows: number
+  /** The number of columns $c$. */
   cols: number
+  /** The observed counts, row-major ($r c$ values). */
   observed: Float64Array
+  /** The expected counts under independence, row-major like `observed`. */
   expected: Float64Array
+  /** The total count $N$. */
   total: number
+  /** The degrees of freedom $(r - 1)(c - 1)$. */
   df: number
 }
 
-/** The expected counts rᵢcⱼ/N of an r × c table under independence, and its (r − 1)(c − 1) degrees of freedom. */
+/**
+ * The expected counts $r_i c_j/N$ of an $r \times c$ table under independence ($r_i$ and $c_j$ the row and column
+ * totals), and its $(r - 1)(c - 1)$ degrees of freedom (scipy's `contingency.expected_freq`). Throws `DomainError`
+ * for a table smaller than $2 \times 2$, a negative count, or a row or column that sums to zero.
+ *
+ * @param table The observed counts, rows by columns.
+ * @returns The table with its expected counts.
+ *
+ * @example The counts a 2 x 3 table would have under independence
+ * const t = expectedCounts([[10, 10, 20], [20, 20, 20]])
+ * print('expected (row-major):', t.expected, ' df =', t.df)
+ */
 export function expectedCounts(table: MatrixLike): Table {
   const { data, m, n } = dense.toMatrixF64(table, 'expectedCounts')
   if (m < 2 || n < 2) throw new DomainError('expectedCounts', 'expectedCounts: the table needs at least 2 × 2 cells')
@@ -133,6 +230,16 @@ export function expectedCounts(table: MatrixLike): Table {
   return { rows: m, cols: n, observed: data, expected, total, df: (m - 1) * (n - 1) }
 }
 
+/**
+ * The test of independence with statistic `powerDivergence` at `lambda` against $\chi^2((r - 1)(c - 1))$, upper tail,
+ * with Yates' correction when asked for and the table has one degree of freedom.
+ *
+ * @param table The observed counts, rows by columns.
+ * @param correction Whether to apply Yates' correction to a table with one degree of freedom.
+ * @param lambda 1 for Pearson's $X^2$, 0 for $G$.
+ * @param test The registry key of the test.
+ * @returns The test result, with the uncorrected Cramér's $V$ as its effect size.
+ */
 function independence(table: MatrixLike, correction: boolean, lambda: 0 | 1, test: string): TestResult {
   const t = expectedCounts(table)
   let o = t.observed
@@ -158,9 +265,28 @@ function independence(table: MatrixLike, correction: boolean, lambda: 0 | 1, tes
 }
 
 /**
- * Pearson's χ² test of independence of the rows and columns of an r × c table: X² = Σ (oᵢⱼ − eᵢⱼ)²/eᵢⱼ with
- * eᵢⱼ = rᵢcⱼ/N, χ²((r − 1)(c − 1)) under the null. For a 2 × 2 table Yates' continuity correction is applied unless
- * `correction` is false (as scipy's `chi2_contingency`). Effect size: Cramér's V (uncorrected).
+ * Pearson's $\chi^2$ test of independence of the rows and columns of an $r \times c$ table:
+ * $X^2 = \sum_{ij} (o_{ij} - e_{ij})^2/e_{ij}$ with $e_{ij} = r_i c_j/N$, $\chi^2((r - 1)(c - 1))$ under the null.
+ * For a $2 \times 2$ table Yates' continuity correction is applied unless `correction` is false: each count moves
+ * half a unit towards its expectation, never past it (as scipy's `chi2_contingency`). Effect size: Cramér's $V$
+ * (uncorrected).
+ *
+ * @param table The observed counts, rows by columns, at least $2 \times 2$.
+ * @param options Options of the test.
+ * @param options.correction Apply Yates' correction to a $2 \times 2$ table (ignored for larger ones).
+ * @returns The test result.
+ *
+ * @example A 2 x 3 table consistent with independence
+ * const r = chiSquareIndependence([[10, 10, 20], [20, 20, 20]])
+ * print('X2 =', r.statistic, ' df =', r.df, ' p =', r.pValue)
+ *
+ * @example Yates' correction on a 2 x 2 table
+ * const t = [[12, 5], [9, 17]]
+ * const corrected = chiSquareIndependence(t)
+ * const plain = chiSquareIndependence(t, { correction: false })
+ * print('Yates-corrected: X2 =', corrected.statistic, ' p =', corrected.pValue)
+ * print('uncorrected: X2 =', plain.statistic, ' p =', plain.pValue)
+ * print(plain.effectSize)
  */
 export function chiSquareIndependence(
   table: MatrixLike,
@@ -169,15 +295,33 @@ export function chiSquareIndependence(
   return independence(table, correction, 1, 'chiSquareIndependence')
 }
 
-/** The G-test of independence: G = 2 Σ oᵢⱼ log(oᵢⱼ/eᵢⱼ) (Yates-corrected counts for 2 × 2 unless `correction` is false). */
+/**
+ * The $G$-test of independence: $G = 2\sum_{ij} o_{ij} \log(o_{ij}/e_{ij})$, $\chi^2((r - 1)(c - 1))$ under the
+ * null, with Yates-corrected counts for a $2 \times 2$ table unless `correction` is false (scipy's
+ * `chi2_contingency` with `lambda_='log-likelihood'`). Effect size: Cramér's $V$ (from the uncorrected $X^2$).
+ *
+ * @param table The observed counts, rows by columns, at least $2 \times 2$.
+ * @param options Options of the test.
+ * @param options.correction Apply Yates' correction to a $2 \times 2$ table (ignored for larger ones).
+ * @returns The test result.
+ *
+ * @example The G statistic of two tables
+ * const big = gTestIndependence([[10, 10, 20], [20, 20, 20]])
+ * print('2 x 3: G =', big.statistic, ' p =', big.pValue)
+ * const small = gTestIndependence([[12, 5], [9, 17]])
+ * print('2 x 2, corrected: G =', small.statistic, ' p =', small.pValue)
+ */
 export function gTestIndependence(table: MatrixLike, { correction = true }: { correction?: boolean } = {}): TestResult {
   return independence(table, correction, 0, 'gTestIndependence')
 }
 
 /**
- * Cramér's V = √(X²/(N (min(r, c) − 1))) for an r × c table, from the uncorrected Pearson X²: 0 for independence, 1
- * for a perfect association (scipy's `contingency.association(method='cramer')`). The
- * registered metric is `aifn-compute/learning/metrics`' `cramersV`; this is the effect size the independence tests report.
+ * Cramér's $V = \sqrt{X^2/(N(\min(r, c) - 1))}$ for an $r \times c$ table, from the uncorrected Pearson $X^2$: 0 for
+ * independence, 1 for a perfect association (scipy's `contingency.association(method='cramer')`). The registered
+ * metric is `aifn-compute/learning/metrics`' `cramersV`; this is the effect size the independence tests report.
+ *
+ * @param table The observed counts, rows by columns.
+ * @returns $V$, in $[0, 1]$.
  */
 function cramersV(table: MatrixLike): number {
   const t = expectedCounts(table)
@@ -186,7 +330,14 @@ function cramersV(table: MatrixLike): number {
 
 // ── 2 × 2 tables ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The cells a, b, c, d of a 2 × 2 table [[a, b], [c, d]] as non-negative integers. */
+/**
+ * The cells $a, b, c, d$ of a $2 \times 2$ table `[[a, b], [c, d]]`, checked to be non-negative integers (a
+ * `DomainError` otherwise, or for a table of another shape).
+ *
+ * @param table The table, as two rows of two counts.
+ * @param where The caller's name, for error messages.
+ * @returns The cells `[a, b, c, d]`, row by row.
+ */
 function twoByTwo(table: MatrixLike, where: string): [number, number, number, number] {
   const { data, m, n } = dense.toMatrixF64(table, where)
   if (m !== 2 || n !== 2) throw new DomainError(where, `${where}: needs a 2 × 2 table`)
@@ -196,9 +347,16 @@ function twoByTwo(table: MatrixLike, where: string): [number, number, number, nu
 }
 
 /**
- * Fisher's noncentral hypergeometric law of a, the top-left cell given the margins, at odds ratio ψ:
- * P(a = x) ∝ C(K, x) C(N − K, n − x) ψˣ over max(0, n + K − N) ≤ x ≤ min(n, K), with N the total, K the first column's
- * total and n the first row's. Returned as the support's lower end and the probabilities.
+ * Fisher's noncentral hypergeometric law of $a$, the top-left cell given the margins, at odds ratio $\psi$:
+ * $\pr(a = x) \propto \binom{K}{x}\binom{N - K}{n - x}\psi^x$ over $\max(0, n + K - N) \le x \le \min(n, K)$, with $N$
+ * the total, $K$ the first column's total and $n$ the first row's. Returned as the support's lower end and the
+ * probabilities, normalised in logs so that no term overflows.
+ *
+ * @param N The table's total count.
+ * @param K The first column's total.
+ * @param n The first row's total.
+ * @param logPsi The log odds ratio $\log\psi$ (0 for the central hypergeometric law).
+ * @returns `lo`, the smallest possible $a$, and `p`, the probabilities of $a = \text{lo}, \text{lo} + 1, \dots$.
  */
 function noncentralHypergeometric(N: number, K: number, n: number, logPsi: number): { lo: number; p: Float64Array } {
   const lo = Math.max(0, n + K - N)
@@ -215,7 +373,14 @@ function noncentralHypergeometric(N: number, K: number, n: number, logPsi: numbe
   return { lo, p: p.map((v) => v / s) }
 }
 
-/** Solve f(log ψ) = target for an f increasing in log ψ, by bisection on [−60, 60] (ψ from e⁻⁶⁰ to e⁶⁰). */
+/**
+ * Solve $f(\log\psi) = \text{target}$ for an $f$ increasing in $\log\psi$, by bisection on $[-60, 60]$ ($\psi$ from
+ * $e^{-60}$ to $e^{60}$), to $10^{-13}$ or 200 halvings. A target out of $f$'s range returns an end of the bracket.
+ *
+ * @param f An increasing function of the log odds ratio.
+ * @param target The value to reach.
+ * @returns The log odds ratio found.
+ */
 function solveLogPsi(f: (logPsi: number) => number, target: number): number {
   let lo = -60
   let hi = 60
@@ -228,10 +393,23 @@ function solveLogPsi(f: (logPsi: number) => number, target: number): number {
 }
 
 /**
- * The odds ratio of a 2 × 2 table [[a, b], [c, d]] with a confidence interval. `sample`: ad/(bc), with Woolf's
- * interval exp(log OR ± z √(1/a + 1/b + 1/c + 1/d)); `conditional` (default): the conditional maximum-likelihood
- * estimate, the ψ at which the noncentral hypergeometric mean of a equals the observed a, with the exact interval that
- * inverts the two one-sided Fisher tests (Cornfield, 1956), as scipy's `odds_ratio`.
+ * The odds ratio of a $2 \times 2$ table `[[a, b], [c, d]]` with a confidence interval. `sample`: $ad/(bc)$, with
+ * Woolf's interval $\exp(\log \mathrm{OR} \pm z\sqrt{1/a + 1/b + 1/c + 1/d})$, or $[0, \infty]$ when a cell is 0;
+ * `conditional` (default): the conditional maximum-likelihood estimate, the $\psi$ at which the noncentral
+ * hypergeometric mean of $a$ equals the observed $a$ (0 or $\infty$ when $a$ is at an end of its range), with the
+ * exact interval that inverts the two one-sided Fisher tests (Cornfield, 1956), as scipy's `odds_ratio`.
+ *
+ * @param table The table, two rows of two non-negative integer counts.
+ * @param options The estimate and its interval.
+ * @param options.kind `conditional` or `sample`.
+ * @param options.level The confidence level, in $(0, 1)$.
+ * @param options.alternative `two-sided`, `less` (an upper bound, from 0) or `greater` (a lower bound, to $\infty$).
+ * @returns `value`, the odds ratio, and `ci`, its interval.
+ *
+ * @example The conditional and the sample odds ratio of one table
+ * const table = [[7, 15], [58, 472]]
+ * print('conditional:', oddsRatio(table))
+ * print('sample:', oddsRatio(table, { kind: 'sample' }))
  */
 export function oddsRatio(
   table: MatrixLike,
@@ -285,11 +463,25 @@ export function oddsRatio(
 }
 
 /**
- * Fisher's exact test of a 2 × 2 table [[a, b], [c, d]] (Fisher, 1922): given the margins, a follows the
- * hypergeometric law Hypergeometric(N, a + c, a + b) when rows and columns are independent (odds ratio 1). The
- * statistic is a; `greater` tests an odds ratio above 1 (large a), and the two-sided p-value sums every table no more
- * likely than the observed one. The effect size is the conditional maximum-likelihood odds ratio with its exact
- * interval.
+ * Fisher's exact test of a $2 \times 2$ table `[[a, b], [c, d]]` (Fisher, 1922): given the margins, $a$ follows the
+ * hypergeometric law $\Hypergeom(N, a + c, a + b)$ when rows and columns are independent (odds ratio 1). The
+ * statistic is $a$; `greater` tests an odds ratio above 1 (large $a$), and the two-sided p-value sums every table no
+ * more likely than the observed one (scipy's `fisher_exact`). The estimate and effect size are the conditional
+ * maximum-likelihood odds ratio with its exact interval.
+ *
+ * @param table The table, two rows of two non-negative integer counts.
+ * @param options The alternative and the confidence level of the odds ratio's interval.
+ * @returns The test result, with the exact hypergeometric null law.
+ *
+ * @example Fisher's tea-tasting lady names all 8 cups correctly
+ * // Rows: milk or tea poured first; columns: what she guessed.
+ * const r = fisherExact([[4, 0], [0, 4]])
+ * print('two-sided p =', r.pValue)
+ * print('one-sided p =', fisherExact([[4, 0], [0, 4]], { alternative: 'greater' }).pValue)
+ *
+ * @example A table that is not enough evidence
+ * const r = fisherExact([[6, 2], [1, 4]])
+ * print('p =', r.pValue, ' odds ratio =', r.estimate, ' interval:', r.ci)
  */
 export function fisherExact(table: MatrixLike, options: TestOptions = {}): TestResult {
   const [a, b, c, d] = twoByTwo(table, 'fisherExact')

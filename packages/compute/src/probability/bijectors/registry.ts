@@ -1,7 +1,9 @@
 /**
  * The registry of bijectors (design S §2.5): the fixed monotone maps (exp, log, sigmoid, tanh, softplus, the normal
- * cdf) and the factories that make one from parameters (affine, power, ordered, chains), with their domains and
- * codomains as support names. `Transformed` distributions, constrained parameters and the lab's pickers use this table.
+ * cdf) and the factories that make one from parameters (affine, power, chains, ordered, affine coupling), with their
+ * domains and codomains as support names, their TeX and the parameter `Space` of each factory. `Transformed`
+ * distributions, constrained parameters and the lab's pickers use this table. `transformLogDensity` is registered
+ * separately, as the module's one function.
  */
 
 import { definer, entries, type BijectorInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

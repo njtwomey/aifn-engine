@@ -1,19 +1,24 @@
 /**
- * Ordinal likelihoods: the probability of each of K ordered classes given a latent linear predictor η and K − 1
- * increasing thresholds θ₁ < … < θ_{K−1}, for the three classical models (Agresti, 2010, "Analysis of Ordinal
- * Categorical Data", 2nd ed., ch. 3–4):
+ * Ordinal likelihoods: the probability of each of $K$ ordered classes given a latent linear predictor $\eta$ and
+ * $K - 1$ increasing thresholds, for the three classical models (Agresti, 2010, "Analysis of Ordinal Categorical
+ * Data", 2nd ed., ch. 3–4).
  *
- * - `cumulative` (McCullagh, 1980, "Regression models for ordinal data", JRSS B 42): P(y ≤ k) = F(θ_k − η), so
- *   P(y = k) = F(θ_k − η) − F(θ_{k−1} − η). With the logit link this is the proportional-odds model.
- * - `continuation-ratio` (sequential; Fienberg, 1980; Tutz, 1990): P(y = k | y ≥ k) = F(θ_k − η), so
- *   P(y = k) = F(θ_k − η) Π_{j<k} (1 − F(θ_j − η)).
- * - `adjacent-category` (Agresti, 2010, §4.1): log(P(y = k + 1)/P(y = k)) = η − θ_k, logit only.
+ * Classes are $0, \dots, K - 1$ and thresholds $\theta_0 < \dots < \theta_{K-2}$, with $\theta_{-1} = -\infty$ and
+ * $\theta_{K-1} = \infty$:
  *
- * Classes are 0 … K − 1. F is the latent cdf of the link: logit (logistic), probit (normal) or cloglog (Gumbel minimum,
- * F(z) = 1 − exp(−e^z)). Everything is computed in log space from primitives (log F and log(1 − F) in closed form per
- * link), so log-likelihoods are differentiable in η and θ. η is a number or a tensor of any batch shape; class
- * log-probabilities have shape [...batch, K]. Thresholds must be increasing (build them with `orderedBijector` from
- * `aifn-compute/probability/bijectors` to optimise them unconstrained).
+ * - `cumulative` (McCullagh, 1980, "Regression models for ordinal data", JRSS B 42):
+ *   $\pr(y \le k) = F(\theta_k - \eta)$, so $\pr(y = k) = F(\theta_k - \eta) - F(\theta_{k-1} - \eta)$. With the
+ *   logit link this is the proportional-odds model.
+ * - `continuation-ratio` (sequential; Fienberg, 1980; Tutz, 1990): $\pr(y = k \mid y \ge k) = F(\theta_k - \eta)$,
+ *   so $\pr(y = k) = F(\theta_k - \eta) \prod_{j<k} (1 - F(\theta_j - \eta))$.
+ * - `adjacent-category` (Agresti, 2010, §4.1): $\log(\pr(y = k + 1)/\pr(y = k)) = \eta - \theta_k$, logit only.
+ *
+ * $F$ is the latent cdf of the link: logit (logistic), probit (normal) or cloglog (Gumbel minimum,
+ * $F(z) = 1 - \exp(-e^z)$). Everything is computed in log space from primitives ($\log F$ and $\log(1 - F)$ in
+ * closed form per link), so log-likelihoods are differentiable in $\eta$ and $\thetavec$. $\eta$ is a number or a
+ * tensor of any batch shape; class log-probabilities have shape $[\dots, K]$, the batch shape of $\eta$ followed by
+ * the classes. Thresholds must be increasing (build them with `orderedBijector` from
+ * `aifn-compute/probability/bijectors` to optimise them unconstrained); this is not checked.
  */
 
 import { logDiffExp, logSigmoid, logSoftmax, normalLogCdf, sigmoid, normalCdf } from 'aifn-compute/numerics/special'
@@ -45,13 +50,17 @@ export type OrdinalModel = 'cumulative' | 'continuation-ratio' | 'adjacent-categ
 /** The latent cdf of an ordinal model. */
 export type OrdinalLinkName = 'logit' | 'probit' | 'cloglog'
 
-/** A latent cdf F with log F and log(1 − F) written stably with primitives. */
+/**
+ * A latent cdf $F$ with $\log F$ and $\log(1 - F)$ written stably with primitives: `cdf` is $F(z)$, `logCdf` is
+ * $\log F(z)$ and `logSurvival` is $\log(1 - F(z))$.
+ */
 type LatentCdf = {
   cdf(z: Value): Value
   logCdf(z: Value): Value
   logSurvival(z: Value): Value
 }
 
+/** The latent cdf of each link. */
 const LATENT: Record<OrdinalLinkName, LatentCdf> = {
   logit: { cdf: sigmoid, logCdf: logSigmoid, logSurvival: (z) => logSigmoid(neg(z)) },
   probit: { cdf: normalCdf, logCdf: normalLogCdf, logSurvival: (z) => normalLogCdf(neg(z)) },
@@ -63,19 +72,36 @@ const LATENT: Record<OrdinalLinkName, LatentCdf> = {
   },
 }
 
-/** An ordinal likelihood: class probabilities and log-likelihoods as functions of η and the thresholds θ. */
+/**
+ * An ordinal likelihood: class probabilities and log-likelihoods as functions of $\eta$ and the thresholds
+ * $\thetavec$ (a vector of $K - 1$ values; `ShapeError` otherwise).
+ */
 export interface OrdinalLikelihood {
+  /** The model. */
   readonly model: OrdinalModel
+  /** The latent cdf's link. */
   readonly link: OrdinalLinkName
-  /** log P(y = k | η, θ) for k = 0 … K − 1 (K = len θ + 1): shape [...shape(η), K]. */
+  /**
+   * $\log \pr(y = k \mid \eta, \thetavec)$ for $k = 0, \dots, K - 1$, with $K$ one more than the number of
+   * thresholds: the batch shape of $\eta$ followed by $K$.
+   */
   logProbabilities(eta: Value, thresholds: Value): Value
-  /** P(y = k | η, θ), shape [...shape(η), K]; each lane sums to 1. */
+  /** $\pr(y = k \mid \eta, \thetavec)$, shaped as `logProbabilities`; each lane sums to 1. */
   probabilities(eta: Value, thresholds: Value): Value
-  /** The pointwise log-likelihood log P(y | η, θ) of observed classes y (shape of η; a number for one observation). */
+  /**
+   * The pointwise log-likelihood $\log \pr(y \mid \eta, \thetavec)$ of observed classes $y$, one per element of
+   * $\eta$ (the shape of $\eta$; a number for one untraced observation). Throws `ShapeError` when the count of
+   * classes differs from the size of $\eta$, and `DomainError` for a class outside $0, \dots, K - 1$.
+   */
   logLik(y: Index | Tensor | ArrayLike<Index>, eta: Value, thresholds: Value): Value
 }
 
-/** The number of thresholds, checking that θ is a vector. */
+/**
+ * The number of thresholds, checking that $\thetavec$ is a non-empty vector (`ShapeError` otherwise).
+ *
+ * @param thresholds The thresholds $\thetavec$.
+ * @returns Their number, $K - 1$.
+ */
 function thresholdCount(thresholds: Value): Size {
   const shape = shapeOfValue(thresholds)
   if (shape.length !== 1 || shape[0] < 1) {
@@ -84,18 +110,37 @@ function thresholdCount(thresholds: Value): Size {
   return shape[0]
 }
 
-/** η with a trailing axis of length 1 ([...batch] → [...batch, 1]); a scalar η stays a scalar. */
+/**
+ * $\eta$ with a trailing axis of length 1, so that it broadcasts against the thresholds; a scalar $\eta$ stays a
+ * scalar.
+ *
+ * @param eta The linear predictor $\eta$.
+ * @returns $\eta$ reshaped to its batch shape followed by 1.
+ */
 function asColumn(eta: Value): Value {
   const batch = shapeOfValue(eta)
   return batch.length === 0 ? eta : reshape(eta, [...batch, 1])
 }
 
-/** A constant tensor of the batch shape of η with a trailing axis of length 1. */
+/**
+ * A constant tensor of the batch shape of $\eta$ with a trailing axis of length 1, to pad the class axis.
+ *
+ * @param eta The linear predictor, whose shape is taken.
+ * @param value The constant (here $-\infty$ or 0, a log-probability).
+ * @returns The constant tensor.
+ */
 function padding(eta: Value, value: number): Tensor {
   return full([...shapeOfValue(eta), 1], value)
 }
 
-/** The strictly upper-triangular (m × n) matrix Uⱼₖ = 1 for j < k: v · U is the exclusive cumulative sum of v. */
+/**
+ * The strictly upper-triangular $m \times n$ matrix with $U_{jk} = 1$ for $j < k$: $\vvec^\top\Umat$ is the
+ * exclusive cumulative sum of $\vvec$.
+ *
+ * @param m The number of rows (the length of $\vvec$).
+ * @param n The number of columns (the length of the sums).
+ * @returns $\Umat$ as a float64 tensor.
+ */
 function exclusiveCumsum(m: Size, n: Size): Tensor {
   const u = new Float64Array(m * n)
   for (let j = 0; j < m; j++) for (let k = j + 1; k < n; k++) u[j * n + k] = 1
@@ -104,11 +149,28 @@ function exclusiveCumsum(m: Size, n: Size): Tensor {
 
 /**
  * The ordinal likelihood of a model over a latent cdf (default `cumulative` with `logit`, the proportional-odds model).
- * `adjacent-category` is defined for the logit only.
+ * `adjacent-category` is defined for the logit only; it and an unknown link throw `DomainError`.
  *
- * @example
+ * @param model The model: `cumulative`, `continuation-ratio` or `adjacent-category`.
+ * @param linkName The latent cdf: `logit`, `probit` or `cloglog`.
+ * @returns The likelihood, as functions of $\eta$ and the thresholds.
+ *
+ * @example The proportional-odds model at $\eta = 0.5$ with four classes
  * const po = ordinalLikelihood('cumulative', 'logit')
- * po.probabilities(0.5, tensor([-1, 0, 1])) // P(y = 0 … 3) at η = 0.5
+ * const p = po.probabilities(0.5, tensor([-1, 0, 1]))
+ * print('P(y = 0 ... 3):', p, 'sum:', sum(p))
+ * print('log P(y = 2):', po.logLik(2, 0.5, tensor([-1, 0, 1])))
+ *
+ * @example The three models on the same predictor and thresholds
+ * const theta = tensor([-1, 0, 1])
+ * print('cumulative:', ordinalLikelihood('cumulative').probabilities(0.5, theta))
+ * print('continuation-ratio:', ordinalLikelihood('continuation-ratio').probabilities(0.5, theta))
+ * print('adjacent-category:', ordinalLikelihood('adjacent-category').probabilities(0.5, theta))
+ *
+ * @example A batch of predictors, and the gradient in $\eta$
+ * const po = ordinalLikelihood('cumulative', 'probit')
+ * print('log-likelihoods:', po.logLik([0, 2], tensor([-2, 3]), tensor([-1, 1])))
+ * print('d/d eta:', grad((eta) => po.logLik(0, eta, tensor([-1, 1])))(0))
  */
 export function ordinalLikelihood(
   model: OrdinalModel = 'cumulative',
@@ -173,13 +235,25 @@ export function ordinalLikelihood(
   }
 }
 
-/** A rank-0 result as a number when untraced (a traced value is returned as is). */
+/**
+ * A rank-0 result as a number when untraced (a traced value is returned as is).
+ *
+ * @param v The rank-0 value.
+ * @returns A number, or `v` itself when traced.
+ */
 function unwrapScalar(v: Value): Value {
   const raw = unwrap(v)
   return raw === v && typeof raw !== 'number' ? toFlat(raw)[0] : v
 }
 
-/** The slice [start, stop) of the last axis of v. */
+/**
+ * The slice $[\text{start}, \text{stop})$ of the last axis of `v`, every other axis kept whole.
+ *
+ * @param v The value to slice.
+ * @param start The first index kept.
+ * @param stop One past the last index kept.
+ * @returns The slice.
+ */
 function sliceLast(v: Value, start: number, stop: number): Value {
   const rank = shapeOfValue(v).length
   return slice(v, ...Array.from({ length: rank - 1 }, () => null), [start, stop])

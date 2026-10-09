@@ -1,6 +1,6 @@
 /**
- * The registry of `aifn-compute/probability/markov`: the chain simulator as an algorithm (`problem: 'map'`, random), and the
- * exact computations on a transition matrix as functions.
+ * The registry of `aifn-compute/probability/markov`: the chain simulator as an algorithm (`problem: 'map'`, random),
+ * and the exact computations on a transition matrix as functions.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -203,6 +203,7 @@ fn(
   chain.simulateChain,
 )
 
+/** A registry table: the entries of one kind, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 
 /** The algorithms of the module, keyed by factory name. */

@@ -1,3 +1,12 @@
+/**
+ * Resampling: bootstrap resamples and the nonparametric bootstrap with its percentile and basic intervals, random
+ * permutations and the two-sample permutation test, and Kish's effective sample size of importance weights.
+ *
+ * Randomness comes from an `aifn-compute/foundation/random` stream, the first argument. `resampleIndices` and
+ * `shuffled` draw from it and advance it; `bootstrap` and `permutationTest` draw resample $r$ from a child stream named
+ * by $r$, so their results depend only on the stream's key and the stream itself is not advanced.
+ */
+
 import { child, integers, permutation, type Stream } from 'aifn-compute/foundation/random'
 import { toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -7,22 +16,49 @@ import { quantile, type QuantileMethod } from './quantile'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
 /**
- * `size` indices drawn uniformly with replacement from 0 … n − 1 (default size n), as an int32 rank-1 tensor: one
- * bootstrap resample.
+ * `size` indices drawn uniformly with replacement from $0, \dots, n - 1$ (default size $n$), as an int32 rank-1
+ * tensor: one bootstrap resample.
+ *
+ * @param s The random stream; advanced by the draws.
+ * @param n The number of values to draw indices from.
+ * @param size How many indices to draw.
+ * @returns The indices.
+ *
+ * @example One bootstrap resample of five values
+ * const x = tensor([10, 20, 30, 40, 50])
+ * const idx = resampleIndices(stream(1), 5)
+ * print('indices =', idx)
+ * print('resample =', take(x, idx))
  */
 export function resampleIndices(s: Stream, n: Size, size: Size = n): Tensor {
   return integers(s, n, { shape: [size] })
 }
 
-/** The values of x in the order of a uniformly random permutation (`aifn-compute/foundation/random`'s `permutation`). */
+/**
+ * The values of $\xvec$ in the order of a uniformly random permutation (`aifn-compute/foundation/random`'s
+ * `permutation`).
+ *
+ * @param s The random stream; advanced by the draw.
+ * @param x The values; not modified.
+ * @returns A new array of the values in permuted order.
+ */
 function shuffledValues(s: Stream, x: ArrayLike<number>): Float64Array {
   const order = toFlat(permutation(s, x.length))
   return Float64Array.from(order, (j) => x[j])
 }
 
 /**
- * A uniformly random permutation of x (drawn by `aifn-compute/foundation/random`'s `permutation`), as a new rank-1 tensor. (The
- * in-place shuffle of an index array is `aifn-compute/foundation/random`'s `shuffle`.)
+ * A uniformly random permutation of $\xvec$ (drawn by `aifn-compute/foundation/random`'s `permutation`), as a new
+ * rank-1 tensor. (The in-place shuffle of an index array is `aifn-compute/foundation/random`'s `shuffle`.)
+ *
+ * @param s The random stream; advanced by the draw.
+ * @param xData The values: an array or a rank-1 tensor. Not modified.
+ * @returns The values in a random order.
+ *
+ * @example Shuffle twice from one stream
+ * const s = stream(1)
+ * print('first =', shuffled(s, [1, 2, 3, 4, 5]))
+ * print('second =', shuffled(s, [1, 2, 3, 4, 5]))
  */
 export function shuffled(s: Stream, xData: Data): Tensor {
   return vectorOf(shuffledValues(s, toSequence(xData, 'shuffled')))
@@ -34,16 +70,31 @@ export type Bootstrap = {
   estimate: number
   /** The statistic on each resample (rank-1). */
   replicates: Tensor
-  /** The standard deviation of the replicates (n − 1). */
+  /** The standard deviation of the replicates ($n - 1$ divisor); NaN for fewer than two resamples. */
   standardError: number
-  /** mean(replicates) − estimate. */
+  /** The mean of the replicates minus the estimate; NaN for no resamples. */
   bias: number
 }
 
 /**
- * The nonparametric bootstrap (Efron 1979): the statistic on `resamples` samples drawn with replacement from x, with
- * resample r drawn from `child(s, 'resample', r)`. Returns the estimate, the replicates, their standard error and the
- * bias estimate.
+ * The nonparametric bootstrap (Efron 1979): the statistic on `resamples` samples drawn with replacement from
+ * $\xvec$, with resample $r$ drawn from `child(s, 'resample', r)`. Returns the estimate, the replicates, their
+ * standard error and the bias estimate. Throws `DomainError` on an empty sample.
+ *
+ * @param s The random stream whose children draw the resamples; not advanced.
+ * @param xData The sample: an array or a rank-1 tensor.
+ * @param statistic The statistic of a sample. It receives one buffer of $n$ values, refilled for each resample, so it
+ *   must not keep it.
+ * @param resamples The number of bootstrap resamples.
+ * @returns The `estimate`, the `replicates`, the `standardError` and the `bias`.
+ *
+ * @example The standard error of a mean
+ * // For the mean it approaches the population sd over the root of n: sqrt(2 / 5).
+ * const average = (v) => v.reduce((a, b) => a + b, 0) / v.length
+ * const b = bootstrap(stream(0), [1, 2, 3, 4, 5], average, 400)
+ * print('estimate =', b.estimate)
+ * print('standard error =', b.standardError)
+ * print('bias =', b.bias)
  */
 export function bootstrap(
   s: Stream,
@@ -71,10 +122,28 @@ export function bootstrap(
 }
 
 /**
- * A bootstrap confidence interval at `level` (default 0.95) from the replicates' quantiles (method `linear`):
- * - `percentile` (default): [q(α/2), q(1 − α/2)] of the replicates.
- * - `basic`: [2θ̂ − q(1 − α/2), 2θ̂ − q(α/2)], reflecting the percentiles about the estimate θ̂.
+ * A bootstrap confidence interval at `level` (default 0.95) from the replicates' quantiles (method `linear` by
+ * default), with $\alpha = 1 - \text{level}$:
+ * - `percentile` (default): $[q(\alpha/2), q(1 - \alpha/2)]$ of the replicates.
+ * - `basic`: $[2\hat{\theta} - q(1 - \alpha/2), 2\hat{\theta} - q(\alpha/2)]$, reflecting the percentiles about the
+ *   estimate $\hat{\theta}$.
+ *
  * (Efron and Tibshirani 1993, §13; Davison and Hinkley 1997, §5.2.)
+ *
+ * @param result The bootstrap, as `bootstrap` returns it (at least one replicate).
+ * @param options The level, the kind of interval and the quantile method.
+ * @param options.level The coverage, in $(0, 1)$ (default 0.95).
+ * @param options.method `percentile` (default) or `basic`, as above.
+ * @param options.quantileMethod The quantile method for $q$ (default `linear`; see `QuantileMethod`).
+ * @returns The interval as `[lower, upper]`.
+ *
+ * @example Percentile and basic intervals for the mean of skewed data
+ * // The basic interval reflects the percentiles about the estimate, so the long right tail moves it left.
+ * const average = (v) => v.reduce((a, b) => a + b, 0) / v.length
+ * const b = bootstrap(stream(0), [1, 2, 3, 4, 5, 6, 7, 8, 9, 30], average, 400)
+ * print('estimate =', b.estimate)
+ * print('percentile 90% =', bootstrapInterval(b, { level: 0.9 }))
+ * print('basic 90% =', bootstrapInterval(b, { level: 0.9, method: 'basic' }))
  */
 export function bootstrapInterval(
   result: Bootstrap,
@@ -93,16 +162,37 @@ export type PermutationTest = {
   observed: number
   /** The statistic on each permuted split (rank-1). */
   null: Tensor
-  /** The Monte Carlo p-value with the +1 correction, so it is never 0 (Phipson and Smyth 2010). */
+  /**
+   * The Monte Carlo p-value with the $+1$ correction, so it is never 0 (Phipson and Smyth 2010).
+   */
   pValue: number
 }
 
 /**
- * A two-sample permutation test: pools x and y, shuffles the pool `resamples` times (shuffle r from `child(s, 'permutation', r)`),
- * and recomputes `statistic(x', y')` on each split into the original group sizes. The p-value is
- * (1 + #{null at least as extreme}) / (1 + resamples): `greater` counts null ≥ observed, `less` null ≤ observed, and
- * `two-sided` (default) is min(1, 2 · min(p_less, p_greater)), as in `scipy.stats.permutation_test`. Comparisons
- * allow a relative tolerance of 1e-14 so that ties in exact arithmetic count as ties.
+ * A two-sample permutation test: pools $\xvec$ and $\yvec$, shuffles the pool `resamples` times (shuffle $r$ from
+ * `child(s, 'permutation', r)`), and recomputes the statistic on each split into the original group sizes. The p-value
+ * is $(1 + \#\{\text{null at least as extreme}\}) / (1 + \text{resamples})$: `greater` counts null values
+ * $\ge$ the observed one, `less` those $\le$ it, and `two-sided` (default) is
+ * $\min(1, 2 \min(p_\text{less}, p_\text{greater}))$, as in `scipy.stats.permutation_test`. Comparisons allow a
+ * relative tolerance of $10^{-14}$ so that ties in exact arithmetic count as ties.
+ *
+ * @param s The random stream whose children draw the permutations; not advanced.
+ * @param xData The first sample: an array or a rank-1 tensor.
+ * @param yData The second sample: an array or a rank-1 tensor.
+ * @param statistic The statistic of a split, given the two groups (views of a scratch array, so it must not keep
+ *   them); large values should point away from the null for `greater`.
+ * @param options The number of permutations and the alternative.
+ * @param options.resamples The number of random permutations (default 9999).
+ * @param options.alternative `two-sided` (default), `greater` or `less`, as above.
+ * @returns The `observed` statistic, the `null` statistics and the `pValue`.
+ *
+ * @example A difference in means
+ * // Of the 20 ways to split the six values in two groups of three, only the observed one and its mirror image are
+ * // this extreme, so the exact two-sided p-value is 2 / 20.
+ * const average = (v) => v.reduce((a, b) => a + b, 0) / v.length
+ * const t = permutationTest(stream(0), [1, 2, 3], [7, 8, 9], (x, y) => average(y) - average(x), { resamples: 999 })
+ * print('observed =', t.observed)
+ * print('p-value =', t.pValue)
  */
 export function permutationTest(
   s: Stream,
@@ -138,9 +228,22 @@ export function permutationTest(
 }
 
 /**
- * Kish's effective sample size of importance weights, (Σwᵢ)² / Σwᵢ² (Kong 1992; Kish 1965): n for equal weights, 1
- * when one weight dominates. With `log: true` the inputs are log-weights, shifted by their maximum first so that
- * large log-weights do not overflow. Weights need not be normalised.
+ * Kish's effective sample size of importance weights, $(\sum_i w_i)^2 / \sum_i w_i^2$ (Kong 1992; Kish 1965): $n$
+ * for equal weights, 1 when one weight dominates. With `log: true` the inputs are log-weights, shifted by their
+ * maximum first so that large log-weights do not overflow. Weights need not be normalised. Throws `DomainError` for no
+ * weights or a negative one; NaN when every weight is 0.
+ *
+ * @param weightsData The weights $w_i$ (or their logarithms): an array or a rank-1 tensor.
+ * @param options Whether the weights are given as logarithms.
+ * @param options.log The inputs are $\log w_i$ (default false).
+ * @returns The effective sample size, between 1 and $n$.
+ *
+ * @example Equal, uneven and log weights
+ * print('equal =', importanceEffectiveSampleSize([1, 1, 1, 1]))
+ * print('one dominates =', importanceEffectiveSampleSize([1, 0.001, 0.001, 0.001]))
+ * print('uneven =', importanceEffectiveSampleSize([1, 1, 2, 4]))
+ * // Weights of exp(1000) each would overflow; as logs they do not.
+ * print('log weights =', importanceEffectiveSampleSize([1000, 1000, 1000], { log: true }))
  */
 export function importanceEffectiveSampleSize(weightsData: Data, options: { log?: boolean } = {}): number {
   const weights = toSequence(weightsData, 'importanceEffectiveSampleSize')

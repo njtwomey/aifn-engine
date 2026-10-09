@@ -1,8 +1,12 @@
 /**
- * Distributions built from others: finite mixtures, `Independent` (a batch reinterpreted as one event, as in
- * PyTorch's `Independent`), `Transformed` (the pushforward of a univariate distribution through a monotone
- * bijection, with the change-of-variables log-Jacobian) and `Pushforward` (through a many-to-one map such as x², summing
- * over preimages).
+ * Distributions built from others: finite mixtures, zero inflation, `Independent` (a batch reinterpreted as one event,
+ * as in PyTorch's `Independent`), `Transformed` (the pushforward of a univariate distribution through a monotone
+ * bijection, with the change-of-variables log-Jacobian) and `Pushforward` (through a many-to-one map such as $x^2$,
+ * summing over preimages).
+ *
+ * Log-densities are written with primitives, so they stay differentiable in the parameters of the distributions they
+ * are built from. Quantities without a closed form (a mixture's entropy, a transformed distribution's moments) throw
+ * `AifnError` and say to estimate them from samples.
  */
 
 import { AifnError, DomainError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -62,11 +66,22 @@ import {
   univariate,
 } from './util'
 
+/**
+ * A method that throws `AifnError` saying that `what` has no closed form and should be estimated from samples.
+ *
+ * @param what The method's name in the message, such as `'Mixture.entropy'`.
+ * @returns The method, which takes no arguments and always throws.
+ */
 const noClosedForm = (what: string) => () => {
   throw new AifnError(what, `${what}: no closed form (estimate it from samples)`)
 }
 
-/** The smallest and largest raw values of a bound (a batch of bounds gives the outermost). */
+/**
+ * The smallest or largest raw value of a bound (a batch of bounds gives the outermost).
+ *
+ * @param v The bound: a number or a tensor of them (read through a traced value).
+ * @param which `'min'` for the smallest value, `'max'` for the largest.
+ */
 function extreme(v: Value, which: 'min' | 'max'): number {
   const r = unwrap(v)
   const values = typeof r === 'number' ? [r] : toFlat(r)
@@ -76,14 +91,27 @@ function extreme(v: Value, which: 'min' | 'max'): number {
 // ── Mixture ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * A finite mixture Σₖ wₖ pₖ(x) of univariate components with weights w (length K, non-negative, normalised here; a
- * number array or a tensor, possibly traced). The weights may be a batch [..., K], one weight vector per element of
- * the batch (a mixture density network's head: weights and component parameters that vary by input); the batch shape
- * is the broadcast of the weights' and the components'. `logProb` is a log-sum-exp over components (differentiable in
- * the weights and in every component's parameters), the cdf and survival function are the weighted sums, and the quantile
- * is found numerically. The mean and variance follow from the law of total variance; the entropy and mode have no
- * closed form and throw. Draws pick a component per draw (stream `child(s, 'component')`) and take that component's
- * draw (stream `child(s, 'draws', k)`). No `rsample`: the choice of component is discrete.
+ * A finite mixture $p(x) = \sum_k w_k p_k(x)$ of univariate components with weights $w_k$ (normalised here). The
+ * weights may be a batch $[\dots, K]$, one weight vector per element of the batch (a mixture density network's head:
+ * weights and component parameters that vary by input); the batch shape is the broadcast of the weights' and the
+ * components'. `logProb` is a log-sum-exp over components (differentiable in the weights and in every component's
+ * parameters), the cdf and survival function are the weighted sums, and the quantile is found numerically. The mean
+ * $\sum_k w_k \mu_k$ and the variance $\sum_k w_k (\sigma_k^2 + \mu_k^2) - \mu^2$ follow from the law of total
+ * variance; the entropy and mode have no closed form and throw. Draws pick a component per draw (stream
+ * `child(s, 'component')`) and take that component's draw (stream `child(s, 'draws', k)`). No `rsample`: the choice
+ * of component is discrete. Throws `DomainError` when there are no components, the weights' last axis is not $K$ long
+ * or a weight is negative.
+ *
+ * @param weights The $K$ non-negative weights, one per component, on the last axis: a number array or a tensor
+ *   (possibly traced), or a batch `[..., K]`.
+ * @param components The $K$ component distributions; the support is the hull of theirs, discrete when all are.
+ * @returns The mixture.
+ *
+ * @example Two normals, an equal mixture
+ * const d = Mixture([0.5, 0.5], [Normal(-1, 1), Normal(1, 1)])
+ * print('p(0) =', d.prob(0), ' Normal(1, 1) at 0 =', Normal(1, 1).prob(0))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ * print('draws =', d.sample(stream(5), { shape: [5] }))
  */
 export function Mixture(weights: Value | readonly number[], components: readonly Univariate[]): Univariate {
   const w: Value = Array.isArray(weights) ? tensor(weights as number[]) : (weights as Value)
@@ -154,13 +182,24 @@ export function Mixture(weights: Value | readonly number[], components: readonly
 // ── ZeroInflated ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * A zero-inflated discrete distribution (Lambert, 1992): with probability π the outcome is a structural zero, otherwise
- * it is drawn from `base`, so P(0) = π + (1 − π) p(0) and P(k) = (1 − π) p(k) for k ≠ 0. π is a probability or `{ logits
- * }` (stable near 0 and 1: log π = log σ(η)); it may be a batch, broadcast against the base's batch. `logProb` is
- * differentiable in π and in the base's parameters; with π = 0 it is the base's. The mean is (1 − π)μ and the variance
- * (1 − π)(σ² + πμ²). Draws pick structural zeros on stream `child(s, 'structural')` and base draws on
- * `child(s, 'base')`. The base must be discrete with 0 in its support (a zero-inflated Poisson, negative binomial or
- * Bernoulli).
+ * A zero-inflated discrete distribution (Lambert, 1992): with probability $\pi$ the outcome is a structural zero,
+ * otherwise it is drawn from `base`, so $\pr(0) = \pi + (1 - \pi) p(0)$ and $\pr(k) = (1 - \pi) p(k)$ for
+ * $k \ne 0$. `logProb` is differentiable in $\pi$ and in the base's parameters; with $\pi = 0$ it is the base's. The
+ * mean is $(1 - \pi)\mu$ and the variance $(1 - \pi)(\sigma^2 + \pi\mu^2)$, with $\mu$ and $\sigma^2$ the base's.
+ * Draws pick structural zeros on stream `child(s, 'structural')` and base draws on `child(s, 'base')`. The entropy and
+ * mode throw. The base must be discrete with 0 in its support (a zero-inflated Poisson, negative binomial or
+ * Bernoulli), else `DomainError`.
+ *
+ * @param pi The probability $\pi \in [0, 1]$ of a structural zero, or `{ logits }`, its log-odds $\eta$ (stable near 0
+ *   and 1: $\log \pi = \log \sigma(\eta)$). It may be a batch, broadcast against the base's batch.
+ * @param base The discrete distribution of the outcomes that are not structural zeros.
+ * @returns The zero-inflated distribution.
+ *
+ * @example A zero-inflated Poisson
+ * const d = ZeroInflated(0.2, Poisson(2))
+ * print('P(0) =', d.prob(0), ' 0.2 + 0.8 e^-2 =', 0.2 + 0.8 * Math.exp(-2))
+ * print('P(1) =', d.prob(1))
+ * print('mean =', d.mean(), ' variance =', d.variance())
  */
 export function ZeroInflated(pi: Value | { logits: Value }, base: Univariate): Univariate {
   if (!base.discrete) throw new DomainError('ZeroInflated', 'ZeroInflated: the base must be discrete')
@@ -215,7 +254,12 @@ export function ZeroInflated(pi: Value | { logits: Value }, base: Univariate): U
   })
 }
 
-/** The raw values of a parameter as a flat array (a number gives one value). */
+/**
+ * The raw values of a parameter as a flat array (a number gives one value). Throws for a traced value, which cannot
+ * be sampled.
+ *
+ * @param v The parameter.
+ */
 function flatOf(v: Value): Float64Array {
   const r = raw(v, 'ZeroInflated.sample')
   return typeof r === 'number' ? Float64Array.of(r) : Float64Array.from(toFlat(r))
@@ -224,10 +268,22 @@ function flatOf(v: Value): Float64Array {
 // ── Independent ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Reinterpret the last `reinterpreted` batch axes of `base` as event axes (PyTorch's `Independent`): a batch of d
- * independent normals becomes one distribution over vectors in ℝᵈ with a diagonal covariance. `logProb` and `entropy`
- * sum over the reinterpreted axes; moments and draws are the base's. `covariance()` is available for a univariate base
- * with one reinterpreted axis (a diagonal matrix).
+ * Reinterpret the last `reinterpreted` batch axes of `base` as event axes (PyTorch's `Independent`): a batch of $d$
+ * independent normals becomes one distribution over vectors in $\reals^d$ with a diagonal covariance,
+ * $\log p(\xvec) = \sum_i \log p_i(x_i)$. `logProb` and `entropy` sum over the reinterpreted axes; moments and draws
+ * (and `rsample`, when the base has it) are the base's. `covariance()` is available for a univariate base with one
+ * reinterpreted axis (a diagonal matrix) and throws otherwise.
+ *
+ * @param base The distribution whose batch axes become event axes.
+ * @param reinterpreted How many trailing batch axes to move into the event, from 0 to the base's batch rank (else
+ *   `ShapeError`).
+ * @returns The distribution, with `base` and `reinterpreted` kept on it.
+ *
+ * @example Three independent standard normals as one vector
+ * const d = Independent(Normal(tensor([0, 0, 0]), 1))
+ * print('batch', d.batchShape, ' event', d.eventShape)
+ * print('log p(0) =', d.logProb(tensor([0, 0, 0])), ' 3 log Normal(0, 1) at 0 =', 3 * Normal(0, 1).logProb(0))
+ * print('covariance =', d.covariance())
  */
 export function Independent(base: Distribution, reinterpreted = 1): Multivariate {
   const b = base.batchShape
@@ -276,13 +332,26 @@ export function Independent(base: Distribution, reinterpreted = 1): Multivariate
 // ── Transformed ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The distribution of y = f(x) for x ~ base and a monotone bijector f: log p(y) = log p_base(f⁻¹(y)) − log |f′(f⁻¹(y))|
- * (the change of variables). The support is the image of the base's support under f (`imageOf`), with its open ends
- * marked, e.g. (0, 1) for a normal through the sigmoid; a base whose support is not inside f's domain (a normal
- * through log) is a `DomainError`. The cdf is the base's cdf at f⁻¹(y) (its survival function when f decreases), and
- * quantiles and draws map through f. Moments and entropy have no closed form in general and throw.
+ * The distribution of $y = f(x)$ for $x \sim$ `base` and a monotone bijector $f$, by the change of variables
+ * $\log p(y) = \log p_{\text{base}}(f^{-1}(y)) - \log \lvert f'(f^{-1}(y)) \rvert$. The support is the image of the
+ * base's support under $f$ (`imageOf`), with its open ends marked, e.g. $(0, 1)$ for a normal through the sigmoid; a
+ * base whose support is not inside $f$'s domain (a normal through log) is a `DomainError`. The cdf is the base's cdf
+ * at $f^{-1}(y)$ (its survival function when $f$ decreases), and quantiles and draws map through $f$ (a pathwise
+ * `rsample` when the base has one). Moments and entropy have no closed form in general and throw.
  *
- * @example Transformed(Normal(0, 1), expBijector) // the log-normal LogNormal(0, 1)
+ * @param base The univariate distribution of $x$.
+ * @param bijector The monotone map $f$ with its inverse and $\log \lvert f' \rvert$, such as the bijectors of
+ *   `aifn-compute/probability/bijectors`.
+ * @returns The distribution of $y$.
+ *
+ * @example The exponential of a standard normal is the log-normal
+ * // expBijector of aifn-compute/probability/bijectors, written out: Transformed(Normal(0, 1), expBijector).
+ * const open = (lower, upper) => ({ lower, upper, lowerOpen: true, upperOpen: true })
+ * const expBijector = { name: 'exp', forward: exp, inverse: log, logAbsDetJacobian: (x) => x, increasing: true,
+ *   domain: open(-Infinity, Infinity), codomain: open(0, Infinity) }
+ * const d = Transformed(Normal(0, 1), expBijector)
+ * print('p(2) =', d.prob(2), ' LogNormal(0, 1) at 2 =', LogNormal(0, 1).prob(2))
+ * print('median =', d.quantile(0.5), ' P(Y ≤ e) =', d.cdf(Math.E))
  */
 export function Transformed(base: Univariate, bijector: Bijector): Univariate {
   // The image of the base's support; throws when that support does not fit the bijector's domain.
@@ -370,14 +439,31 @@ export function Transformed(base: Univariate, bijector: Bijector): Univariate {
 // ── Pushforward through a many-to-one map ───────────────────────────────────────────────────────────────────────────
 
 /**
- * The distribution of y = f(x) for a continuous, unbatched x ~ base and a map f made of monotone branches (such as
- * `squareMap`; a bijector is one branch). The density sums the change of variables over the preimages,
- * p(y) = Σₖ p_base(xₖ) / |f′(xₖ)| with xₖ = fₖ⁻¹(y), as a log-sum-exp (differentiable in y and the base's parameters).
- * A branch contributes only where y is in its image. The cdf adds each branch's base mass on {x : f(x) ≤ y} (not
- * differentiable), the quantile inverts it numerically, and draws are f of the base's draws. The support is the image
- * of the base's support (`imageOf`). Moments and entropy throw.
+ * The distribution of $y = f(x)$ for a continuous, unbatched $x \sim$ `base` and a map $f$ made of monotone branches
+ * (such as `squareMap`; a bijector is one branch). The density sums the change of variables over the preimages,
+ * $p(y) = \sum_k p_{\text{base}}(x_k) / \lvert f'(x_k) \rvert$ with $x_k = f_k^{-1}(y)$, as a log-sum-exp
+ * (differentiable in $y$ and the base's parameters). A branch contributes only where $y$ is in its image. The cdf adds
+ * each branch's base mass on $\{x : f(x) \le y\}$ (not differentiable), the quantile inverts it numerically, and
+ * draws are $f$ of the base's draws. The support is the image of the base's support (`imageOf`). Moments and entropy
+ * throw. A discrete or batched base is a `DomainError`.
  *
- * @example Pushforward(Normal(0, 1), squareMap) // the χ²₁ distribution, ChiSquare(1)
+ * @param base The continuous, unbatched distribution of $x$.
+ * @param map The map $f$: a many-to-one map with its monotone branches, or a bijector (one branch).
+ * @returns The distribution of $y$.
+ *
+ * @example The square of a standard normal is chi-squared with one degree of freedom
+ * // squareMap of aifn-compute/probability/bijectors, written out: Pushforward(Normal(0, 1), squareMap).
+ * const span = (lower, upper, lowerOpen, upperOpen) => ({ lower, upper, lowerOpen, upperOpen })
+ * const logAbsDetJacobian = (x) => log(abs(mul(2, x)))
+ * const branches = [
+ *   { domain: span(-Infinity, 0, true, false), inverse: (y) => neg(sqrt(y)), logAbsDetJacobian, increasing: false },
+ *   { domain: span(0, Infinity, false, true), inverse: sqrt, logAbsDetJacobian, increasing: true },
+ * ]
+ * const squareMap = { name: 'square', forward: square, branches, domain: span(-Infinity, Infinity, true, true),
+ *   codomain: span(0, Infinity, false, true) }
+ * const d = Pushforward(Normal(0, 1), squareMap)
+ * print('p(1) =', d.prob(1), ' ChiSquare(1) at 1 =', ChiSquare(1).prob(1))
+ * print('P(Y ≤ 1) =', d.cdf(1), ' ChiSquare(1) =', ChiSquare(1).cdf(1))
  */
 export function Pushforward(base: Univariate, map: ManyToOneMap | Bijector): Univariate {
   const where = `Pushforward(${base.name}, ${map.name})`

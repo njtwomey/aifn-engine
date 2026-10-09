@@ -2,6 +2,11 @@
  * Survival estimators from right-censored times: the Kaplan–Meier estimate of the survival function with Greenwood's
  * variance and linear or log–log intervals (as scipy's `ecdf` on `CensoredData`), the Nelson–Aalen estimate of the
  * cumulative hazard with Aalen's variance, and the log-rank test that several groups share one survival function.
+ *
+ * The data are pairs of a time and an event flag: 1 when the event was observed at that time, 0 when the subject was
+ * censored then (still event-free when last seen). Everything is built on the risk table of the distinct event times
+ * $t_j$, with $n_j$ subjects at risk just before $t_j$ and $d_j$ events at it; a subject censored at $t_j$ counts as at
+ * risk there. Curves are reported at the event times only, as step functions.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -10,7 +15,15 @@ import { solve } from 'aifn-compute/numerics/linalg'
 import { ChiSquare, Normal } from 'aifn-compute/probability/distributions'
 import { checkLevel, pValueOf, result, type TestResult } from './protocol'
 
-/** Times with event flags (1 an event, 0 censored at that time), checked. */
+/**
+ * Times with event flags (1 an event, 0 censored at that time), checked: at least one time, equal lengths, finite
+ * times and flags of 0 or 1 (a `DomainError` otherwise).
+ *
+ * @param time The times.
+ * @param event The event flags, one per time.
+ * @param where The caller's name, for error messages.
+ * @returns The times `t` and flags `e` as new Float64Arrays.
+ */
 function censored(time: VectorLike, event: VectorLike, where: string): { t: Float64Array; e: Float64Array } {
   const t = dense.toF64(time, where)
   const e = dense.toF64(event, where)
@@ -21,7 +34,15 @@ function censored(time: VectorLike, event: VectorLike, where: string): { t: Floa
   return { t, e }
 }
 
-/** The risk table at each distinct event time: the time, the number at risk just before it, and the events at it. */
+/**
+ * The risk table at each distinct event time: the time, the number at risk just before it, and the events at it.
+ * Times with only censorings have no row, but leave the risk set.
+ *
+ * @param t The times, in any order.
+ * @param e The event flags, one per time.
+ * @returns Arrays over the event times, ascending: `times`, `atRisk` ($n_j$), `events` ($d_j$) and `censoredAt`
+ *   (the censorings at the same time).
+ */
 function riskTable(t: Float64Array, e: Float64Array) {
   const order = Array.from(t.keys()).sort((i, j) => t[i] - t[j])
   const times: number[] = []
@@ -50,10 +71,17 @@ function riskTable(t: Float64Array, e: Float64Array) {
   return { times, atRisk, events, censoredAt }
 }
 
+/**
+ * A list of numbers as a rank-1 tensor.
+ *
+ * @param v The numbers.
+ * @returns A new tensor of them.
+ */
 const vec = (v: readonly number[] | Float64Array) => fromData(Float64Array.from(v), [v.length])
 
 /** A Kaplan–Meier estimate: the survival curve at each distinct event time, with pointwise intervals. */
 export type KaplanMeier = {
+  /** Always `'survival-curve'`. */
   readonly kind: 'survival-curve'
   /** Distinct event times, ascending. */
   readonly time: Tensor
@@ -61,23 +89,44 @@ export type KaplanMeier = {
   readonly atRisk: Tensor
   /** The number of events at each time. */
   readonly events: Tensor
-  /** Ŝ(t) just after each time (a step function, right-continuous). */
+  /** $\hat S(t)$ just after each time (a step function, right-continuous). */
   readonly survival: Tensor
-  /** Greenwood's standard error of Ŝ(t). */
+  /** Greenwood's standard error of $\hat S(t)$. */
   readonly standardError: Tensor
+  /** The lower end of the pointwise interval at each time. */
   readonly lower: Tensor
+  /** The upper end of the pointwise interval at each time. */
   readonly upper: Tensor
+  /** The intervals' confidence level. */
   readonly level: number
+  /** How the intervals were built. */
   readonly interval: 'linear' | 'log-log'
-  /** The smallest time with Ŝ(t) ≤ ½ (NaN when the curve stays above ½). */
+  /** The smallest time with $\hat S(t) \le \tfrac12$ (NaN when the curve stays above $\tfrac12$). */
   readonly median: number
 }
 
 /**
- * The Kaplan–Meier estimator (Kaplan and Meier, 1958): Ŝ(t) = Πⱼ:ₜⱼ≤ₜ (1 − dⱼ/nⱼ) over the distinct event times tⱼ, with
- * dⱼ events among nⱼ at risk. Greenwood's (1926) variance is Ŝ² Σ dⱼ/(nⱼ(nⱼ − dⱼ)). `linear` intervals are Ŝ ± z·se cut
- * to [0, 1]; `log-log` (default) intervals transform through log(−log Ŝ), which keeps them in [0, 1]: Ŝ^{exp(±z·σ)}
- * with σ = √(Σ dⱼ/(nⱼ(nⱼ − dⱼ)))/|log Ŝ|. Where Ŝ is 0 or 1 the log–log interval is undefined (NaN), as in scipy.
+ * The Kaplan–Meier estimator (Kaplan and Meier, 1958): $\hat S(t) = \prod_{j: t_j \le t} (1 - d_j/n_j)$ over the
+ * distinct event times $t_j$, with $d_j$ events among $n_j$ at risk. Greenwood's (1926) variance is
+ * $\hat S^2 \sum_j d_j/(n_j(n_j - d_j))$. `linear` intervals are $\hat S \pm z\,\mathrm{se}$ cut to $[0, 1]$;
+ * `log-log` (default) intervals transform through $\log(-\log \hat S)$, which keeps them in $[0, 1]$:
+ * $\hat S^{\exp(\pm z\sigma)}$ with $\sigma = \sqrt{\sum_j d_j/(n_j(n_j - d_j))}/\lvert \log \hat S \rvert$. Where
+ * $\hat S$ is 0 or 1 the log–log interval is undefined (NaN), as in scipy. Once $\hat S$ reaches 0 its standard error
+ * is NaN.
+ *
+ * @param time The time of each subject's event or censoring.
+ * @param event 1 where the event was observed, 0 where the time was censored.
+ * @param options The intervals.
+ * @param options.level The confidence level of the pointwise intervals, in $(0, 1)$.
+ * @param options.interval `log-log` or `linear`.
+ * @returns The curve at each distinct event time, with its standard errors, intervals and median.
+ *
+ * @example Eight subjects, three of them censored
+ * const km = kaplanMeier([3, 5, 6, 8, 10, 12, 15, 18], [1, 1, 0, 1, 1, 0, 1, 0])
+ * print('event times:', km.time, ' at risk:', km.atRisk)
+ * print('S(t):', km.survival)
+ * print('95% log-log interval:', km.lower, km.upper)
+ * print('median survival:', km.median)
  */
 export function kaplanMeier(
   time: VectorLike,
@@ -130,23 +179,43 @@ export function kaplanMeier(
 
 /** A Nelson–Aalen estimate of the cumulative hazard at each distinct event time. */
 export type NelsonAalen = {
+  /** Always `'cumulative-hazard'`. */
   readonly kind: 'cumulative-hazard'
+  /** Distinct event times, ascending. */
   readonly time: Tensor
+  /** The number at risk just before each time. */
   readonly atRisk: Tensor
+  /** The number of events at each time. */
   readonly events: Tensor
-  /** Ĥ(t) just after each time. */
+  /** $\hat H(t)$ just after each time. */
   readonly cumulativeHazard: Tensor
-  /** Aalen's standard error √(Σ dⱼ/nⱼ²). */
+  /** Aalen's standard error $\sqrt{\sum_j d_j/n_j^2}$. */
   readonly standardError: Tensor
+  /** The lower end of the pointwise interval at each time. */
   readonly lower: Tensor
+  /** The upper end of the pointwise interval at each time. */
   readonly upper: Tensor
+  /** The intervals' confidence level. */
   readonly level: number
 }
 
 /**
- * The Nelson–Aalen estimator (Nelson, 1972; Aalen, 1978) of the cumulative hazard: Ĥ(t) = Σⱼ:ₜⱼ≤ₜ dⱼ/nⱼ, with Aalen's
- * variance Σ dⱼ/nⱼ² and the log-transformed interval Ĥ exp(±z·se/Ĥ), which stays positive. exp(−Ĥ) is the
+ * The Nelson–Aalen estimator (Nelson, 1972; Aalen, 1978) of the cumulative hazard:
+ * $\hat H(t) = \sum_{j: t_j \le t} d_j/n_j$, with Aalen's variance $\sum_j d_j/n_j^2$ and the log-transformed
+ * interval $\hat H \exp(\pm z\,\mathrm{se}/\hat H)$, which stays positive. $\exp(-\hat H)$ is the
  * Fleming–Harrington estimate of the survival function.
+ *
+ * @param time The time of each subject's event or censoring.
+ * @param event 1 where the event was observed, 0 where the time was censored.
+ * @param options The intervals.
+ * @param options.level The confidence level of the pointwise intervals, in $(0, 1)$.
+ * @returns The cumulative hazard at each distinct event time, with its standard errors and intervals.
+ *
+ * @example The cumulative hazard of the eight subjects, and the survival it implies
+ * const na = nelsonAalen([3, 5, 6, 8, 10, 12, 15, 18], [1, 1, 0, 1, 1, 0, 1, 0])
+ * print('H(t):', na.cumulativeHazard)
+ * print('exp(-H):', exp(neg(na.cumulativeHazard)))
+ * print('Kaplan-Meier:', kaplanMeier([3, 5, 6, 8, 10, 12, 15, 18], [1, 1, 0, 1, 1, 0, 1, 0]).survival)
  */
 export function nelsonAalen(
   time: VectorLike,
@@ -186,15 +255,34 @@ export function nelsonAalen(
   }
 }
 
-/** The result of the log-rank test: the protocol's fields with each group's observed and expected events. */
+/**
+ * The result of the log-rank test: the protocol's fields with the group labels in order (`groups`) and each group's
+ * observed and expected numbers of events (`observed`, `expected`).
+ */
 export type LogRankTest = TestResult & { groups: number[]; observed: Tensor; expected: Tensor }
 
 /**
- * The log-rank test (Mantel, 1966; Peto and Peto, 1972) of H₀: G ≥ 2 groups share one survival function. At each
- * distinct event time tⱼ with nⱼ at risk and dⱼ events, group g expects dⱼ n_gⱼ/nⱼ of them; with O − E the observed
- * minus expected events and V their hypergeometric covariance, Σⱼ dⱼ(nⱼ − dⱼ)/(nⱼ − 1) · (n_gⱼ/nⱼ)(δ_gh − n_hⱼ/nⱼ),
- * the statistic (O − E)ᵀ V⁻¹ (O − E) over the first G − 1 groups is χ²(G − 1) under the null. `group` labels each
- * observation (any numbers); groups are ordered by label.
+ * The log-rank test (Mantel, 1966; Peto and Peto, 1972) of $H_0$: $G \ge 2$ groups share one survival function. At
+ * each distinct event time $t_j$ with $n_j$ at risk and $d_j$ events, group $g$ expects $d_j n_{gj}/n_j$ of them; with
+ * $\mathbf{O} - \mathbf{E}$ the observed minus expected events and $\Vmat$ their hypergeometric covariance,
+ * $V_{gh} = \sum_j \frac{d_j(n_j - d_j)}{n_j - 1} \frac{n_{gj}}{n_j}\left(\delta_{gh} - \frac{n_{hj}}{n_j}\right)$,
+ * the statistic $(\mathbf{O} - \mathbf{E})^\top \Vmat^{-1} (\mathbf{O} - \mathbf{E})$ over the first $G - 1$ groups
+ * is $\chi^2(G - 1)$ under the null. With two groups it is the square of scipy's `logrank` statistic. `group` labels
+ * each observation (any numbers); groups are ordered by label. Throws `DomainError` for fewer than two groups or
+ * mismatched lengths.
+ *
+ * @param time The time of each subject's event or censoring.
+ * @param event 1 where the event was observed, 0 where the time was censored.
+ * @param group The group label of each subject.
+ * @returns The test result, with each group's observed and expected events.
+ *
+ * @example Earlier events in one group, but too few subjects to reject at 5%
+ * const time = [3, 5, 6, 8, 10, 12, 15, 18, 9, 11, 14, 16, 20, 22, 25, 30]
+ * const event = [1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0]
+ * const group = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+ * const r = logRankTest(time, event, group)
+ * print('chi2 =', r.statistic, ' df =', r.df, ' p =', r.pValue)
+ * print('observed:', r.observed, ' expected:', r.expected)
  */
 export function logRankTest(time: VectorLike, event: VectorLike, group: VectorLike): LogRankTest {
   const { t, e } = censored(time, event, 'logRankTest')

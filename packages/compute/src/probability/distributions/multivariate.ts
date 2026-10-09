@@ -1,7 +1,11 @@
 /**
  * Multivariate families: the multivariate normal (with conditioning and marginals), Dirichlet, multinomial and
- * Wishart. Log-densities are compositions of primitives (`aifn-compute/numerics/linalg`'s Cholesky factor and triangular solves are
- * differentiable), so they are differentiable in the value and in the parameters.
+ * Wishart. Log-densities are compositions of primitives (`aifn-compute/numerics/linalg`'s Cholesky factor and
+ * triangular solves are differentiable), so they are differentiable in the value and in the parameters.
+ *
+ * Vector families take their parameters with the event on the last axis, $[\dots, d]$, the leading axes being the
+ * batch; values outside the support (off the simplex, counts not summing to $n$, a matrix that is not positive
+ * definite) have log-density $-\infty$ rather than throwing.
  */
 
 import { AifnError, DomainError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -56,7 +60,13 @@ import type { Multivariate, SampleOptions, Support } from './types'
 import { check, drawShape, isInteger, LOG_2PI, raw, scalarOf, sumLast } from './util'
 import { xlogy } from 'aifn-compute/numerics/special'
 
-/** A mask over the rows (last axis) of x: 1 where `test(row)` holds; a number for a single row. */
+/**
+ * A mask over the rows (last axis) of `x`: 1 where `test(row)` holds, else 0. Throws `ShapeError` for a scalar.
+ *
+ * @param x A vector `[K]` or a batch of them `[..., K]`, read through its raw values.
+ * @param test The condition on one row, given as a plain array of its $K$ values.
+ * @returns A number for a single vector, else a tensor of the leading shape `[...]`.
+ */
 function rowMask(x: Value, test: (row: number[]) => boolean): Raw {
   const r = unwrap(x)
   if (typeof r === 'number') throw new ShapeError('multivariate', 'expected a vector (or a batch of vectors)')
@@ -68,14 +78,29 @@ function rowMask(x: Value, test: (row: number[]) => boolean): Raw {
   return r.shape.length === 1 ? out[0] : fromData(out, r.shape.slice(0, -1))
 }
 
-/** `expr` where the mask holds, `fill` elsewhere (the mask of a single row is a number). */
+/**
+ * `expr` where the mask holds, `fill` elsewhere (the mask of a single row is a number).
+ *
+ * @param ok The row mask, as `rowMask` returns it.
+ * @param expr The value where the row is valid, with the shape of the mask.
+ * @param fill The value where it is not (such as $-\infty$ for a log-density).
+ * @returns `expr` itself when a single row is valid, `fill` when it is not, else the elementwise choice.
+ */
 function maskRows(ok: Raw, expr: Value, fill: number): Value {
   if (ok === 1) return expr
   if (ok === 0 && typeof ok === 'number') return fill
   return where(ok, expr, fill)
 }
 
-/** Selection matrix S (rows e_{indices[i]}ᵀ), so that S x picks the entries and S Σ Sᵀ the sub-block. */
+/**
+ * The selection matrix $\Smat$ whose row $i$ is $\evec_{j_i}^\top$ for the $i$-th index $j_i$, so that $\Smat\xvec$
+ * picks the entries and $\Smat\Sigmamat\Smat^\top$ the sub-block. Throws `DomainError` for an index that is not an
+ * integer in $0, \dots, d - 1$.
+ *
+ * @param indices The coordinates to pick, in the order they are wanted.
+ * @param d The dimension $d$ of the vectors picked from.
+ * @returns $\Smat$, of shape `[indices.length, d]`.
+ */
 function selector(indices: readonly number[], d: number): Tensor {
   const out = new Float64Array(indices.length * d)
   indices.forEach((j, i) => {
@@ -86,7 +111,16 @@ function selector(indices: readonly number[], d: number): Tensor {
   return fromData(out, [indices.length, d])
 }
 
-/** Build a multivariate object: fills in `prob`, `stddev` and the sample-shape handling. */
+/**
+ * Build a multivariate object: fills in `prob`, `stddev` and the sample-shape handling (draws have shape
+ * `[...shape, ...batchShape, ...eventShape]`, and parameters must be untraced to sample).
+ *
+ * @param base The family's own parts: its name, parameters, shapes, support, log-density, moments, entropy, mode,
+ *   sampler (given the full draw shape `[...shape, ...batchShape]`), and optionally a pathwise `rsample` and its
+ *   exponential-family form.
+ * @param extra Further members merged into the result (the multivariate normal adds its own after the call).
+ * @returns The distribution, with the members of `extra`.
+ */
 function multivariate<P extends Value, Extra extends object>(
   base: {
     name: string
@@ -138,33 +172,63 @@ function multivariate<P extends Value, Extra extends object>(
 
 // ── Multivariate normal ──────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The spread of a multivariate normal: covariance Σ, precision Λ = Σ⁻¹, or a lower Cholesky factor L of Σ. */
+/**
+ * The spread of a multivariate normal, one of: `covariance`, the covariance $\Sigmamat$ ($d \times d$); `precision`,
+ * $\Lambdamat = \Sigmamat^{-1}$; or `scaleTril`, a lower-triangular Cholesky factor $\Lmat$ with
+ * $\Lmat\Lmat^\top = \Sigmamat$.
+ */
 export type MultivariateNormalSpread = { covariance: Value } | { precision: Value } | { scaleTril: Value }
 
 /** A multivariate normal: the shared protocol plus its factor and the Gaussian operations. */
 export type MultivariateNormal<P extends Value = Value> = Multivariate<P> & {
   /** The mean, `[...batchShape, d]`. */
   readonly loc: Value
-  /** Lower-triangular L with Σ = L Lᵀ (d × d, shared by the batch). */
+  /** Lower-triangular $\Lmat$ with $\Sigmamat = \Lmat\Lmat^\top$ ($d \times d$, shared by the batch). */
   readonly scaleTril: Value
-  /** The diagonal jitter added to factor Σ (0 unless `options.jitter` allowed it). */
+  /** The diagonal jitter added to factor $\Sigmamat$ (0 unless `options.jitter` allowed it). */
   readonly jitter: number
   /**
-   * The conditional distribution of the other coordinates (in increasing index order) given x[indices] = values:
-   * mean μ_f + Σ_fo Σ_oo⁻¹ (x_o − μ_o) and covariance Σ_ff − Σ_fo Σ_oo⁻¹ Σ_of (Bishop, 2006, PRML §2.3.1).
-   * `values` has shape `[..., indices.length]` and broadcasts with the batch.
+   * The conditional distribution of the other coordinates $f$ (in increasing index order) given that the coordinates
+   * $o$ at `indices` equal `values`: mean $\muvec_f + \Sigmamat_{fo} \Sigmamat_{oo}^{-1} (\xvec_o - \muvec_o)$ and
+   * covariance $\Sigmamat_{ff} - \Sigmamat_{fo} \Sigmamat_{oo}^{-1} \Sigmamat_{of}$ (Bishop, 2006, PRML §2.3.1).
+   * `values` has shape `[..., indices.length]` and broadcasts with the batch. Throws `DomainError` when every
+   * coordinate is observed.
    */
   condition(indices: readonly number[], values: Value): MultivariateNormal<Value>
-  /** The marginal distribution of x[indices]: mean μ_I and covariance Σ_II. */
+  /**
+   * The marginal distribution of the coordinates $I$ at `indices` (in that order): mean $\muvec_I$ and covariance
+   * $\Sigmamat_{II}$.
+   */
   marginal(indices: readonly number[]): MultivariateNormal<Value>
 }
 
 /**
- * The multivariate normal N(loc, Σ) in d dimensions. `loc` has shape `[d]` (or `[..., d]` for a batch sharing one
- * covariance). The spread is `{ covariance }`, `{ precision }` or `{ scaleTril }` (a lower Cholesky factor of Σ).
- * A covariance that does not factor is an error unless `options.jitter` allows jitter (the `cholesky` options; the
- * jitter used is reported on the result). Densities, entropy and conditioning are differentiable in loc and in the
- * spread.
+ * The multivariate normal $\Gauss(\muvec, \Sigmamat)$ in $d$ dimensions,
+ * $p(\xvec) = (2\pi)^{-d/2} \det(\Sigmamat)^{-1/2}
+ * \exp\left(-\tfrac{1}{2}(\xvec - \muvec)^\top \Sigmamat^{-1} (\xvec - \muvec)\right)$, evaluated through the
+ * Cholesky factor $\Lmat$ of $\Sigmamat$. A covariance that does not factor throws `DomainError` unless
+ * `options.jitter` allows jitter (the `cholesky` options; the jitter used is reported on the result). Densities,
+ * entropy, pathwise draws (`rsample`) and conditioning are differentiable in $\muvec$ and in the spread. The result
+ * also has `condition` and `marginal` (Bishop, 2006, PRML §2.3.1 and §2.3.2).
+ *
+ * @param loc The mean $\muvec$: shape `[d]`, or `[..., d]` for a batch sharing one covariance.
+ * @param spread `{ covariance }` ($\Sigmamat$), `{ precision }` ($\Sigmamat^{-1}$, inverted here) or
+ *   `{ scaleTril }` (a lower Cholesky factor $\Lmat$ of $\Sigmamat$, used as given), each $d \times d$.
+ * @param options `jitter`: how much diagonal jitter `cholesky` may add to factor the covariance (default `false`,
+ *   none). Passed on to the distributions `condition` returns (`marginal` does not pass it on).
+ * @returns The distribution, with `loc`, `scaleTril`, `jitter`, `condition` and `marginal`.
+ *
+ * @example Density at the mean, and the moments
+ * const d = MultivariateNormal(tensor([0, 0]), { covariance: tensor([[1, 0], [0, 4]]) })
+ * print('p(0) =', d.prob(tensor([0, 0])), ' 1/(2π · 2) =', 1 / (4 * Math.PI))
+ * print('variance =', d.variance())
+ * print('draws =', d.sample(stream(0), { shape: [3] }))
+ *
+ * @example Conditioning on an observed coordinate
+ * const d = MultivariateNormal(tensor([0, 0]), { covariance: tensor([[1, 0.8], [0.8, 1]]) })
+ * const c = d.condition([0], tensor([1]))
+ * print('given x0 = 1: mean =', c.mean(), ' variance =', c.variance())
+ * print('marginal of x1: mean =', d.marginal([1]).mean(), ' variance =', d.marginal([1]).variance())
  */
 export function MultivariateNormal<M extends Value, S extends Value>(
   loc: M,
@@ -288,20 +352,47 @@ export function MultivariateNormal<M extends Value, S extends Value>(
 
 // ── Dirichlet ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Covariance of a vector with probabilities q and scale c: c (diag(q) − q qᵀ), batched over leading axes. */
+/**
+ * The covariance $c\,(\diag(\qvec) - \qvec\qvec^\top)$ of a vector with probabilities $\qvec$ and scale $c$,
+ * batched over leading axes.
+ *
+ * @param q The probabilities $\qvec$, shape `[..., K]`.
+ * @param K The number of categories, the length of the last axis of `q`.
+ * @param c The scale $c$: a number, or a tensor `[..., 1, 1]` that broadcasts against the batch.
+ * @returns The covariance, shape `[..., K, K]`.
+ */
 function simplexCovariance(q: Value, K: number, c: Value): Value {
   const column = expandDims(q, -1)
   const row = expandDims(q, -2)
   return mul(c, sub(mul(column, eye(K)), mul(column, row)))
 }
 
-/** Tolerance on Σ x = 1 for a point of the simplex. */
+/** Tolerance on $\sum_k x_k = 1$ for a point of the simplex, per category. */
 const SIMPLEX_TOLERANCE = 1e-9
 
 /**
- * The Dirichlet distribution on the (K − 1)-simplex with concentrations α > 0 (last axis K; a batch `[..., K]`).
- * Points off the simplex (a negative entry, or a sum further than 1e-9·K from 1) have log-density −∞. The mode is
- * (α − 1)/(α₀ − K) when every αₖ > 1 and NaN otherwise. An exponential family with η = α − 1 and T(x) = log x.
+ * The Dirichlet distribution on the $(K - 1)$-simplex with concentrations $\alphavec > 0$,
+ * $p(\xvec) = \frac{\Gamma(\alpha_0)}{\prod_k \Gamma(\alpha_k)} \prod_k x_k^{\alpha_k - 1}$ with
+ * $\alpha_0 = \sum_k \alpha_k$. The mean is $\alphavec / \alpha_0$ and the variance of each coordinate
+ * $\bar\alpha_k (1 - \bar\alpha_k) / (\alpha_0 + 1)$, with $\bar\alpha_k = \alpha_k / \alpha_0$. Points off the
+ * simplex (a negative entry, or a sum further than $10^{-9} K$ from 1) have log-density $-\infty$. The mode is
+ * $(\alphavec - 1)/(\alpha_0 - K)$ when every $\alpha_k > 1$ and NaN otherwise. An exponential family with
+ * $\etavec = \alphavec - 1$ and $T(\xvec) = \log \xvec$. Throws `ShapeError` for a scalar and `DomainError` for a
+ * concentration that is not positive.
+ *
+ * @param concentration The concentrations $\alphavec$, all positive: shape `[K]`, or `[..., K]` for a batch.
+ * @returns The distribution, with event shape `[K]`.
+ *
+ * @example Density and moments
+ * const d = Dirichlet(tensor([1, 2, 1]))
+ * print('p(0.25, 0.5, 0.25) =', d.prob(tensor([0.25, 0.5, 0.25])), ' (Γ(4) / Γ(2)) · 0.5 =', 3)
+ * print('mean =', d.mean())
+ * print('variance =', d.variance())
+ *
+ * @example The flat Dirichlet is uniform on the simplex
+ * const d = Dirichlet(tensor([1, 1, 1]))
+ * print('p =', d.prob(tensor([0.2, 0.3, 0.5])), d.prob(tensor([0.6, 0.3, 0.1])))
+ * print('off the simplex:', d.prob(tensor([0.5, 0.5, 0.5])))
  */
 export function Dirichlet<A extends Value>(concentration: A): Multivariate<A> {
   const shape = shapeOfValue(concentration)
@@ -358,7 +449,14 @@ export function Dirichlet<A extends Value>(concentration: A): Multivariate<A> {
 
 // ── Multinomial ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Visit every vector of K non-negative integers summing to n. */
+/**
+ * Visit every vector of $K$ non-negative integers summing to $n$, in lexicographic order.
+ *
+ * @param n The total $n$.
+ * @param K The number of parts $K$ (at least 1).
+ * @param visit Called once per vector; it receives the same array each time, overwritten between calls, so it must
+ *   copy what it keeps.
+ */
 function compositions(n: number, K: number, visit: (counts: number[]) => void): void {
   const counts = new Array<number>(K).fill(0)
   const go = (j: number, left: number) => {
@@ -375,7 +473,12 @@ function compositions(n: number, K: number, visit: (counts: number[]) => void): 
   go(0, n)
 }
 
-/** The number of compositions of n into K parts, C(n + K − 1, K − 1). */
+/**
+ * The number of compositions of $n$ into $K$ non-negative parts, $\binom{n + K - 1}{K - 1}$, as a float.
+ *
+ * @param n The total $n$.
+ * @param K The number of parts $K$.
+ */
 function compositionCount(n: number, K: number): number {
   let c = 1
   for (let i = 1; i < K; i++) c = (c * (n + i)) / i
@@ -383,10 +486,23 @@ function compositionCount(n: number, K: number): number {
 }
 
 /**
- * The multinomial distribution: counts in K categories from n trials (a non-negative integer, a constant) with
- * probabilities p (last axis K, normalised here; a batch `[..., K]`). Count vectors that are not non-negative integers
- * summing to n have log-mass −∞. The entropy is an exact sum over all C(n + K − 1, K − 1) outcomes, allowed up to
- * 10⁶ of them; `mode()` has no closed form and throws.
+ * The multinomial distribution: counts $\xvec$ in $K$ categories from $n$ trials with probabilities $\pvec$,
+ * $\pr(\xvec) = \frac{n!}{\prod_k x_k!} \prod_k p_k^{x_k}$. The mean is $n\pvec$ and the covariance
+ * $n(\diag(\pvec) - \pvec\pvec^\top)$. Count vectors that are not non-negative integers summing to $n$ have
+ * log-mass $-\infty$. The entropy (no batch only) is an exact sum over all $\binom{n + K - 1}{K - 1}$ outcomes,
+ * allowed up to $10^6$ of them; `mode()` has no closed form and throws. Throws `DomainError` for an invalid $n$ or a
+ * negative weight, and `ShapeError` for scalar weights.
+ *
+ * @param n The number of trials $n$, a non-negative integer (a constant; one value for the whole batch).
+ * @param p The category weights, non-negative along the last axis (length $K$; `[..., K]` for a batch), normalised
+ *   here to $\pvec$.
+ * @returns The distribution, with event shape `[K]`.
+ *
+ * @example Four trials over three categories
+ * const d = Multinomial(4, tensor([0.5, 0.25, 0.25]))
+ * print('P(2, 1, 1) =', d.prob(tensor([2, 1, 1])), ' 12 / 4³ =', 12 / 64)
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ * print('draws =', d.sample(stream(2), { shape: [3] }))
  */
 export function Multinomial<N extends Value, P extends Value>(n: N, p: P): Multivariate<N | P> {
   check('Multinomial', 'n', n, (x) => isInteger(x) && x >= 0, 'a non-negative integer')
@@ -442,14 +558,27 @@ export function Multinomial<N extends Value, P extends Value>(n: N, p: P): Multi
 
 // ── Wishart ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** log Γ_d(a) = d(d − 1)/4 · log π + Σⱼ₌₁ᵈ log Γ(a + (1 − j)/2), the multivariate log-gamma function. */
+/**
+ * The multivariate log-gamma function
+ * $\log \Gamma_d(a) = \frac{d(d - 1)}{4} \log \pi + \sum_{j=1}^{d} \log \Gamma\left(a + \frac{1 - j}{2}\right)$
+ * (differentiable in $a$).
+ *
+ * @param a The argument $a$, greater than $(d - 1)/2$.
+ * @param d The dimension $d$.
+ */
 function logMultivariateGamma(a: Value, d: number): Value {
   let total: Value = (d * (d - 1) * Math.log(Math.PI)) / 4
   for (let j = 1; j <= d; j++) total = add(total, logGamma(add(a, (1 - j) / 2)))
   return total
 }
 
-/** ψ_d(a) = Σⱼ₌₁ᵈ ψ(a + (1 − j)/2), the derivative of log Γ_d. */
+/**
+ * The multivariate digamma function $\psi_d(a) = \sum_{j=1}^{d} \psi\left(a + \frac{1 - j}{2}\right)$, the
+ * derivative of $\log \Gamma_d$.
+ *
+ * @param a The argument $a$, greater than $(d - 1)/2$.
+ * @param d The dimension $d$.
+ */
 function multivariateDigamma(a: Value, d: number): Value {
   let total: Value = 0
   for (let j = 1; j <= d; j++) total = add(total, digamma(add(a, (1 - j) / 2)))
@@ -457,11 +586,30 @@ function multivariateDigamma(a: Value, d: number): Value {
 }
 
 /**
- * The Wishart distribution over d × d positive-definite matrices with `df` = ν > d − 1 degrees of freedom and scale
- * matrix V (scipy's wishart(df, scale)); the mean is νV. `logProb` takes one matrix `[d, d]` or a stack `[..., d, d]`;
- * a matrix that is not positive definite has log-density −∞. Draws use Bartlett's decomposition (Bartlett, 1933;
- * Smith and Hocking, 1972): X = (L A)(L A)ᵀ with V = L Lᵀ, A lower triangular, A_ii = √χ²(ν − i) and standard
- * normals below the diagonal. `covariance()` (a 4-tensor) is not provided and throws.
+ * The Wishart distribution over $d \times d$ positive-definite matrices with $\nu > d - 1$ degrees of freedom and
+ * scale matrix $\Vmat$ (scipy's wishart(df, scale)):
+ * $p(\Xmat) = \frac{\det(\Xmat)^{(\nu - d - 1)/2} \exp\left(-\tfrac{1}{2}\trace(\Vmat^{-1}\Xmat)\right)}
+ * {2^{\nu d/2} \det(\Vmat)^{\nu/2} \Gamma_d(\nu/2)}$. The mean is $\nu\Vmat$, the variance of entry $ij$ is
+ * $\nu(V_{ij}^2 + V_{ii} V_{jj})$, and the mode is $(\nu - d - 1)\Vmat$ when $\nu \ge d + 1$ (NaN otherwise).
+ * `logProb` takes one matrix `[d, d]` or a stack `[..., d, d]`; a matrix that is not positive definite has
+ * log-density $-\infty$. Draws use Bartlett's decomposition (Bartlett, 1933; Smith and Hocking, 1972):
+ * $\Xmat = (\Lmat\Amat)(\Lmat\Amat)^\top$ with $\Vmat = \Lmat\Lmat^\top$, $\Amat$ lower triangular,
+ * $A_{ii} = \sqrt{c_i}$ with $c_i \sim \ChiSq(\nu - i)$ for $i = 0, \dots, d - 1$, and standard normals below the
+ * diagonal. `covariance()` (a 4-tensor) is not provided and throws. Throws `ShapeError` for a scale that is not
+ * square or not positive definite, and `DomainError` for $\nu \le d - 1$.
+ *
+ * @param df The degrees of freedom $\nu > d - 1$, a single number (no batch).
+ * @param scale The scale matrix $\Vmat$, $d \times d$ symmetric positive definite.
+ * @returns The distribution, with event shape `[d, d]` and no batch.
+ *
+ * @example Density at the identity, and the moments
+ * const d = Wishart(3, tensor([[1, 0], [0, 1]]))
+ * print('p(I) =', d.prob(tensor([[1, 0], [0, 1]])), ' e^-1 / (4π) =', Math.exp(-1) / (4 * Math.PI))
+ * print('mean =', d.mean())
+ * print('variance =', d.variance())
+ *
+ * @example A seeded draw is symmetric positive definite
+ * print('X =', Wishart(3, tensor([[1, 0.5], [0.5, 1]])).sample(stream(4)))
  */
 export function Wishart<D extends Value, V extends Value>(df: D, scale: V): Multivariate<D | V> {
   const shape = shapeOfValue(scale)

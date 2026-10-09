@@ -1,8 +1,9 @@
 /**
- * The private aggregation step of DP-SGD (Abadi et al., 2016): clip each example's gradient to L2 norm at most C
- * (the global norm over every parameter leaf), sum, add N(0, σ²C²) to every coordinate and divide by the expected
- * batch size. The sum of clipped gradients has L2 sensitivity C to adding or removing one example, so the noisy sum is
- * the Gaussian mechanism with noise multiplier σ.
+ * The private aggregation step of DP-SGD (Abadi et al., 2016): clip each example's gradient to $L_2$ norm at most $C$
+ * (the global norm over every parameter leaf), sum, add $\Gauss(0, \sigma^2 C^2)$ to every coordinate and divide by
+ * the expected batch size. The sum of clipped gradients has $L_2$ sensitivity $C$ to adding or removing one example, so
+ * the noisy sum is the Gaussian mechanism with noise multiplier $\sigma$. The privacy spent is counted by
+ * `dpSgdEpsilon`.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -15,15 +16,39 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 export type PrivateGradient<P> = {
   /** The noisy mean gradient, shaped as one example's gradient. */
   gradient: P
-  /** Each example's gradient norm before clipping [B]. */
+  /** Each example's gradient norm before clipping, $B$ values. */
   norms: Float64Array
-  /** Share of examples whose gradient was clipped. */
+  /** Share of examples whose gradient was clipped (norm above $C$). */
   clippedShare: number
 }
 
 /**
- * Clip, sum and noise per-example gradients. `perExample` is a pytree whose leaves carry a leading batch axis [B, …]
- * (as `vmap(grad(loss))` returns); `denominator` is the expected batch size (default B).
+ * Clip, sum and noise per-example gradients: each example's gradient $\gvec_b$ is scaled by
+ * $\min(1, C / \lVert \gvec_b \rVert)$, the scaled gradients are summed, and $\Gauss(0, \sigma^2 C^2)$ noise is added
+ * to every coordinate before dividing by the denominator. Not differentiable (it reads the leaves' values). Throws a
+ * `DomainError` for a clipping norm that is not positive, a negative noise multiplier or a pytree without leaves,
+ * and a `ShapeError` when the leaves' batch axes differ.
+ *
+ * @param perExample A pytree of tensors whose leaves carry a leading batch axis of length $B$, one gradient per
+ *   example (as `vmap(grad(loss))` returns them).
+ * @param clipNorm The clipping norm $C > 0$, on the global $L_2$ norm of an example's gradient over all leaves.
+ * @param noiseMultiplier The noise multiplier $\sigma \ge 0$: the noise's standard deviation is $\sigma C$ (0 adds
+ *   none).
+ * @param stream The random stream the noise is drawn from.
+ * @param denominator What the noisy sum is divided by: the expected batch size under Poisson sampling. Defaults to
+ *   $B$.
+ * @returns The noisy mean `gradient`, shaped as one example's gradient, with the norms before clipping and the share
+ *   clipped.
+ *
+ * @example Two examples, one clipped, without noise
+ * const g = { w: tensor([[3, 4], [0.6, 0.8]]) }
+ * const r = clipAndNoise(g, 1, 0, stream(0))
+ * print('gradient:', r.gradient.w)
+ * print('norms:', r.norms, 'clipped share:', r.clippedShare)
+ *
+ * @example With noise multiplier 1
+ * const g = { w: tensor([[3, 4], [0.6, 0.8]]) }
+ * print('gradient:', clipAndNoise(g, 1, 1, stream(0)).gradient.w)
  */
 export function clipAndNoise<P>(
   perExample: P,

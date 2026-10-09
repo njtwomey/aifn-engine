@@ -1,22 +1,30 @@
 /**
- * Distributional-regression families (GAMLSS; Rigby and Stasinopoulos, 2005, "Generalized additive models for
- * location, scale and shape", JRSS C 54(3)): a parametric response distribution D(θ₁, …, θ_K) whose every parameter
- * θ_k has its own link g_k, with what fitting by the RS algorithm needs from it: the log-density, the score ∂ℓ/∂θ_k
- * and the expected second derivative E[∂²ℓ/∂θ_k²] of each parameter (the cross derivatives are not used), the cdf, the
- * quantile function, the mean and variance, and per-observation starting values.
+ * Distributional-regression (GAMLSS) families: response distributions whose every parameter has its own link, with
+ * the scores and expected second derivatives that fitting needs, and the quantile residual and worm plot that check a
+ * fit.
+ *
+ * GAMLSS is Rigby and Stasinopoulos (2005), "Generalized additive models for location, scale and shape", JRSS C
+ * 54(3): a parametric response distribution $D(\theta_1, \dots, \theta_K)$ whose every parameter $\theta_k$ has its
+ * own link $g_k$. A family provides what fitting by the RS algorithm needs: the log-density, the score
+ * $\partial\ell/\partial\theta_k$ and the expected second derivative
+ * $\expect[\partial^2\ell/\partial\theta_k^2]$ of each parameter (the cross derivatives are not used), the cdf,
+ * the quantile function, the mean and variance, and per-observation starting values.
  *
  * Families, in the parameterisations and with the default links of the R package gamlss.dist (Stasinopoulos and
  * Rigby, 2007):
- * - `normal` NO(μ, σ): y ~ N(μ, σ²); links identity, log.
- * - `student-t` TF(μ, σ, ν): y = μ + σT with T ~ t_ν; links identity, log, log.
- * - `box-cox-cole-green` BCCG(μ, σ, ν), the LMS method of Cole and Green (1992): z = ((y/μ)^ν − 1)/(νσ) (log(y/μ)/σ
- *   at ν = 0) is standard normal truncated to the image of y > 0; μ is close to the median, σ to the coefficient of
- *   variation and ν is the Box–Cox power that makes y symmetric (ν = 1 none, ν < 1 right skew). Links identity, log,
- *   identity.
- * - `gamma` GA(μ, σ): shape 1/σ², mean μ, so σ is the coefficient of variation; links log, log.
- * - `poisson` PO(μ); link log.
+ * - `normal` $\operatorname{NO}(\mu, \sigma)$: $y \sim \Gauss(\mu, \sigma^2)$; links identity, log.
+ * - `student-t` $\operatorname{TF}(\mu, \sigma, \nu)$: $y = \mu + \sigma T$ with $T \sim t_\nu$; links
+ *   identity, log, log.
+ * - `box-cox-cole-green` $\operatorname{BCCG}(\mu, \sigma, \nu)$, the LMS method of Cole and Green (1992):
+ *   $z = ((y/\mu)^\nu - 1)/(\nu\sigma)$ ($\log(y/\mu)/\sigma$ at $\nu = 0$) is standard normal truncated to the
+ *   image of $y > 0$; $\mu$ is close to the median, $\sigma$ to the coefficient of variation and $\nu$ is the
+ *   Box–Cox power that makes $y$ symmetric ($\nu = 1$ none, $\nu < 1$ right skew). Links identity, log, identity.
+ * - `gamma` $\operatorname{GA}(\mu, \sigma)$: shape $1/\sigma^2$, mean $\mu$, so $\sigma$ is the coefficient of
+ *   variation; links log, log.
+ * - `poisson` $\operatorname{PO}(\mu)$; link log.
  *
- * Every function takes and returns plain numbers (one observation), so a fitter evaluates them in a loop.
+ * Every function takes and returns plain numbers (one observation), so a fitter evaluates them in a loop; none is
+ * differentiable by `grad`, since the derivatives a fitter needs are given in closed form.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -43,44 +51,62 @@ export type DistributionalFamilyName = 'normal' | 'student-t' | 'box-cox-cole-gr
 
 /** One parameter of a family: its name, symbol, role, the links it takes (the first is the default) and its range. */
 export interface DistributionalParameterInfo {
+  /** The parameter's name. */
   readonly name: DistributionalParameter
-  /** TeX symbol, e.g. `\\sigma`. */
+  /** TeX symbol, e.g. `\sigma`. */
   readonly tex: string
+  /** What the parameter controls: the location, the scale or the shape. */
   readonly role: 'location' | 'scale' | 'shape'
+  /** The links it takes; the first is the default. */
   readonly links: readonly LinkName[]
   /** The open range of valid values. */
   readonly range: 'real' | 'positive'
 }
 
 /**
- * A distributional-regression family (see the module comment). θ is one value per parameter, in `parameters` order.
+ * A distributional-regression family (see the file comment). $\thetavec$ is one value per parameter, in `parameters`
+ * order, and $k$ indexes that order.
  */
 export interface DistributionalFamily {
+  /** The family's name, as `distributionalFamily` takes it. */
   readonly name: DistributionalFamilyName
   /** gamlss.dist's abbreviation: NO, TF, BCCG, GA, PO. */
   readonly abbreviation: string
+  /** A readable name, e.g. "Student t". */
   readonly label: string
+  /** The parameters, in gamlss's order: $\mu$, then $\sigma$ and $\nu$ where the family has them. */
   readonly parameters: readonly DistributionalParameterInfo[]
+  /** The values a response can take. */
   readonly support: 'real' | 'positive' | 'non-negative-integers'
-  /** log p(y | θ). */
+  /** $\log p(y \mid \thetavec)$ ($-\infty$ outside the support). */
   logPdf(y: number, theta: readonly number[]): number
-  /** ∂ℓ/∂θ_k at y. */
+  /** $\partial\ell/\partial\theta_k$ at $y$. */
   score(k: number, y: number, theta: readonly number[]): number
-  /** E[∂²ℓ/∂θ_k²] (negative): minus the expected information of θ_k. */
+  /** $\expect[\partial^2\ell/\partial\theta_k^2]$ (negative): minus the expected information of $\theta_k$. */
   expectedSecond(k: number, theta: readonly number[]): number
+  /** The cdf $F(y \mid \thetavec)$. */
   cdf(y: number, theta: readonly number[]): number
+  /** The quantile function: the $y$ with $F(y \mid \thetavec) = p$ (the smallest with $F \ge p$ for counts). */
   quantile(p: number, theta: readonly number[]): number
-  /** The mean and variance (NaN or ∞ where they do not exist). */
+  /** The mean (NaN where it does not exist). */
   mean(theta: readonly number[]): number
+  /** The variance (NaN or $\infty$ where it does not exist). */
   variance(theta: readonly number[]): number
-  /** Whether θ lies in the parameter space. */
+  /** Whether $\thetavec$ lies in the parameter space. */
   valid(theta: readonly number[]): boolean
   /** Starting values of each parameter at each observation (gamlss.dist's `*.initial`). */
   initial(y: ArrayLike<number>): Float64Array[]
 }
 
+/** $\log\sqrt{2\pi}$. */
 const LOG_SQRT_2PI = 0.5 * Math.log(2 * Math.PI)
 
+/**
+ * The sample mean and standard deviation (with the $n - 1$ divisor, or 1 for a single value).
+ *
+ * @param y The responses.
+ * @returns `mean` and `sd`.
+ */
 function moments(y: ArrayLike<number>) {
   let m = 0
   for (let i = 0; i < y.length; i++) m += y[i]
@@ -89,10 +115,31 @@ function moments(y: ArrayLike<number>) {
   for (let i = 0; i < y.length; i++) v += (y[i] - m) ** 2
   return { mean: m, sd: Math.sqrt(v / Math.max(1, y.length - 1)) }
 }
+/**
+ * A constant array.
+ *
+ * @param n The length.
+ * @param v The value of every entry.
+ * @returns `n` copies of `v`.
+ */
 const fill = (n: number, v: number) => new Float64Array(n).fill(v)
+/**
+ * Each response moved halfway to the mean, gamlss.dist's starting value for $\mu$.
+ *
+ * @param y The responses.
+ * @param m Their mean.
+ * @returns $(y_i + m)/2$ for each response.
+ */
 const halfway = (y: ArrayLike<number>, m: number) => Float64Array.from(y, (v) => (v + m) / 2)
 
-/** Mean and variance by the midpoint rule over m quantiles (for families without closed forms). */
+/**
+ * Mean and variance by the midpoint rule over $m$ quantiles (for families without closed forms): the moments of the
+ * quantiles at $(i + 1/2)/m$.
+ *
+ * @param q The quantile function.
+ * @param m The number of quantiles.
+ * @returns `mean` and `variance` (rounding below 0 clipped).
+ */
 function quantileMoments(q: (p: number) => number, m = 400) {
   let s = 0
   let s2 = 0
@@ -105,6 +152,16 @@ function quantileMoments(q: (p: number) => number, m = 400) {
   return { mean, variance: Math.max(0, s2 / m - mean * mean) }
 }
 
+/**
+ * A parameter's description, as `DistributionalParameterInfo`.
+ *
+ * @param name The parameter's name.
+ * @param tex Its TeX symbol.
+ * @param role What it controls.
+ * @param links The links it takes, the default first.
+ * @param range Its range of valid values.
+ * @returns The description.
+ */
 const param = (
   name: DistributionalParameter,
   tex: string,
@@ -113,7 +170,19 @@ const param = (
   range: DistributionalParameterInfo['range'],
 ): DistributionalParameterInfo => ({ name, tex, role, links, range })
 
-/** NO(μ, σ): the normal distribution with mean μ and standard deviation σ. */
+/**
+ * $\operatorname{NO}(\mu, \sigma)$: the normal distribution with mean $\mu$ and standard deviation $\sigma$. The
+ * expected information is $1/\sigma^2$ for $\mu$ and $2/\sigma^2$ for $\sigma$. Starting values: each response
+ * halfway to the mean for $\mu$, the sample standard deviation for $\sigma$.
+ *
+ * @returns The family.
+ *
+ * @example The log-density, scores and a quantile of the standard normal
+ * const f = normalDistributional()
+ * print('log pdf at 0 = -log(2 pi)/2:', f.logPdf(0, [0, 1]))
+ * print('scores at y = 1:', f.score(0, 1, [0, 1]), f.score(1, 1, [0, 1]))
+ * print('quantile(0.975):', f.quantile(0.975, [0, 1]))
+ */
 export function normalDistributional(): DistributionalFamily {
   return {
     name: 'normal',
@@ -139,7 +208,20 @@ export function normalDistributional(): DistributionalFamily {
   }
 }
 
-/** TF(μ, σ, ν): y = μ + σT with T Student-t on ν degrees of freedom. */
+/**
+ * $\operatorname{TF}(\mu, \sigma, \nu)$: $y = \mu + \sigma T$ with $T$ Student t on $\nu$ degrees of freedom.
+ * The expected information is that of Lange, Little and Taylor (1989), JASA 84(408), §2. The mean exists for
+ * $\nu > 1$ and the variance $\sigma^2\nu/(\nu - 2)$ for $\nu > 2$ ($\infty$ for $1 < \nu \le 2$). Starting
+ * values: $\mu$ as for the normal, the sample standard deviation for $\sigma$ and $\nu = 10$.
+ *
+ * @returns The family.
+ *
+ * @example Heavier tails than the normal
+ * const f = studentTDistributional()
+ * print('quantile(0.975), nu = 3:', f.quantile(0.975, [0, 1, 3]))
+ * print('variance, nu = 3:', f.variance([0, 1, 3]), 'nu = 2:', f.variance([0, 1, 2]))
+ * print('mean, nu = 1:', f.mean([0, 1, 1]))
+ */
 export function studentTDistributional(): DistributionalFamily {
   return {
     name: 'student-t',
@@ -182,10 +264,28 @@ export function studentTDistributional(): DistributionalFamily {
   }
 }
 
-/** |ν| below this is treated as ν = 0 (the log transform) by BCCG. */
+/** $\lvert \nu \rvert$ below this is treated as $\nu = 0$ (the log transform) by BCCG. */
 const NU_ZERO = 1e-7
 
-/** BCCG(μ, σ, ν): the Box–Cox Cole–Green distribution (the LMS method), truncated to y > 0. */
+/**
+ * $\operatorname{BCCG}(\mu, \sigma, \nu)$: the Box–Cox Cole–Green distribution (the LMS method of Cole and Green,
+ * 1992), truncated to $y > 0$. The scores account for the truncation; the expected second derivatives are
+ * gamlss.dist's approximations, which ignore it. The mean and variance have no closed form and come from 400
+ * quantiles (midpoint rule). Starting values: $\mu$ as for the normal, $\sigma = 0.1$ and $\nu = 0.5$.
+ *
+ * @returns The family.
+ *
+ * @example At $\nu = 0$ it is log-normal, with median $\mu$ and mean $\mu e^{\sigma^2/2}$
+ * const f = boxCoxColeGreenDistributional()
+ * print('median:', f.quantile(0.5, [10, 0.2, 0]))
+ * print('mean (from quantiles):', f.mean([10, 0.2, 0]), 'exact:', 10 * Math.exp(0.02))
+ *
+ * @example A power below 1 skews to the right
+ * const f = boxCoxColeGreenDistributional()
+ * const q = (nu) => [0.05, 0.5, 0.95].map((p) => f.quantile(p, [10, 0.3, nu]))
+ * print('5%, 50%, 95%, nu = 1:', q(1))
+ * print('5%, 50%, 95%, nu = -1:', q(-1))
+ */
 export function boxCoxColeGreenDistributional(): DistributionalFamily {
   const zOf = (y: number, m: number, s: number, v: number) =>
     Math.abs(v) < NU_ZERO ? Math.log(y / m) / s : (Math.pow(y / m, v) - 1) / (v * s)
@@ -253,7 +353,18 @@ export function boxCoxColeGreenDistributional(): DistributionalFamily {
   }
 }
 
-/** GA(μ, σ): the gamma distribution with mean μ and coefficient of variation σ (shape 1/σ², scale μσ²). */
+/**
+ * $\operatorname{GA}(\mu, \sigma)$: the gamma distribution with mean $\mu$ and coefficient of variation $\sigma$
+ * (shape $1/\sigma^2$, scale $\mu\sigma^2$), so the variance is $(\sigma\mu)^2$. Starting values: $\mu$ as for
+ * the normal and $\sigma = 1$.
+ *
+ * @returns The family.
+ *
+ * @example At $\sigma = 1$ it is exponential with mean $\mu$
+ * const f = gammaDistributional()
+ * print('cdf(2), mu = 2, sigma = 1: 1 - 1/e =', f.cdf(2, [2, 1]))
+ * print('variance, mu = 2, sigma = 0.5:', f.variance([2, 0.5]))
+ */
 export function gammaDistributional(): DistributionalFamily {
   return {
     name: 'gamma',
@@ -287,7 +398,18 @@ export function gammaDistributional(): DistributionalFamily {
   }
 }
 
-/** PO(μ): the Poisson distribution with mean μ. */
+/**
+ * $\operatorname{PO}(\mu)$: the Poisson distribution with mean $\mu$. The log-density is $-\infty$ off the
+ * non-negative integers; the quantile is the smallest $k$ with $F(k) \ge p$, found by walking from the normal
+ * approximation. Starting value: each response halfway to the mean.
+ *
+ * @returns The family.
+ *
+ * @example The log-density, cdf and median at $\mu = 2$
+ * const f = poissonDistributional()
+ * print('log p(2) = log 2 - 2:', f.logPdf(2, [2]), 'log p(1.5):', f.logPdf(1.5, [2]))
+ * print('F(2):', f.cdf(2, [2]), 'median:', f.quantile(0.5, [2]))
+ */
 export function poissonDistributional(): DistributionalFamily {
   const cdf = (y: number, m: number) => (y < 0 ? 0 : regularisedGammaQ(Math.floor(y) + 1, m))
   return {
@@ -317,6 +439,7 @@ export function poissonDistributional(): DistributionalFamily {
   }
 }
 
+/** The family factories by name. */
 const FAMILIES: Record<DistributionalFamilyName, () => DistributionalFamily> = {
   normal: normalDistributional,
   'student-t': studentTDistributional,
@@ -325,14 +448,40 @@ const FAMILIES: Record<DistributionalFamilyName, () => DistributionalFamily> = {
   poisson: poissonDistributional,
 }
 
-/** The distributional family by name (see the module comment). */
+/**
+ * The distributional family by name (see the file comment). Throws `DomainError` for an unknown name.
+ *
+ * @param name The family's name.
+ * @returns The family.
+ *
+ * @example The gamma family's parameters and their default links
+ * const f = distributionalFamily('gamma')
+ * print(f.abbreviation, f.parameters.map((p) => `${p.name}: ${p.links[0]}`))
+ */
 export function distributionalFamily(name: DistributionalFamilyName): DistributionalFamily {
   const f = FAMILIES[name]
   if (!f) throw new DomainError('distributionalFamily', `distributionalFamily: unknown family "${name}"`)
   return f()
 }
 
-/** The links of a family's parameters: the given names, or each parameter's default; a link it does not take throws. */
+/**
+ * The links of a family's parameters: the given names, or each parameter's default. A link a parameter does not take
+ * throws `DomainError`.
+ *
+ * @param family The family.
+ * @param names A link name for any of the parameters; the others take their default (the first of their `links`).
+ * @returns One link per parameter, in `parameters` order.
+ *
+ * @example Defaults, an override, and a link the parameter does not take
+ * const f = distributionalFamily('box-cox-cole-green')
+ * print('defaults:', distributionalLinks(f).map((g) => g.name))
+ * print('log mu:', distributionalLinks(f, { mu: 'log' }).map((g) => g.name))
+ * try {
+ *   distributionalLinks(f, { nu: 'log' })
+ * } catch (e) {
+ *   print('error:', e.message)
+ * }
+ */
 export function distributionalLinks(
   family: DistributionalFamily,
   names: Partial<Record<DistributionalParameter, LinkName>> = {},
@@ -346,8 +495,20 @@ export function distributionalLinks(
 }
 
 /**
- * The normalised quantile residual r = Φ⁻¹(F(y | θ)) (Dunn and Smyth, 1996); for a discrete family the mid-point
- * Φ⁻¹((F(y − 1) + F(y))/2). Under the true model the residuals are standard normal (continuous families).
+ * The normalised quantile residual $r = \Phi^{-1}(F(y \mid \thetavec))$ (Dunn and Smyth, 1996); for a discrete
+ * family the mid-point $\Phi^{-1}((F(y - 1) + F(y))/2)$, not the randomised residual. Under the true model the
+ * residuals are standard normal (continuous families). The probability is clamped to $[10^{-15}, 1 - 10^{-15}]$, so
+ * $r$ stays finite.
+ *
+ * @param family The fitted family.
+ * @param y The observed response.
+ * @param theta The fitted parameters at that observation, in `parameters` order.
+ * @returns The residual $r$.
+ *
+ * @example A response at the 97.5% point of its law, and a count
+ * print('normal:', quantileResidual(normalDistributional(), 1.96, [0, 1]))
+ * print('gamma, y = mu:', quantileResidual(gammaDistributional(), 2, [2, 0.5]))
+ * print('Poisson, y = 2, mu = 2:', quantileResidual(poissonDistributional(), 2, [2]))
  */
 export function quantileResidual(family: DistributionalFamily, y: number, theta: readonly number[]): number {
   const u =
@@ -359,12 +520,16 @@ export function quantileResidual(family: DistributionalFamily, y: number, theta:
 
 /** A worm plot's data (see `wormPlot`). */
 export type WormPlot = {
-  /** Standard normal quantiles Φ⁻¹((i − ½)/n) of the sorted residuals, [n]. */
+  /** The standard normal quantiles $\Phi^{-1}((i - 1/2)/n)$, $i = 1, \dots, n$, of the sorted residuals. */
   x: Float64Array
-  /** Each sorted residual minus its normal quantile, [n]. */
+  /** Each sorted residual minus its normal quantile ($n$ values). */
   y: Float64Array
-  /** The pointwise approximate 95% band ±1.96 √(p(1 − p)/n)/φ(x) at `x`. */
+  /**
+   * The lower edge of the pointwise approximate 95% band, $-1.96 \sqrt{p(1 - p)/n}/\varphi(x)$ at `x`, with
+   * $p = (i - 1/2)/n$ and $\varphi$ the standard normal density.
+   */
   lower: Float64Array
+  /** The upper edge of the band, $+1.96 \sqrt{p(1 - p)/n}/\varphi(x)$. */
   upper: Float64Array
 }
 
@@ -372,6 +537,15 @@ export type WormPlot = {
  * The worm plot (van Buuren and Fredriks, 2001): a normal Q–Q plot of residuals detrended by subtracting the identity
  * line, so departures from normality show as shapes about zero (a shift: the mean; a slope: the variance; a U or
  * inverted U: skewness; an S: kurtosis), with a pointwise 95% band.
+ *
+ * @param residuals The residuals, usually quantile residuals; not modified (a sorted copy is used).
+ * @returns The plot's points and band, one entry per residual in sorted order.
+ *
+ * @example Five residuals: the band is widest at the ends
+ * const w = wormPlot([1.5, -1.2, 0.1, -0.3, 0.4])
+ * print('x:', w.x)
+ * print('y:', w.y)
+ * print('upper:', w.upper)
  */
 export function wormPlot(residuals: ArrayLike<number>): WormPlot {
   const r = Float64Array.from(residuals).sort()

@@ -1,11 +1,14 @@
 /**
- * Continuous univariate families. Every density is a composition of `aifn-compute/foundation/tensor` and `aifn-compute/numerics/special` primitives, so
- * `logProb` is differentiable in the value and in every parameter; cdfs and quantiles are differentiable wherever the
- * special function they use is (the incomplete gamma and beta functions only in their continuous argument). Numerically
- * inverted quantiles and quadrature cdfs are not differentiable and say so when given traced values.
+ * Continuous univariate families. Every density is a composition of `aifn-compute/foundation/tensor` and
+ * `aifn-compute/numerics/special` primitives, so `logProb` is differentiable in the value and in every parameter; cdfs
+ * and quantiles are differentiable wherever the special function they use is (the incomplete gamma and beta functions
+ * only in their continuous argument). Numerically inverted quantiles and quadrature cdfs are not differentiable and say
+ * so when given traced values.
  *
- * Parameterisations follow scipy.stats (`loc`, `scale`) wherever there is a scale: Normal(loc, scale) is scipy's
- * norm(loc, scale), with the standard deviation as scale.
+ * Parameterisations follow scipy.stats (`loc`, `scale`) wherever there is a scale: `Normal(loc, scale)` is scipy's
+ * `norm(loc, scale)`, with the standard deviation as scale. Each constructor checks its parameters and throws a
+ * `DomainError` naming the family and the parameter when one is out of range; on an interval support, values outside
+ * it have log-density $-\infty$. Every family is built by `univariate`, so each has the full `Univariate` interface.
  */
 
 import {
@@ -90,18 +93,47 @@ import {
 } from './util'
 import { xlog1py, xlogy } from 'aifn-compute/numerics/special'
 
+/**
+ * The test of a positive parameter, for `check`.
+ *
+ * @param x One element of the parameter's raw value.
+ * @returns True when $x > 0$ (false for NaN).
+ */
 const positive = (x: number) => x > 0
+/**
+ * The test of a finite parameter, for `check`.
+ *
+ * @param x One element of the parameter's raw value.
+ * @returns True unless $x$ is NaN or $\pm\infty$.
+ */
 const finite = (x: number) => Number.isFinite(x)
 
-/** NaN with the batch shape of `params`. */
+/**
+ * NaN with the batch shape of `params`: the value of a moment that is undefined for every member of the family.
+ *
+ * @param params The distribution's parameters (numbers, tensors or traced values); only their broadcast shape is used.
+ * @returns NaN as a number when every parameter is a number, else a tensor of NaN of the parameters' broadcast shape.
+ */
 function nanAt(...params: Value[]): Value {
   return rawMap(params, () => NaN)
 }
 
-/** Draws as a tensor (the samplers return a number when every parameter is a number and no shape is given). */
+/**
+ * Draws as a tensor (the samplers return a number when every parameter is a number and no shape is given).
+ *
+ * @param x A sampler's output: a number or a tensor.
+ * @returns `x` itself when it is a tensor, else a rank-0 tensor holding it.
+ */
 const drawn = (x: number | Tensor): Tensor => (typeof x === 'number' ? fromData(new Float64Array([x]), []) : x)
 
-/** A raw draw of a composition (numbers or tensors, never traced) as a tensor of the draw's shape. */
+/**
+ * A raw draw of a composition (numbers or tensors, never traced) as a tensor of the draw's shape.
+ *
+ * @param x The draw, a number or a tensor; it is unwrapped first.
+ * @param shape The draw's full shape (sample shape, then batch shape). Used only when `x` is a number, which then fills
+ *   a tensor of this shape; a tensor `x` is returned as it is.
+ * @returns A tensor of the draw.
+ */
 const drawnAt = (x: Value, shape: number[]): Tensor => {
   const r = unwrap(x)
   return typeof r === 'number' ? fromData(new Float64Array(shape.reduce((a, b) => a * b, 1)).fill(r), shape) : r
@@ -110,9 +142,36 @@ const drawnAt = (x: Value, shape: number[]): Tensor => {
 // ── Normal ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The normal distribution N(loc, scale²), with the standard deviation `scale` > 0 (scipy's norm). Tails of the cdf,
- * log cdf and survival function keep full relative accuracy (they use Φ and log Φ, never 1 − Φ). An exponential family
- * with η = (μ/σ², −1/(2σ²)) and T(x) = (x, x²).
+ * The normal distribution $\Gauss(\mu, \sigma^2)$ with mean $\mu$ and standard deviation $\sigma > 0$ (scipy's `norm`),
+ * with density
+ * $p(x) = \frac{1}{\sigma\sqrt{2\pi}} \exp\LP -\frac{(x - \mu)^2}{2\sigma^2} \RP$.
+ * The tails of the cdf, log cdf and survival function keep full relative accuracy: they use $\Phi$ and $\log\Phi$,
+ * never $1 - \Phi$. `rsample` is the pathwise draw $\mu + \sigma z$ with $z \sim \Gauss(0, 1)$. An exponential family
+ * with $\etavec = (\mu/\sigma^2, -1/(2\sigma^2))$ and $T(x) = (x, x^2)$.
+ *
+ * @param loc The mean $\mu$.
+ * @param scale The standard deviation $\sigma$ (not the variance); every element must be positive, or a `DomainError`
+ *   is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `loc` and `scale`.
+ *
+ * @example The density at the mean, and the moments
+ * const d = Normal(1, 2)
+ * print('p(1) =', d.prob(1), ' 1 / (2 sqrt(2 pi)) =', 1 / (2 * Math.sqrt(2 * Math.PI)))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example The cdf and quantile round trip, and a far tail
+ * const d = Normal(0, 1)
+ * print('cdf(1.96) =', d.cdf(1.96))
+ * print('quantile(0.975) =', d.quantile(0.975))
+ * print('log survival(40) =', d.logSurvival(40))
+ *
+ * @example A seeded sample and its moments
+ * const x = Normal(3, 0.5).sample(stream(0), { shape: [10000] })
+ * print('sample mean =', mean(x), ' sample variance =', variance(x))
+ *
+ * @example A batch of two, and a gradient in the mean
+ * print('log p(0) =', Normal(tensor([0, 1]), 1).logProb(0))
+ * print('d/dmu log p(2) at mu = 0.5:', grad((mu) => Normal(mu, 1).logProb(2))(0.5))
  */
 export function Normal<M extends Value, S extends Value>(loc: M, scale: S): Univariate<M | S> {
   check('Normal', 'scale', scale, positive, 'positive')
@@ -142,7 +201,25 @@ export function Normal<M extends Value, S extends Value>(loc: M, scale: S): Univ
   })
 }
 
-/** The normal distribution with natural parameters η₁ = μ/σ² and η₂ = −1/(2σ²) < 0 (as used by EP messages). */
+/**
+ * The normal distribution with natural parameters $\eta_1 = \mu/\sigma^2$ and $\eta_2 = -1/(2\sigma^2) < 0$ (as used by
+ * EP messages), with density $p(x) \propto \exp(\eta_1 x + \eta_2 x^2)$. It is `Normal` with $\sigma^2 = -1/(2\eta_2)$
+ * and $\mu = \eta_1\sigma^2$, so its `params` are the mean and standard deviation.
+ *
+ * @param eta1 The first natural parameter $\eta_1 = \mu/\sigma^2$, the precision-weighted mean.
+ * @param eta2 The second natural parameter $\eta_2 = -1/(2\sigma^2)$, minus half the precision; every element must be
+ *   negative, or a `DomainError` is thrown.
+ * @returns The normal distribution, with batch shape the broadcast shape of `eta1` and `eta2`.
+ *
+ * @example Natural parameters to mean and variance
+ * const d = normalFromNatural(2, -0.5)
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example The round trip through Normal's natural parameters
+ * const [eta1, eta2] = Normal(3, 2).expFamily.naturalParams()
+ * print('eta1 =', eta1, ' eta2 =', eta2)
+ * print('back:', normalFromNatural(eta1, eta2).params)
+ */
 export function normalFromNatural<A extends Value, B extends Value>(eta1: A, eta2: B): Univariate<A | B> {
   check('normalFromNatural', 'eta2', eta2, (x) => x < 0, 'negative')
   const variance = div(-0.5, eta2)
@@ -152,8 +229,27 @@ export function normalFromNatural<A extends Value, B extends Value>(eta1: A, eta
 // ── Log-normal ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The log-normal distribution: log X ~ N(mu, sigma²), sigma > 0 (scipy's lognorm(s = sigma, scale = e^mu)). Support
- * x > 0.
+ * The log-normal distribution: $\log X \sim \Gauss(\mu, \sigma^2)$ with $\sigma > 0$ (scipy's
+ * `lognorm(s=sigma, scale=exp(mu))`), with density
+ * $p(x) = \frac{1}{x\sigma\sqrt{2\pi}} \exp\LP -\frac{(\log x - \mu)^2}{2\sigma^2} \RP$ for $x > 0$.
+ * Mean $e^{\mu + \sigma^2/2}$, variance $(e^{\sigma^2} - 1)e^{2\mu + \sigma^2}$ and mode $e^{\mu - \sigma^2}$.
+ * `rsample` is the pathwise draw $e^{\mu + \sigma z}$. An exponential family with
+ * $\etavec = (\mu/\sigma^2, -1/(2\sigma^2))$ and $T(x) = (\log x, (\log x)^2)$.
+ *
+ * @param mu The mean $\mu$ of $\log X$ (not of $X$).
+ * @param sigma The standard deviation $\sigma$ of $\log X$; every element must be positive, or a `DomainError` is
+ *   thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `mu` and `sigma`.
+ *
+ * @example The density, the median and the mean
+ * const d = LogNormal(0, 1)
+ * print('p(1) =', d.prob(1), ' 1 / sqrt(2 pi) =', 1 / Math.sqrt(2 * Math.PI))
+ * print('median =', d.quantile(0.5))
+ * print('mean =', d.mean(), ' exp(1/2) =', Math.exp(0.5))
+ *
+ * @example The logarithm of a seeded sample is normal
+ * const x = LogNormal(1, 0.5).sample(stream(1), { shape: [10000] })
+ * print('mean of log x =', mean(log(x)), ' variance of log x =', variance(log(x)))
  */
 export function LogNormal<M extends Value, S extends Value>(mu: M, sigma: S): Univariate<M | S> {
   check('LogNormal', 'sigma', sigma, positive, 'positive')
@@ -203,9 +299,33 @@ export function LogNormal<M extends Value, S extends Value>(mu: M, sigma: S): Un
 // ── Student t ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Student's t distribution with `df` = ν > 0 degrees of freedom, location and scale (scipy's t(df, loc, scale)).
- * The mean is NaN for ν ≤ 1; the variance is ∞ for 1 < ν ≤ 2 and NaN for ν ≤ 1. Differentiable in x, loc and scale;
- * the cdf and quantile are not differentiable in ν. No `rsample`: the draw divides by a chi-square draw (see `Gamma`).
+ * Student's $t$ distribution with $\nu > 0$ degrees of freedom, location $\mu$ and scale $\sigma > 0$ (scipy's
+ * `t(df, loc, scale)`), with density
+ * $p(x) = \frac{\Gamma((\nu + 1)/2)}{\Gamma(\nu/2)\sqrt{\nu\pi}\,\sigma} \LP 1 + \frac{z^2}{\nu} \RP^{-(\nu + 1)/2}$
+ * with $z = (x - \mu)/\sigma$.
+ * The mean $\mu$ is NaN for $\nu \le 1$; the variance $\sigma^2\nu/(\nu - 2)$ is $\infty$ for $1 < \nu \le 2$ and NaN
+ * for $\nu \le 1$. Differentiable in $x$, $\mu$ and $\sigma$; the cdf and quantile are not differentiable in $\nu$. No
+ * `rsample`: the draw divides by a chi-square draw (see `Gamma`).
+ *
+ * @param df The degrees of freedom $\nu$; every element must be positive, or a `DomainError` is thrown.
+ * @param loc The location $\mu$, the median (and the mean when $\nu > 1$).
+ * @param scale The scale $\sigma$, not the standard deviation; every element must be positive, or a `DomainError` is
+ *   thrown.
+ * @returns The distribution, with batch shape the broadcast shape of the three parameters.
+ *
+ * @example The density at 0 and the moments
+ * const d = StudentT(3)
+ * print('p(0) =', d.prob(0), ' 2 / (pi sqrt 3) =', 2 / (Math.PI * Math.sqrt(3)))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example Moments that do not exist
+ * print('df = 2: mean', StudentT(2).mean(), ' variance', StudentT(2).variance())
+ * print('df = 1: mean', StudentT(1).mean(), ' variance', StudentT(1).variance())
+ *
+ * @example The cdf and quantile round trip
+ * const d = StudentT(5, 1, 2)
+ * const x = d.quantile(0.9)
+ * print('quantile(0.9) =', x, ' cdf of it =', d.cdf(x))
  */
 export function StudentT<D extends Value, M extends Value = number, S extends Value = number>(
   df: D,
@@ -260,7 +380,23 @@ export function StudentT<D extends Value, M extends Value = number, S extends Va
 
 // ── Cauchy ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The Cauchy distribution with location and scale > 0 (scipy's cauchy). Its mean and variance are NaN (undefined). */
+/**
+ * The Cauchy distribution with location $\mu$ and scale $\sigma > 0$ (scipy's `cauchy`), with density
+ * $p(x) = \frac{1}{\pi\sigma(1 + z^2)}$ with $z = (x - \mu)/\sigma$.
+ * Its mean and variance are NaN (undefined); its median and mode are $\mu$ and its quartiles $\mu \pm \sigma$. The
+ * quantile keeps its relative accuracy in both tails, and `rsample` is the pathwise draw through it.
+ *
+ * @param loc The location $\mu$, the median.
+ * @param scale The scale $\sigma$, the half-width of the interquartile range; every element must be positive, or a
+ *   `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `loc` and `scale`.
+ *
+ * @example The density at the median, the quartiles, and no moments
+ * const d = Cauchy(1, 2)
+ * print('p(1) =', d.prob(1), ' 1 / (2 pi) =', 1 / (2 * Math.PI))
+ * print('quartiles:', d.quantile(0.25), d.quantile(0.75))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ */
 export function Cauchy<M extends Value, S extends Value>(loc: M, scale: S): Univariate<M | S> {
   check('Cauchy', 'scale', scale, positive, 'positive')
   const z = (x: Value) => div(sub(x, loc), scale)
@@ -284,7 +420,29 @@ export function Cauchy<M extends Value, S extends Value>(loc: M, scale: S): Univ
 
 // ── Laplace ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The Laplace (double exponential) distribution with location and scale b > 0 (scipy's laplace). */
+/**
+ * The Laplace (double exponential) distribution with location $\mu$ and scale $b > 0$ (scipy's `laplace`), with
+ * density
+ * $p(x) = \frac{1}{2b} \exp\LP -\frac{\abs{x - \mu}}{b} \RP$.
+ * Mean, median and mode $\mu$, variance $2b^2$. Both tails of the cdf, the survival function and the quantile keep
+ * their relative accuracy, and `rsample` is the pathwise draw through the quantile.
+ *
+ * @param loc The location $\mu$.
+ * @param scale The scale $b$, the mean absolute deviation from $\mu$; every element must be positive, or a
+ *   `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `loc` and `scale`.
+ *
+ * @example The density at the mode and the moments
+ * const d = Laplace(0, 2)
+ * print('p(0) =', d.prob(0), ' 1 / (2b) =', 1 / 4)
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example A far-tail quantile, and the cdf back
+ * const d = Laplace(0, 1)
+ * const x = d.quantile(1e-300)
+ * print('quantile(1e-300) =', x, ' log(2e-300) =', Math.log(2e-300))
+ * print('cdf of it =', d.cdf(x))
+ */
 export function Laplace<M extends Value, S extends Value>(loc: M, scale: S): Univariate<M | S> {
   check('Laplace', 'scale', scale, positive, 'positive')
   const z = (x: Value) => div(sub(x, loc), scale)
@@ -331,7 +489,23 @@ export function Laplace<M extends Value, S extends Value>(loc: M, scale: S): Uni
 
 // ── Logistic ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The logistic distribution with location and scale s > 0 (scipy's logistic); its cdf is the sigmoid. */
+/**
+ * The logistic distribution with location $\mu$ and scale $s > 0$ (scipy's `logistic`), with density
+ * $p(x) = \frac{e^{-z}}{s(1 + e^{-z})^2}$ with $z = (x - \mu)/s$.
+ * Its cdf is the sigmoid $\sigma(z)$ and its quantile $\mu + s \operatorname{logit} p$. Mean, median and mode $\mu$,
+ * variance $\pi^2 s^2/3$. `rsample` is the pathwise draw through the quantile.
+ *
+ * @param loc The location $\mu$.
+ * @param scale The scale $s$, not the standard deviation; every element must be positive, or a `DomainError` is
+ *   thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `loc` and `scale`.
+ *
+ * @example The density at the mode, the cdf and the variance
+ * const d = Logistic(0, 1)
+ * print('p(0) =', d.prob(0), ' cdf(0) =', d.cdf(0))
+ * print('cdf(2) =', d.cdf(2), ' 1 / (1 + e^-2) =', 1 / (1 + Math.exp(-2)))
+ * print('variance =', d.variance(), ' pi^2 / 3 =', Math.PI ** 2 / 3)
+ */
 export function Logistic<M extends Value, S extends Value>(loc: M, scale: S): Univariate<M | S> {
   check('Logistic', 'scale', scale, positive, 'positive')
   const z = (x: Value) => div(sub(x, loc), scale)
@@ -360,7 +534,26 @@ export function Logistic<M extends Value, S extends Value>(loc: M, scale: S): Un
 
 // ── Uniform ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The continuous uniform distribution on [low, high], low < high (scipy's uniform(low, high − low)). Mode: NaN. */
+/**
+ * The continuous uniform distribution on $[a, b]$ with $a < b$ (scipy's `uniform(low, high - low)`), with density
+ * $p(x) = \frac{1}{b - a}$ for $a \le x \le b$,
+ * and 0 elsewhere. Mean $(a + b)/2$, variance $(b - a)^2/12$; the mode is NaN (every point of $[a, b]$ is one).
+ * `rsample` is the pathwise draw $a + (b - a)u$ with $u$ uniform on $[0, 1)$.
+ *
+ * @param low The lower end $a$.
+ * @param high The upper end $b$; every element of `high - low` must be positive, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `low` and `high`.
+ *
+ * @example Density, moments, and the cdf and quantile
+ * const d = Uniform(2, 6)
+ * print('p(3) =', d.prob(3), ' p(7) =', d.prob(7))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ * print('cdf(5) =', d.cdf(5), ' quantile(0.75) =', d.quantile(0.75))
+ *
+ * @example A seeded sample and its moments
+ * const x = Uniform(0, 1).sample(stream(2), { shape: [10000] })
+ * print('sample mean =', mean(x), ' sample variance =', variance(x), ' 1/12 =', 1 / 12)
+ */
 export function Uniform<A extends Value, B extends Value>(low: A, high: B): Univariate<A | B> {
   check('Uniform', 'high − low', sub(unwrap(high), unwrap(low)), positive, 'positive')
   const width = sub(high, low)
@@ -384,7 +577,27 @@ export function Uniform<A extends Value, B extends Value>(low: A, high: B): Univ
 
 // ── Exponential ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The exponential distribution with rate λ > 0 (mean 1/λ; scipy's expon(scale = 1/λ)). Support x ≥ 0. */
+/**
+ * The exponential distribution with rate $\lambda > 0$ (scipy's `expon(scale=1/rate)`), with density
+ * $p(x) = \lambda e^{-\lambda x}$ for $x \ge 0$.
+ * Mean $1/\lambda$, variance $1/\lambda^2$, mode 0. The cdf $1 - e^{-\lambda x}$ is computed with
+ * $\operatorname{expm1}$, so it keeps its relative accuracy near 0. `rsample` is the pathwise draw
+ * $-\log(1 - u)/\lambda$. An exponential family with $\eta = -\lambda$ and $T(x) = x$.
+ *
+ * @param rate The rate $\lambda$, the reciprocal of the mean; every element must be positive, or a `DomainError` is
+ *   thrown.
+ * @returns The distribution, with batch shape the shape of `rate`.
+ *
+ * @example The density at 0, the median and the mean
+ * const d = Exponential(2)
+ * print('p(0) =', d.prob(0), ' p(-1) =', d.prob(-1))
+ * print('median =', d.quantile(0.5), ' log(2) / 2 =', Math.LN2 / 2)
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example A seeded sample and its moments
+ * const x = Exponential(0.5).sample(stream(3), { shape: [10000] })
+ * print('sample mean =', mean(x), ' sample variance =', variance(x))
+ */
 export function Exponential<R extends Value>(rate: R): Univariate<R> {
   check('Exponential', 'rate', rate, positive, 'positive')
   const valid = (x: Value) => mask([x], (v) => v >= 0)
@@ -417,6 +630,14 @@ export function Exponential<R extends Value>(rate: R): Univariate<R> {
 
 // ── Gamma family ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The specification of the gamma distribution with shape $\alpha$ and rate $\beta$, shared by `Gamma` and `ChiSquare`
+ * (which replaces its name, parameters, cdf, survival function and sampler). The parameters are not checked here.
+ *
+ * @param shape The shape $\alpha$, positive.
+ * @param rate The rate $\beta$, positive (the reciprocal of the scale).
+ * @returns The `UnivariateSpec` of $\GammaD(\alpha, \beta)$, for `univariate`.
+ */
 function gammaSpec(shape: Value, rate: Value) {
   const valid = (x: Value) => mask([x], (v) => v >= 0)
   const t = (x: Value) => mul(rate, maximum(x, 0))
@@ -463,10 +684,34 @@ function gammaSpec(shape: Value, rate: Value) {
 }
 
 /**
- * The gamma distribution with shape α > 0 and rate β > 0 (mean α/β; scipy's gamma(α, scale = 1/β)). For α < 1 the
- * density is infinite at 0 and the mode is 0. The quantile is found numerically (not differentiable). An exponential
- * family with η = (α − 1, −β) and T(x) = (log x, x). No `rsample` yet: a pathwise gamma draw needs implicit
- * reparameterisation (Figurnov, Mohamed and Mnih 2018), which waits for ∂P(a, x)/∂a in `aifn-compute/numerics/special`.
+ * The gamma distribution with shape $\alpha > 0$ and rate $\beta > 0$ (scipy's `gamma(a, scale=1/rate)`), with
+ * density $p(x) = \frac{\beta^\alpha}{\Gamma(\alpha)} x^{\alpha - 1} e^{-\beta x}$ for $x \ge 0$.
+ * Mean $\alpha/\beta$, variance $\alpha/\beta^2$ and mode $(\alpha - 1)/\beta$ for $\alpha \ge 1$; for $\alpha < 1$
+ * the density is infinite at 0 and the mode is 0. The cdf is the regularised incomplete gamma function
+ * $P(\alpha, \beta x)$, and the quantile inverts it numerically (inverting $Q$ above $p = 1/2$): both are
+ * differentiable in $x$ (or $p$) and $\beta$, not in $\alpha$. An exponential family with
+ * $\etavec = (\alpha - 1, -\beta)$ and $T(x) = (\log x, x)$. No `rsample` yet: a pathwise gamma draw needs implicit
+ * reparameterisation (Figurnov, Mohamed and Mnih 2018), which waits for $\partial P(a, x)/\partial a$ in
+ * `aifn-compute/numerics/special`.
+ *
+ * @param shape The shape $\alpha$; every element must be positive, or a `DomainError` is thrown.
+ * @param rate The rate $\beta$, the reciprocal of the scale (use `GammaWithScale` to give the scale); every element
+ *   must be positive, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `shape` and `rate`.
+ *
+ * @example The density at a point, and the moments
+ * const d = Gamma(2, 3)
+ * print('p(1) =', d.prob(1), ' 9 e^-3 =', 9 * Math.exp(-3))
+ * print('mean =', d.mean(), ' variance =', d.variance(), ' mode =', d.mode())
+ *
+ * @example The cdf and quantile round trip
+ * const d = Gamma(0.5, 1)
+ * const x = d.quantile(0.99)
+ * print('quantile(0.99) =', x, ' cdf of it =', d.cdf(x))
+ *
+ * @example A seeded sample and its moments
+ * const x = Gamma(4, 2).sample(stream(4), { shape: [10000] })
+ * print('sample mean =', mean(x), ' sample variance =', variance(x))
  */
 export function Gamma<A extends Value, B extends Value>(shape: A, rate: B): Univariate<A | B> {
   check('Gamma', 'shape', shape, positive, 'positive')
@@ -474,13 +719,42 @@ export function Gamma<A extends Value, B extends Value>(shape: A, rate: B): Univ
   return univariate(gammaSpec(shape, rate))
 }
 
-/** The gamma distribution with shape α and scale θ = 1/β (scipy's gamma(α, scale = θ)); `params` holds the rate. */
+/**
+ * The gamma distribution with shape $\alpha$ and scale $\theta = 1/\beta$ (scipy's `gamma(a, scale=theta)`), with
+ * density $p(x) = \frac{x^{\alpha - 1} e^{-x/\theta}}{\Gamma(\alpha)\theta^\alpha}$ for $x \ge 0$. It is `Gamma` with
+ * rate $1/\theta$, so its `params` hold the shape and the rate, and its `name` is `'Gamma'`.
+ *
+ * @param shape The shape $\alpha$; every element must be positive, or a `DomainError` is thrown.
+ * @param scale The scale $\theta$; every element must be positive, or a `DomainError` is thrown.
+ * @returns The gamma distribution, with batch shape the broadcast shape of `shape` and `scale`.
+ *
+ * @example The same distribution as Gamma with the reciprocal rate
+ * const d = GammaWithScale(2, 0.5)
+ * print('params:', d.params)
+ * print('mean =', d.mean(), ' Gamma(2, 2) mean =', Gamma(2, 2).mean())
+ */
 export function GammaWithScale<A extends Value, C extends Value>(shape: A, scale: C): Univariate<A | C> {
   check('Gamma', 'scale', scale, positive, 'positive')
   return Gamma(shape, div(1, scale)) as unknown as Univariate<A | C>
 }
 
-/** The chi-square distribution with k > 0 degrees of freedom: Gamma(k/2, rate 1/2) (scipy's chi2). No `rsample` (see `Gamma`). */
+/**
+ * The chi-square distribution $\ChiSq(k)$ with $k > 0$ degrees of freedom, $\GammaD(k/2, 1/2)$ in shape and rate
+ * (scipy's `chi2`), with density $p(x) = \frac{x^{k/2 - 1} e^{-x/2}}{2^{k/2}\Gamma(k/2)}$ for $x \ge 0$. Mean $k$,
+ * variance $2k$. No `rsample` (see `Gamma`).
+ *
+ * @param df The degrees of freedom $k$ (need not be an integer); every element must be positive, or a `DomainError`
+ *   is thrown.
+ * @returns The distribution, with batch shape the shape of `df`.
+ *
+ * @example The 95% point of one degree of freedom, and the moments
+ * const d = ChiSquare(1)
+ * print('quantile(0.95) =', d.quantile(0.95), ' 1.96^2 =', 1.959964 ** 2)
+ * print('mean =', ChiSquare(4).mean(), ' variance =', ChiSquare(4).variance())
+ *
+ * @example Two degrees of freedom is the exponential with rate 1/2
+ * print('cdf(3) =', ChiSquare(2).cdf(3), ' 1 - e^-1.5 =', 1 - Math.exp(-1.5))
+ */
 export function ChiSquare<K extends Value>(df: K): Univariate<K> {
   check('ChiSquare', 'df', df, positive, 'positive')
   const spec = gammaSpec(mul(0.5, df), 0.5)
@@ -496,9 +770,26 @@ export function ChiSquare<K extends Value>(df: K): Univariate<K> {
 }
 
 /**
- * The inverse-gamma distribution: 1/X with X ~ Gamma(α, rate β), for shape α > 0 and scale β > 0 (scipy's
- * invgamma(α, scale = β)). Mean β/(α − 1) for α > 1 (NaN otherwise), variance for α > 2. An exponential family with
- * η = (−α − 1, −β) and T(x) = (log x, 1/x). No `rsample` (see `Gamma`).
+ * The inverse-gamma distribution: the law of $1/X$ with $X \sim \GammaD(\alpha, \beta)$ in shape and rate, for shape
+ * $\alpha > 0$ and scale $\beta > 0$ (scipy's `invgamma(a, scale=beta)`), with density
+ * $p(x) = \frac{\beta^\alpha}{\Gamma(\alpha)} x^{-\alpha - 1} e^{-\beta/x}$ for $x > 0$.
+ * Mean $\beta/(\alpha - 1)$ for $\alpha > 1$ and variance $\beta^2/((\alpha - 1)^2(\alpha - 2))$ for $\alpha > 2$ (NaN
+ * otherwise); mode $\beta/(\alpha + 1)$. Its cdf is the upper tail $Q(\alpha, \beta/x)$ of the gamma. An exponential
+ * family with $\etavec = (-\alpha - 1, -\beta)$ and $T(x) = (\log x, 1/x)$. No `rsample` (see `Gamma`).
+ *
+ * @param shape The shape $\alpha$; every element must be positive, or a `DomainError` is thrown.
+ * @param scale The scale $\beta$, the rate of the gamma variable it inverts; every element must be positive, or a
+ *   `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `shape` and `scale`.
+ *
+ * @example The moments, and the cdf as a gamma tail
+ * const d = InverseGamma(3, 2)
+ * print('mean =', d.mean(), ' variance =', d.variance(), ' mode =', d.mode())
+ * print('cdf(0.5) =', d.cdf(0.5), ' Gamma(3, 2) survival(2) =', Gamma(3, 2).survival(2))
+ *
+ * @example A seeded sample and its mean
+ * const x = InverseGamma(5, 8).sample(stream(5), { shape: [10000] })
+ * print('sample mean =', mean(x), ' mean =', InverseGamma(5, 8).mean())
  */
 export function InverseGamma<A extends Value, B extends Value>(shape: A, scale: B): Univariate<A | B> {
   check('InverseGamma', 'shape', shape, positive, 'positive')
@@ -569,9 +860,27 @@ export function InverseGamma<A extends Value, B extends Value>(shape: A, scale: 
 // ── Beta ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The beta distribution with a > 0 and b > 0 on [0, 1] (scipy's beta). The mode is (a − 1)/(a + b − 2) when a, b > 1
- * and NaN otherwise (it is at a boundary, or not unique). An exponential family with η = (a − 1, b − 1) and
- * T(x) = (log x, log(1 − x)). No `rsample` yet: its draw is built on gamma draws (see `Gamma`).
+ * The beta distribution with $a > 0$ and $b > 0$ on $[0, 1]$ (scipy's `beta`), with density
+ * $p(x) = \frac{x^{a - 1}(1 - x)^{b - 1}}{B(a, b)}$ for $0 \le x \le 1$.
+ * Mean $a/(a + b)$, variance $ab/((a + b)^2(a + b + 1))$. The mode is $(a - 1)/(a + b - 2)$ when $a, b > 1$ and NaN
+ * otherwise (it is at a boundary, or not unique). The cdf is the regularised incomplete beta function $I_x(a, b)$ and
+ * the survival function $I_{1 - x}(b, a)$. An exponential family with $\etavec = (a - 1, b - 1)$ and
+ * $T(x) = (\log x, \log(1 - x))$. No `rsample` yet: its draw is built on gamma draws (see `Gamma`).
+ *
+ * @param a The first shape $a$, the exponent of $x$ plus one; every element must be positive, or a `DomainError` is
+ *   thrown.
+ * @param b The second shape $b$, the exponent of $1 - x$ plus one; every element must be positive, or a
+ *   `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `a` and `b`.
+ *
+ * @example The density at a point, and the moments
+ * const d = Beta(2, 3)
+ * print('p(0.5) =', d.prob(0.5), ' 12 (0.5)(0.25) =', 12 * 0.5 * 0.25)
+ * print('mean =', d.mean(), ' variance =', d.variance(), ' mode =', d.mode())
+ *
+ * @example A seeded sample and its moments
+ * const x = Beta(2, 3).sample(stream(6), { shape: [10000] })
+ * print('sample mean =', mean(x), ' sample variance =', variance(x))
  */
 export function Beta<A extends Value, B extends Value>(a: A, b: B): Univariate<A | B> {
   check('Beta', 'a', a, positive, 'positive')
@@ -627,11 +936,30 @@ export function Beta<A extends Value, B extends Value>(a: A, b: B): Univariate<A
 // ── Fisher–Snedecor F ────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The F distribution with d₁ > 0 and d₂ > 0 degrees of freedom (scipy's f(d₁, d₂)): the law of (X₁/d₁)/(X₂/d₂) for
- * independent X₁ ~ χ²(d₁) and X₂ ~ χ²(d₂), and of (d₂/d₁)·B/(1 − B) for B ~ Beta(d₁/2, d₂/2), which gives the cdf
- * I_{d₁x/(d₁x + d₂)}(d₁/2, d₂/2), the survival function from the other tail of the same beta, and the quantiles.
- * Mean d₂/(d₂ − 2) for d₂ > 2 and the variance for d₂ > 4 (Infinity otherwise, as scipy); the null law of an
- * analysis-of-variance ratio.
+ * The $F$ distribution with $d_1 > 0$ and $d_2 > 0$ degrees of freedom (scipy's `f(dfn, dfd)`), with density
+ * $p(x) = \frac{1}{x B(d_1/2, d_2/2)} \sqrt{\frac{(d_1 x)^{d_1} d_2^{d_2}}{(d_1 x + d_2)^{d_1 + d_2}}}$ for $x \ge 0$:
+ * the law of $(X_1/d_1)/(X_2/d_2)$ for independent $X_1 \sim \ChiSq(d_1)$ and $X_2 \sim \ChiSq(d_2)$, and of
+ * $(d_2/d_1) B/(1 - B)$ for $B \sim \Beta(d_1/2, d_2/2)$, which gives the cdf
+ * $I_{d_1 x/(d_1 x + d_2)}(d_1/2, d_2/2)$, the survival function from the other tail of the same beta, and the
+ * quantiles. Mean $d_2/(d_2 - 2)$ for $d_2 > 2$ and variance $2d_2^2(d_1 + d_2 - 2)/(d_1(d_2 - 2)^2(d_2 - 4))$ for
+ * $d_2 > 4$ (Infinity otherwise); the null law of an analysis-of-variance ratio.
+ *
+ * @param df1 The numerator degrees of freedom $d_1$; every element must be positive, or a `DomainError` is thrown.
+ * @param df2 The denominator degrees of freedom $d_2$; every element must be positive, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `df1` and `df2`.
+ *
+ * @example A critical value, and the moments
+ * const d = FisherSnedecor(5, 10)
+ * print('quantile(0.95) =', d.quantile(0.95))
+ * print('mean =', d.mean(), ' 10 / 8 =', 10 / 8, ' variance =', d.variance())
+ *
+ * @example One numerator degree of freedom is a squared Student t
+ * print('F(1, 10) quantile(0.95) =', FisherSnedecor(1, 10).quantile(0.95))
+ * print('t(10) quantile(0.975)^2 =', StudentT(10).quantile(0.975) ** 2)
+ *
+ * @example A seeded sample and its mean
+ * const x = FisherSnedecor(5, 10).sample(stream(7), { shape: [10000] })
+ * print('sample mean =', mean(x))
  */
 export function FisherSnedecor<A extends Value, B extends Value>(df1: A, df2: B): Univariate<A | B> {
   check('FisherSnedecor', 'df1', df1, positive, 'positive')
@@ -704,7 +1032,25 @@ export function FisherSnedecor<A extends Value, B extends Value>(df1: A, df2: B)
 
 // ── Weibull ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The Weibull distribution with shape k > 0 and scale λ > 0 (scipy's weibull_min(k, scale = λ)). Support x ≥ 0. */
+/**
+ * The Weibull distribution with shape $k > 0$ and scale $\lambda > 0$ (scipy's `weibull_min(c, scale=lambda)`), with
+ * density $p(x) = \frac{k}{\lambda} \LP \frac{x}{\lambda} \RP^{k - 1} e^{-(x/\lambda)^k}$ for $x \ge 0$.
+ * Survival function $e^{-(x/\lambda)^k}$, mean $\lambda\Gamma(1 + 1/k)$, variance
+ * $\lambda^2(\Gamma(1 + 2/k) - \Gamma(1 + 1/k)^2)$, and mode $\lambda((k - 1)/k)^{1/k}$ for $k > 1$ (0 otherwise).
+ * `rsample` is the pathwise draw through the quantile $\lambda(-\log(1 - p))^{1/k}$.
+ *
+ * @param shape The shape $k$; every element must be positive, or a `DomainError` is thrown.
+ * @param scale The scale $\lambda$; every element must be positive, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `shape` and `scale`.
+ *
+ * @example Shape 1 is the exponential with rate 1/scale
+ * print('log p(1.5) =', Weibull(1, 2).logProb(1.5), ' exponential:', Exponential(0.5).logProb(1.5))
+ *
+ * @example The moments and the median
+ * const d = Weibull(2, 1)
+ * print('mean =', d.mean(), ' sqrt(pi) / 2 =', Math.sqrt(Math.PI) / 2)
+ * print('median =', d.quantile(0.5), ' sqrt(log 2) =', Math.sqrt(Math.LN2))
+ */
 export function Weibull<K extends Value, L extends Value>(shape: K, scale: L): Univariate<K | L> {
   check('Weibull', 'shape', shape, positive, 'positive')
   check('Weibull', 'scale', scale, positive, 'positive')
@@ -744,7 +1090,25 @@ export function Weibull<K extends Value, L extends Value>(shape: K, scale: L): U
 
 // ── Gumbel ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The Gumbel (maximum) distribution with location μ and scale β > 0 (scipy's gumbel_r). */
+/**
+ * The Gumbel (maximum) distribution with location $\mu$ and scale $\beta > 0$ (scipy's `gumbel_r`), with density
+ * $p(x) = \frac{1}{\beta} \exp(-(z + e^{-z}))$ with $z = (x - \mu)/\beta$, and cdf $\exp(-e^{-z})$.
+ * Mean $\mu + \gamma\beta$ ($\gamma$ the Euler–Mascheroni constant), variance $\pi^2\beta^2/6$, mode $\mu$. `rsample`
+ * is the pathwise draw through the quantile $\mu - \beta\log(-\log p)$.
+ *
+ * @param loc The location $\mu$, the mode.
+ * @param scale The scale $\beta$; every element must be positive, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `loc` and `scale`.
+ *
+ * @example The cdf at the mode, and the moments
+ * const d = Gumbel(0, 1)
+ * print('cdf(0) =', d.cdf(0), ' 1/e =', Math.exp(-1))
+ * print('mean =', d.mean(), ' variance =', d.variance())
+ *
+ * @example A seeded sample and its moments
+ * const x = Gumbel(1, 2).sample(stream(8), { shape: [40000] })
+ * print('sample mean =', mean(x), ' 1 + 2 gamma =', 1 + 2 * 0.5772156649)
+ */
 export function Gumbel<M extends Value, S extends Value>(loc: M, scale: S): Univariate<M | S> {
   check('Gumbel', 'scale', scale, positive, 'positive')
   const z = (x: Value) => div(sub(x, loc), scale)
@@ -774,10 +1138,28 @@ export function Gumbel<M extends Value, S extends Value>(loc: M, scale: S): Univ
 // ── Generalised Pareto ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The generalised Pareto distribution with shape ξ, location μ and scale σ > 0 (scipy's genpareto(ξ, μ, σ)): the law of
- * exceedances over a high threshold (Pickands, 1975; Balkema and de Haan, 1974). With z = (x − μ)/σ the survival
- * function is (1 + ξz)^{−1/ξ}, and e^{−z} at ξ = 0 (the exponential). ξ > 0 gives a Pareto-like heavy tail, ξ < 0 a
- * bounded support up to μ − σ/ξ. The mean exists for ξ < 1, the variance for ξ < ½ (∞ beyond).
+ * The generalised Pareto distribution with shape $\xi$, location $\mu$ and scale $\sigma > 0$ (scipy's
+ * `genpareto(c, loc, scale)`): the law of exceedances over a high threshold (Pickands, 1975; Balkema and de Haan,
+ * 1974). With $z = (x - \mu)/\sigma$ the density is $p(x) = \frac{1}{\sigma}(1 + \xi z)^{-1/\xi - 1}$ and the survival
+ * function $(1 + \xi z)^{-1/\xi}$, which are $e^{-z}/\sigma$ and $e^{-z}$ at $\xi = 0$ (the exponential). $\xi > 0$
+ * gives a Pareto-like heavy tail, $\xi < 0$ a bounded support up to $\mu - \sigma/\xi$. The mean
+ * $\mu + \sigma/(1 - \xi)$ exists for $\xi < 1$ and the variance $\sigma^2/((1 - \xi)^2(1 - 2\xi))$ for $\xi < 1/2$
+ * ($\infty$ beyond). `rsample` is the pathwise draw through the quantile.
+ *
+ * @param shape The shape $\xi$, any finite number (a `DomainError` is thrown for NaN or $\pm\infty$).
+ * @param loc The location $\mu$, the lower end of the support.
+ * @param scale The scale $\sigma$; every element must be positive, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of the three parameters.
+ *
+ * @example Shape 0 is the exponential
+ * print('log p(1) =', GeneralisedPareto(0, 0, 2).logProb(1), ' exponential:', Exponential(0.5).logProb(1))
+ *
+ * @example A heavy tail, and a bounded support
+ * const heavy = GeneralisedPareto(0.25, 0, 1)
+ * print('mean =', heavy.mean(), ' 1 / (1 - 0.25) =', 1 / 0.75)
+ * print('survival(3) =', heavy.survival(3), ' (1 + 0.75)^-4 =', 1.75 ** -4)
+ * const bounded = GeneralisedPareto(-0.5, 0, 1)
+ * print('upper end =', bounded.support.upper, ' cdf(2) =', bounded.cdf(2))
  */
 export function GeneralisedPareto<C extends Value, M extends Value, S extends Value>(
   shape: C,
@@ -848,7 +1230,14 @@ export function GeneralisedPareto<C extends Value, M extends Value, S extends Va
 
 // ── Von Mises ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** ∫_{−π}^{z} e^{κ(cos t − 1)} dt by composite Simpson's rule, with enough panels to resolve the peak's width 1/√κ. */
+/**
+ * $\int_{-\pi}^{z} e^{\kappa(\cos t - 1)} \, dt$ by composite Simpson's rule, with enough panels to resolve the peak's
+ * width $1/\sqrt\kappa$ (the integrand is scaled by $e^{-\kappa}$ so that it does not overflow).
+ *
+ * @param z The upper limit, an angle relative to the mean direction; 0 is returned for $z \le -\pi$.
+ * @param kappa The concentration $\kappa \ge 0$.
+ * @returns The integral.
+ */
 function vonMisesIntegral(z: number, kappa: number): number {
   const lo = -Math.PI
   if (z <= lo) return 0
@@ -862,6 +1251,15 @@ function vonMisesIntegral(z: number, kappa: number): number {
   return (total * h) / 3
 }
 
+/**
+ * The von Mises cdf by quadrature: the integral of the density from $\mu - \pi$ to $x$, as the ratio of two
+ * `vonMisesIntegral`s. Not periodic: 0 below $\mu - \pi$ and 1 above $\mu + \pi$.
+ *
+ * @param x The angle at which to evaluate the cdf (not reduced modulo $2\pi$).
+ * @param loc The mean direction $\mu$.
+ * @param kappa The concentration $\kappa \ge 0$.
+ * @returns The probability of an angle in $[\mu - \pi, x]$.
+ */
 function vonMisesCdf(x: number, loc: number, kappa: number): number {
   const z = x - loc
   if (z <= -Math.PI) return 0
@@ -870,13 +1268,25 @@ function vonMisesCdf(x: number, loc: number, kappa: number): number {
 }
 
 /**
- * Best and Fisher (1979), "Efficient simulation of the von Mises distribution", Applied Statistics 28(2): a wrapped
- * Cauchy envelope with acceptance rate above 65% for every κ. For κ below 1e-6 the distribution is uniform to double
- * precision (and the envelope's constants cancel), so draws are uniform.
+ * One uniform in $[0, 1)$ (2 words of the stream).
+ *
+ * @param s The stream to draw from; it is advanced.
+ * @returns The uniform.
  */
-/** One uniform in [0, 1) (2 words of the stream). */
 const unit = (s: Stream): number => units(s, 1)[0]
 
+/**
+ * One von Mises draw by the rejection sampler of Best and Fisher (1979), "Efficient simulation of the von Mises
+ * distribution", Applied Statistics 28(2): a wrapped Cauchy envelope with acceptance rate above 65% for every
+ * $\kappa$. For $\kappa$ below $10^{-6}$ the distribution is uniform to double precision (and the envelope's constants
+ * cancel), so draws are uniform.
+ *
+ * @param s The stream to draw from; it is advanced (by one uniform when the draw is uniform, else three per
+ *   proposal).
+ * @param loc The mean direction $\mu$.
+ * @param kappa The concentration $\kappa \ge 0$.
+ * @returns An angle in $[\mu - \pi, \mu + \pi]$.
+ */
 function vonMisesDraw(s: Stream, loc: number, kappa: number): number {
   if (kappa < 1e-6) return loc + Math.PI * (2 * unit(s) - 1)
   const tau = 1 + Math.sqrt(1 + 4 * kappa * kappa)
@@ -895,10 +1305,26 @@ function vonMisesDraw(s: Stream, loc: number, kappa: number): number {
 }
 
 /**
- * The von Mises distribution on the circle with mean direction `loc` and concentration κ ≥ 0 (scipy's
- * vonmises(κ, loc)); the density e^{κ cos(x − μ)} / (2π I₀(κ)) is periodic, and the cdf runs over [μ − π, μ + π]
- * (0 below, 1 above). `variance()` is the circular variance 1 − I₁(κ)/I₀(κ). The cdf (by quadrature) and quantile
- * (by bisection) are not differentiable; the density is, in x, μ and κ. No `rsample` (the draw is a rejection sampler).
+ * The von Mises distribution on the circle with mean direction $\mu$ and concentration $\kappa \ge 0$ (scipy's
+ * `vonmises(kappa, loc)`), with density $p(x) = \frac{e^{\kappa\cos(x - \mu)}}{2\pi I_0(\kappa)}$, which is periodic;
+ * the cdf runs over $[\mu - \pi, \mu + \pi]$ (0 below, 1 above). `mean()` is $\mu$ and `variance()` the circular
+ * variance $1 - I_1(\kappa)/I_0(\kappa)$. The cdf (by quadrature) and quantile (by bisection) are not differentiable;
+ * the density is, in $x$, $\mu$ and $\kappa$. No `rsample` (the draw is a rejection sampler, Best and Fisher 1979).
+ *
+ * @param loc The mean direction $\mu$, in radians.
+ * @param concentration The concentration $\kappa$ (0 is the uniform distribution on the circle, and large $\kappa$
+ *   approaches $\Gauss(\mu, 1/\kappa)$); every element must be non-negative, or a `DomainError` is thrown.
+ * @returns The distribution, with batch shape the broadcast shape of `loc` and `concentration`.
+ *
+ * @example The density is uniform at zero concentration, and the cdf is one half at the mean
+ * print('p(1) at kappa = 0:', VonMises(0, 0).prob(1), ' 1 / (2 pi) =', 1 / (2 * Math.PI))
+ * const d = VonMises(0.5, 2)
+ * print('cdf(0.5) =', d.cdf(0.5), ' quantile(0.9) =', d.quantile(0.9))
+ *
+ * @example The circular variance from a seeded sample
+ * const d = VonMises(0, 2)
+ * const x = d.sample(stream(9), { shape: [10000] })
+ * print('1 - mean cos x =', 1 - mean(cos(x)), ' circular variance =', d.variance())
  */
 export function VonMises<M extends Value, K extends Value>(loc: M, concentration: K): Univariate<M | K> {
   check('VonMises', 'concentration', concentration, (k) => k >= 0, 'non-negative')
@@ -923,7 +1349,15 @@ export function VonMises<M extends Value, K extends Value>(loc: M, concentration
 
 // ── Truncated normal ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The quantile of a truncated standard normal on [α, β], reflected into the lower tail when α > 0 for accuracy. */
+/**
+ * The quantile of a standard normal truncated to $[a, b]$, reflected into the lower tail when $a > 0$ for accuracy:
+ * $\Phi^{-1}(\Phi(a) + p(\Phi(b) - \Phi(a)))$, clamped to $[a, b]$.
+ *
+ * @param p The probability, in $[0, 1]$; NaN is returned outside it.
+ * @param a The standardised lower bound $(\text{low} - \mu)/\sigma$, possibly $-\infty$.
+ * @param b The standardised upper bound $(\text{high} - \mu)/\sigma$, possibly $\infty$.
+ * @returns The standardised quantile, in $[a, b]$.
+ */
 function truncatedStandardQuantile(p: number, a: number, b: number): number {
   if (!(p >= 0 && p <= 1)) return NaN
   if (a > 0) return -truncatedStandardQuantile(1 - p, -b, -a)
@@ -933,10 +1367,35 @@ function truncatedStandardQuantile(p: number, a: number, b: number): number {
 }
 
 /**
- * The normal distribution N(loc, scale²) truncated to [low, high] (either may be infinite; scipy's
- * truncnorm((low − loc)/scale, (high − loc)/scale, loc, scale)). The normaliser Φ(β) − Φ(α) is computed in log space
- * without cancellation, so far-tail truncations (the TrueSkill and probit cases) stay accurate. The quantile (and the
- * sampler, by inversion) reflects into the lower tail; it is not differentiable, so there is no `rsample`.
+ * The normal distribution $\Gauss(\mu, \sigma^2)$ truncated to $[l, h]$ (either may be infinite; scipy's
+ * `truncnorm((low - loc)/scale, (high - loc)/scale, loc, scale)`), with density
+ * $p(x) = \frac{\phi(z)}{\sigma(\Phi(\beta) - \Phi(\alpha))}$ for $l \le x \le h$, where $z = (x - \mu)/\sigma$,
+ * $\alpha = (l - \mu)/\sigma$ and $\beta = (h - \mu)/\sigma$. The normaliser $Z = \Phi(\beta) - \Phi(\alpha)$ is
+ * computed in log space without cancellation, so far-tail truncations (the TrueSkill and probit cases) stay accurate.
+ * Mean $\mu + \sigma(\phi(\alpha) - \phi(\beta))/Z$; mode $\mu$ clamped to $[l, h]$. The quantile (and the sampler, by
+ * inversion) reflects into the lower tail; it is not differentiable, so there is no `rsample`.
+ *
+ * @param loc The mean $\mu$ of the normal before truncation (not the mean of the result).
+ * @param scale The standard deviation $\sigma$ of the normal before truncation; every element must be positive, or a
+ *   `DomainError` is thrown.
+ * @param low The lower bound $l$, or `-Infinity`.
+ * @param high The upper bound $h$, or `Infinity`; every element of `high - low` must be positive, or a `DomainError` is
+ *   thrown.
+ * @returns The distribution, with batch shape the broadcast shape of the four parameters.
+ *
+ * @example The half-normal
+ * const d = TruncatedNormal(0, 1, 0, Infinity)
+ * print('p(0) =', d.prob(0), ' mean =', d.mean(), ' sqrt(2 / pi) =', Math.sqrt(2 / Math.PI))
+ * print('variance =', d.variance(), ' 1 - 2 / pi =', 1 - 2 / Math.PI)
+ *
+ * @example A far-tail truncation stays accurate
+ * const d = TruncatedNormal(0, 1, 10, Infinity)
+ * print('mean =', d.mean(), ' log p(10) =', d.logProb(10))
+ *
+ * @example The cdf and quantile round trip, and a seeded sample inside the bounds
+ * const d = TruncatedNormal(1, 2, -1, 2)
+ * print('quantile(0.3) =', d.quantile(0.3), ' cdf of it =', d.cdf(d.quantile(0.3)))
+ * print('draws:', d.sample(stream(10), { shape: [5] }))
  */
 export function TruncatedNormal<M extends Value, S extends Value, A extends Value, B extends Value>(
   loc: M,

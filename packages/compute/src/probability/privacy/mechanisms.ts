@@ -1,14 +1,23 @@
 /**
- * Differentially private mechanisms (Dwork, McSherry, Nissim and Smith, 2006; Dwork and Roth, 2014). A mechanism M is
- * (ε, δ)-differentially private when P(M(D) ∈ S) ≤ e^ε P(M(D′) ∈ S) + δ for all neighbouring datasets D, D′ and sets S.
+ * Differentially private mechanisms (Dwork, McSherry, Nissim and Smith, 2006; Dwork and Roth, 2014). A mechanism $M$ is
+ * $(\varepsilon, \delta)$-differentially private when
+ * $\prob(M(D) \in S) \le e^\varepsilon \prob(M(D') \in S) + \delta$ for all neighbouring datasets $D, D'$ and sets
+ * $S$.
  *
- * - `laplaceMechanism`: f(D) + Lap(Δ₁/ε) per coordinate, ε-DP for a query of L1 sensitivity Δ₁.
- * - `gaussianMechanism`: f(D) + N(0, σ²) per coordinate. `classicGaussianSigma` is σ = Δ₂√(2 ln(1.25/δ))/ε (valid for
- *   ε < 1); `analyticGaussianSigma` (Balle and Wang, 2018) is the smallest σ whose exact privacy profile
- *   `gaussianDelta(σ, ε)` = Φ(Δ/2σ − εσ/Δ) − e^ε Φ(−Δ/2σ − εσ/Δ) is at most δ, for any ε > 0.
- * - `exponentialMechanism` (McSherry and Talwar, 2007): picks candidate r with probability ∝ exp(ε u(r)/(2Δu)).
- * - `randomisedResponse` (Warner, 1965): each bit kept with probability e^ε/(1 + e^ε), else flipped; ε-DP per bit,
- *   with the unbiased estimate of the true share of ones from the reports.
+ * - `laplaceMechanism`: $f(D) + \Laplace(0, \Delta_1/\varepsilon)$ per coordinate, $\varepsilon$-DP for a query of
+ *   $L_1$ sensitivity $\Delta_1$.
+ * - `gaussianMechanism`: $f(D) + \Gauss(0, \sigma^2)$ per coordinate. `classicGaussianSigma` is
+ *   $\sigma = \Delta_2 \sqrt{2 \ln(1.25/\delta)} / \varepsilon$ (valid for $\varepsilon < 1$); `analyticGaussianSigma`
+ *   (Balle and Wang, 2018) is the smallest $\sigma$ whose exact privacy profile `gaussianDelta`,
+ *   $\delta(\varepsilon) = \Phi(a - b) - e^\varepsilon \Phi(-a - b)$ with $a = \Delta/2\sigma$ and
+ *   $b = \varepsilon\sigma/\Delta$, is at most $\delta$, for any $\varepsilon > 0$.
+ * - `exponentialMechanism` (McSherry and Talwar, 2007): picks candidate $r$ with probability
+ *   $\propto \exp(\varepsilon u(r) / (2\Delta u))$.
+ * - `randomisedResponse` (Warner, 1965): each bit kept with probability $e^\varepsilon/(1 + e^\varepsilon)$, else
+ *   flipped; $\varepsilon$-DP per bit, with the unbiased estimate of the true share of ones from the reports.
+ *
+ * Randomness comes from an `aifn-compute/foundation/random` stream, the last argument. Parameters that must be positive
+ * (sensitivities, $\varepsilon$, $\sigma$) are checked, and a bad one throws a `DomainError`.
  */
 
 import type { Size, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -17,14 +26,43 @@ import { dense, toFlat } from 'aifn-compute/foundation/tensor'
 import { normalCdf, normalLogCdf } from 'aifn-compute/numerics/special'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
+/**
+ * A scalar result of a special function, read as a number.
+ *
+ * @param v The value, known to be a number.
+ * @returns The same value, typed as a number.
+ */
 const num = (v: unknown) => v as number
 
+/**
+ * Throws a `DomainError` unless `v` is positive and finite.
+ *
+ * @param where The caller's name, for the error message.
+ * @param name The parameter's name, for the error message.
+ * @param v The value to check.
+ */
 const positive = (where: string, name: string, v: number) => {
   if (!(v > 0 && Number.isFinite(v)))
     throw new DomainError(where, `${where}: ${name} must be positive and finite, got ${v}`)
 }
 
-/** f(D) + Lap(0, Δ₁/ε) noise on each coordinate: ε-DP for a query of L1 sensitivity Δ₁ (`sensitivity`). */
+/**
+ * The Laplace mechanism: $f(D) + \Laplace(0, b)$ noise on each coordinate, with scale $b = \Delta_1 / \varepsilon$:
+ * $\varepsilon$-DP for a query of $L_1$ sensitivity $\Delta_1$. The noise is drawn by inversion from one uniform per
+ * coordinate.
+ *
+ * @param value The true answer $f(D)$, one number per coordinate.
+ * @param sensitivity The $L_1$ sensitivity $\Delta_1$: the most $\lVert f(D) - f(D') \rVert_1$ can be over
+ *   neighbouring datasets.
+ * @param epsilon The privacy parameter $\varepsilon > 0$; smaller is more private and noisier.
+ * @param stream The random stream the noise is drawn from.
+ * @returns The noisy answer, a new array of the same length.
+ *
+ * @example A count of 100 released with scale 1/0.5 = 2
+ * print('released:', laplaceMechanism([100], 1, 0.5, stream(0)))
+ * const draws = laplaceMechanism(new Float64Array(2000), 1, 0.5, stream(1))
+ * print('mean |noise| (the scale, 2):', draws.reduce((a, x) => a + Math.abs(x), 0) / draws.length)
+ */
 export function laplaceMechanism(
   value: VectorLike,
   sensitivity: number,
@@ -43,7 +81,20 @@ export function laplaceMechanism(
   })
 }
 
-/** f(D) + N(0, σ²) noise on each coordinate (σ from `classicGaussianSigma` or `analyticGaussianSigma`). */
+/**
+ * The Gaussian mechanism: $f(D) + \Gauss(0, \sigma^2)$ noise on each coordinate. It is $(\varepsilon, \delta)$-DP for
+ * the $\sigma$ that `classicGaussianSigma` or `analyticGaussianSigma` gives.
+ *
+ * @param value The true answer $f(D)$, one number per coordinate.
+ * @param sigma The noise's standard deviation $\sigma > 0$ (not the noise multiplier: the sensitivity is in it).
+ * @param stream The random stream the noise is drawn from.
+ * @returns The noisy answer, a new array of the same length.
+ *
+ * @example A mean released at (1, 1e-5)-DP
+ * const sigma = analyticGaussianSigma(0.01, 1, 1e-5)
+ * print('sigma:', sigma)
+ * print('released:', gaussianMechanism([0.42], sigma, stream(0)))
+ */
 export function gaussianMechanism(value: VectorLike, sigma: number, stream: Stream): Float64Array {
   positive('gaussianMechanism', 'sigma', sigma)
   const v = dense.toF64(value, 'gaussianMechanism')
@@ -51,7 +102,20 @@ export function gaussianMechanism(value: VectorLike, sigma: number, stream: Stre
   return Float64Array.from(v, (u, i) => u + noise[i])
 }
 
-/** The classic calibration σ = Δ₂√(2 ln(1.25/δ))/ε (Dwork and Roth, 2014, Thm. A.1), (ε, δ)-DP for ε < 1. */
+/**
+ * The classic calibration of the Gaussian mechanism, $\sigma = \Delta_2 \sqrt{2 \ln(1.25/\delta)} / \varepsilon$
+ * (Dwork and Roth, 2014, Thm. A.1), $(\varepsilon, \delta)$-DP for $\varepsilon < 1$. Throws a `DomainError`
+ * outside $0 < \varepsilon < 1$ and $0 < \delta < 1$.
+ *
+ * @param sensitivity The $L_2$ sensitivity $\Delta_2$ of the query.
+ * @param epsilon The privacy parameter $\varepsilon$, in $(0, 1)$.
+ * @param delta The failure probability $\delta$, in $(0, 1)$.
+ * @returns The noise standard deviation $\sigma$.
+ *
+ * @example Classic against analytic
+ * print('classic:', classicGaussianSigma(1, 0.5, 1e-5))
+ * print('analytic:', analyticGaussianSigma(1, 0.5, 1e-5))
+ */
 export function classicGaussianSigma(sensitivity: number, epsilon: number, delta: number): number {
   positive('classicGaussianSigma', 'sensitivity', sensitivity)
   if (!(epsilon > 0 && epsilon < 1))
@@ -61,8 +125,19 @@ export function classicGaussianSigma(sensitivity: number, epsilon: number, delta
 }
 
 /**
- * The exact δ(ε) of the Gaussian mechanism with noise σ and L2 sensitivity Δ (Balle and Wang, 2018, Thm. 8):
- * Φ(Δ/2σ − εσ/Δ) − e^ε Φ(−Δ/2σ − εσ/Δ), the smallest δ for which it is (ε, δ)-DP.
+ * The exact privacy profile $\delta(\varepsilon)$ of the Gaussian mechanism with noise $\sigma$ and $L_2$ sensitivity
+ * $\Delta$ (Balle and Wang, 2018, Thm. 8):
+ * $\Phi(\Delta/2\sigma - \varepsilon\sigma/\Delta) - e^\varepsilon \Phi(-\Delta/2\sigma - \varepsilon\sigma/\Delta)$,
+ * the smallest $\delta$ for which it is $(\varepsilon, \delta)$-DP. The second term is computed from the log cdf,
+ * and a result below 0 by rounding is returned as 0. The arguments are not checked.
+ *
+ * @param sensitivity The $L_2$ sensitivity $\Delta$.
+ * @param sigma The noise standard deviation $\sigma$.
+ * @param epsilon The privacy parameter $\varepsilon \ge 0$.
+ * @returns $\delta(\varepsilon)$, in $[0, 1]$.
+ *
+ * @example The profile falls as epsilon grows
+ * for (const eps of [0, 1, 2, 4]) print('epsilon', eps, 'delta', gaussianDelta(1, 1, eps))
  */
 export function gaussianDelta(sensitivity: number, sigma: number, epsilon: number): number {
   const a = sensitivity / (2 * sigma)
@@ -73,8 +148,20 @@ export function gaussianDelta(sensitivity: number, sigma: number, epsilon: numbe
 }
 
 /**
- * The smallest ε at which the Gaussian mechanism with noise σ and L2 sensitivity Δ is (ε, δ)-DP: the inverse of
- * `gaussianDelta` in ε (δ(ε) decreases in ε), by bisection. 0 when δ(0) ≤ δ already.
+ * The smallest $\varepsilon$ at which the Gaussian mechanism with noise $\sigma$ and $L_2$ sensitivity $\Delta$ is
+ * $(\varepsilon, \delta)$-DP: the inverse of `gaussianDelta` in $\varepsilon$ ($\delta(\varepsilon)$ decreases in
+ * $\varepsilon$), by bisection to a relative tolerance of $10^{-13}$. 0 when $\delta(0) \le \delta$ already. Throws a
+ * `DomainError` for a sensitivity or $\sigma$ that is not positive, or $\delta$ outside $(0, 1)$.
+ *
+ * @param sensitivity The $L_2$ sensitivity $\Delta$.
+ * @param sigma The noise standard deviation $\sigma$.
+ * @param delta The failure probability $\delta$, in $(0, 1)$.
+ * @returns The smallest $\varepsilon$ (an upper end of the bisection bracket, so never below the true value).
+ *
+ * @example Round trip through gaussianDelta
+ * const eps = gaussianEpsilon(1, 2, 1e-5)
+ * print('epsilon:', eps)
+ * print('delta back:', gaussianDelta(1, 2, eps))
  */
 export function gaussianEpsilon(sensitivity: number, sigma: number, delta: number): number {
   positive('gaussianEpsilon', 'sensitivity', sensitivity)
@@ -93,8 +180,21 @@ export function gaussianEpsilon(sensitivity: number, sigma: number, delta: numbe
 }
 
 /**
- * The analytic Gaussian mechanism's σ (Balle and Wang, 2018): the smallest σ with `gaussianDelta(Δ, σ, ε)` ≤ δ, by
- * bisection on log σ (δ(σ) decreases in σ). Valid for every ε > 0, and never larger than the classic σ.
+ * The analytic Gaussian mechanism's $\sigma$ (Balle and Wang, 2018): the smallest $\sigma$ with
+ * `gaussianDelta`$(\Delta, \sigma, \varepsilon) \le \delta$, by bisection on $\log \sigma$ over
+ * $\Delta e^{-20}$ to $\Delta e^{20}$ ($\delta$ decreases in $\sigma$). Valid for every $\varepsilon > 0$, and never
+ * larger than the classic $\sigma$. Throws a `DomainError` for a sensitivity or $\varepsilon$ that is not positive,
+ * or $\delta$ outside $(0, 1)$.
+ *
+ * @param sensitivity The $L_2$ sensitivity $\Delta$.
+ * @param epsilon The privacy parameter $\varepsilon > 0$.
+ * @param delta The failure probability $\delta$, in $(0, 1)$.
+ * @returns The noise standard deviation $\sigma$.
+ *
+ * @example Beyond the classic range, and the profile at the answer
+ * const sigma = analyticGaussianSigma(1, 2, 1e-5)
+ * print('sigma at epsilon = 2:', sigma)
+ * print('delta at that sigma:', gaussianDelta(1, sigma, 2))
  */
 export function analyticGaussianSigma(sensitivity: number, epsilon: number, delta: number): number {
   positive('analyticGaussianSigma', 'sensitivity', sensitivity)
@@ -112,7 +212,22 @@ export function analyticGaussianSigma(sensitivity: number, epsilon: number, delt
   return Math.exp(hi)
 }
 
-/** The exponential mechanism's selection probabilities ∝ exp(ε u_r / (2Δu)) over candidates with utilities u. */
+/**
+ * The exponential mechanism's selection probabilities $p_r \propto \exp(\varepsilon u_r / (2\Delta u))$ over
+ * candidates $r$ with utilities $u_r$, computed stably (shifted by the largest). Throws a `DomainError` for a
+ * sensitivity or $\varepsilon$ that is not positive, or when no candidate has a finite utility; errors name
+ * `exponentialMechanism`.
+ *
+ * @param utilities The utility $u_r$ of each candidate (higher is better); $-\infty$ rules a candidate out.
+ * @param sensitivity The sensitivity $\Delta u$ of the utility: the most one candidate's utility can change between
+ *   neighbouring datasets.
+ * @param epsilon The privacy parameter $\varepsilon > 0$.
+ * @returns The probabilities, one per candidate, summing to 1.
+ *
+ * @example Three candidates, more and less private
+ * print('epsilon 1:', exponentialMechanismProbabilities([1, 2, 3], 1, 1))
+ * print('epsilon 10:', exponentialMechanismProbabilities([1, 2, 3], 1, 10))
+ */
 export function exponentialMechanismProbabilities(
   utilities: VectorLike,
   sensitivity: number,
@@ -135,7 +250,20 @@ export function exponentialMechanismProbabilities(
   return w.map((x) => x / z)
 }
 
-/** Pick a candidate by the exponential mechanism (ε-DP for utilities of sensitivity Δu). */
+/**
+ * Pick a candidate by the exponential mechanism: $\varepsilon$-DP for utilities of sensitivity $\Delta u$. Draws one
+ * uniform and walks the probabilities of `exponentialMechanismProbabilities`, which throws as that does.
+ *
+ * @param utilities The utility of each candidate (higher is better).
+ * @param sensitivity The sensitivity $\Delta u$ of the utility.
+ * @param epsilon The privacy parameter $\varepsilon > 0$.
+ * @param stream The random stream the choice is drawn from.
+ * @returns The index of the chosen candidate.
+ *
+ * @example The most useful candidate usually wins
+ * const s = stream(3)
+ * print('choices:', Array.from({ length: 10 }, () => exponentialMechanism([1, 2, 3], 1, 4, s)))
+ */
 export function exponentialMechanism(
   utilities: VectorLike,
   sensitivity: number,
@@ -151,10 +279,33 @@ export function exponentialMechanism(
   return p.length - 1
 }
 
-/** The probability e^ε/(1 + e^ε) that randomised response reports the true bit. */
+/**
+ * The probability $e^\varepsilon / (1 + e^\varepsilon)$ that randomised response reports the true bit, computed as
+ * $1 / (1 + e^{-\varepsilon})$.
+ *
+ * @param epsilon The privacy parameter $\varepsilon$ (not checked).
+ * @returns The probability of telling the truth.
+ *
+ * @example Warner's coin, and more privacy
+ * print('epsilon ln 3 (keep 3/4):', randomisedResponseKeep(Math.log(3)))
+ * print('epsilon 0 (a fair coin):', randomisedResponseKeep(0))
+ */
 export const randomisedResponseKeep = (epsilon: number): number => 1 / (1 + Math.exp(-epsilon))
 
-/** Randomised response: each bit (0 or 1) reported truthfully with probability e^ε/(1 + e^ε), else flipped. */
+/**
+ * Randomised response: each bit (0 or 1) reported truthfully with probability $e^\varepsilon/(1 + e^\varepsilon)$,
+ * else flipped, which is $\varepsilon$-DP for each person's bit. Throws a `DomainError` for $\varepsilon$ that is not
+ * positive.
+ *
+ * @param bits The true bits, each 0 or 1 (a flipped entry is `1 - x`).
+ * @param epsilon The privacy parameter $\varepsilon > 0$.
+ * @param stream The random stream the coin flips are drawn from.
+ * @returns The reported bits, a new array of the same length.
+ *
+ * @example Ten bits at ln 3 (each kept with probability 3/4)
+ * const truth = [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]
+ * print('reported:', randomisedResponse(truth, Math.log(3), stream(2)))
+ */
 export function randomisedResponse(bits: VectorLike, epsilon: number, stream: Stream): Float64Array {
   positive('randomisedResponse', 'epsilon', epsilon)
   const b = dense.toF64(bits, 'randomisedResponse')
@@ -163,7 +314,21 @@ export function randomisedResponse(bits: VectorLike, epsilon: number, stream: St
   return Float64Array.from(b, (x, i) => (u[i] < keep ? x : 1 - x))
 }
 
-/** The unbiased estimate of the share of ones from randomised-response reports: (mean − (1 − p))/(2p − 1). */
+/**
+ * The unbiased estimate of the share of ones from randomised-response reports: $(\bar r - (1 - p)) / (2p - 1)$, with
+ * $\bar r$ the share of reported ones and $p$ the probability of a truthful report. It may fall outside $[0, 1]$ for a
+ * small sample.
+ *
+ * @param reports The reported bits.
+ * @param epsilon The $\varepsilon$ the reports were made with (not checked: 0 divides by zero).
+ * @returns The estimated share of true ones.
+ *
+ * @example Recovering a share of 0.3 from noisy reports
+ * const truth = Array.from({ length: 2000 }, (_, i) => (i < 600 ? 1 : 0))
+ * const reports = randomisedResponse(truth, 1, stream(4))
+ * print('share reported:', reports.reduce((a, x) => a + x, 0) / reports.length)
+ * print('estimate:', randomisedResponseEstimate(reports, 1))
+ */
 export function randomisedResponseEstimate(reports: VectorLike, epsilon: number): number {
   const r = dense.toF64(reports, 'randomisedResponseEstimate')
   const p = randomisedResponseKeep(epsilon)

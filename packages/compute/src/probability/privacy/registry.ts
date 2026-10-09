@@ -1,6 +1,6 @@
 /**
- * The registry of `aifn-compute/probability/privacy`: differentially private mechanisms, composition and RDP/zCDP accounting,
- * and DP-SGD's clipped, noised gradient aggregation.
+ * The registry of `aifn-compute/probability/privacy`: differentially private mechanisms, composition and RDP/zCDP
+ * accounting, and DP-SGD's clipped, noised gradient aggregation, each with its summary, notes and citations.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
