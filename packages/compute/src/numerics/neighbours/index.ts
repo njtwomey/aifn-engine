@@ -8,7 +8,9 @@
  * - Graphs: `nearestNeighbourDescent` ($k$-NN graphs), HNSW (`hnswIndex`, `hnswQuery` with its layer-by-layer trace).
  * - Quantisation: codebooks (`kmeansPlusPlus`, `assignNearest`, `lloydUpdate`, `trainCodebook`), the inverted file
  *   (`ivfIndex`, `ivfQuery`), product quantisation and OPQ (`productQuantiser`, `optimisedProductQuantiser`,
- *   `pqEncode`, `pqDecode`, `pqDistanceTable`, `pqQuery`).
+ *   `pqEncode`, `pqDecode`, `pqDistanceTable`, `pqQuery`), and residual quantisation (`residualQuantiser`, `rqEncode`,
+ *   `rqDecode`: $D$ codebooks, each quantising what the ones before left, with `codePrefixTree` for the hierarchy of
+ *   their codes).
  * - Measurement: `searchRecall`, `benchmarkSearch`.
  */
 
@@ -85,6 +87,15 @@ export {
   type ProductQuantiser,
   type ProductQuantiserOptions,
 } from './quantisation'
+export {
+  codePrefixTree,
+  residualQuantiser,
+  rqDecode,
+  rqEncode,
+  type CodeTreeNode,
+  type ResidualQuantiser,
+  type ResidualQuantiserOptions,
+} from './residual'
 export {
   hnswIndex,
   hnswQuery,

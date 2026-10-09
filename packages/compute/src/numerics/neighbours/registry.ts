@@ -7,6 +7,7 @@ import * as hnsw from './hnsw'
 import * as lsh from './lsh'
 import * as nnDescent from './nn-descent'
 import * as quantisation from './quantisation'
+import * as residual from './residual'
 import * as search from './search'
 import * as trees from './trees'
 
@@ -264,6 +265,49 @@ fn(
   },
   quantisation.productQuantiser,
 )
+const RQ = { notes: ['additive-and-residual-quantisation'], cite: ['chen2010rvq'] }
+fn(
+  {
+    key: 'residualQuantiser',
+    name: 'Residual vector quantiser',
+    summary: 'D codebooks trained in turn, each by k-means on what the levels before it leave.',
+    role: 'fit',
+    random: true,
+    ...RQ,
+  },
+  residual.residualQuantiser,
+)
+fn(
+  {
+    key: 'rqEncode',
+    name: 'Residual quantisation codes',
+    summary: 'Level by level, the codeword nearest to the remaining residual: D indices per vector.',
+    role: 'transform',
+    ...RQ,
+  },
+  residual.rqEncode,
+)
+fn(
+  {
+    key: 'rqDecode',
+    name: 'Residual quantisation reconstruction',
+    summary: 'The sum of a code’s codewords over its first levels, coarse to fine.',
+    role: 'transform',
+    ...RQ,
+  },
+  residual.rqDecode,
+)
+fn(
+  {
+    key: 'codePrefixTree',
+    name: 'Code prefix tree',
+    summary:
+      'Multi-level codes as a tree of prefixes, each node with its count and span, for icicle and sunburst plots.',
+    role: 'transform',
+    ...RQ,
+  },
+  residual.codePrefixTree,
+)
 fn(
   {
     key: 'optimisedProductQuantiser',
@@ -351,6 +395,15 @@ fn(
 
 /** The functions of the module, keyed by name. */
 export const neighbourFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', search, trees, lsh, nnDescent, codebook, quantisation, hnsw, benchmark) as Readonly<
-    Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
-  >
+  entries<FunctionInfo>(
+    'function',
+    search,
+    trees,
+    lsh,
+    nnDescent,
+    codebook,
+    quantisation,
+    residual,
+    hnsw,
+    benchmark,
+  ) as Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>>
