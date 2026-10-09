@@ -191,7 +191,7 @@ const recipe = (path: string) => ENTRIES.find((e) => e.path === `render/${path}`
 const SLIDES: Slide[] = [
   {
     label: 'Optimisers',
-    blurb: 'Seven first-order methods raced over a landscape with four minima. Drag the start.',
+    blurb: 'Seven first-order methods and L-BFGS raced over a landscape with four minima. Drag the start.',
     Figure: OptimiserRace,
   },
   {

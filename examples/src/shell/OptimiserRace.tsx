@@ -1,6 +1,8 @@
+import type { Algorithm, Status } from 'aifn-compute/foundation/contracts'
 import { toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { live } from 'aifn-compute/foundation/trace'
 import { adagrad, adam, gradientDescent, momentum, nesterov, rmsprop } from 'aifn-compute/optim/first-order'
+import { lbfgs } from 'aifn-compute/optim/second-order'
 import { Contours, Curve, Figure, Handle, Plot, Points, Raster, useAxis, type Vec2 } from 'aifn-render'
 import { useState } from 'react'
 import { grid } from '@examples/data'
@@ -16,7 +18,10 @@ const objective = (x: Tensor) => {
 
 const xs = grid(-5, 5, 110)
 const z = xs.map((b) => xs.map((a) => Math.log10(1 + f(a, b))))
-/** Every first-order method of `aifn-compute/optim/first-order`, with step sizes that keep each stable here. */
+/**
+ * Every first-order method of `aifn-compute/optim/first-order`, with step sizes that keep each stable here, and L-BFGS,
+ * which builds a curvature estimate from its last few gradients and stops once converged.
+ */
 const METHODS = [
   { name: 'gradient descent', alg: gradientDescent(objective, { stepSize: 0.004 }) },
   { name: 'line search', alg: gradientDescent(objective, { lineSearch: 'backtracking' }) },
@@ -25,10 +30,11 @@ const METHODS = [
   { name: 'AdaGrad', alg: adagrad(objective, { stepSize: 0.4 }) },
   { name: 'RMSProp', alg: rmsprop(objective, { stepSize: 0.03 }) },
   { name: 'Adam', alg: adam(objective, { stepSize: 0.15 }) },
+  { name: 'L-BFGS', alg: lbfgs(objective) },
 ]
 const STEPS = 150
 
-function pathOf(alg: (typeof METHODS)[number]['alg'], x0: Vec2) {
+function pathOf<S extends Status & { x: Tensor }>(alg: Algorithm<{ x0: Vec2 }, S>, x0: Vec2) {
   const px: number[] = []
   const py: number[] = []
   for (const { state } of live(alg, { x0 })) {
@@ -40,16 +46,16 @@ function pathOf(alg: (typeof METHODS)[number]['alg'], x0: Vec2) {
   return { px, py }
 }
 
-/** Seven optimisers raced from one draggable start over Himmelblau's four-minimum landscape. */
+/** Eight optimisers raced from one draggable start over Himmelblau's four-minimum landscape. */
 export function OptimiserRace() {
   const [start, setStart] = useState<Vec2>([-1, -0.5])
-  const paths = METHODS.map((m) => pathOf(m.alg, start))
+  const paths = METHODS.map((m) => pathOf(m.alg as Algorithm<{ x0: Vec2 }, Status & { x: Tensor }>, start))
   const x = useAxis({ label: 'x₁', range: [-5, 5] })
   const y = useAxis({ label: 'x₂', range: [-5, 5], equal: x })
   return (
     <Figure
       title="Race the optimisers"
-      purpose="Seven first-order methods from the same start, 150 steps each."
+      purpose="Seven first-order methods and L-BFGS from the same start, up to 150 steps each."
       hoverReadout={false}
       defaultSize="L"
       caption="Drag the start: the landscape has four minima, and the methods split between them."
