@@ -1,6 +1,9 @@
 /**
  * Capability mixins (plan §5.1): build `decide`, `expect` and `sample` from what a model already has, and complete a
  * partial forward pass with a readout. Each returns a new plain object; the model passed in is not changed.
+ *
+ * The copy is shallow (the model's fields are spread into a new object), and the new methods call the model's own,
+ * bound to it, so a mixin can wrap any fitted model, including one made by another mixin.
  */
 
 import type {
@@ -22,24 +25,37 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 /**
  * How `withDecision` turns a model's outputs into a decision per input.
  *
- * - `'argmax'`: the class with the highest score (from `score`, [N, K]) or the highest predictive probability.
- * - `'mode'`: the predictive's mode (`mode` field or method), or the most probable class.
- * - `{ threshold: t }`: class 1 when P(y = 1 | x) ≥ t (from a Bernoulli or two-class predictive), or when the score
- *   ([N] or [N, 1]) is at least t when the model has no predictive.
- * - `{ costs: C }`: the Bayes decision under a K×K cost matrix, where C[i][j] is the cost of deciding j when the truth
- *   is i: argminⱼ Σᵢ P(i | x) C[i][j] (Duda, Hart and Stork, 2001, "Pattern Classification", §2.2).
+ * - `'argmax'`: the class with the highest score (from `score`, $N \times K$; preferred when the model has one) or the
+ *   highest predictive probability.
+ * - `'mode'`: the predictive's mode (its `mode()` method), or the most probable class of a class distribution.
+ * - `{ threshold: t }`: class 1 when $\Pr(y = 1 \mid x) \ge t$ (from a Bernoulli or two-class predictive), or when
+ *   the score ($N$ values, or $N \times 1$) is at least $t$ when the model has no predictive.
+ * - `{ costs: C }`: the Bayes decision under a $K \times K$ cost matrix $\Cmat$, where $C_{ij}$ is the cost of
+ *   deciding $j$ when the truth is $i$: $\argmin_j \sum_i \Pr(i \mid x) C_{ij}$ (Duda, Hart and Stork, 2001, "Pattern
+ *   Classification", §2.2).
  */
 export type DecisionRule =
   'argmax' | 'mode' | { threshold: number } | { costs: Tensor | readonly (readonly number[])[] }
 
 type Decidable = Scores<never> | Predicts<never, Distribution>
 
-/** The argmax class of each row of scores or probabilities [..., K], flattened to [N]. */
+/**
+ * The argmax class of each row of scores or probabilities, flattened to one class per row.
+ *
+ * @param p Scores or probabilities whose last axis is over the $K$ classes.
+ * @returns The index of the largest entry of each row, $N$ values for $N$ rows.
+ */
 function argmaxRows(p: Tensor): Tensor {
   const k = p.shape[p.shape.length - 1]
   return argmax(reshape(p, [sizeOf(p.shape) / k, k]), 1)
 }
 
+/**
+ * A cost matrix as a dense row-major array. Throws `ShapeError` when it is not square.
+ *
+ * @param costs The $K \times K$ costs, as nested arrays (row $i$ the truth) or a matrix tensor.
+ * @returns The $K^2$ costs, row-major, and $K$.
+ */
 function costMatrix(costs: Tensor | readonly (readonly number[])[]): { c: Float64Array; k: number } {
   if (Array.isArray(costs)) {
     const k = costs.length
@@ -56,7 +72,16 @@ function costMatrix(costs: Tensor | readonly (readonly number[])[]): { c: Float6
   return { c: dense.data(t), k: t.shape[0] }
 }
 
-/** The decision function for `rule` on `model`. */
+/**
+ * The decision function for `rule` on `model` (see `DecisionRule`). Throws `DomainError` at once when the rule needs a
+ * predictive the model lacks (`'mode'`, costs); other mismatches (a one-column score under `'argmax'`, a non-class
+ * predictive under a threshold, a cost matrix of the wrong size) throw when the decision is made.
+ *
+ * @param model The model, with `score` or `predictive` (or both).
+ * @param rule How to decide.
+ * @returns A function from inputs to int32 decisions, one per input (the mode's values under `'mode'` for a
+ *   non-class predictive).
+ */
 function decider(model: Decidable, rule: DecisionRule): (x: unknown) => Tensor {
   const predictive = (model as Partial<Predicts<unknown, Distribution>>).predictive?.bind(model)
   const score = (model as Partial<Scores<unknown>>).score?.bind(model)
@@ -132,18 +157,41 @@ function decider(model: Decidable, rule: DecisionRule): (x: unknown) => Tensor {
 
 /**
  * A copy of `model` that also decides, by `rule` (see `DecisionRule`) from its `score` or `predictive`. Decisions are
- * int32 class indices [N].
+ * int32 class indices, one per input (under `'mode'`, a non-class predictive's modes, as they are). An existing
+ * `decide` is replaced.
  *
- * @example const classifier = withDecision(model, { costs: [[0, 1], [5, 0]] }) // a false negative costs 5
+ * @param model The fitted model, with `score` or `predictive`; not modified.
+ * @param rule How to decide: `'argmax'`, `'mode'`, `{ threshold }` or `{ costs }`.
+ * @returns A new model with the same fields and methods and a `decide`.
+ *
+ * @example A false negative that costs five times a false positive lowers the threshold to 1/6
+ * // The inputs are already the probabilities of class 1.
+ * const model = { predictive: (x) => bernoulliPredictive(x) }
+ * const x = tensor([0.1, 0.2, 0.6])
+ * print('threshold 0.5:', withDecision(model, { threshold: 0.5 }).decide(x))
+ * print('costs:', withDecision(model, { costs: [[0, 1], [5, 0]] }).decide(x))
+ *
+ * @example The argmax of scores
+ * const scorer = { score: (x) => x }
+ * print(withDecision(scorer, 'argmax').decide(tensor([[0.1, 2, -1], [3, 0, 0]])))
  */
 export function withDecision<M extends Decidable>(model: M, rule: DecisionRule): M & Decides<InputOf<M>, Tensor> {
   return { ...model, decide: decider(model, rule) } as M & Decides<InputOf<M>, Tensor>
 }
 
 /**
- * A copy of `model` that also gives expectations E[f(y) | x] from its predictive (the mean without `f`): a finite sum
- * for class distributions, Gauss–Hermite quadrature for other univariate laws (see `expectation`). For an ordinal
- * model with an ordered-categorical predictive, `expect(x)` is E[y].
+ * A copy of `model` that also gives expectations $\expect[f(y) \mid x]$ from its predictive (the mean without `f`): a
+ * finite sum for class distributions, Gauss–Hermite quadrature for other univariate laws (see `expectation`). For an
+ * ordinal model with an ordered-categorical predictive, `expect(x)` is $\expect[y]$.
+ *
+ * @param model The fitted model, with `predictive`; not modified.
+ * @returns A new model with the same fields and methods and `expect(x, f)`.
+ *
+ * @example The mean and second moment of a Gaussian predictive
+ * const model = withExpectation({ predictive: (x) => gaussianPredictive(x, full(x.shape, 2)) })
+ * const x = tensor([0, 1])
+ * print('E[y | x]:', model.expect(x))
+ * print('E[y^2 | x] = mean^2 + 4:', model.expect(x, (y) => y * y))
  */
 export function withExpectation<M extends Predicts<never, Distribution>>(model: M): M & Expects<InputOf<M>> {
   const predictive = (model as unknown as Predicts<unknown, Distribution>).predictive.bind(model)
@@ -151,7 +199,19 @@ export function withExpectation<M extends Predicts<never, Distribution>>(model: 
     Expects<InputOf<M>>
 }
 
-/** A copy of `model` that also samples: `sample(s, x, n)` draws from `predictive(x)`. */
+/**
+ * A copy of `model` that also samples: `sample(s, x, n)` draws from `predictive(x)` with the stream `s`, $n$ draws
+ * per input on a new leading axis when $n$ is given, else one.
+ *
+ * @param model The fitted model, with `predictive`; not modified.
+ * @returns A new model with the same fields and methods and `sample(s, x, n)`.
+ *
+ * @example Seeded draws from a Gaussian predictive
+ * const model = withSampling({ predictive: (x) => gaussianPredictive(x, full(x.shape, 0.1)) })
+ * const draws = model.sample(stream(0), tensor([0, 10]), 3)
+ * print('shape:', draws.shape)
+ * print('draws:', draws)
+ */
 export function withSampling<M extends Predicts<never, Distribution>>(model: M): M & Samples<InputOf<M>, Tensor> {
   const predictive = (model as unknown as Predicts<unknown, Distribution>).predictive.bind(model)
   return {
@@ -163,9 +223,13 @@ export function withSampling<M extends Predicts<never, Distribution>>(model: M):
 
 /** Completers a readout may define: each maps the head (and the input) to one output. */
 export type Completers<H, X> = {
+  /** The predictive distribution from the head. */
   predictive?: (head: H, x: X) => Distribution
+  /** The decisions from the head. */
   decide?: (head: H, x: X) => unknown
+  /** The scores from the head. */
   score?: (head: H, x: X) => Tensor
+  /** The transformed inputs from the head. */
   transform?: (head: H, x: X) => unknown
 }
 
@@ -175,15 +239,29 @@ export type ReadoutOf<X, C> = {
 }
 
 /**
- * Complete a model's partial forward pass `forward(x) → head` into new capabilities. `complete` is either a record of
- * completers (`predictive`, `decide`, `score`, `transform`), each `(head, x) => output`, or a single function
- * returning a distribution (short for `{ predictive }`). The result is a new fitted model whose capabilities follow
- * the completers' return types: `readout(m, (h) => bernoulliPredictive(sigmoid(h)))` predicts a Bernoulli, and has no
- * `decide` unless one is given (or added with `withDecision`). Capabilities of `model` with the same names are
- * replaced.
+ * Complete a model's partial forward pass, `forward(x)` returning a head, into new capabilities. `complete` is either
+ * a record of completers (`predictive`, `decide`, `score`, `transform`), each `(head, x) => output`, or a single
+ * function returning a distribution (short for `{ predictive }`). The result is a new fitted model whose capabilities
+ * follow the completers' return types: `readout(m, (h) => bernoulliPredictive(sigmoid(h)))` predicts a Bernoulli, and
+ * has no `decide` unless one is given (or added with `withDecision`). Capabilities of `model` with the same names are
+ * replaced; each call runs `forward` afresh.
  *
- * @example
- * const ordinal = readout(latent, { predictive: (eta) => orderedCategorical(eta, cutpoints) })
+ * @param model The fitted model with `forward`; not modified.
+ * @param complete A function from the head (and the input) to a distribution, or a record of completers.
+ * @returns A new model with the fields and methods of `model` and one method per completer.
+ *
+ * @example A logistic readout of a linear head
+ * const latent = { forward: (x) => sub(mul(x, 2), 1) }
+ * const model = readout(latent, (h) => bernoulliPredictive(map(h, (v) => 1 / (1 + Math.exp(-v)))))
+ * print('heads:', model.forward(tensor([0, 0.5, 2])))
+ * print('P(y = 1 | x):', model.predictive(tensor([0, 0.5, 2])).mean())
+ *
+ * @example Several capabilities from one head
+ * const latent = { forward: (x) => sub(mul(x, 2), 1) }
+ * const model = readout(latent, { score: (h) => h, decide: (h) => map(h, (v) => (v >= 0 ? 1 : 0)) })
+ * print('capabilities:', capabilities(model))
+ * print('scores:', model.score(tensor([0, 0.5, 2])))
+ * print('decisions:', model.decide(tensor([0, 0.5, 2])))
  */
 export function readout<M extends Fitted<never, unknown>, D extends Distribution>(
   model: M,

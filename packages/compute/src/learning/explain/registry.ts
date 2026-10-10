@@ -1,7 +1,7 @@
 /**
- * The registry of `aifn-compute/learning/explain`: attributions (Shapley values, KernelSHAP, TreeSHAP and interaction values,
- * LIME, gradients, DeepLIFT, occlusion), counterfactuals, rules, concepts (TCAV), data attribution, global effects and
- * the evaluation of explanations.
+ * The registry of `aifn-compute/learning/explain`: attributions (Shapley values, KernelSHAP, TreeSHAP and interaction
+ * values, LIME, gradients, DeepLIFT, occlusion), counterfactuals, rules, concepts (TCAV), data attribution, global
+ * effects and the evaluation of explanations.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

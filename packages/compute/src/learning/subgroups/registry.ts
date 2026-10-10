@@ -1,6 +1,7 @@
 /**
- * The registry of `aifn-compute/learning/subgroups`: subgroup discovery as a step-through algorithm (`problem: 'table'`), and
- * the description language, quality measures, SD-Map and the exceptional-model classes as functions.
+ * The registry of `aifn-compute/learning/subgroups`: subgroup discovery as a step-through algorithm
+ * (`problem: 'table'`), and the description language, quality measures, SD-Map and the exceptional-model classes as
+ * functions.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -208,6 +209,7 @@ fn(
   emm.associationModel,
 )
 
+/** The entries of one kind, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const all = { ...subgroups, ...sdmap, ...language, ...quality, ...emm }
 

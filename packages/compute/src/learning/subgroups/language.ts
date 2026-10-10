@@ -4,9 +4,9 @@
  * is the set of rows satisfying every selector, a bitset, so a refinement's cover is its parent's cover AND one
  * selector's cover.
  *
- * Numeric attributes are discretised by cut points: `equal-frequency` (cuts at the 1/b, …, (b − 1)/b quantiles of
- * the column's values, as data values), `equal-width` (b equal intervals of its range), or `on-the-fly`, where the
- * cuts are the equal-frequency cuts of the values inside the description being refined, so a deeper description
+ * Numeric attributes are discretised by cut points: `equal-frequency` (cuts at the $1/b, \dots, (b - 1)/b$ quantiles
+ * of the column's values, as data values), `equal-width` ($b$ equal intervals of its range), or `on-the-fly`, where
+ * the cuts are the equal-frequency cuts of the values inside the description being refined, so a deeper description
  * gets cuts adapted to its own rows (Grosskreutz and Rüping, 2009, "On subgroup discovery in numerical domains").
  *
  * Refinement is canonical: selectors are ordered by attribute and operator, and a description is extended only by
@@ -25,8 +25,11 @@ export type SelectorOp = '=' | '≠' | '≥' | '≤'
 
 /** One test on one attribute. Plain data. */
 export interface Selector {
+  /** The column tested. */
   readonly attribute: string
+  /** The test: `=` or `≠` a level of a nominal attribute, `≥` or `≤` a cut point of a numeric one. */
   readonly op: SelectorOp
+  /** The level or cut point compared with. */
   readonly value: string | number
 }
 
@@ -44,7 +47,7 @@ export interface LanguageOptions {
   nominal?: readonly string[]
   /** Default `equal-frequency`. */
   discretisation?: Discretisation
-  /** Intervals per numeric attribute: b − 1 cut points (default 4). */
+  /** Intervals per numeric attribute, $b$: at most $b - 1$ cut points (default 4). */
   bins?: number
   /** Also generate `≠` selectors for nominal attributes (default false). */
   negations?: boolean
@@ -52,7 +55,9 @@ export interface LanguageOptions {
 
 /** An attribute of the language. */
 export interface LanguageAttribute {
+  /** The column's name in the table. */
   readonly name: string
+  /** Nominal (tested with `=` and `≠`) or numeric (tested with `≥` and `≤`). */
   readonly kind: 'nominal' | 'numeric'
   /** Nominal: the levels, sorted. */
   readonly levels: readonly (string | number)[]
@@ -62,10 +67,15 @@ export interface LanguageAttribute {
 
 /** A description language over a table, with memoised covers. */
 export interface SelectorLanguage {
+  /** The number of rows of the table. */
   readonly rows: number
+  /** The attributes, in the order of the table's columns: the canonical order of selectors. */
   readonly attributes: readonly LanguageAttribute[]
+  /** How numeric attributes get their cut points. */
   readonly discretisation: Discretisation
+  /** The number of intervals per numeric attribute. */
   readonly bins: number
+  /** Whether nominal attributes also get `≠` selectors. */
   readonly negations: boolean
   /** The single-selector descriptions' selectors (the root's refinements), in canonical order. */
   readonly selectors: readonly Selector[]
@@ -83,17 +93,57 @@ export interface SelectorLanguage {
 
 const OPS: readonly SelectorOp[] = ['=', '≠', '≥', '≤']
 
-/** The canonical key of a selector (exact values). */
+/**
+ * The canonical key of a selector, with its value written exactly: two selectors are the same test when their keys
+ * are equal.
+ *
+ * @param s The selector.
+ * @returns The attribute, the operator and the value, separated by spaces.
+ *
+ * @example A nominal and a numeric selector
+ * print(selectorKey({ attribute: 'colour', op: '=', value: 'red' }))
+ * print(selectorKey({ attribute: 'size', op: '≥', value: 3.14159 }))
+ */
 export function selectorKey(s: Selector): string {
   return `${s.attribute} ${s.op} ${s.value}`
 }
 
-/** The canonical key of a description: its selectors' keys joined by ∧ (`∅` for the empty description). */
+/**
+ * The canonical key of a description: its selectors' keys joined by `∧` (`∅` for the empty description). Keys are
+ * equal only for selectors in the same order, so a description built by hand is put in canonical order first
+ * (`language.canonical`).
+ *
+ * @param d The description.
+ * @returns The key, as used to memoise covers and to tell search nodes apart.
+ *
+ * @example A conjunction and the empty description
+ * const d = [
+ *   { attribute: 'colour', op: '=', value: 'red' },
+ *   { attribute: 'size', op: '≥', value: 3.14159 },
+ * ]
+ * print(descriptionKey(d))
+ * print(descriptionKey([]))
+ */
 export function descriptionKey(d: Description): string {
   return d.length ? d.map(selectorKey).join(' ∧ ') : '∅'
 }
 
-/** A description for display: numeric cut points to `digits` significant digits; `everything` for the empty one. */
+/**
+ * A description for display: numeric cut points to `digits` significant digits; `everything` for the empty one.
+ *
+ * @param d The description.
+ * @param digits The significant digits of numeric values.
+ * @returns The selectors joined by `∧`.
+ *
+ * @example Cut points rounded for display
+ * const d = [
+ *   { attribute: 'colour', op: '=', value: 'red' },
+ *   { attribute: 'size', op: '≥', value: 3.14159 },
+ * ]
+ * print(formatDescription(d))
+ * print(formatDescription(d, 1))
+ * print(formatDescription([]))
+ */
 export function formatDescription(d: Description, digits = 3): string {
   if (!d.length) return 'everything'
   return d
@@ -101,15 +151,42 @@ export function formatDescription(d: Description, digits = 3): string {
     .join(' ∧ ')
 }
 
-/** True when `s` may join `d` (at most one selector per attribute and operator; nothing beside an `=`). */
+/**
+ * True when `s` may join `d` (at most one selector per attribute and operator; nothing beside an `=`). It does not
+ * check that a `≥` and a `≤` on one attribute leave a non-empty interval.
+ *
+ * @param d The description to extend.
+ * @param s The selector to add.
+ * @returns Whether the conjunction is in the language.
+ *
+ * @example An interval is allowed, a second lower bound or a test beside an equality is not
+ * const d = [{ attribute: 'size', op: '≥', value: 3 }]
+ * print('size <= 5:', compatibleSelector(d, { attribute: 'size', op: '≤', value: 5 }))
+ * print('size >= 4:', compatibleSelector(d, { attribute: 'size', op: '≥', value: 4 }))
+ * const red = [{ attribute: 'colour', op: '=', value: 'red' }]
+ * print('colour != blue:', compatibleSelector(red, { attribute: 'colour', op: '≠', value: 'blue' }))
+ */
 export function compatibleSelector(d: Description, s: Selector): boolean {
   for (const p of d) if (p.attribute === s.attribute && (p.op === s.op || p.op === '=' || s.op === '=')) return false
   return true
 }
 
+/**
+ * A column's values as an array: a tensor flattened, an array as it is.
+ *
+ * @param c The column.
+ * @returns Its values in row order.
+ */
 const values = (c: Column): readonly (string | number)[] => (isTensor(c) ? toFlat(c) : c)
 
-/** Equal-frequency cut points of finite values (data values; neither the minimum nor the maximum). */
+/**
+ * Equal-frequency cut points of finite values (data values; neither the minimum nor the maximum): the value at
+ * position $\lfloor jm/b \rfloor$ for $j = 1, \dots, b - 1$, with repeats dropped.
+ *
+ * @param sortedValues The $m$ values, finite and in ascending order.
+ * @param bins The number of intervals $b$.
+ * @returns The distinct cut points, ascending (none for no values).
+ */
 function equalFrequency(sortedValues: ArrayLike<number>, bins: number): number[] {
   const m = sortedValues.length
   if (m === 0) return []
@@ -121,6 +198,13 @@ function equalFrequency(sortedValues: ArrayLike<number>, bins: number): number[]
   return out
 }
 
+/**
+ * Equal-width cut points: $b - 1$ points splitting the range of the values into $b$ equal intervals.
+ *
+ * @param sortedValues The values, finite and in ascending order.
+ * @param bins The number of intervals $b$.
+ * @returns The cut points, ascending (none when there are no values or they are all equal).
+ */
 function equalWidth(sortedValues: ArrayLike<number>, bins: number): number[] {
   const m = sortedValues.length
   if (m === 0) return []
@@ -130,7 +214,21 @@ function equalWidth(sortedValues: ArrayLike<number>, bins: number): number[] {
   return Array.from({ length: bins - 1 }, (_, j) => lo + ((j + 1) * (hi - lo)) / bins)
 }
 
-/** Cut points of `xs` by a fixed method (NaN values ignored). */
+/**
+ * Cut points of `xs` by a fixed method (values that are not finite are ignored). Throws `DomainError` unless `bins` is
+ * an integer of at least 1.
+ *
+ * @param xs The values of a numeric column, in any order.
+ * @param bins The number of intervals $b$: at most $b - 1$ cut points.
+ * @param method `equal-frequency` (data values at the $j/b$ quantiles, neither the minimum nor the maximum, repeats
+ *   dropped) or `equal-width` (equal intervals of the range).
+ * @returns The cut points, ascending.
+ *
+ * @example Four intervals of 1 to 8, by either method
+ * const xs = [8, 1, 7, 2, 6, 3, 5, 4]
+ * print('equal-frequency:', cutPoints(xs, 4, 'equal-frequency'))
+ * print('equal-width:', cutPoints(xs, 4, 'equal-width'))
+ */
 export function cutPoints(xs: ArrayLike<number>, bins: number, method: 'equal-frequency' | 'equal-width'): number[] {
   if (!(Number.isInteger(bins) && bins >= 1))
     throw new DomainError('cutPoints', 'cutPoints: bins must be an integer ≥ 1')
@@ -140,7 +238,27 @@ export function cutPoints(xs: ArrayLike<number>, bins: number, method: 'equal-fr
 
 /**
  * The description language of a table: every column not excluded is an attribute (a tensor or a numeric array is
- * numeric unless listed in `nominal`; a string array is nominal).
+ * numeric unless listed in `nominal`; any other array is nominal, its distinct values the levels). Throws `DomainError`
+ * when no column is left or the columns differ in length; asking for the cover of a selector on an unknown attribute
+ * throws too.
+ *
+ * @param table The table, a column per name; the target columns go in `options.exclude`.
+ * @param options The columns to exclude or treat as nominal, the discretisation and number of intervals of numeric
+ *   attributes, and whether to generate `≠` selectors.
+ * @returns The language: its attributes and single selectors, covers (memoised), and the canonical refinement operator.
+ *
+ * @example A colour and a size: the selectors, and a description's cover
+ * const table = {
+ *   colour: ['red', 'red', 'blue', 'blue', 'green', 'green'],
+ *   size: [1, 2, 3, 4, 5, 6],
+ *   bought: [1, 1, 0, 0, 1, 0],
+ * }
+ * const language = selectorLanguage(table, { exclude: ['bought'], bins: 3 })
+ * print('selectors:', language.selectors.map(selectorKey))
+ * const d = [{ attribute: 'size', op: '≥', value: 3 }]
+ * print('rows of size >= 3:', bitsetIndices(language.cover(d)))
+ * print('its refinements:', language.refinements(d).map(descriptionKey))
+ * print('refinements of colour = blue:', language.refinements([language.selectors[0]]).map(descriptionKey))
  */
 export function selectorLanguage(table: Table, options: LanguageOptions = {}): SelectorLanguage {
   const discretisation = options.discretisation ?? 'equal-frequency'

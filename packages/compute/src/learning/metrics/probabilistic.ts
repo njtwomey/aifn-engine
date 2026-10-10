@@ -1,8 +1,14 @@
 /**
  * Metrics of predicted probabilities and predictive distributions: log loss, the Brier score and Murphy's
  * decomposition, the spherical score, calibration errors (ECE, MCE, RMS, debiased squared, classwise, confidence,
- * sweep) with reliability diagrams and consistency bars, CRPS (Gaussian and ensemble), the Gaussian log score,
- * interval scores, coverage and PIT values, and perplexity.
+ * sweep) with reliability diagrams and consistency bars, CRPS (Gaussian and ensemble), the log score of any
+ * predictive and of a Gaussian forecast, interval scores, coverage and PIT values, and perplexity.
+ *
+ * Probabilities are a vector of $\pr(\text{positive})$ for a binary problem, or an $n \times K$ matrix whose columns
+ * follow the sorted classes (or `labels`). The scores are losses, averaged over cases, and are proper scoring rules
+ * (Gneiting and Raftery, 2007); the calibration errors are not, and depend on the binning, so report `bins` and
+ * `strategy` with them. Logarithms are natural, so log scores are in nats. Inputs of different lengths throw
+ * `ShapeError`, and an empty input `DomainError`.
  */
 
 import { type Stream, uniform } from 'aifn-compute/foundation/random'
@@ -31,9 +37,13 @@ import {
 } from './core'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** Probabilities: a vector of P(positive) for a binary problem, or an n × K matrix whose columns follow `labels`. */
+/**
+ * Probabilities: a vector of $\pr(\text{positive})$ for a binary problem, or an $n \times K$ matrix whose columns
+ * follow `labels`.
+ */
 export type Probabilities = Data | Rows
 
+/** Options shared by the metrics of class probabilities. */
 type ProbabilityOptions = {
   /** Binary: the positive class. */
   positive?: Label
@@ -41,7 +51,18 @@ type ProbabilityOptions = {
   labels?: readonly Label[]
 }
 
-/** The probability each case gave to its true class, and the full rows, for binary or multiclass input. */
+/**
+ * The probability each case gave to its true class, and the full rows, for binary or multiclass input. A binary vector
+ * $p$ becomes rows $(1 - p, p)$. Throws `ShapeError` for mismatched lengths or a column count other than the number of
+ * classes, and `DomainError` for an empty input or a label not among the classes.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, or an $n \times K$ matrix of class probabilities.
+ * @param options The positive class (binary) or the classes in column order (matrix).
+ * @param what The caller's name, for error messages.
+ * @returns `n` cases, `K` classes, the row-major $n \times K$ `rows`, each case's true-class `index`, and whether the
+ *   input was `binary`.
+ */
 function probabilityRows(yTrue: Labels, probabilities: Probabilities, options: ProbabilityOptions, what: string) {
   if (!isMatrixLike(probabilities)) {
     const { y } = binaryTruth(yTrue, options.positive)
@@ -68,8 +89,22 @@ function probabilityRows(yTrue: Labels, probabilities: Probabilities, options: P
 }
 
 /**
- * Log loss (cross-entropy), −(1/n) Σ log q_{i,yᵢ} in nats (log-loss-and-brier-score). Probabilities are not clipped:
- * a probability of 0 for an observed class gives +∞. Pass `eps` to clip to [eps, 1 − eps] as some libraries do.
+ * Log loss (cross-entropy), $-\frac{1}{n} \sum_i \log q_{i, y_i}$ in nats (log-loss-and-brier-score), as
+ * scikit-learn's `log_loss`. Probabilities are not clipped: a probability of 0 for an observed class gives
+ * $+\infty$. Pass `eps` to clip to $[\epsilon, 1 - \epsilon]$ as some libraries do. Rows are not renormalised.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, or an $n \times K$ matrix of class probabilities.
+ * @param options `positive` (binary), `labels` (the classes in column order), and `eps`, the clipping $\epsilon$.
+ * @returns The mean negative log probability of the true class, in nats.
+ *
+ * @example Class probabilities (the scikit-learn example)
+ * print(logLoss(['spam', 'ham', 'ham', 'spam'], [[0.1, 0.9], [0.9, 0.1], [0.8, 0.2], [0.35, 0.65]]))
+ *
+ * @example A certain mistake costs infinitely much, unless clipped
+ * print('binary =', logLoss([1, 0], [0.9, 0.2]))
+ * print('certain and wrong =', logLoss([1, 0], [0.9, 1]))
+ * print('clipped at 1e-15 =', logLoss([1, 0], [0.9, 1], { eps: 1e-15 }))
  */
 export const logLoss = defineMetric(
   {
@@ -95,9 +130,19 @@ export const logLoss = defineMetric(
 )
 
 /**
- * The Brier score (Brier 1950). For a vector of binary probabilities, the mean squared error (1/n) Σ (pᵢ − yᵢ)² (the
- * form libraries report); for an n × K matrix, Brier's original (1/n) Σᵢ Σₖ (qᵢₖ − 1[yᵢ = k])², twice the binary form
- * for two classes (log-loss-and-brier-score).
+ * The Brier score (Brier, 1950). For a vector of binary probabilities, the mean squared error
+ * $\frac{1}{n} \sum_i (p_i - y_i)^2$ (the form libraries report, as scikit-learn's `brier_score_loss`); for an
+ * $n \times K$ matrix, Brier's original $\frac{1}{n} \sum_i \sum_k (q_{ik} - \indicator[y_i = k])^2$, twice the binary
+ * form for two classes (log-loss-and-brier-score).
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, or an $n \times K$ matrix of class probabilities.
+ * @param options `positive` (binary) or `labels` (the classes in column order).
+ * @returns The Brier score: in $[0, 1]$ for a vector, $[0, 2]$ for a matrix.
+ *
+ * @example Binary (the scikit-learn example), and the same forecasts as two columns
+ * print('vector =', brierScore([0, 1, 1, 0], [0.1, 0.9, 0.8, 0.3]))
+ * print('matrix =', brierScore([0, 1, 1, 0], [[0.9, 0.1], [0.1, 0.9], [0.2, 0.8], [0.7, 0.3]]))
  */
 export const brierScore = defineMetric(
   {
@@ -122,8 +167,18 @@ export const brierScore = defineMetric(
 )
 
 /**
- * The spherical score as a loss, 1 − q_y/‖q‖, averaged over cases (proper-scoring-rule): strictly proper by the
- * Cauchy–Schwarz inequality.
+ * The spherical score as a loss, $1 - q_y / \lVert \qvec \rVert$, averaged over cases (proper-scoring-rule): strictly
+ * proper by the Cauchy–Schwarz inequality.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, or an $n \times K$ matrix of class probabilities.
+ * @param options `positive` (binary) or `labels` (the classes in column order).
+ * @returns The mean loss, in $[0, 1]$: 0 for certainty in the true class.
+ *
+ * @example Certain, confident and unsure forecasts of the positive class
+ * print('certain =', sphericalScore([1], [1]))
+ * print('0.8 =', sphericalScore([1], [0.8]))
+ * print('0.5 =', sphericalScore([1], [0.5]))
  */
 export const sphericalScore = defineMetric(
   {
@@ -154,21 +209,33 @@ export const sphericalScore = defineMetric(
 export type BinStrategy = 'uniform' | 'quantile'
 
 /**
- * A reliability diagram as a binned `Curve` (no thresholds): per bin, `x` the mean prediction p̄ₘ against `y` the
- * observed frequency ȳₘ of the event. Empty bins hold NaN.
+ * A reliability diagram as a binned `Curve` (no thresholds): per bin $m$, `x` the mean prediction $\bar{p}_m$
+ * against `y` the observed frequency $\bar{y}_m$ of the event. Empty bins hold NaN.
  */
 export type ReliabilityDiagram = Curve<'reliability'> & {
-  /** Bin edges (length M + 1). Equal-mass bins report the smallest prediction of each bin and 1 as the last edge. */
+  /**
+   * Bin edges ($M + 1$ values). Equal-mass bins report the smallest prediction of each bin and 1 as the last edge
+   * (NaN for an empty bin).
+   */
   readonly edges: Tensor
   /** Cases in each bin. */
   readonly counts: Tensor
-  /** ȳₘ − p̄ₘ. */
+  /** $\bar{y}_m - \bar{p}_m$ per bin. */
   readonly gap: Tensor
-  /** The binned ECE, Σ (nₘ/n)|ȳₘ − p̄ₘ|. */
+  /** The binned ECE, $\sum_m (n_m / n) \lvert \bar{y}_m - \bar{p}_m \rvert$. */
   readonly ece: number
 }
 
-/** Bin index of each prediction, and the bin edges. */
+/**
+ * Bin index of each prediction, and the bin edges. A `bins` that is not a positive integer, or with `uniform` bins a
+ * prediction outside $[0, 1]$, throws `DomainError`.
+ *
+ * @param p The predictions.
+ * @param bins The number of bins $M$.
+ * @param strategy `uniform`: bins $[k/M, (k + 1)/M)$, the last closed at 1. `quantile`: the case of rank $r$ (ties by
+ *   position) goes to bin $\lfloor rM/n \rfloor$.
+ * @returns The bin of each prediction, and the $M + 1$ edges.
+ */
 function binAssignments(p: Float64Array, bins: number, strategy: BinStrategy): { bin: Int32Array; edges: number[] } {
   if (!(bins >= 1 && Number.isInteger(bins)))
     throw new DomainError('metrics', 'metrics: bins must be a positive integer')
@@ -194,7 +261,16 @@ function binAssignments(p: Float64Array, bins: number, strategy: BinStrategy): {
   return { bin, edges }
 }
 
-/** Per-bin counts, mean predictions and event frequencies. */
+/**
+ * Per-bin counts, mean predictions and event frequencies (NaN for an empty bin).
+ *
+ * @param y The outcomes, 0/1 per case.
+ * @param p The predictions, one per case.
+ * @param bins The number of bins $M$.
+ * @param strategy How the predictions are binned.
+ * @returns The `counts`, mean prediction `meanP` and frequency `freq` of each bin, the `edges`, the number of cases
+ *   `n` and the `bin` of each case.
+ */
 function binStatistics(y: ArrayLike<number>, p: Float64Array, bins: number, strategy: BinStrategy) {
   const { bin, edges } = binAssignments(p, bins, strategy)
   const counts = new Float64Array(bins)
@@ -210,8 +286,9 @@ function binStatistics(y: ArrayLike<number>, p: Float64Array, bins: number, stra
   return { counts, meanP, freq, edges, n: p.length, bin }
 }
 
+/** Options of the binned calibration errors of binary probabilities. */
 type CalibrationOptions = {
-  /** Number of bins M (default 10). */
+  /** Number of bins $M$ (default 10). */
   bins?: number
   /** `uniform` (default) or `quantile` (equal-mass). */
   strategy?: BinStrategy
@@ -221,7 +298,22 @@ type CalibrationOptions = {
 
 /**
  * The reliability diagram of binary probabilities (reliability-diagrams-and-consistency-bars; Murphy and Winkler
- * 1977): predictions binned into M bins, and for each bin the mean prediction p̄ₘ and the fraction of positives ȳₘ.
+ * 1977): predictions binned into $M$ bins, and for each bin the mean prediction $\bar{p}_m$ and the fraction of
+ * positives $\bar{y}_m$.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `bins`, the number of bins $M$ (default 10); `strategy`, `uniform` (default) or `quantile`; and
+ *   `positive`, the positive class.
+ * @returns The diagram: mean predictions against frequencies, with the edges, counts and gaps of the bins and the
+ *   binned ECE.
+ *
+ * @example Two bins
+ * const yTrue = [0, 0, 1, 0, 1, 1, 1, 1]
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * const d = reliabilityDiagram(yTrue, probs, { bins: 2 })
+ * print('mean prediction =', d.x, ' frequency =', d.y)
+ * print('counts =', d.counts, ' ECE =', d.ece)
  */
 export function reliabilityDiagram(
   yTrue: Labels,
@@ -249,7 +341,16 @@ export function reliabilityDiagram(
   }
 }
 
-/** Binned calibration error of binary probabilities with an Lʳ norm over bins (r = 1: ECE, 2: RMS, ∞: MCE). */
+/**
+ * Binned calibration error of binary probabilities with an $L^r$ norm over bins ($r = 1$: ECE, 2: RMS, $\infty$:
+ * MCE). Empty bins are skipped.
+ *
+ * @param y The outcomes, 0/1 per case.
+ * @param p The predictions, one per case.
+ * @param o The binning: `bins` (default 10) and `strategy` (default `uniform`).
+ * @param norm The norm $r$: 1, 2 or `max`.
+ * @returns The calibration error.
+ */
 function binnedCalibrationError(y: ArrayLike<number>, p: Float64Array, o: CalibrationOptions, norm: 1 | 2 | 'max') {
   const s = binStatistics(y, p, o.bins ?? 10, o.strategy ?? 'uniform')
   let total = 0
@@ -262,6 +363,15 @@ function binnedCalibrationError(y: ArrayLike<number>, p: Float64Array, o: Calibr
   return norm === 2 ? Math.sqrt(total) : total
 }
 
+/**
+ * Binary truth and predictions, checked to have the same non-zero length.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities The predicted probabilities of the positive class.
+ * @param positive The positive class; left out, chosen by `positiveOf`.
+ * @param what The caller's name, for error messages.
+ * @returns The 0/1 truth `y` and the predictions `p`.
+ */
 function binaryInputs(yTrue: Labels, probabilities: Data, positive: Label | undefined, what: string) {
   const { y } = binaryTruth(yTrue, positive)
   const p = values(probabilities)
@@ -270,6 +380,14 @@ function binaryInputs(yTrue: Labels, probabilities: Data, positive: Label | unde
   return { y, p }
 }
 
+/**
+ * The registry metadata shared by the calibration errors: stable, of probabilities, lower is better, range $[0, 1]$.
+ *
+ * @param key The metric's key, its export name.
+ * @param name The metric's display name.
+ * @param note The slug of the note that defines it.
+ * @returns The metric's spec, for `defineMetric`.
+ */
 const calibrationInfo = (key: string, name: string, note = 'calibration-error') =>
   ({
     key,
@@ -283,8 +401,20 @@ const calibrationInfo = (key: string, name: string, note = 'calibration-error') 
   }) as const
 
 /**
- * The expected calibration error of binary probabilities, Σₘ (|Bₘ|/n)|ȳ(Bₘ) − p̄(Bₘ)| over M bins (Naeini et al.
+ * The expected calibration error of binary probabilities,
+ * $\sum_m (\lvert B_m \rvert / n) \lvert \bar{y}(B_m) - \bar{p}(B_m) \rvert$ over $M$ bins $B_m$ (Naeini et al.,
  * 2015). Depends on the binning: report `bins` and `strategy`.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `bins`, the number of bins $M$ (default 10); `strategy`, `uniform` (default) or `quantile`; and
+ *   `positive`, the positive class.
+ * @returns The ECE, in $[0, 1]$.
+ *
+ * @example Two bins: calibrated below 0.5, under-confident above
+ * const yTrue = [0, 0, 1, 0, 1, 1, 1, 1]
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * print(expectedCalibrationError(yTrue, probs, { bins: 2 }))
  */
 export const expectedCalibrationError = defineMetric(
   calibrationInfo('expectedCalibrationError', 'Expected calibration error'),
@@ -294,7 +424,21 @@ export const expectedCalibrationError = defineMetric(
   },
 )
 
-/** The maximum calibration error: the largest bin gap maxₘ |ȳₘ − p̄ₘ| over non-empty bins (Naeini et al. 2015). */
+/**
+ * The maximum calibration error: the largest bin gap $\max_m \lvert \bar{y}_m - \bar{p}_m \rvert$ over non-empty bins
+ * (Naeini et al., 2015).
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `bins`, the number of bins $M$ (default 10); `strategy`, `uniform` (default) or `quantile`; and
+ *   `positive`, the positive class.
+ * @returns The MCE, in $[0, 1]$.
+ *
+ * @example The worse of two bins
+ * const yTrue = [0, 0, 1, 0, 1, 1, 1, 1]
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * print(maximumCalibrationError(yTrue, probs, { bins: 2 }))
+ */
 export const maximumCalibrationError = defineMetric(
   calibrationInfo('maximumCalibrationError', 'Maximum calibration error'),
   (yTrue: Labels, probabilities: Data, options: CalibrationOptions = {}): number => {
@@ -303,7 +447,21 @@ export const maximumCalibrationError = defineMetric(
   },
 )
 
-/** The RMS (L²) calibration error, √(Σₘ (nₘ/n)(ȳₘ − p̄ₘ)²) (Kumar et al. 2019), the plug-in CE₂. */
+/**
+ * The RMS ($L^2$) calibration error, $\sqrt{\sum_m (n_m / n)(\bar{y}_m - \bar{p}_m)^2}$ (Kumar et al., 2019), the
+ * plug-in $\mathrm{CE}_2$.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `bins`, the number of bins $M$ (default 10); `strategy`, `uniform` (default) or `quantile`; and
+ *   `positive`, the positive class.
+ * @returns The RMS calibration error, in $[0, 1]$.
+ *
+ * @example Two bins
+ * const yTrue = [0, 0, 1, 0, 1, 1, 1, 1]
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * print(rmsCalibrationError(yTrue, probs, { bins: 2 }))
+ */
 export const rmsCalibrationError = defineMetric(
   calibrationInfo('rmsCalibrationError', 'RMS calibration error', 'estimating-calibration-error'),
   (yTrue: Labels, probabilities: Data, options: CalibrationOptions = {}): number => {
@@ -313,9 +471,22 @@ export const rmsCalibrationError = defineMetric(
 )
 
 /**
- * The debiased squared calibration error (Kumar et al. 2019; estimating-calibration-error):
- * Σₘ (nₘ/n)[(ȳₘ − p̄ₘ)² − ȳₘ(1 − ȳₘ)/(nₘ − 1)], an estimate of CE₂² with the binomial noise of each bin subtracted.
- * It can be negative; bins with one case contribute nothing to the correction. Default equal-mass bins.
+ * The debiased squared calibration error (Kumar et al., 2019; estimating-calibration-error):
+ * $\sum_m (n_m / n) [(\bar{y}_m - \bar{p}_m)^2 - \bar{y}_m (1 - \bar{y}_m) / (n_m - 1)]$, an estimate of
+ * $\mathrm{CE}_2^2$ with the binomial noise of each bin subtracted. It can be negative; bins with one case contribute
+ * nothing to the correction. Default equal-mass bins.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `bins`, the number of bins $M$ (default 10); `strategy`, `quantile` (default) or `uniform`; and
+ *   `positive`, the positive class.
+ * @returns The debiased estimate of the squared calibration error.
+ *
+ * @example Small bins: the noise correction can make it negative
+ * const yTrue = [0, 0, 1, 0, 1, 1, 1, 1]
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * print('debiased =', debiasedSquaredCalibrationError(yTrue, probs, { bins: 4 }))
+ * print('plug-in =', rmsCalibrationError(yTrue, probs, { bins: 4, strategy: 'quantile' }) ** 2)
  */
 export const debiasedSquaredCalibrationError = defineMetric(
   {
@@ -340,8 +511,19 @@ export const debiasedSquaredCalibrationError = defineMetric(
 )
 
 /**
- * ECE_sweep (Roelofs et al. 2022): equal-mass bins, with the largest number of bins (up to `maxBins`, default n) for
- * which the bin frequencies are still non-decreasing.
+ * $\mathrm{ECE}_{\mathrm{sweep}}$ (Roelofs et al., 2022): equal-mass bins, with the largest number of bins (up to
+ * `maxBins`, default $n$) for which the bin frequencies are still non-decreasing. The bin counts are tried in turn
+ * from 1, so the cost grows with $n^2 \log n$.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `maxBins`, the most bins to try (default $n$), and `positive`, the positive class.
+ * @returns The ECE with equal-mass bins at the chosen count.
+ *
+ * @example Five bins are the most that stay monotone
+ * const yTrue = [0, 0, 1, 0, 1, 1, 1, 1]
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * print(sweepCalibrationError(yTrue, probs))
  */
 export const sweepCalibrationError = defineMetric(
   calibrationInfo('sweepCalibrationError', 'ECE sweep', 'estimating-calibration-error'),
@@ -360,8 +542,19 @@ export const sweepCalibrationError = defineMetric(
 )
 
 /**
- * Confidence (top-label) ECE for multiclass probabilities (Guo et al. 2017): bin the largest probability of each case
- * and compare it with the accuracy of the predicted class in each bin.
+ * Confidence (top-label) ECE for multiclass probabilities (Guo et al., 2017): bin the largest probability of each case
+ * and compare it with the accuracy of the predicted class in each bin. Of tied largest probabilities the first class
+ * is predicted.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities An $n \times K$ matrix of class probabilities (a binary vector is read as two columns).
+ * @param options `bins` and `strategy` as for `expectedCalibrationError`, and `labels`, the classes in column order.
+ * @returns The confidence ECE, in $[0, 1]$.
+ *
+ * @example Three classes
+ * const yTrue = [0, 1, 2, 2]
+ * const probs = [[0.8, 0.1, 0.1], [0.3, 0.6, 0.1], [0.2, 0.2, 0.6], [0.5, 0.3, 0.2]]
+ * print(confidenceCalibrationError(yTrue, probs))
  */
 export const confidenceCalibrationError = defineMetric(
   calibrationInfo('confidenceCalibrationError', 'Confidence ECE'),
@@ -380,8 +573,18 @@ export const confidenceCalibrationError = defineMetric(
 )
 
 /**
- * Classwise ECE (Kull et al. 2019): the binary ECE of each class's probability column against "is this class",
- * averaged over the K classes.
+ * Classwise ECE (Kull et al., 2019): the binary ECE of each class's probability column against "is this class",
+ * averaged over the $K$ classes.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities An $n \times K$ matrix of class probabilities.
+ * @param options `bins` and `strategy` as for `expectedCalibrationError`, and `labels`, the classes in column order.
+ * @returns The classwise ECE, in $[0, 1]$.
+ *
+ * @example Three classes
+ * const yTrue = [0, 1, 2, 2]
+ * const probs = [[0.8, 0.1, 0.1], [0.3, 0.6, 0.1], [0.2, 0.2, 0.6], [0.5, 0.3, 0.2]]
+ * print(classwiseCalibrationError(yTrue, probs))
  */
 export const classwiseCalibrationError = defineMetric(
   calibrationInfo('classwiseCalibrationError', 'Classwise ECE'),
@@ -398,9 +601,21 @@ export const classwiseCalibrationError = defineMetric(
 )
 
 /**
- * Consistency bars (Bröcker and Smith 2007): for each bin of a reliability diagram, the central `level` interval
+ * Consistency bars (Bröcker and Smith, 2007): for each bin of a reliability diagram, the central `level` interval
  * (default 0.9) of the observed frequency that a calibrated model would produce, from `resamples` (default 1000)
- * redraws of every label from Bernoulli(pᵢ) with the stream.
+ * redraws of every label from $\Bern(p_i)$ with the stream. Empty bins hold NaN.
+ *
+ * @param s The random stream the labels are redrawn from; it is advanced.
+ * @param probabilities The predicted probabilities $p_i$, each in $[0, 1]$.
+ * @param options `bins` and `strategy`, the binning of `reliabilityDiagram` (default 10 `uniform` bins);
+ *   `resamples`, the number of redraws; and `level`, the coverage of each bar.
+ * @returns Per bin, the `lower` and `upper` ends of the bar and the mean prediction `meanPredicted`.
+ *
+ * @example Bars for two bins
+ * const probs = [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9]
+ * const bars = consistencyBars(stream(0), probs, { bins: 2, resamples: 200 })
+ * print('mean prediction =', bars.meanPredicted)
+ * print('lower =', bars.lower, ' upper =', bars.upper)
  */
 export function consistencyBars(
   s: Stream,
@@ -435,22 +650,39 @@ export function consistencyBars(
 
 /** Murphy's decomposition of the binary Brier score. */
 export type BrierDecomposition = {
+  /** The Brier score, $\frac{1}{n} \sum_i (p_i - y_i)^2$. */
   brier: number
+  /** How far each group's forecast is from its outcome frequency (lower is better). */
   reliability: number
+  /** How far the groups' outcome frequencies are from the base rate (higher is better). */
   resolution: number
+  /** The variance $\bar{o}(1 - \bar{o})$ of the outcomes, which no forecast changes. */
   uncertainty: number
   /**
-   * brier − (reliability − resolution + uncertainty): zero when the forecasts are grouped by their distinct values,
-   * and the within-bin variance terms when bins pool different forecasts.
+   * $\mathrm{brier} - (\mathrm{reliability} - \mathrm{resolution} + \mathrm{uncertainty})$: zero when the forecasts
+   * are grouped by their distinct values, and the within-bin variance terms when bins pool different forecasts.
    */
   residual: number
 }
 
 /**
- * Murphy's decomposition of the binary Brier score (Murphy 1973; log-loss-and-brier-score):
- * Brier = reliability − resolution + uncertainty, with reliability (1/n) Σ_b n_b(f_b − ō_b)², resolution
- * (1/n) Σ_b n_b(ō_b − ō)² and uncertainty ō(1 − ō). Without `bins`, forecasts are grouped by distinct value and the
- * identity is exact; with `bins`, f_b is each bin's mean forecast and `residual` reports what the bins leave out.
+ * Murphy's decomposition of the binary Brier score (Murphy, 1973; log-loss-and-brier-score):
+ * $\mathrm{Brier} = \mathrm{reliability} - \mathrm{resolution} + \mathrm{uncertainty}$, with reliability
+ * $\frac{1}{n} \sum_b n_b (f_b - \bar{o}_b)^2$, resolution $\frac{1}{n} \sum_b n_b (\bar{o}_b - \bar{o})^2$ and
+ * uncertainty $\bar{o}(1 - \bar{o})$. Without `bins`, forecasts are grouped by distinct value and the identity is
+ * exact; with `bins`, $f_b$ is each bin's mean forecast and `residual` reports what the bins leave out.
+ *
+ * @param yTrue The true labels.
+ * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
+ * @param options `bins`, the number of equal-width bins on $[0, 1]$ (left out: group by distinct forecast), and
+ *   `positive`, the positive class.
+ * @returns The Brier score, its three terms and the residual.
+ *
+ * @example Two distinct forecasts: the identity is exact
+ * print(brierDecomposition([0, 1, 1, 0], [0.25, 0.75, 0.75, 0.25]))
+ *
+ * @example Bins pool different forecasts, and the residual shows it
+ * print(brierDecomposition([0, 1, 1, 0, 1], [0.1, 0.7, 0.9, 0.3, 0.8], { bins: 2 }))
  */
 export function brierDecomposition(
   yTrue: Labels,
@@ -489,6 +721,15 @@ export function brierDecomposition(
 /** A value per case, or one value shared by all cases. */
 export type PerCase = Data | number
 
+/**
+ * A value per case as a Float64Array of length `n`: a number is repeated, data is checked against `n` (`ShapeError`),
+ * and a traced value throws `DomainError`.
+ *
+ * @param x One number for every case, or one value per case.
+ * @param n The number of cases.
+ * @param what The caller's name, for error messages.
+ * @returns The $n$ values.
+ */
 function perCase(x: PerCase | Value, n: number, what: string): Float64Array {
   if (typeof x === 'number') return new Float64Array(n).fill(x)
   if (isTraced(x)) throw new DomainError('metrics', `metrics: ${what}: traced values are not accepted`)
@@ -499,14 +740,28 @@ function perCase(x: PerCase | Value, n: number, what: string): Float64Array {
 
 /**
  * A Gaussian forecast per case: means and standard deviations, or a model's predictive `Normal` distribution (the
- * `predictive` capability, as `evaluate` passes it), batch shape [n].
+ * `predictive` capability, as `evaluate` passes it), batch shape $[n]$.
  */
 export type GaussianForecast = { mean: PerCase; sd: PerCase } | Distribution
 
+/**
+ * True for a distribution object (its `kind` is `distribution`).
+ *
+ * @param x Any value.
+ * @returns Whether `x` is a distribution.
+ */
 const isDistribution = (x: unknown): x is Distribution =>
   typeof x === 'object' && x !== null && (x as { kind?: unknown }).kind === 'distribution'
 
-/** The means and standard deviations of a Gaussian forecast for n cases; a predictive must be a `Normal`. */
+/**
+ * The means and standard deviations of a Gaussian forecast for $n$ cases; a predictive must be a `Normal`, or
+ * `DomainError` is thrown.
+ *
+ * @param f The forecast: `mean` and `sd`, or a `Normal` predictive.
+ * @param n The number of cases.
+ * @param what The caller's name, for error messages.
+ * @returns The mean `mu` and standard deviation `sd` of each case.
+ */
 function gaussianMoments(f: GaussianForecast, n: number, what: string): { mu: Float64Array; sd: Float64Array } {
   if (isDistribution(f)) {
     if (f.name !== 'Normal')
@@ -520,10 +775,25 @@ function gaussianMoments(f: GaussianForecast, n: number, what: string): { mu: Fl
 }
 
 /**
- * The log score of any predictive distribution, −(1/n) Σ log p(yᵢ) (a density for continuous predictives, a mass for
- * discrete ones), in nats: the proper scoring rule behind log loss and the Gaussian log score (Gneiting and Raftery
- * 2007, §4.1), read from the model's `predictive` through `logProb`. The predictive's batch is the n cases; for a
- * categorical predictive, y holds class indices.
+ * The log score of any predictive distribution, $-\frac{1}{n} \sum_i \log p(y_i)$ (a density for continuous
+ * predictives, a mass for discrete ones), in nats: the proper scoring rule behind log loss and the Gaussian log score
+ * (Gneiting and Raftery, 2007, §4.1), read from the model's `predictive` through `logProb`. The predictive's batch is
+ * the $n$ cases; for a categorical predictive, $y$ holds class indices. Anything but a distribution throws
+ * `DomainError`.
+ *
+ * @param yTrue The observations $y_i$, one per case.
+ * @param predictive The predictive distribution: any object of kind `distribution` whose `logProb` of the vector of
+ *   observations gives one log density (or mass) per case.
+ * @returns The mean negative log predictive density, in nats.
+ *
+ * @example A standard normal predictive, written out by hand
+ * const predictive = {
+ *   kind: 'distribution',
+ *   name: 'Normal',
+ *   logProb: (y) => toArray(y).map((v) => -0.5 * v * v - 0.5 * Math.log(2 * Math.PI)),
+ * }
+ * print('log score =', logScore([0, 1, -1], predictive))
+ * print('Gaussian log score =', gaussianLogScore([0, 1, -1], { mean: 0, sd: 1 }))
  */
 export const logScore = defineMetric(
   {
@@ -549,9 +819,18 @@ export const logScore = defineMetric(
 )
 
 /**
- * The CRPS of Gaussian forecasts N(μᵢ, σᵢ²), averaged over cases (Gneiting and Raftery 2007, eq. 21): with
- * z = (y − μ)/σ, CRPS = σ(z(2Φ(z) − 1) + 2φ(z) − 1/√π). In the units of y. The forecast is means and sds, or a
- * model's Normal predictive (so `evaluate` serves it).
+ * The CRPS of Gaussian forecasts $\Gauss(\mu_i, \sigma_i^2)$, averaged over cases (Gneiting and Raftery, 2007, eq.
+ * 21): with $z = (y - \mu)/\sigma$, $\mathrm{CRPS} = \sigma(z(2\Phi(z) - 1) + 2\phi(z) - 1/\sqrt{\pi})$. In the units
+ * of $y$. The forecast is means and sds, or a model's Normal predictive (so `evaluate` serves it).
+ *
+ * @param yTrue The observations $y_i$, one per case.
+ * @param forecast The Gaussian forecast: `mean` and `sd` per case (or one each for all cases), or a `Normal`
+ *   predictive distribution with batch shape $[n]$. Another distribution throws `DomainError`.
+ * @returns The mean CRPS, in the units of $y$.
+ *
+ * @example An observation at the mean, with two spreads
+ * print('sd 1:', crpsGaussian([0], { mean: 0, sd: 1 }))
+ * print('sd 2:', crpsGaussian([0], { mean: 0, sd: 2 }))
  */
 export const crpsGaussian = defineMetric(
   {
@@ -578,10 +857,24 @@ export const crpsGaussian = defineMetric(
 )
 
 /**
- * The CRPS of ensemble or sample forecasts in the kernel form E|X − y| − ½E|X − X'| (Gneiting and Raftery 2007),
- * averaged over cases. `samples` is an n × m matrix (m draws per case) or, for one case, a vector. The plug-in form
- * divides the spread term by m²; `fair: true` divides by m(m − 1), which is unbiased for the underlying distribution.
- * Computed in O(m log m) per case from the sorted draws.
+ * The CRPS of ensemble or sample forecasts in the kernel form
+ * $\expect\lvert X - y \rvert - \frac{1}{2}\expect\lvert X - X' \rvert$ (Gneiting and Raftery, 2007), averaged over
+ * cases. `samples` is an $n \times m$ matrix ($m$ draws per case) or, for one case, a vector. The plug-in form divides
+ * the spread term by $m^2$; `fair: true` divides by $m(m - 1)$, which is unbiased for the underlying distribution.
+ * Computed in $O(m \log m)$ per case from the sorted draws. A row count other than the number of observations throws
+ * `ShapeError`.
+ *
+ * @param yTrue The observations, one per case, or a single number for one case.
+ * @param samples The draws: an $n \times m$ matrix with a row per case, or a vector of $m$ draws for one case.
+ * @param options `fair`, true for the unbiased spread term (needs $m \ge 2$).
+ * @returns The mean CRPS, in the units of $y$.
+ *
+ * @example Two draws either side of the observation
+ * print('plug-in =', crpsEnsemble(0.5, [0, 1]))
+ * print('fair =', crpsEnsemble(0.5, [0, 1], { fair: true }))
+ *
+ * @example Two cases, three draws each
+ * print(crpsEnsemble([0, 2], [[-1, 0, 1], [0, 1, 2]]))
  */
 export const crpsEnsemble = defineMetric(
   {
@@ -620,9 +913,18 @@ export const crpsEnsemble = defineMetric(
 )
 
 /**
- * The negative log predictive density of Gaussian forecasts, −(1/n) Σ log N(yᵢ; μᵢ, σᵢ²) (the log score, orientated
- * as a loss). The forecast is means and sds, or a model's Normal predictive (so `evaluate` serves it); `logScore`
- * is the same score for any predictive distribution.
+ * The negative log predictive density of Gaussian forecasts, $-\frac{1}{n} \sum_i \log \Gauss(y_i; \mu_i, \sigma_i^2)$
+ * (the log score, orientated as a loss). The forecast is means and sds, or a model's Normal predictive (so `evaluate`
+ * serves it); `logScore` is the same score for any predictive distribution.
+ *
+ * @param yTrue The observations $y_i$, one per case.
+ * @param forecast The Gaussian forecast: `mean` and `sd` per case (or one each for all cases), or a `Normal`
+ *   predictive distribution with batch shape $[n]$. Another distribution throws `DomainError`.
+ * @returns The mean negative log density, in nats.
+ *
+ * @example Standard normal forecasts: half of log 2 pi, plus half the mean square
+ * print(gaussianLogScore([0, 1, -1], { mean: 0, sd: 1 }))
+ * print(0.5 * Math.log(2 * Math.PI) + (0 + 1 + 1) / 6)
  */
 export const gaussianLogScore = defineMetric(
   {
@@ -645,12 +947,23 @@ export const gaussianLogScore = defineMetric(
   },
 )
 
-/** A central prediction interval per case. */
+/**
+ * A central prediction interval per case: its `lower` end $\ell$ and `upper` end $u$, each one value per case or one
+ * for all.
+ */
 export type Interval = { lower: PerCase; upper: PerCase }
 
 /**
- * The interval score of central (1 − α) prediction intervals, averaged over cases (Gneiting and Raftery 2007, §6.2):
- * (u − ℓ) + (2/α)(ℓ − y)·1[y < ℓ] + (2/α)(y − u)·1[y > u].
+ * The interval score of central $(1 - \alpha)$ prediction intervals, averaged over cases (Gneiting and Raftery, 2007,
+ * §6.2): $(u - \ell) + \frac{2}{\alpha}(\ell - y)\indicator[y < \ell] + \frac{2}{\alpha}(y - u)\indicator[y > u]$.
+ *
+ * @param yTrue The observations $y_i$, one per case.
+ * @param interval The intervals $[\ell, u]$.
+ * @param options `alpha`, the nominal miss rate $\alpha$ of the intervals (required; 0.1 for 90% intervals).
+ * @returns The mean interval score, in the units of $y$.
+ *
+ * @example Width 6, with one miss below and one above
+ * print(intervalScore([1, 5, 10], { lower: 2, upper: 8 }, { alpha: 0.2 }))
  */
 export const intervalScore = defineMetric(
   {
@@ -679,7 +992,16 @@ export const intervalScore = defineMetric(
   },
 )
 
-/** Coverage: the fraction of observations inside their interval [ℓ, u] (report beside a score, not as one). */
+/**
+ * Coverage: the fraction of observations inside their interval $[\ell, u]$ (report beside a score, not as one).
+ *
+ * @param yTrue The observations $y_i$, one per case.
+ * @param interval The intervals $[\ell, u]$, ends included.
+ * @returns The fraction covered, in $[0, 1]$.
+ *
+ * @example One of three inside
+ * print(coverage([1, 5, 10], { lower: 2, upper: 8 }))
+ */
 export const coverage = defineMetric(
   {
     key: 'coverage',
@@ -703,9 +1025,20 @@ export const coverage = defineMetric(
 )
 
 /**
- * Probability integral transform values uᵢ = Fᵢ(yᵢ) (quantile-calibration): uniform on [0, 1] for a calibrated
- * forecaster. Gaussian forecasts give Φ((y − μ)/σ); ensembles (an n × m matrix of draws) give the fraction of draws
- * ≤ y, or with `stream` the randomised PIT that spreads ties uniformly between the fractions below and at y.
+ * Probability integral transform values $u_i = F_i(y_i)$ (quantile-calibration): uniform on $[0, 1]$ for a calibrated
+ * forecaster. Gaussian forecasts give $\Phi((y - \mu)/\sigma)$; ensembles (an $n \times m$ matrix of draws) give the
+ * fraction of draws $\le y$, or with `stream` the randomised PIT that spreads ties uniformly between the fractions
+ * below and at $y$.
+ *
+ * @param yTrue The observations $y_i$, one per case.
+ * @param forecast `mean` and `sd` per case (or one each for all), or `samples`, an $n \times m$ matrix of draws with a
+ *   row per case.
+ * @param options `stream`, the random stream for the randomised PIT of an ensemble; left out, ties count as below.
+ * @returns The PIT value of each case.
+ *
+ * @example Gaussian forecasts and an ensemble
+ * print('Gaussian:', pitValues([0, 1.96], { mean: 0, sd: 1 }))
+ * print('ensemble:', pitValues([2], { samples: [[1, 2, 2, 3]] }))
  */
 export function pitValues(
   yTrue: Data,
@@ -737,7 +1070,13 @@ export function pitValues(
 
 /**
  * Perplexity of held-out tokens from their log-probabilities (natural log) under the model,
- * exp(−(1/T) Σ log p(xₜ | x₍<t₎)) (perplexity-as-a-metric).
+ * $\exp(-\frac{1}{T} \sum_t \log p(x_t \mid x_{<t}))$ (perplexity-as-a-metric).
+ *
+ * @param logProbabilities The natural-log probability the model gave each of the $T$ tokens.
+ * @returns The perplexity, at least 1.
+ *
+ * @example A uniform guess among four tokens
+ * print(perplexity([Math.log(0.25), Math.log(0.25), Math.log(0.25)]))
  */
 export const perplexity = defineMetric(
   {

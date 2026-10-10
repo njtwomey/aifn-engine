@@ -1,18 +1,26 @@
 /**
- * `aifn-compute/learning/estimators`: the estimator protocol (plan §5.1). Fitted models, capabilities, datasets and
- * predictive distributions are the contract types of `aifn-compute/foundation/contracts`; this module adds what runs.
+ * `aifn-compute/learning/estimators`: the estimator protocol (plan §5.1), as sklearn.base. Fitted models,
+ * capabilities, datasets and predictive distributions are the contract types of `aifn-compute/foundation/contracts`;
+ * this module adds what runs.
  *
  * - Capabilities: `Fitted` (`forward`), `Decides`, `Predicts`, `Expects`, `Scores`, `Transforms`, `Samples`,
- *   `Trained`, named by `Capability`; guards `hasPredictive` and the like; `capabilities(m)`.
+ *   `Trained`, named by `Capability`; the guards `hasForward`, `hasDecide`, `hasPredictive`, `hasExpect`, `hasScore`,
+ *   `hasTransform`, `hasSample` and `hasTraining`; `capabilities(m)` lists them.
  * - Mixins: `withDecision(model, rule)` (argmax, mode, threshold, cost matrix), `withExpectation`, `withSampling`,
- *   `readout(model, complete)`.
+ *   `readout(model, complete)` to complete a partial forward pass.
  * - Data: `Dataset` (`kind: 'dataset'`) and `dataset(x, y?)`, `Supervised`, `rowCount`, `takeRows`, `takeData`;
  *   `Estimator`, `FitOptions`; input checks `matrixShape`, `targetValues`.
- * - Predictives: contract `Distribution`s; `gaussianPredictive`, `bernoulliPredictive`, `categoricalPredictive`,
- *   `classProbabilities`, `expectation` (Gauss–Hermite on normal scores), `asTensor`.
+ * - Predictives: contract `Distribution`s; `gaussianPredictive`, `bernoulliPredictive`, `categoricalPredictive`;
+ *   `isUnivariate`, `isClassDistribution`, `classProbabilities`, `expectation` (Gauss–Hermite on normal scores),
+ *   `asTensor`.
  * - Registering: `defineModel(spec, factory)` attaches a `ModelInfo` (task, capabilities, `hyper` space) to an
  *   estimator factory; `isModelEntry`.
- * - Evaluation: `evaluate(model, data, metrics)` over registered metrics, each read by its `info.capability`.
+ * - Evaluation: `evaluate(model, data, metrics)` over registered metrics, each read by its `info.capability`; its
+ *   parts `outputFor`, `outputs` (each capability once), `metricInput` and `score`.
+ *
+ * A fitted model is a plain object with its fitted state as fields and its capabilities as methods, so the guards and
+ * mixins work on any model, and the compiler rejects a request for a capability a model does not declare. Fitting and
+ * the mixins never change the estimator or model they are given. The helpers work on untraced values.
  */
 
 export {

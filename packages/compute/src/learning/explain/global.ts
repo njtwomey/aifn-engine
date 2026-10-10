@@ -1,18 +1,21 @@
 /**
- * Global effects and interactions of a model f over data:
+ * Global effects and interactions of a model $f$ over data:
  *
- * - `accumulatedLocalEffects` (Apley and Zhu, 2020): split feature j at its quantiles; in each bin average, over the
- *   rows that fall in it, the change of f as x_j moves from the bin's lower to upper edge with the other features kept;
- *   accumulate the averages and centre them (as the ALEPlot package). Unlike partial dependence it never evaluates f
- *   at combinations the data do not contain, so it stays faithful when features are correlated.
+ * - `accumulatedLocalEffects` (Apley and Zhu, 2020): split feature $j$ at its quantiles; in each bin average, over the
+ *   rows that fall in it, the change of $f$ as $x_j$ moves from the bin's lower to upper edge with the other features
+ *   kept; accumulate the averages and centre them (as the ALEPlot package). Unlike partial dependence it never
+ *   evaluates $f$ at combinations the data do not contain, so it stays faithful when features are correlated.
  * - `hStatistic` (Friedman and Popescu, 2008): the share of the variance of the joint partial dependence of features
- *   j and k that their separate partial dependences do not explain, H²ⱼₖ = Σᵢ [PDⱼₖ − PDⱼ − PDₖ]² / Σᵢ PD²ⱼₖ at the
- *   data rows (each centred), and the overall statistic H²ⱼ = Σᵢ [f − PDⱼ − PD₋ⱼ]² / Σᵢ f², the share of f's variance
- *   from interactions involving j. 0 for an additive effect; 1 when the effect is pure interaction.
- * - `functionalAnova` (Hoeffding, 1948; Sobol, 1993; Hooker, 2004): f = f₀ + Σⱼ fⱼ + Σⱼ<ₖ fⱼₖ + … with each term
- *   averaging to zero over each of its features, under a product measure given by a grid and weights per feature.
- *   Evaluates f on the full grid, so it is exact for that measure; the variances of the terms over their total are
- *   Sobol indices. For a GAM with pairwise terms it recovers ("purifies") the main effects and interactions.
+ *   $j$ and $k$ that their separate partial dependences do not explain,
+ *   $H^2_{jk} = \sum_i [\text{PD}_{jk} - \text{PD}_j - \text{PD}_k]^2 / \sum_i \text{PD}_{jk}^2$ at the data rows
+ *   (each centred), and the overall statistic
+ *   $H^2_j = \sum_i [f - \text{PD}_j - \text{PD}_{-j}]^2 / \sum_i f^2$ (also centred), the share of $f$'s variance
+ *   from interactions involving $j$. 0 for an additive effect; 1 when the effect is pure interaction.
+ * - `functionalAnova` (Hoeffding, 1948; Sobol, 1993; Hooker, 2004):
+ *   $f = f_0 + \sum_j f_j + \sum_{j<k} f_{jk} + \dots$ with each term averaging to zero over each of its features,
+ *   under a product measure given by a grid and weights per feature. Evaluates $f$ on the full grid, so it is exact
+ *   for that measure; the variances of the terms over their total are Sobol indices. For a GAM with pairwise terms it
+ *   recovers ("purifies") the main effects and interactions.
  */
 
 import type { MatrixLike, Size, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -20,15 +23,40 @@ import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { DomainError } from 'aifn-compute/foundation/errors'
 import type { ScalarModel } from './shapley'
 
+/**
+ * A model's outputs on a batch of rows, as a fresh array.
+ *
+ * @param model The model, called once on the $m \times d$ batch.
+ * @param rows The rows, row-major ($m \times d$ values).
+ * @param m The number of rows.
+ * @param d The number of features.
+ * @returns The $m$ outputs.
+ */
 const evaluate = (model: ScalarModel, rows: Float64Array, m: Size, d: Size): Float64Array => {
   const o = model(fromData(rows, [m, d]))
   return 'shape' in o ? Float64Array.from(dense.data(o as Tensor)) : Float64Array.from(o)
 }
 
 /**
- * The ALE of `feature` over rows X [n, d] with `bins` (default 20) quantile bins: the bin edges z [K + 1] (the
- * minimum, then the k/K quantiles by inverting the empirical distribution, duplicates removed), the centred
- * accumulated effect at each edge [K + 1], the rows per bin [K] and each bin's mean local change [K].
+ * The accumulated local effect of a feature over the rows of $\Xmat$ (see the file comment), in one model call on
+ * $2n$ rows. The first bin is $[z_0, z_1]$ and the others $(z_{k-1}, z_k]$. Throws `DomainError` when `feature` is not
+ * a column of $\Xmat$ or the feature is constant.
+ *
+ * @param model The model, called on the rows with the feature set to their bin's lower and upper edges.
+ * @param X The data ($n \times d$); not modified.
+ * @param feature The column whose effect is measured.
+ * @param options The binning.
+ * @param options.bins The number of quantile bins asked for (default 20); fewer remain when quantiles coincide.
+ * @returns `edges`, the $K + 1$ bin edges $z_k$ (the minimum, then the $k/K$ quantiles by inverting the empirical
+ *   distribution, duplicates removed); `effect`, the centred accumulated effect at each edge; `counts`, the rows per
+ *   bin; and `local`, each bin's mean change in output ($K$ each).
+ *
+ * @example The effect of a square, centred
+ * const model = (X) => toArray(X).map(([a, b]) => a * a + b)
+ * const r = accumulatedLocalEffects(model, [[0, 0], [1, 1], [2, 0], [3, 1], [4, 0]], 0, { bins: 4 })
+ * print('edges =', r.edges)
+ * print('local =', r.local, ' counts =', r.counts)
+ * print('effect =', r.effect)
  */
 export function accumulatedLocalEffects(
   model: ScalarModel,
@@ -77,7 +105,16 @@ export function accumulatedLocalEffects(
   return { edges, effect, counts, local }
 }
 
-/** Centred partial dependence on the features in `set`, evaluated at each of the rows (an n × n sweep). */
+/**
+ * Centred partial dependence on the features in `set`, evaluated at each of the rows: one model call on $n^2$ rows.
+ *
+ * @param model The model.
+ * @param data The rows, row-major ($n \times d$ values); not modified.
+ * @param n The number of rows.
+ * @param d The number of features.
+ * @param set The features held at each row's values while the others range over the data.
+ * @returns The partial dependence at each row minus its mean ($n$ values).
+ */
 function centredDependence(model: ScalarModel, data: Float64Array, n: Size, d: Size, set: readonly number[]) {
   const rows = new Float64Array(n * n * d)
   for (let i = 0; i < n; i++)
@@ -98,8 +135,21 @@ function centredDependence(model: ScalarModel, data: Float64Array, n: Size, d: S
 }
 
 /**
- * Friedman's H-statistics on the rows X [n, d] (sweeps cost n² evaluations each, so pass a subsample): the pairwise
- * H [d, d] (symmetric; the diagonal 0) and the overall Hⱼ [d] (square roots of the H² of the module comment).
+ * Friedman's H-statistics on the rows of $\Xmat$: pairwise and overall, the square roots of the $H^2$ of the file
+ * comment. Each partial dependence sweep costs $n^2$ model evaluations, so pass a subsample.
+ *
+ * @param model The model.
+ * @param X The rows ($n \times d$) the partial dependences are computed over.
+ * @param options The features examined.
+ * @param options.features The features whose statistics are computed (default all); the others' entries stay 0.
+ * @returns `pairwise`, $H_{jk}$ as a $d \times d$ matrix row-major (symmetric, the diagonal 0); `overall`, $H_j$ ($d$
+ *   values); and `features`, the features examined.
+ *
+ * @example Features 0 and 1 interact; feature 2 adds on
+ * const model = (X) => toArray(X).map(([a, b, c]) => a * b + c)
+ * const r = hStatistic(model, [[-1, -1, 0], [-1, 1, 1], [1, -1, 2], [1, 1, 3]])
+ * print('H01 =', r.pairwise[1], ' H02 =', r.pairwise[2], ' H12 =', r.pairwise[5])
+ * print('overall =', r.overall)
  */
 export function hStatistic(
   model: ScalarModel,
@@ -151,26 +201,46 @@ export function hStatistic(
 
 /** The functional ANOVA decomposition of `functionalAnova`. */
 export type FunctionalAnova = {
-  /** f₀ = E f. */
+  /** $f_0 = \expect f$. */
   mean: number
-  /** The grids and normalised weights per feature. */
+  /** The grid of each feature. */
   grids: Float64Array[]
+  /** The weights of each feature's grid points, normalised to sum to 1. */
   weights: Float64Array[]
-  /** Main effects fⱼ on feature j's grid. */
+  /** The main effect $f_j$ of each feature, on its grid. */
   main: Float64Array[]
-  /** Pairwise terms fⱼₖ on grid j × grid k, row-major [gⱼ, gₖ]. */
+  /**
+   * The pairwise terms $f_{jk}$, $j < k$, in the order $(0, 1), (0, 2), \dots, (1, 2), \dots$: each with its
+   * `features` and its `values` on grid $j$ times grid $k$, row-major ($g_j \times g_k$).
+   */
   pairs: { features: [Size, Size]; values: Float64Array }[]
-  /** Var f, Var fⱼ, Var fⱼₖ (same order as `pairs`) and the remainder from higher orders. */
+  /** $\var f$. */
   variance: number
+  /** $\var f_j$ for each feature. */
   mainVariance: Float64Array
+  /** $\var f_{jk}$ for each pair, in the order of `pairs`. */
   pairVariance: Float64Array
+  /** The remainder, $\var f$ minus the main and pairwise variances: the variance of the higher-order terms. */
   higherVariance: number
 }
 
 /**
- * The functional ANOVA of `model` over the product of per-feature grids [gⱼ] with weights (default equal; normalised
- * to sum to 1 per feature): main effects and pairwise terms, and their variances. Evaluates f on all Π gⱼ grid points
- * (at most 2 × 10⁶).
+ * The functional ANOVA of `model` over the product of per-feature grids with weights: main effects and pairwise terms,
+ * and their variances. Evaluates $f$ on all $\prod_j g_j$ grid points, in calls of at most 20000 rows. Throws
+ * `DomainError` when there are more than $2 \times 10^6$ grid points.
+ *
+ * @param model The model.
+ * @param grids The grid of each feature ($g_j$ values for feature $j$); their number is the model's $d$.
+ * @param options The measure on each grid.
+ * @param options.weights The weight of each grid point, per feature (default equal); normalised to sum to 1.
+ * @returns The decomposition.
+ *
+ * @example Main effects, an interaction and a three-way term, each with its variance
+ * const model = (X) => toArray(X).map(([a, b, c]) => a + 2 * b + a * b + a * b * c)
+ * const r = functionalAnova(model, [[-1, 1], [-1, 1], [-1, 1]])
+ * print('mean =', r.mean, ' main =', r.main)
+ * print('pairs =', r.pairs.map((p) => [p.features, Array.from(p.values)]))
+ * print('variance =', r.variance, ' main =', r.mainVariance, ' pairs =', r.pairVariance, ' higher =', r.higherVariance)
  */
 export function functionalAnova(
   model: ScalarModel,

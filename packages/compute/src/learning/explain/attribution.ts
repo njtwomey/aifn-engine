@@ -2,16 +2,18 @@
  * More local attributions:
  *
  * - `occlusion` (Zeiler and Fergus, 2014): slide a window over the input (a vector, or an image or sequence given by
- *   `shape`), set the features under it to a baseline, and credit each feature with the output's drop averaged over the
- *   windows covering it, as Captum's `Occlusion`.
+ *   `shape`), set the features under it to a baseline, and credit each feature with the output's drop averaged over
+ *   the windows covering it, as Captum's `Occlusion`.
  * - `deepLift` (Shrikumar, Greenside and Kundaje, 2017), rescale rule: through a `DenseNetwork`, each nonlinearity's
- *   multiplier is Δa/Δz between the input and a reference (its derivative where Δz ≈ 0), and linear layers pass
- *   multipliers back by Wᵀ. The attributions (x − x′) ⊙ m sum to f(x) − f(x′) exactly (summation-to-delta).
- *   `deepShap` (Lundberg and Lee, 2017) averages DeepLIFT over background references.
+ *   multiplier is $\Delta a/\Delta z$ between the input and a reference (its derivative where
+ *   $\Delta z \approx 0$), and linear layers pass multipliers back by $\Wmat^\top$. The attributions
+ *   $(\xvec - \xvec') \odot \mvec$ sum to $f(\xvec) - f(\xvec')$ exactly (summation-to-delta). `deepShap`
+ *   (Lundberg and Lee, 2017) averages DeepLIFT over background references.
  * - `expectedGradients` (Erion et al., 2021): integrated gradients averaged over baselines drawn from the data, with a
- *   random point on each path, E[(x − x′) ⊙ ∇f(x′ + α(x − x′))].
+ *   random point on each path,
+ *   $\expect_{\xvec', \alpha}[(\xvec - \xvec') \odot \nabla f(\xvec' + \alpha(\xvec - \xvec'))]$.
  * - `shapleyInteractions` (Lundberg, Erion and Lee, 2018, after Grabisch and Roubens, 1999): the Shapley interaction
- *   values Φᵢⱼ of a set function, exact by enumeration; each row sums to the Shapley value φᵢ.
+ *   values $\Phi_{ij}$ of a set function, exact by enumeration; each row sums to the Shapley value $\phi_i$.
  * - `kernelShapVariance`: KernelSHAP's sampling spread, by repeating the sampled estimate on independent streams.
  */
 
@@ -24,6 +26,15 @@ import { activate, activateDerivative, denseForward, denseLayers, type DenseNetw
 import { exactShapley, kernelShap, type KernelShapOptions, type ScalarModel } from './shapley'
 import type { Differentiable } from './gradients'
 
+/**
+ * A model's outputs on a batch of rows, as a fresh array.
+ *
+ * @param model The model, called once on the $m \times d$ batch.
+ * @param rows The rows, row-major ($m \times d$ values).
+ * @param m The number of rows.
+ * @param d The number of features.
+ * @returns The $m$ outputs.
+ */
 const evaluate = (model: ScalarModel, rows: Float64Array, m: Size, d: Size): Float64Array => {
   const o = model(fromData(rows, [m, d]))
   return 'shape' in o ? Float64Array.from(dense.data(o as Tensor)) : Float64Array.from(o)
@@ -33,20 +44,39 @@ const evaluate = (model: ScalarModel, rows: Float64Array, m: Size, d: Size): Flo
 
 /** Options of `occlusion`. */
 export type OcclusionOptions = {
-  /** The input's shape (default [d]); its product must be d. A 2-D shape [h, w] is an image in row-major order. */
+  /**
+   * The input's shape (default $[d]$); its product must be $d$. A 2-D shape $[h, w]$ is an image in row-major order.
+   */
   shape?: readonly Size[]
   /** The window's extent per axis (default 1 per axis). */
   window?: readonly Size[]
   /** The step between window positions per axis (default 1). */
   strides?: readonly Size[]
-  /** The value the occluded features take: one number or a vector [d] (default 0). */
+  /** The value the occluded features take: one number or a vector of $d$ (default 0). */
   baseline?: number | VectorLike
 }
 
 /**
- * Occlusion attributions of `model` at x [d]: for each window position (starts 0, s, 2s, … up to and including the
- * first that reaches the end, cropped there) the drop f(x) − f(x with the window at the baseline), shared by every
- * feature in the window and averaged over the windows covering each feature. One model call over all positions.
+ * Occlusion attributions of `model` at $\xvec$: for each window position (along each axis, starts
+ * $0, s, 2s, \dots$ up to and including the first whose window reaches the end, cropped there) the drop
+ * $f(\xvec) - f(\xvec \text{ with the window at the baseline})$, credited in full to every feature in the window and
+ * averaged over the windows covering each feature. One model call over all positions. Throws `ShapeError` when `shape`
+ * does not hold $d$ features or `window` and `strides` do not have one entry per axis, and `DomainError` when a window
+ * is not in $1, \dots, \text{size}$ or a stride is below 1.
+ *
+ * @param model The model, called once on the instance and all its occluded copies.
+ * @param x The instance $\xvec$ ($d$ values, row-major in `shape`).
+ * @param options The input's shape, the window, its strides and the baseline.
+ * @returns `values`, the attributions ($d$; 0 for a feature no window covers); `output`, $f(\xvec)$; and `windows`, the
+ *   number of window positions.
+ *
+ * @example A linear model with one feature per window: weight times (x minus the baseline)
+ * const model = (X) => matmul(X, tensor([2, -1, 0.5]))
+ * print(occlusion(model, [1, 2, 3]))
+ *
+ * @example Windows on a 2 x 3 image, the last one cropped
+ * const model = (X) => sum(X, 1)
+ * print(occlusion(model, [1, 2, 3, 4, 5, 6], { shape: [2, 3], window: [1, 2], strides: [1, 2] }))
  */
 export function occlusion(
   model: ScalarModel,
@@ -107,9 +137,28 @@ export function occlusion(
 // ── DeepLIFT and DeepSHAP ────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * DeepLIFT (rescale rule) attributions of output `output` of a `DenseNetwork` at x [d] against the reference
- * `baseline` [d] (default 0). `multipliers` are the contribution per unit of input difference, m = Σ attributions /
- * (x − x′) elementwise; `delta` is Σ values − (f(x) − f(x′)), zero up to rounding.
+ * DeepLIFT (rescale rule) attributions of one output of a `DenseNetwork` at $\xvec$ against a reference $\xvec'$ (see
+ * the file comment): one forward pass on the instance and the reference, then one backward pass of multipliers.
+ * Throws `ShapeError` when the baseline's length differs from $\xvec$'s (and as `denseForward`).
+ *
+ * @param net The network.
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param options The reference and the output explained.
+ * @param options.baseline The reference $\xvec'$ ($d$ values; default all zeros).
+ * @param options.output The output unit explained (default 0).
+ * @returns `values`, the attributions $(\xvec - \xvec') \odot \mvec$; `multipliers`, $\mvec$, the contribution per unit
+ *   of input difference; `output` and `baselineOutput`, $f(\xvec)$ and $f(\xvec')$; and `delta`,
+ *   $\sum_i \text{values}_i - (f(\xvec) - f(\xvec'))$, zero up to rounding.
+ *
+ * @example A 2-2-1 ReLU network: the attributions add up to the change in output
+ * const net = { weights: [[[1, -1], [1, 1]], [[1], [2]]], biases: [[0, 0], [0]], activation: 'relu' }
+ * print(deepLift(net, [1, 2]))
+ *
+ * @example Across a ReLU's kink DeepLIFT keeps summation-to-delta, gradient times input does not
+ * // f(x) = relu(x - 1): f(2) - f(0) = 1.
+ * const net = { weights: [[[1]], [[1]]], biases: [[-1], [0]], activation: 'relu' }
+ * print('deepLift =', deepLift(net, [2]).values)
+ * print('gradient times input =', inputGradient(denseFunction(net), [2]).timesInput)
  */
 export function deepLift(
   net: DenseNetwork,
@@ -166,7 +215,24 @@ export function deepLift(
   return { values, multipliers: m, output, baselineOutput, delta }
 }
 
-/** DeepSHAP: DeepLIFT attributions of x [d] averaged over the background rows [b, d] as references. */
+/**
+ * DeepSHAP: DeepLIFT attributions of $\xvec$ averaged over the background rows as references. One `deepLift` call
+ * per background row.
+ *
+ * @param net The network.
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param background The reference rows ($b \times d$).
+ * @param options The output explained.
+ * @param options.output The output unit explained (default 0).
+ * @returns `values`, the mean attributions ($d$); `base`, the mean output over the background; and `output`,
+ *   $f(\xvec)$; $\text{base} + \sum_i \phi_i = \text{output}$ up to rounding.
+ *
+ * @example A linear network: weight times (x minus the background mean)
+ * const net = { weights: [[[2], [-1], [0.5]]], biases: [[0]], activation: 'relu' }
+ * const r = deepShap(net, [1, 2, 3], [[0, 0, 0], [2, 0, 2]])
+ * print(r)
+ * print('w (x - mean b) =', [2 * (1 - 1), -1 * (2 - 0), 0.5 * (3 - 1)])
+ */
 export function deepShap(
   net: DenseNetwork,
   x: VectorLike,
@@ -190,9 +256,25 @@ export function deepShap(
 // ── Expected gradients ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Expected gradients of f at x [d]: the mean over `samples` (default 200) draws of a background row x′ and α ~ U(0, 1)
- * of (x − x′) ⊙ ∇f(x′ + α(x − x′)), all gradients in one `vmap(grad(f))` batch. Its attributions sum, in expectation,
- * to f(x) − E f(x′).
+ * Expected gradients of $f$ at $\xvec$: the mean over draws of a background row $\xvec'$ (uniformly) and
+ * $\alpha \sim \Unif(0, 1)$ of $(\xvec - \xvec') \odot \nabla f(\xvec' + \alpha(\xvec - \xvec'))$, all gradients in
+ * one `vmap(grad(f))` batch. Its attributions sum, in expectation, to $f(\xvec) - \expect f(\xvec')$. Throws
+ * `ShapeError` when the background does not have $d$ columns.
+ *
+ * @param f The function explained.
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param background The rows the baselines are drawn from ($b \times d$).
+ * @param stream The random stream: rows are drawn from `child(stream, 'rows')` and $\alpha$ from
+ *   `child(stream, 'alpha')`, so `stream` itself is not advanced.
+ * @param options The number of draws.
+ * @param options.samples The number of (row, $\alpha$) draws averaged (default 200).
+ * @returns `values`, the attributions ($d$), and `samples`, the number of draws.
+ *
+ * @example A linear function: close to weight times (x minus the background mean)
+ * const f = (x) => sum(mul(tensor([2, -1, 0.5]), x))
+ * const r = expectedGradients(f, [1, 2, 3], [[0, 0, 0], [2, 0, 2]], stream(0), { samples: 400 })
+ * print('values =', r.values)
+ * print('w (x - mean b) =', [2 * (1 - 1), -1 * (2 - 0), 0.5 * (3 - 1)])
  */
 export function expectedGradients(
   f: Differentiable,
@@ -228,10 +310,24 @@ export function expectedGradients(
 // ── Shapley interaction values ───────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Exact Shapley interaction values of a set function over d ≤ 16 players: for i ≠ j,
- * Φᵢⱼ = Σ_{S ⊆ N∖{i,j}} |S|!(d − |S| − 2)!/(2(d − 1)!) [v(S∪{i,j}) − v(S∪{i}) − v(S∪{j}) + v(S)], and the main effect
- * Φᵢᵢ = φᵢ − Σ_{j≠i} Φᵢⱼ, so each row sums to the Shapley value φᵢ and the whole matrix to v(N) − v(∅). Returns the
- * matrix [d, d] row-major and the Shapley values.
+ * Exact Shapley interaction values of a set function over $2 \le d \le 16$ players, by enumerating all $2^d$
+ * coalitions: for $i \ne j$,
+ * $\Phi_{ij} = \sum_{S \subseteq N \setminus \{i, j\}} \frac{\lvert S \rvert!\,(d - \lvert S \rvert - 2)!}{2(d - 1)!}
+ * [v(S \cup \{i, j\}) - v(S \cup \{i\}) - v(S \cup \{j\}) + v(S)]$, and the main effect
+ * $\Phi_{ii} = \phi_i - \sum_{j \ne i} \Phi_{ij}$, so each row sums to the Shapley value $\phi_i$ and the whole
+ * matrix to $v(N) - v(\emptyset)$. Throws `DomainError` when $d$ is not an integer in $2, \dots, 16$.
+ *
+ * @param value The set function $v$: receives a coalition as a membership mask of $d$ booleans and returns its worth.
+ *   Each coalition is evaluated once.
+ * @param d The number of players.
+ * @returns `values`, the $d \times d$ matrix $\Phi$ row-major; `shapley`, the Shapley values; `base`,
+ *   $v(\emptyset)$; and `output`, $v(N)$.
+ *
+ * @example An AND of two players plus a third that acts alone
+ * const v = (mask) => (mask[0] && mask[1] ? 1 : 0) + (mask[2] ? 1 : 0)
+ * const r = shapleyInteractions(v, 3)
+ * print('Phi =', [0, 1, 2].map((i) => Array.from(r.values.slice(3 * i, 3 * i + 3))))
+ * print('shapley =', r.shapley)
  */
 export function shapleyInteractions(
   value: (mask: readonly boolean[]) => number,
@@ -272,8 +368,26 @@ export function shapleyInteractions(
 // ── KernelSHAP's sampling spread ─────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * KernelSHAP repeated `repeats` times (default 20) with `samples` sampled coalitions each, on independent child
- * streams: the estimates [repeats, d], their mean and standard deviation per feature (n − 1 denominator).
+ * KernelSHAP's sampling spread: `kernelShap` repeated on independent child streams, with the mean and standard
+ * deviation of its estimates per feature (denominator $\text{repeats} - 1$). When the coalition budget enumerates
+ * every coalition, the estimates agree and the deviation is 0. Throws `DomainError` for fewer than two repeats.
+ *
+ * @param model The model, as for `kernelShap`.
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param background The background rows ($b \times d$).
+ * @param stream The random stream: repeat $r$ samples from `child(stream, 'repeat', r)`.
+ * @param options The coalitions per estimate and the number of estimates.
+ * @param options.samples The coalitions per estimate, as `kernelShap`'s `samples` (default $2d + 2048$).
+ * @param options.repeats The number of estimates (default 20).
+ * @returns `estimates`, every estimate ($\text{repeats} \times d$), and their `mean` and `sd` per feature.
+ *
+ * @example How far 30 sampled coalitions stray
+ * // Features 0 to 2 act only together, features 3 to 7 add up: exact values 1/3, 1/3, 1/3, then 1 each.
+ * const model = (X) => toArray(X).map((r) => r[0] * r[1] * r[2] + r.slice(3).reduce((a, b) => a + b))
+ * const background = [[0, 0, 0, 0, 0, 0, 0, 0]]
+ * const r = kernelShapVariance(model, [1, 1, 1, 1, 1, 1, 1, 1], background, stream(0), { samples: 30, repeats: 10 })
+ * print('mean =', r.mean)
+ * print('sd =', r.sd)
  */
 export function kernelShapVariance(
   model: ScalarModel,

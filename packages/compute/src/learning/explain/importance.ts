@@ -15,6 +15,15 @@ import { quantile } from 'aifn-compute/probability/stats'
 import type { ScalarModel } from './shapley'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
+/**
+ * A model's outputs on a batch of rows, as a fresh array.
+ *
+ * @param model The model, called once on the $m \times d$ batch.
+ * @param rows The rows, row-major ($m \times d$ values).
+ * @param m The number of rows.
+ * @param d The number of features.
+ * @returns The $m$ outputs.
+ */
 const outputs = (model: ScalarModel, rows: Float64Array, m: Size, d: Size): Float64Array => {
   const o = model(fromData(rows, [m, d]))
   return 'shape' in o ? Float64Array.from(dense.data(o as Tensor)) : Float64Array.from(o)
@@ -22,18 +31,40 @@ const outputs = (model: ScalarModel, rows: Float64Array, m: Size, d: Size): Floa
 
 /** Options of `permutationImportance`. */
 export type PermutationImportanceOptions = {
-  /** Shuffles per feature (default 5). */
+  /** Shuffles per feature (default 5; ignored when `permutations` is given). */
   repeats?: Size
   /** Stream for the shuffles (required unless `permutations` is given). */
   stream?: Stream
-  /** Explicit shuffles [feature][repeat][n] of row indices, each applied to the column as left by the last. */
+  /**
+   * Explicit shuffles of row indices, indexed `[feature][repeat]`, each a permutation of the $n$ rows applied to the
+   * column as left by the last; the number of repeats is that of feature 0.
+   */
   permutations?: readonly (readonly (readonly number[])[])[]
 }
 
 /**
- * Permutation importance of each feature of X [n, d] for `model` under `score(y, predicted)` (higher is better): the
- * baseline score minus the score with the feature's column shuffled, per repeat [d][repeats], with mean and standard
- * deviation (population, as scikit-learn).
+ * Permutation importance of each feature for `model` under a score (higher is better): the baseline score minus the
+ * score with the feature's column shuffled, per repeat, with the mean and the standard deviation (population, as
+ * scikit-learn) over repeats. One model call per feature and repeat, plus one. Throws `DomainError` when neither a
+ * `stream` nor `permutations` is given.
+ *
+ * @param model The model, called on the $n \times d$ data with one column shuffled.
+ * @param X The data $\Xmat$ ($n \times d$); not modified.
+ * @param y The targets ($n$ values), passed to `score`.
+ * @param score The score of predictions against the targets, `score(y, predicted)`, higher being better (a negated
+ *   error, an accuracy, an $R^2$).
+ * @param options The number of repeats and the stream or explicit permutations.
+ * @returns `baseline`, the score on the unshuffled data; `importances`, the drops per feature and repeat ($d$ arrays of
+ *   `repeats` values); and their `mean` and `std` per feature ($d$ values each).
+ *
+ * @example An unused feature has no importance
+ * const model = (X) => matmul(X, tensor([3, 0]))
+ * const X = [[0, 5], [1, 4], [2, 3], [3, 2], [4, 1], [5, 0]]
+ * const y = [0, 3, 6, 9, 12, 15]
+ * const negMse = (y, p) => -y.reduce((a, v, i) => a + (v - p[i]) ** 2, 0) / y.length
+ * const r = permutationImportance(model, X, y, negMse, { repeats: 3, stream: stream(0) })
+ * print('baseline =', r.baseline)
+ * print('mean =', r.mean, ' std =', r.std)
  */
 export function permutationImportance(
   model: ScalarModel,
@@ -70,8 +101,21 @@ export function permutationImportance(
 }
 
 /**
- * Grid values for a feature: its distinct values when there are at most `resolution` of them, else `resolution`
- * evenly spaced values between its 5th and 95th percentiles (linear interpolation between order statistics).
+ * Grid values for a feature: its distinct values in increasing order when there are at most `resolution` of them,
+ * else `resolution` evenly spaced values between two of its percentiles (by default the 5th and 95th, by linear
+ * interpolation between order statistics).
+ *
+ * @param X The data ($n \times d$).
+ * @param feature The column whose values are gridded.
+ * @param resolution The largest number of grid values.
+ * @param percentiles The lower and upper ends of an evenly spaced grid, as fractions in $[0, 1]$.
+ * @returns The grid values.
+ *
+ * @example Few distinct values are kept; many are spread between percentiles
+ * const X = [[1, 0], [1, 10], [2, 20], [3, 30], [3, 40], [3, 100]]
+ * print('feature 0:', featureGrid(X, 0, 5))
+ * print('feature 1:', featureGrid(X, 1, 5))
+ * print('feature 1, full range:', featureGrid(X, 1, 5, [0, 1]))
  */
 export function featureGrid(
   X: MatrixLike,
@@ -88,9 +132,25 @@ export function featureGrid(
 }
 
 /**
- * Partial dependence of `model` on `feature` over the rows of X [n, d]: for each grid value g (default
- * `featureGrid(X, feature)`), every row's prediction with x_feature = g (the ICE curves [n, grid]) and their mean
- * (the partial dependence [grid]).
+ * Partial dependence of `model` on `feature` over the rows of $\Xmat$: for each grid value $g$, every row's prediction
+ * with $x_{\text{feature}} = g$ (the ICE curves) and their mean (the partial dependence). One model call, on all
+ * $n \times \lvert\text{grid}\rvert$ modified rows. Throws `DomainError` when `feature` is not a column of $\Xmat$.
+ *
+ * @param model The model, called on the batch of modified rows.
+ * @param X The data ($n \times d$) the curves are averaged over; not modified.
+ * @param feature The column varied.
+ * @param options The grid.
+ * @param options.grid The values the feature is set to (default `featureGrid(X, feature, resolution)`).
+ * @param options.resolution The largest number of grid values when `grid` is not given (default 100).
+ * @returns `grid`, the values; `average`, the partial dependence at each; and `individual`, the ICE curves
+ *   ($n \times \lvert\text{grid}\rvert$, row $i$ for data row $i$).
+ *
+ * @example An interaction shows in the ICE curves but averages out
+ * // f = x0 * x1: the slope in x0 is x1, which is -1 or 1 across the rows.
+ * const model = (X) => toArray(X).map(([a, b]) => a * b)
+ * const r = partialDependence(model, [[0, -1], [0, 1]], 0, { grid: [0, 1, 2] })
+ * print('average =', r.average)
+ * print('individual =', r.individual)
  */
 export function partialDependence(
   model: ScalarModel,

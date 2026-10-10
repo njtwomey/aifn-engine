@@ -1,11 +1,11 @@
 /**
  * Platt scaling (Platt, 1999, "Probabilistic outputs for support vector machines and comparisons to regularized
- * likelihood methods"): class probabilities from a classifier's real-valued scores f by a fitted sigmoid
- * P(y = 1 | f) = 1/(1 + exp(A f + B)). A and B minimise the cross-entropy against regularised targets
- * t₊ = (N₊ + 1)/(N₊ + 2) for positives and t₋ = 1/(N₋ + 2) for negatives, which keeps the fit finite on separable
- * scores. The minimiser is Newton's method with a backtracking line search, in the numerically stable form of Lin, Lin
- * and Weng (2007, "A note on Platt's probabilistic outputs for support vector machines", Machine Learning 68,
- * Algorithm 1), as LIBSVM uses.
+ * likelihood methods"): class probabilities from a classifier's real-valued scores $f$ by a fitted sigmoid
+ * $P(y = 1 \mid f) = 1/(1 + \exp(Af + B))$. $A$ and $B$ minimise the cross-entropy against regularised targets
+ * $t_+ = (N_+ + 1)/(N_+ + 2)$ for the $N_+$ positives and $t_- = 1/(N_- + 2)$ for the $N_-$ negatives, which keeps the
+ * fit finite on separable scores. The minimiser is Newton's method with a backtracking line search, in the numerically
+ * stable form of Lin, Lin and Weng (2007, "A note on Platt's probabilistic outputs for support vector machines",
+ * Machine Learning 68, Algorithm 1), as LIBSVM uses.
  */
 
 import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -14,15 +14,15 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** A fitted Platt sigmoid. */
 export interface PlattScaling {
-  /** The slope A (negative when larger scores mean the positive class). */
+  /** The slope $A$ (negative when larger scores mean the positive class). */
   readonly A: number
-  /** The offset B. */
+  /** The offset $B$. */
   readonly B: number
   /** Newton iterations taken. */
   readonly iterations: number
   /** The gradient fell below `tolerance`; false when the iteration limit or a failed line search stopped it. */
   readonly converged: boolean
-  /** P(y = 1 | f) = 1/(1 + exp(A f + B)) for scores f [m]. */
+  /** $P(y = 1 \mid f) = 1/(1 + \exp(Af + B))$ for each of $m$ scores $f$, as a vector of $m$ values. */
   probability(scores: Tensor): Tensor
 }
 
@@ -35,8 +35,25 @@ export interface PlattOptions {
 }
 
 /**
- * Fit Platt's sigmoid to scores f [n] and binary labels y [n] (1 positive, anything else negative; ±1 and 0/1 both
- * work). Throws when the scores and labels differ in length or a score is not finite.
+ * Fit Platt's sigmoid to scores and binary labels, from $A = 0$ and $B = \log((N_- + 1)/(N_+ + 1))$. Throws
+ * `ShapeError` when the scores and labels differ in length, `DomainError` when a score is not finite. Not converging
+ * is reported in the result (`converged`), not thrown.
+ *
+ * @param scores The classifier's real-valued scores $f_i$ on $n$ held-out cases (read as a flat vector).
+ * @param labels The $n$ labels: 1 is positive and anything else negative, so $\pm 1$ and 0/1 both work.
+ * @param options The iteration limit and gradient tolerance of Newton's method.
+ * @returns The fitted $A$ and $B$, how the fit ended, and `probability`, the map from new scores to $P(y = 1)$.
+ *
+ * @example Overlapping scores: larger scores are more often positive
+ * const platt = plattScaling(tensor([-2, -1, 0, 1, 2, 3]), tensor([0, 0, 1, 0, 1, 1]))
+ * print('A =', platt.A, 'B =', platt.B, 'converged =', platt.converged)
+ * print('P(y = 1) at -2, 0, 2:', platt.probability(tensor([-2, 0, 2])))
+ *
+ * @example Separable scores still give a finite fit
+ * // The targets 3/4 and 1/4 (two cases of each class) stop the sigmoid from becoming a step.
+ * const platt = plattScaling(tensor([-2, -1, 1, 2]), tensor([-1, -1, 1, 1]))
+ * print('A =', platt.A, 'B =', platt.B, 'iterations =', platt.iterations)
+ * print('P(y = 1) at the training scores:', platt.probability(tensor([-2, -1, 1, 2])))
  */
 export function plattScaling(scores: Tensor, labels: Tensor, options: PlattOptions = {}): PlattScaling {
   const { maxIterations = 100, tolerance = 1e-5 } = options

@@ -3,6 +3,12 @@
  * pair counting (Rand, adjusted Rand, Fowlkes–Mallows) and information theory (mutual information, NMI with four
  * normalisations, AMI, homogeneity, completeness, V-measure, variation of information), in nats as scikit-learn.
  * Internal indices judge a partition by the data's geometry: silhouette, Calinski–Harabasz, Davies–Bouldin, Dunn.
+ *
+ * External scores take two labellings of the same $n$ items (numbers, strings or booleans, compared by value), so they
+ * do not depend on the names of the clusters; throughout, $C$ is the reference partition with class sizes $a_i$, $K$
+ * the predicted one with cluster sizes $b_j$, and $n_{ij}$ the items in class $i$ and cluster $j$. Internal indices
+ * take the data as an $n \times d$ matrix with a cluster label per row, use Euclidean distances, and throw
+ * `DomainError` for fewer than two clusters.
  */
 
 import { logFactorial } from 'aifn-compute/numerics/special'
@@ -24,20 +30,39 @@ import {
 } from './core'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** A contingency table of two labellings: `table[i][j]` counts items in class i of the first and cluster j of the second. */
+/** A contingency table of two labellings, as `contingencyTable` returns it. */
 export type Contingency = {
+  /**
+   * The $R \times C$ counts: `table[i][j]` counts the items in class $i$ of the first labelling and cluster $j$ of the
+   * second.
+   */
   table: Tensor
-  /** Row sums aᵢ (sizes of the first labelling's classes). */
+  /** Row sums $a_i$ (sizes of the first labelling's classes). */
   rows: Tensor
-  /** Column sums bⱼ (sizes of the second labelling's clusters). */
+  /** Column sums $b_j$ (sizes of the second labelling's clusters). */
   cols: Tensor
+  /** The number of items $n$. */
   n: number
+  /** The first labelling's classes in label order, one per row of `table`. */
   rowLabels: Label[]
+  /** The second labelling's clusters in label order, one per column of `table`. */
   colLabels: Label[]
 }
 
+/**
+ * A contingency table as working arrays: `c`, the $R \times C$ counts $n_{ij}$ row-major; `a`, the $R$ row sums
+ * $a_i$; `b`, the $C$ column sums $b_j$; `R` and `C`, the numbers of classes and clusters; `n`, the number of items.
+ */
 type Table = { c: Float64Array; a: Float64Array; b: Float64Array; R: number; C: number; n: number }
 
+/**
+ * Count two labellings into a contingency table, rows and columns in label order. Throws `ShapeError` when the
+ * labellings differ in length.
+ *
+ * @param labelsTrue The reference labelling, one label per item: the rows.
+ * @param labelsPred The predicted labelling of the same items: the columns.
+ * @returns The counts and their margins.
+ */
 function tableOf(labelsTrue: Labels, labelsPred: Labels): Table {
   const t = labelList(labelsTrue)
   const p = labelList(labelsPred)
@@ -59,7 +84,20 @@ function tableOf(labelsTrue: Labels, labelsPred: Labels): Table {
   return { c, a, b, R, C, n: t.length }
 }
 
-/** The contingency table of two labellings of the same n items (rows: `labelsTrue`, columns: `labelsPred`). */
+/**
+ * The contingency table of two labellings of the same $n$ items (rows: `labelsTrue`, columns: `labelsPred`), as
+ * sklearn's `contingency_matrix`. Throws `ShapeError` when the labellings differ in length.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The counts with their margins and the labels of their rows and columns.
+ *
+ * @example Class 1 split into two clusters
+ * const t = contingencyTable([0, 0, 1, 1], ['a', 'a', 'b', 'c'])
+ * print('table', t.table)
+ * print('class sizes', t.rows, 'cluster sizes', t.cols)
+ * print('columns', t.colLabels)
+ */
 export function contingencyTable(labelsTrue: Labels, labelsPred: Labels): Contingency {
   const t = tableOf(labelsTrue, labelsPred)
   return {
@@ -72,9 +110,26 @@ export function contingencyTable(labelsTrue: Labels, labelsPred: Labels): Contin
   }
 }
 
+/**
+ * The number of unordered pairs among $m$ items, $\binom{m}{2} = m(m - 1)/2$.
+ *
+ * @param m The number of items (a count, or a cell of a contingency table).
+ * @returns The number of pairs.
+ */
 const pairs = (m: number) => (m * (m - 1)) / 2
 
-/** Pair counts: TP pairs together in both, FN together only in the truth, FP only in the prediction, TN apart in both. */
+/**
+ * Pair counts over the $\binom{n}{2}$ unordered pairs of items: `tp`, pairs together in both labellings; `fn`,
+ * together only in the truth; `fp`, together only in the prediction; `tn`, apart in both. sklearn's
+ * `pair_confusion_matrix` counts ordered pairs, so each of its counts is twice these.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The four pair counts, summing to $\binom{n}{2}$.
+ *
+ * @example Splitting a class loses one pair
+ * print(pairConfusion([0, 0, 1, 1], [0, 0, 1, 2]))
+ */
 export function pairConfusion(
   labelsTrue: Labels,
   labelsPred: Labels,
@@ -89,6 +144,15 @@ export function pairConfusion(
   return { tp, fp, fn, tn: pairs(t.n) - tp - fp - fn }
 }
 
+/**
+ * The registry metadata of a partition-comparison metric: stable, read from two `partitions`, higher is better.
+ *
+ * @param key The metric's registry key (its export name).
+ * @param name The metric's display name.
+ * @param note The key of the note that explains it.
+ * @param range The metric's range of values.
+ * @returns The metadata, with its literal fields kept.
+ */
 const partitionInfo = (key: string, name: string, note: string, range: readonly [number, number] = [0, 1]) =>
   ({
     key,
@@ -101,7 +165,18 @@ const partitionInfo = (key: string, name: string, note: string, range: readonly 
     capability: 'decide',
   }) as const
 
-/** The Rand index (TP + TN)/C(n, 2), the accuracy of the pairwise "together or apart" decisions (Rand 1971). */
+/**
+ * The Rand index $(\mathrm{TP} + \mathrm{TN})/\binom{n}{2}$, the accuracy of the pairwise "together or apart"
+ * decisions (Rand 1971), as sklearn's `rand_score`; 1 when there are no pairs.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The Rand index, in $[0, 1]$.
+ *
+ * @example Five of the six pairs agree
+ * print('Rand', randIndex([0, 0, 1, 1], [0, 0, 1, 2]))
+ * print('relabelled', randIndex([0, 0, 1, 1], [1, 1, 0, 0]))
+ */
 export const randIndex = defineMetric(
   partitionInfo('randIndex', 'Rand index', 'rand-index-and-adjusted-rand-index'),
   (labelsTrue: Labels, labelsPred: Labels): number => {
@@ -112,9 +187,21 @@ export const randIndex = defineMetric(
 )
 
 /**
- * The adjusted Rand index (Hubert and Arabie 1985): (Index − E[Index])/(Max − E[Index]) with Index = Σ C(nᵢⱼ, 2),
- * E[Index] = Σ C(aᵢ, 2) Σ C(bⱼ, 2)/C(n, 2) and Max the mean of the two marginal sums. 1 for identical partitions (also
- * when both are trivial), about 0 for random ones.
+ * The adjusted Rand index (Hubert and Arabie 1985):
+ * $(\mathrm{Index} - \expect[\mathrm{Index}])/(\mathrm{Max} - \expect[\mathrm{Index}])$ with
+ * $\mathrm{Index} = \sum_{ij} \binom{n_{ij}}{2}$,
+ * $\expect[\mathrm{Index}] = \sum_i \binom{a_i}{2} \sum_j \binom{b_j}{2} / \binom{n}{2}$ and $\mathrm{Max}$ the mean
+ * of the two marginal sums. 1 for identical partitions (also when both are trivial), about 0 for random ones. As
+ * sklearn's `adjusted_rand_score`.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The adjusted Rand index, in $[-\tfrac{1}{2}, 1]$.
+ *
+ * @example Chance-corrected, so lower than the Rand index
+ * print('ARI', adjustedRandIndex([0, 0, 1, 1], [0, 0, 1, 2]))
+ * print('Rand', randIndex([0, 0, 1, 1], [0, 0, 1, 2]))
+ * print('identical up to names', adjustedRandIndex([0, 0, 1, 1], ['b', 'b', 'a', 'a']))
  */
 export const adjustedRandIndex = defineMetric(
   partitionInfo('adjustedRandIndex', 'Adjusted Rand index', 'rand-index-and-adjusted-rand-index', [-0.5, 1]),
@@ -130,7 +217,18 @@ export const adjustedRandIndex = defineMetric(
   },
 )
 
-/** The Fowlkes–Mallows index TP/√((TP + FP)(TP + FN)), the geometric mean of pairwise precision and recall. */
+/**
+ * The Fowlkes–Mallows index $\mathrm{TP}/\sqrt{(\mathrm{TP} + \mathrm{FP})(\mathrm{TP} + \mathrm{FN})}$, the geometric
+ * mean of pairwise precision and recall. NaN when either labelling puts every item in a cluster of its own (sklearn
+ * returns 0).
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The Fowlkes–Mallows index, in $[0, 1]$.
+ *
+ * @example Pairwise precision 1, recall 1/2
+ * print('FM', fowlkesMallows([0, 0, 1, 1], [0, 0, 1, 2]))
+ */
 export const fowlkesMallows = defineMetric(
   partitionInfo('fowlkesMallows', 'Fowlkes–Mallows index', 'fowlkes-mallows-index'),
   (labelsTrue: Labels, labelsPred: Labels): number => {
@@ -141,12 +239,26 @@ export const fowlkesMallows = defineMetric(
 
 // ── Information theory ───────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The entropy $-\sum_k (c_k/n) \log(c_k/n)$ in nats of the partition with cluster sizes $c_k$; empty clusters add
+ * nothing.
+ *
+ * @param counts The cluster sizes $c_k$ (a margin of a contingency table).
+ * @param n The number of items, the sum of `counts`.
+ * @returns The entropy, 0 for a single cluster.
+ */
 const entropy = (counts: Float64Array, n: number) => {
   let h = 0
   for (const c of counts) if (c > 0) h -= (c / n) * Math.log(c / n)
   return h
 }
 
+/**
+ * The mutual information $I(C; K) = \sum_{ij} (n_{ij}/n) \log(n \, n_{ij}/(a_i b_j))$ in nats of a contingency table.
+ *
+ * @param t The contingency table, as `tableOf` makes it.
+ * @returns The mutual information, at least 0.
+ */
 function mutualInformationOf(t: Table): number {
   let mi = 0
   for (let i = 0; i < t.R; i++)
@@ -159,7 +271,11 @@ function mutualInformationOf(t: Table): number {
 
 /**
  * The expected mutual information of two random labellings with the same cluster sizes (Vinh, Epps and Bailey 2010,
- * eq. 24a): a sum over the possible cell counts weighted by hypergeometric probabilities.
+ * eq. 24a): a sum over the possible cell counts weighted by hypergeometric probabilities, in log space by log
+ * factorials. Its cost grows with $R \, C$ times the cluster sizes.
+ *
+ * @param t The contingency table, as `tableOf` makes it; only its margins and $n$ are read.
+ * @returns $\expect[I(C; K)]$ in nats.
  */
 function expectedMutualInformation(t: Table): number {
   const n = t.n
@@ -177,9 +293,20 @@ function expectedMutualInformation(t: Table): number {
   return emi
 }
 
-/** The mean used to normalise mutual information. */
+/**
+ * The mean $m$ of the two entropies used to normalise mutual information: $(H(C) + H(K))/2$, $\sqrt{H(C) H(K)}$,
+ * $\min$ or $\max$.
+ */
 export type EntropyMean = 'arithmetic' | 'geometric' | 'min' | 'max'
 
+/**
+ * A mean of two entropies.
+ *
+ * @param h1 The first entropy.
+ * @param h2 The second entropy.
+ * @param m Which mean: arithmetic (anything not named below), geometric, minimum or maximum.
+ * @returns The mean.
+ */
 function meanOfEntropies(h1: number, h2: number, m: EntropyMean): number {
   if (m === 'min') return Math.min(h1, h2)
   if (m === 'max') return Math.max(h1, h2)
@@ -187,7 +314,18 @@ function meanOfEntropies(h1: number, h2: number, m: EntropyMean): number {
   return (h1 + h2) / 2
 }
 
-/** Mutual information I(C; K) between two labellings, in nats (information-theoretic-clustering-metrics). */
+/**
+ * Mutual information $I(C; K)$ between two labellings, in nats (information-theoretic-clustering-metrics), as
+ * sklearn's `mutual_info_score`.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The mutual information, in $[0, \min(H(C), H(K))]$.
+ *
+ * @example One bit, in nats, between two copies of a balanced split
+ * print('I', mutualInformationScore([0, 0, 1, 1], [1, 1, 0, 0]), 'log 2 =', Math.LN2)
+ * print('independent', mutualInformationScore([0, 0, 1, 1], [0, 1, 0, 1]))
+ */
 export const mutualInformationScore = defineMetric(
   partitionInfo('mutualInformationScore', 'Mutual information', 'information-theoretic-clustering-metrics', [
     0,
@@ -197,8 +335,20 @@ export const mutualInformationScore = defineMetric(
 )
 
 /**
- * Normalised mutual information I(C; K)/m(H(C), H(K)) for a mean m (default arithmetic, which is the V-measure). 1 when
- * both labellings are trivial (one cluster each), as scikit-learn.
+ * Normalised mutual information $I(C; K)/m(H(C), H(K))$ for a mean $m$ (default arithmetic, which is the V-measure).
+ * 1 when both labellings are trivial (one cluster each), as scikit-learn. NaN when the mean is 0 otherwise, which the
+ * geometric and minimum means give when one labelling is a single cluster (scikit-learn returns 0).
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @param options `average`, the mean of the two entropies to divide by (default `'arithmetic'`).
+ * @returns The normalised mutual information, in $[0, 1]$.
+ *
+ * @example Four normalisations of the same table
+ * const c = [0, 0, 1, 1]
+ * const k = [0, 0, 1, 2]
+ * for (const average of ['arithmetic', 'geometric', 'min', 'max'])
+ *   print(average, normalisedMutualInformation(c, k, { average }))
  */
 export const normalisedMutualInformation = defineMetric(
   partitionInfo(
@@ -215,8 +365,20 @@ export const normalisedMutualInformation = defineMetric(
 )
 
 /**
- * Adjusted mutual information (Vinh, Epps and Bailey 2010): (I − E[I])/(m(H(C), H(K)) − E[I]), with E[I] under random
- * labellings of the same cluster sizes. About 0 for random partitions and 1 for identical ones.
+ * Adjusted mutual information (Vinh, Epps and Bailey 2010): $(I - \expect[I])/(m(H(C), H(K)) - \expect[I])$, with
+ * $\expect[I]$ under random labellings of the same cluster sizes. About 0 for random partitions and 1 for identical
+ * ones; 1 also when both are trivial or both put every item alone. As sklearn's `adjusted_mutual_info_score`.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @param options `average`, the mean of the two entropies in the denominator (default `'arithmetic'`).
+ * @returns The adjusted mutual information, at most 1.
+ *
+ * @example Chance-corrected, so lower than the NMI
+ * const c = [0, 0, 0, 1, 1, 1]
+ * const k = [0, 0, 1, 1, 2, 2]
+ * print('AMI', adjustedMutualInformation(c, k))
+ * print('NMI', normalisedMutualInformation(c, k))
  */
 export const adjustedMutualInformation = defineMetric(
   partitionInfo(
@@ -238,7 +400,19 @@ export const adjustedMutualInformation = defineMetric(
   },
 )
 
-/** Homogeneity, completeness and V-measure together (Rosenberg and Hirschberg 2007). */
+/**
+ * Homogeneity, completeness and V-measure together (Rosenberg and Hirschberg 2007), from one contingency table. As
+ * sklearn's `homogeneity_completeness_v_measure`.
+ *
+ * @param labelsTrue The reference labelling (the classes $C$), one label per item.
+ * @param labelsPred The predicted labelling (the clusters $K$) of the same items.
+ * @param options `beta`, the weight $\beta$ of completeness against homogeneity in the V-measure (default 1).
+ * @returns `homogeneity` $I(C; K)/H(C)$, `completeness` $I(C; K)/H(K)$ (each 1 when its entropy is 0) and `vMeasure`
+ *   $(1 + \beta) h c/(\beta h + c)$ (0 when both are 0).
+ *
+ * @example Splitting a class keeps homogeneity but costs completeness
+ * print(homogeneityCompletenessV([0, 0, 1, 1], [0, 0, 1, 2]))
+ */
 export function homogeneityCompletenessV(
   labelsTrue: Labels,
   labelsPred: Labels,
@@ -258,26 +432,71 @@ export function homogeneityCompletenessV(
   return { homogeneity, completeness, vMeasure }
 }
 
-/** Homogeneity I(C; K)/H(C): each cluster holds one class. 1 when H(C) = 0. */
+/**
+ * Homogeneity $I(C; K)/H(C)$: 1 when each cluster holds one class. 1 when $H(C) = 0$.
+ *
+ * @param labelsTrue The reference labelling (the classes), one label per item.
+ * @param labelsPred The predicted labelling (the clusters) of the same items.
+ * @returns The homogeneity, in $[0, 1]$.
+ *
+ * @example Finer clusters stay homogeneous; merged ones do not
+ * print('split', homogeneity([0, 0, 1, 1], [0, 0, 1, 2]))
+ * print('merged', homogeneity([0, 0, 1, 1], [0, 0, 0, 0]))
+ */
 export const homogeneity = defineMetric(
   partitionInfo('homogeneity', 'Homogeneity', 'information-theoretic-clustering-metrics'),
   (labelsTrue: Labels, labelsPred: Labels): number => homogeneityCompletenessV(labelsTrue, labelsPred).homogeneity,
 )
 
-/** Completeness I(C; K)/H(K): each class sits in one cluster. 1 when H(K) = 0. */
+/**
+ * Completeness $I(C; K)/H(K)$: 1 when each class sits in one cluster. 1 when $H(K) = 0$.
+ *
+ * @param labelsTrue The reference labelling (the classes), one label per item.
+ * @param labelsPred The predicted labelling (the clusters) of the same items.
+ * @returns The completeness, in $[0, 1]$.
+ *
+ * @example Merged clusters stay complete; split ones do not
+ * print('merged', completeness([0, 0, 1, 1], [0, 0, 0, 0]))
+ * print('split', completeness([0, 0, 1, 1], [0, 0, 1, 2]))
+ */
 export const completeness = defineMetric(
   partitionInfo('completeness', 'Completeness', 'information-theoretic-clustering-metrics'),
   (labelsTrue: Labels, labelsPred: Labels): number => homogeneityCompletenessV(labelsTrue, labelsPred).completeness,
 )
 
-/** V-measure, the (β-weighted) harmonic mean of homogeneity and completeness; at β = 1 it is the arithmetic NMI. */
+/**
+ * V-measure, the ($\beta$-weighted) harmonic mean of homogeneity and completeness; at $\beta = 1$ it is the
+ * arithmetic NMI.
+ *
+ * @param labelsTrue The reference labelling (the classes), one label per item.
+ * @param labelsPred The predicted labelling (the clusters) of the same items.
+ * @param options `beta`, the weight $\beta$ of completeness against homogeneity (default 1; above 1 favours
+ *   completeness).
+ * @returns The V-measure, in $[0, 1]$.
+ *
+ * @example Equal to the arithmetic NMI at beta = 1
+ * const c = [0, 0, 1, 1]
+ * const k = [0, 0, 1, 2]
+ * print('V', vMeasure(c, k), 'NMI', normalisedMutualInformation(c, k))
+ * print('beta = 2', vMeasure(c, k, { beta: 2 }))
+ */
 export const vMeasure = defineMetric(
   partitionInfo('vMeasure', 'V-measure', 'information-theoretic-clustering-metrics'),
   (labelsTrue: Labels, labelsPred: Labels, options: { beta?: number } = {}): number =>
     homogeneityCompletenessV(labelsTrue, labelsPred, options).vMeasure,
 )
 
-/** Variation of information H(C) + H(K) − 2I(C; K), a metric on partitions, in nats (Meilă 2007). */
+/**
+ * Variation of information $H(C) + H(K) - 2I(C; K)$, a metric on partitions, in nats (Meilă 2007). Lower is better.
+ *
+ * @param labelsTrue The reference labelling, one label per item.
+ * @param labelsPred The predicted labelling of the same items.
+ * @returns The variation of information, 0 for identical partitions.
+ *
+ * @example Splitting one class in two costs half of log 2
+ * print('VI', variationOfInformation([0, 0, 1, 1], [0, 0, 1, 2]), 'log(2)/2 =', Math.LN2 / 2)
+ * print('identical', variationOfInformation([0, 0, 1, 1], [1, 1, 0, 0]))
+ */
 export const variationOfInformation = defineMetric(
   {
     ...partitionInfo('variationOfInformation', 'Variation of information', 'information-theoretic-clustering-metrics'),
@@ -292,7 +511,18 @@ export const variationOfInformation = defineMetric(
 
 // ── Internal indices ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The data matrix (n × d) and cluster index of each row. */
+/**
+ * The data matrix ($n \times d$) and cluster index of each row, with what the internal indices share: the cluster
+ * sizes, the centroids and the Euclidean distances between rows. Throws `ShapeError` when the labels and rows differ in
+ * number and `DomainError` for fewer than two clusters.
+ *
+ * @param x The data: an $n \times d$ matrix (rows of numbers or a tensor), one row per point; a flat array is $n$
+ *   points in one dimension.
+ * @param labels The cluster label of each row.
+ * @returns `X`, the data row-major; `k`, each row's cluster index (clusters in label order); `K`, the number of
+ *   clusters; `sizes`, their sizes; `centroids`, their means ($K \times d$, row-major); and `dist(i, j)`, the distance
+ *   between rows $i$ and $j$.
+ */
 function clustered(x: Rows, labels: Labels) {
   const X = dense(x, 'clustering data')
   const l = labelList(labels)
@@ -314,8 +544,16 @@ function clustered(x: Rows, labels: Labels) {
 }
 
 /**
- * Silhouette of each point (Rousseeuw 1987): (bᵢ − aᵢ)/max(aᵢ, bᵢ), with aᵢ the mean Euclidean distance to the other
- * points of its cluster and bᵢ the mean distance to the nearest other cluster; 0 for a point alone in its cluster.
+ * Silhouette of each point (Rousseeuw 1987): $(b_i - a_i)/\max(a_i, b_i)$, with $a_i$ the mean Euclidean distance
+ * to the other points of its cluster and $b_i$ the mean distance to the nearest other cluster; 0 for a point alone in
+ * its cluster. As sklearn's `silhouette_samples`. Throws `DomainError` for fewer than two clusters.
+ *
+ * @param x The data: an $n \times d$ matrix, one row per point.
+ * @param labels The cluster label of each row.
+ * @returns The $n$ silhouettes, each in $[-1, 1]$.
+ *
+ * @example Two tight, distant clusters on a line
+ * print(silhouetteSamples([[0], [1], [10], [11]], [0, 0, 1, 1]))
  */
 export function silhouetteSamples(x: Rows, labels: Labels): Tensor {
   const { X, k, K, sizes, dist } = clustered(x, labels)
@@ -332,7 +570,19 @@ export function silhouetteSamples(x: Rows, labels: Labels): Tensor {
   return vector(out)
 }
 
-/** The silhouette score, the mean silhouette over all points (internal-clustering-indices). O(n²) distances. */
+/**
+ * The silhouette score, the mean silhouette over all points (internal-clustering-indices), as sklearn's
+ * `silhouette_score` without sampling. Computes all $O(n^2)$ distances.
+ *
+ * @param x The data: an $n \times d$ matrix, one row per point.
+ * @param labels The cluster label of each row (at least two clusters).
+ * @returns The mean silhouette, in $[-1, 1]$.
+ *
+ * @example A good and a bad clustering of the same points
+ * const x = [[0], [1], [10], [11]]
+ * print('by position', silhouetteScore(x, [0, 0, 1, 1]))
+ * print('alternating', silhouetteScore(x, [0, 1, 0, 1]))
+ */
 export const silhouetteScore = defineMetric(
   {
     key: 'silhouetteScore',
@@ -350,8 +600,17 @@ export const silhouetteScore = defineMetric(
 )
 
 /**
- * The Calinski–Harabasz index (variance ratio criterion; Caliński and Harabasz 1974): (B/(k − 1))/(W/(n − k)) with
- * B = Σⱼ |Cⱼ| ‖μⱼ − μ‖² and W = Σⱼ Σ_{x∈Cⱼ} ‖x − μⱼ‖².
+ * The Calinski–Harabasz index (variance ratio criterion; Caliński and Harabasz 1974): $(B/(k - 1))/(W/(n - k))$ with
+ * $B = \sum_j \lvert C_j \rvert \lVert \muvec_j - \muvec \rVert^2$ and
+ * $W = \sum_j \sum_{\xvec \in C_j} \lVert \xvec - \muvec_j \rVert^2$, for $k$ clusters $C_j$ with centroids
+ * $\muvec_j$ and overall mean $\muvec$. 1 when $W = 0$, as sklearn's `calinski_harabasz_score`.
+ *
+ * @param x The data: an $n \times d$ matrix, one row per point.
+ * @param labels The cluster label of each row (at least two clusters).
+ * @returns The index, higher for tighter, better-separated clusters.
+ *
+ * @example Between-cluster spread 100, within 1
+ * print('CH', calinskiHarabasz([[0], [1], [10], [11]], [0, 0, 1, 1]))
  */
 export const calinskiHarabasz = defineMetric(
   {
@@ -377,8 +636,17 @@ export const calinskiHarabasz = defineMetric(
 )
 
 /**
- * The Davies–Bouldin index (Davies and Bouldin 1979): (1/k) Σⱼ max_{l≠j} (Sⱼ + Sₗ)/‖μⱼ − μₗ‖, with Sⱼ the mean distance
- * of cluster j's points to its centroid. Lower is better.
+ * The Davies–Bouldin index (Davies and Bouldin 1979):
+ * $\frac{1}{k} \sum_j \max_{l \ne j} (S_j + S_l)/\lVert \muvec_j - \muvec_l \rVert$, with $S_j$ the mean distance of
+ * cluster $j$'s points to its centroid $\muvec_j$. Lower is better. Two clusters with the same centroid make it
+ * infinite (NaN when both have zero spread), where sklearn's `davies_bouldin_score` skips the pair.
+ *
+ * @param x The data: an $n \times d$ matrix, one row per point.
+ * @param labels The cluster label of each row (at least two clusters).
+ * @returns The index, at least 0.
+ *
+ * @example Spreads of 0.5 about centroids 10 apart
+ * print('DB', daviesBouldin([[0], [1], [10], [11]], [0, 0, 1, 1]))
  */
 export const daviesBouldin = defineMetric(
   {
@@ -414,7 +682,17 @@ export const daviesBouldin = defineMetric(
   },
 )
 
-/** The Dunn index: the smallest distance between points of different clusters over the largest cluster diameter. */
+/**
+ * The Dunn index (Dunn 1974): the smallest distance between points of different clusters over the largest cluster
+ * diameter (the largest distance between two points of one cluster). NaN when every cluster is a single point.
+ *
+ * @param x The data: an $n \times d$ matrix, one row per point.
+ * @param labels The cluster label of each row (at least two clusters).
+ * @returns The index, higher for compact, well-separated clusters.
+ *
+ * @example Gap 9 between clusters of diameter 1
+ * print('Dunn', dunnIndex([[0], [1], [10], [11]], [0, 0, 1, 1]))
+ */
 export const dunnIndex = defineMetric(
   {
     key: 'dunnIndex',

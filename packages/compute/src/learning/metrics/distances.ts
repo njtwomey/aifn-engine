@@ -1,8 +1,12 @@
 /**
  * Distances and similarities: Minkowski distances (Manhattan, Euclidean, Chebyshev), cosine similarity and distance,
- * angular and Mahalanobis distances, pairwise distance matrices, orthogonal Procrustes alignment and the Procrustes
- * disparity, and the Hausdorff family of distances between point sets (Hausdorff, HD95, average symmetric surface
- * distance).
+ * angular and Mahalanobis distances, orthogonal Procrustes alignment and the Procrustes disparity, and the Hausdorff
+ * family of distances between point sets (Hausdorff, HD95, average symmetric surface distance).
+ *
+ * The vector distances take two vectors $\xvec$, $\yvec$ of the same length (arrays or tensors, read flattened) and
+ * throw `ShapeError` otherwise, as scipy.spatial.distance. The point-set functions take matrices with one point per
+ * row. Matrices of distances between every pair of points are `pairwiseDistances` and `squaredDistances` of
+ * `aifn-compute/numerics/linalg`.
  */
 
 import { det, solve, squaredDistances, svd } from 'aifn-compute/numerics/linalg'
@@ -11,6 +15,14 @@ import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { defineMetric, dense, divide, matrix, sameLength, values, vector, type Data, type Rows } from './core'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
+/**
+ * Two vectors as new arrays, checked to have the same length.
+ *
+ * @param x The first vector (an array or a tensor, read flattened).
+ * @param y The second vector.
+ * @param what The caller's name for error messages.
+ * @returns `a` and `b`, the two vectors as Float64Arrays. Throws `ShapeError` when their lengths differ.
+ */
 function pairOf(x: Data, y: Data, what: string) {
   const a = values(x)
   const b = values(y)
@@ -18,6 +30,14 @@ function pairOf(x: Data, y: Data, what: string) {
   return { a, b }
 }
 
+/**
+ * The registry metadata of a vector distance: stable, read from two `vectors`, lower is better.
+ *
+ * @param key The metric's registry key (its export name).
+ * @param name The metric's display name.
+ * @param range The metric's range of values.
+ * @returns The metadata, with its literal fields kept.
+ */
 const distanceInfo = (key: string, name: string, range: readonly [number, number] = [0, Infinity]) =>
   ({
     key,
@@ -29,7 +49,18 @@ const distanceInfo = (key: string, name: string, range: readonly [number, number
     notes: ['pairwise-distances-and-cosine-similarity'],
   }) as const
 
-/** The Minkowski distance (Σ|xₖ − yₖ|^p)^{1/p} for p ≥ 1 (default 2); p = ∞ gives the Chebyshev distance. */
+/**
+ * The Minkowski distance $(\sum_k \lvert x_k - y_k \rvert^p)^{1/p}$ for $p \ge 1$ (default 2); $p = \infty$ gives the
+ * Chebyshev distance. A $p$ below 1 is not checked, and gives a value that breaks the triangle inequality.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @param options `p`, the order of the norm (default 2; `Infinity` for the largest difference).
+ * @returns The distance $\lVert \xvec - \yvec \rVert_p$.
+ *
+ * @example The 3-4-5 triangle at four orders
+ * for (const p of [1, 2, 3, Infinity]) print('p =', p, minkowskiDistance([0, 0], [3, 4], { p }))
+ */
 export const minkowskiDistance = defineMetric(
   distanceInfo('minkowskiDistance', 'Minkowski distance'),
   (x: Data, y: Data, options: { p?: number } = {}): number => {
@@ -40,25 +71,63 @@ export const minkowskiDistance = defineMetric(
   },
 )
 
-/** The Euclidean distance ‖x − y‖₂. */
+/**
+ * The Euclidean distance $\lVert \xvec - \yvec \rVert_2$.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @returns The distance.
+ *
+ * @example The 3-4-5 triangle
+ * print(euclideanDistance([0, 0], [3, 4]))
+ */
 export const euclideanDistance = defineMetric(
   distanceInfo('euclideanDistance', 'Euclidean distance'),
   (x: Data, y: Data) => minkowskiDistance(x, y, { p: 2 }),
 )
 
-/** The Manhattan distance Σ|xₖ − yₖ|. */
+/**
+ * The Manhattan distance $\sum_k \lvert x_k - y_k \rvert$.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @returns The distance.
+ *
+ * @example Three along and four up
+ * print(manhattanDistance([0, 0], [3, 4]))
+ */
 export const manhattanDistance = defineMetric(
   distanceInfo('manhattanDistance', 'Manhattan distance'),
   (x: Data, y: Data) => minkowskiDistance(x, y, { p: 1 }),
 )
 
-/** The Chebyshev distance maxₖ |xₖ − yₖ|. */
+/**
+ * The Chebyshev distance $\max_k \lvert x_k - y_k \rvert$.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @returns The distance.
+ *
+ * @example The larger of the two differences
+ * print(chebyshevDistance([0, 0], [3, 4]))
+ */
 export const chebyshevDistance = defineMetric(
   distanceInfo('chebyshevDistance', 'Chebyshev distance'),
   (x: Data, y: Data) => minkowskiDistance(x, y, { p: Infinity }),
 )
 
-/** Cosine similarity xᵀy/(‖x‖‖y‖); NaN when either vector is zero. */
+/**
+ * Cosine similarity $\xvec^\top\yvec/(\lVert \xvec \rVert \lVert \yvec \rVert)$; NaN when either vector is zero.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @returns The cosine of the angle between them, in $[-1, 1]$.
+ *
+ * @example At 45 degrees, opposite, and with a zero vector
+ * print('45 degrees', cosineSimilarity([1, 0], [1, 1]))
+ * print('opposite', cosineSimilarity([1, 0], [-2, 0]))
+ * print('zero', cosineSimilarity([1, 0], [0, 0]))
+ */
 export const cosineSimilarity = defineMetric(
   { ...distanceInfo('cosineSimilarity', 'Cosine similarity', [-1, 1]), direction: 'higher' },
   (x: Data, y: Data): number => {
@@ -75,19 +144,58 @@ export const cosineSimilarity = defineMetric(
   },
 )
 
-/** Cosine distance 1 − cos θ (not a metric: it can break the triangle inequality). */
+/**
+ * Cosine distance $1 - \cos\theta$ (not a metric: it can break the triangle inequality); NaN when either vector is
+ * zero. As `scipy.spatial.distance.cosine`.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @returns The distance, in $[0, 2]$.
+ *
+ * @example Orthogonal and opposite vectors
+ * print('orthogonal', cosineDistance([1, 0], [0, 1]))
+ * print('opposite', cosineDistance([1, 0], [-1, 0]))
+ */
 export const cosineDistance = defineMetric(
   distanceInfo('cosineDistance', 'Cosine distance', [0, 2]),
   (x: Data, y: Data) => 1 - cosineSimilarity(x, y),
 )
 
-/** Angular distance arccos(cos θ)/π, a true metric on directions, in [0, 1]. */
+/**
+ * Angular distance $\arccos(\cos\theta)/\pi$, a true metric on directions, in $[0, 1]$; NaN when either vector is
+ * zero.
+ *
+ * @param x The first vector.
+ * @param y The second vector, of the same length.
+ * @returns The angle between them as a fraction of $\pi$.
+ *
+ * @example A quarter turn is half the largest angle
+ * print('45 degrees', angularDistance([1, 0], [1, 1]))
+ * print('90 degrees', angularDistance([1, 0], [0, 1]))
+ */
 export const angularDistance = defineMetric(
   distanceInfo('angularDistance', 'Angular distance', [0, 1]),
   (x: Data, y: Data) => Math.acos(Math.max(-1, Math.min(1, cosineSimilarity(x, y)))) / Math.PI,
 )
 
-/** The Mahalanobis distance √((x − y)ᵀΣ⁻¹(x − y)) for a covariance matrix Σ (by a linear solve, not an inverse). */
+/**
+ * The Mahalanobis distance $\sqrt{(\xvec - \yvec)^\top \Sigmamat^{-1} (\xvec - \yvec)}$ for a covariance matrix
+ * $\Sigmamat$ (by a linear solve, not an inverse). As `scipy.spatial.distance.mahalanobis`, which takes
+ * $\Sigmamat^{-1}$ instead. Throws `LinAlgError` for a singular $\Sigmamat$.
+ *
+ * @param x The first vector, of length $d$.
+ * @param y The second vector, of the same length.
+ * @param options `covariance`, the $d \times d$ covariance matrix $\Sigmamat$ (symmetric positive definite).
+ * @returns The distance.
+ *
+ * @example Two steps along a direction of standard deviation 2 is one unit
+ * const covariance = [
+ *   [4, 0],
+ *   [0, 1],
+ * ]
+ * print('along x', mahalanobisDistance([2, 0], [0, 0], { covariance }))
+ * print('along y', mahalanobisDistance([0, 2], [0, 0], { covariance }))
+ */
 export const mahalanobisDistance = defineMetric(
   distanceInfo('mahalanobisDistance', 'Mahalanobis distance'),
   (x: Data, y: Data, options: { covariance: Rows }): number => {
@@ -103,23 +211,51 @@ export const mahalanobisDistance = defineMetric(
 
 /** The result of `orthogonalProcrustes`. */
 export type Procrustes = {
-  /** d × d orthogonal R with R xᵢ ≈ yᵢ (so X Rᵀ ≈ Y for points as rows). */
+  /**
+   * The $d \times d$ orthogonal $\Rmat$ with $\Rmat\xvec_i \approx \yvec_i$ (so $\Xmat\Rmat^\top \approx \Ymat$ for
+   * points as rows; scipy's `orthogonal_procrustes` returns $\Rmat^\top$).
+   */
   rotation: Tensor
-  /** The scale s (1 unless `scale: true`). */
+  /** The scale $s$ (1 unless `scale: true`). */
   scale: number
-  /** The translation t (zero unless `centre: true`): yᵢ ≈ s R xᵢ + t. */
+  /** The translation $\tvec$ (zero unless `centre: true`): $\yvec_i \approx s\Rmat\xvec_i + \tvec$. */
   translation: Tensor
-  /** The residual ‖s X Rᵀ + t − Y‖²_F. */
+  /** The residual $\lVert s\Xmat\Rmat^\top + \ones\tvec^\top - \Ymat \rVert_F^2$. */
   residual: number
-  /** True when R is a reflection (det R = −1). */
+  /** True when $\Rmat$ is a reflection ($\det\Rmat = -1$). */
   reflection: boolean
 }
 
 /**
- * Orthogonal Procrustes (Schönemann 1966; procrustes-analysis): the orthogonal R minimising ‖RA − B‖_F for matched
- * points as the rows of X and Y (A = Xᵀ, B = Yᵀ), R = VUᵀ from the SVD AB⊤ = UΣVᵀ. With `reflection: false` a
- * reflection is turned into the best proper rotation (Kabsch 1976). Optionally also fits a translation (`centre`) and
- * a scale s = Σσₖ/‖A‖²_F (`scale`).
+ * Orthogonal Procrustes (Schönemann 1966; procrustes-analysis): the orthogonal $\Rmat$ minimising
+ * $\lVert \Rmat\Amat - \Bmat \rVert_F$ for matched points as the rows of $\Xmat$ and $\Ymat$
+ * ($\Amat = \Xmat^\top$, $\Bmat = \Ymat^\top$), $\Rmat = \Vmat\Umat^\top$ from the SVD
+ * $\Amat\Bmat^\top = \Umat\Sigmamat\Vmat^\top$. With `reflection: false` a reflection is turned into the best proper
+ * rotation (Kabsch 1976). Optionally also fits a translation (`centre`, which centres both sets first) and a scale
+ * $s = \sum_k \sigma_k/\lVert \Amat \rVert_F^2$ (`scale`). Throws `ShapeError` when the two sets differ in shape.
+ *
+ * @param x The points to move: an $n \times d$ matrix, one point per row.
+ * @param y The target points, matched row by row: an $n \times d$ matrix.
+ * @param options `reflection` (default allowed): `false` restricts $\Rmat$ to proper rotations; `centre` also fits a
+ *   translation; `scale` also fits a scale.
+ * @returns The fitted rotation, scale and translation, the residual and whether $\Rmat$ is a reflection.
+ *
+ * @example Recover a quarter turn, then a turn with a scale and a shift
+ * const x = [
+ *   [1, 0],
+ *   [0, 1],
+ *   [-1, 0],
+ * ]
+ * const turned = [
+ *   [0, 1],
+ *   [-1, 0],
+ *   [0, -1],
+ * ]
+ * const fit = orthogonalProcrustes(x, turned)
+ * print('R', fit.rotation, 'residual', fit.residual)
+ * const moved = turned.map(([a, b]) => [2 * a + 1, 2 * b + 1])
+ * const full = orthogonalProcrustes(x, moved, { centre: true, scale: true })
+ * print('scale', full.scale, 'translation', full.translation, 'residual', full.residual)
  */
 export function orthogonalProcrustes(
   x: Rows,
@@ -189,8 +325,29 @@ export function orthogonalProcrustes(
 
 /**
  * The Procrustes disparity of two matched point sets (rows as points): after centring both and scaling each to unit
- * Frobenius norm, the least squared error over rotations (reflections allowed) and scale, 1 − (Σσₖ)², in [0, 1]
- * (Gower 1975; as SciPy's `procrustes`).
+ * Frobenius norm, the least squared error over rotations (reflections allowed) and scale, $1 - (\sum_k \sigma_k)^2$,
+ * in $[0, 1]$ (Gower 1975; as SciPy's `procrustes`). Throws `DomainError` when a set has all its points equal. The
+ * two sets' shapes are not checked against each other: pass the same $n \times d$.
+ *
+ * @param x The first point set: an $n \times d$ matrix, one point per row.
+ * @param y The second point set, matched row by row.
+ * @returns The disparity: 0 when one set is a similarity transform of the other.
+ *
+ * @example The scipy example, a rotated, scaled and shifted copy
+ * const a = [
+ *   [1, 3],
+ *   [1, 2],
+ *   [1, 1],
+ *   [2, 1],
+ * ]
+ * const b = [
+ *   [4, -2],
+ *   [4, -4],
+ *   [4, -6],
+ *   [2, -6],
+ * ]
+ * print('similar shapes', procrustesDisparity(a, b))
+ * print('different shapes', procrustesDisparity(a, [[0, 0], [1, 0], [2, 0], [0, 3]]))
  */
 export const procrustesDisparity = defineMetric(
   {
@@ -230,7 +387,14 @@ export const procrustesDisparity = defineMetric(
 
 // ── Hausdorff ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Each point of X's Euclidean distance to its nearest point of Y. */
+/**
+ * Each point of $\Xmat$'s Euclidean distance to its nearest point of $\Ymat$. Throws `ShapeError` when the sets
+ * differ in dimension and `DomainError` when $\Ymat$ is empty.
+ *
+ * @param X The query points, row-major with their dimensions.
+ * @param Y The reference points, row-major with their dimensions.
+ * @returns One distance per row of `X`.
+ */
 function nearestDistances(X: ReturnType<typeof dense>, Y: ReturnType<typeof dense>): Float64Array {
   if (X.cols !== Y.cols) throw new ShapeError('metrics', 'metrics: point sets differ in dimension')
   if (Y.rows === 0) throw new DomainError('metrics', 'metrics: a point set is empty')
@@ -242,13 +406,13 @@ function nearestDistances(X: ReturnType<typeof dense>, Y: ReturnType<typeof dens
   })
 }
 
-/** The Hausdorff distances between point sets X and Y (rows as points). */
+/** The Hausdorff distances between point sets $\Xmat$ and $\Ymat$ (rows as points), as `hausdorffDistances` returns. */
 export type HausdorffDistances = {
-  /** H(X, Y) = max(h(X, Y), h(Y, X)). */
+  /** $H(\Xmat, \Ymat) = \max(h(\Xmat, \Ymat), h(\Ymat, \Xmat))$. */
   hausdorff: number
-  /** h(X, Y) = max over x of the distance to the nearest y. */
+  /** $h(\Xmat, \Ymat) = \max_{\xvec} \min_{\yvec} \lVert \xvec - \yvec \rVert$, as scipy's `directed_hausdorff`. */
   directedXY: number
-  /** h(Y, X). */
+  /** $h(\Ymat, \Xmat)$. */
   directedYX: number
   /** The 95th percentile of the pooled nearest distances of both directions (linear quantile). */
   hd95: number
@@ -258,8 +422,16 @@ export type HausdorffDistances = {
 
 /**
  * The Hausdorff distance and its robust relatives between two finite point sets (Huttenlocher et al. 1993;
- * hausdorff-distance). For segmentation, pass the boundary pixels of each region (see `maskBoundary`). HD95 pools both
- * directions before taking the percentile; implementations differ, so state it.
+ * hausdorff-distance). For segmentation, pass the boundary pixels of each region (see `maskBoundary` in
+ * `aifn-methods/evaluation`). HD95 pools both directions before taking the percentile; implementations differ, so
+ * state it. Throws `ShapeError` when the sets differ in dimension and `DomainError` when either is empty.
+ *
+ * @param x The first point set: a matrix with one point per row.
+ * @param y The second point set, in the same dimension (the number of points may differ).
+ * @returns The symmetric and both directed Hausdorff distances, HD95 and the average symmetric surface distance.
+ *
+ * @example A point set and one with a far point
+ * print(hausdorffDistances([[0, 0], [1, 0]], [[0, 0], [3, 0]]))
  */
 export function hausdorffDistances(x: Rows, y: Rows): HausdorffDistances {
   const X = dense(x, 'hausdorffDistances')
@@ -279,7 +451,17 @@ export function hausdorffDistances(x: Rows, y: Rows): HausdorffDistances {
   }
 }
 
-/** The Hausdorff distance H(X, Y) as a metric. */
+/**
+ * The Hausdorff distance $H(\Xmat, \Ymat)$ as a metric: the largest distance from a point of either set to the other
+ * set.
+ *
+ * @param x The first point set: a matrix with one point per row.
+ * @param y The second point set, in the same dimension.
+ * @returns The Hausdorff distance.
+ *
+ * @example Decided by the far point of the second set
+ * print(hausdorffDistance([[0, 0], [1, 0]], [[0, 0], [3, 0]]))
+ */
 export const hausdorffDistance = defineMetric(
   {
     key: 'hausdorffDistance',

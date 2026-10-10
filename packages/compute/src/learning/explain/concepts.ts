@@ -3,11 +3,11 @@
  *
  * A concept (stripes, a corner dot) is given by examples. A linear probe (L2-regularised logistic regression) separates
  * their activations at a hidden layer from those of random examples; the unit normal of its boundary, pointing to the
- * concept, is the concept activation vector v_C. The conceptual sensitivity of an input is the directional derivative
- * S_C(x) = ∇_h f(h(x)) · v_C of the class logit f with respect to the activations h; the TCAV score of a class is the
- * fraction of its examples with S_C > 0. A score near 1/2 can arise by chance, so CAVs are trained against several
- * random sets, random-against-random CAVs give a null distribution of scores, and a two-sided t-test (equal variances,
- * as the authors' code) compares the two.
+ * concept, is the concept activation vector $\vvec_C$. The conceptual sensitivity of an input is the directional
+ * derivative $S_C(\xvec) = \nabla_{\hvec} f(\hvec(\xvec)) \cdot \vvec_C$ of the class logit $f$ with respect to the
+ * activations $\hvec$; the TCAV score of a class is the fraction of its examples with $S_C > 0$. A score near $1/2$ can
+ * arise by chance, so CAVs are trained against several random sets, random-against-random CAVs give a null
+ * distribution of scores, and a two-sided t-test (equal variances, as the authors' code) compares the two.
  */
 
 import type { MatrixLike } from 'aifn-compute/foundation/contracts'
@@ -31,12 +31,27 @@ import { pooledTTest } from 'aifn-compute/probability/tests'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import type { Differentiable } from './gradients'
 
-/** A linear probe: weights [h], bias, and training accuracy. */
+/**
+ * A linear probe $\wvec^\top\avec + b$: its `weights` $\wvec$ ($h$ values), its `bias` $b$, and its `accuracy` on
+ * the rows it was trained on.
+ */
 export type LinearProbe = { weights: Float64Array; bias: number; accuracy: number }
 
 /**
- * Fit an L2-regularised logistic regression separating `positive` rows [p, h] (label 1) from `negative` rows [q, h]:
- * minimise mean softplus(−s(wᵀa + b)) + (λ/2)‖w‖² by L-BFGS (λ = `l2`, default 0.01).
+ * Fit an L2-regularised logistic regression separating `positive` rows (label $s = 1$) from `negative` rows
+ * ($s = -1$): minimise the mean of $\operatorname{softplus}(-s(\wvec^\top\avec + b))$ plus
+ * $(\lambda/2)\lVert \wvec \rVert^2$ by L-BFGS (at most 500 steps, from zero). Throws `ShapeError` when the two sets'
+ * widths differ.
+ *
+ * @param positive The positive rows ($p \times h$).
+ * @param negative The negative rows ($q \times h$).
+ * @param options The penalty.
+ * @param options.l2 The L2 penalty $\lambda$ on the weights, not the bias (default 0.01).
+ * @returns The probe, with its training accuracy (a row on the boundary counts as negative).
+ *
+ * @example Two clouds split along the first axis
+ * const probe = linearProbe([[2, 0], [3, 1], [2.5, -1]], [[-2, 0], [-3, 1], [-2, -1]])
+ * print(probe)
  */
 export function linearProbe(positive: MatrixLike, negative: MatrixLike, options: { l2?: number } = {}): LinearProbe {
   const P = dense.toMatrixF64(positive, 'linearProbe')
@@ -75,7 +90,20 @@ export function linearProbe(positive: MatrixLike, negative: MatrixLike, options:
   return { weights, bias, accuracy: right / n }
 }
 
-/** The concept activation vector: the unit normal of a linear probe of `concept` [p, h] against `random` [q, h]. */
+/**
+ * The concept activation vector: the unit normal of a `linearProbe` of the concept's activations against random ones,
+ * pointing towards the concept.
+ *
+ * @param concept The concept's examples' activations ($p \times h$), the positive class.
+ * @param random The random examples' activations ($q \times h$), the negative class.
+ * @param options The penalty.
+ * @param options.l2 The probe's L2 penalty (default 0.01).
+ * @returns `vector`, the CAV ($h$ values, unit length unless the probe's weights are all zero), and `accuracy`, the
+ *   probe's training accuracy.
+ *
+ * @example The concept lies along the first axis
+ * print(conceptActivationVector([[2, 0], [3, 1], [2.5, -1]], [[-2, 0], [-3, 1], [-2, -1]]))
+ */
 export function conceptActivationVector(
   concept: MatrixLike,
   random: MatrixLike,
@@ -86,13 +114,34 @@ export function conceptActivationVector(
   return { vector: Float64Array.from(probe.weights, (w) => w / norm), accuracy: probe.accuracy }
 }
 
-/** Gradients [m, h] of a differentiable head (activations → class logit) at each row of `activations` [m, h]. */
+/**
+ * Gradients of a differentiable head (from a layer's activations to the class logit) at each row of activations, in
+ * one `vmap(grad(head))` call.
+ *
+ * @param head The rest of the network: a function of one activation vector ($h$ values) returning the class logit.
+ * @param activations The activations of the class's examples ($m \times h$).
+ * @returns The gradients $\nabla_{\hvec} f$ ($m \times h$), one row per example.
+ *
+ * @example The gradient of a product
+ * const head = (a) => mul(get(a, 0), get(a, 1))
+ * print(activationGradients(head, [[1, 2], [3, -1]]))
+ */
 export function activationGradients(head: Differentiable, activations: MatrixLike): Tensor {
   const { data, m, n } = dense.toMatrixF64(activations, 'activationGradients')
   return vmap(grad(head))(fromData(Float64Array.from(data), [m, n])) as Tensor
 }
 
-/** The directional derivatives S = ∇h · v [m] of gradients [m, h] along a CAV v [h]. */
+/**
+ * The directional derivatives $S = \nabla_{\hvec} f \cdot \vvec$ of each row of gradients along a CAV $\vvec$. Throws
+ * `ShapeError` when the CAV's length is not the gradients' width.
+ *
+ * @param gradients The gradients ($m \times h$), as `activationGradients` returns them.
+ * @param cav The CAV $\vvec$ ($h$ values).
+ * @returns One sensitivity per row ($m$ values).
+ *
+ * @example Along the first axis
+ * print(conceptSensitivity([[1, 0], [0.5, 2], [-1, 1]], [1, 0]))
+ */
 export function conceptSensitivity(gradients: MatrixLike, cav: ArrayLike<number>): Float64Array {
   const { data, m, n } = dense.toMatrixF64(gradients, 'conceptSensitivity')
   if (cav.length !== n) throw new ShapeError('conceptSensitivity', 'conceptSensitivity: the CAV must match the width')
@@ -103,7 +152,16 @@ export function conceptSensitivity(gradients: MatrixLike, cav: ArrayLike<number>
   })
 }
 
-/** The TCAV score: the fraction of rows of `gradients` [m, h] with a positive derivative along the CAV. */
+/**
+ * The TCAV score: the fraction of rows of gradients with a positive derivative along the CAV.
+ *
+ * @param gradients The gradients ($m \times h$), as `activationGradients` returns them.
+ * @param cav The CAV ($h$ values).
+ * @returns The score, in $[0, 1]$.
+ *
+ * @example Two of three examples respond positively
+ * print(tcavScore([[1, 0], [0.5, 2], [-1, 1]], [1, 0]))
+ */
 export function tcavScore(gradients: MatrixLike, cav: ArrayLike<number>): number {
   const s = conceptSensitivity(gradients, cav)
   return s.reduce((a, v) => a + (v > 0 ? 1 : 0), 0) / s.length
@@ -111,30 +169,55 @@ export function tcavScore(gradients: MatrixLike, cav: ArrayLike<number>): number
 
 /** The result of `tcav`. */
 export type TcavResult = {
-  /** TCAV scores of the concept against each random set, and their CAVs' probe accuracies. */
+  /** TCAV scores of the concept against each random set. */
   scores: Float64Array
+  /** The training accuracy of each of those CAVs' probes. */
   accuracies: Float64Array
   /** TCAV scores of random-against-random CAVs: the null distribution. */
   randomScores: Float64Array
+  /** The mean of `scores`. */
   mean: number
+  /** The standard deviation of `scores` (denominator $n - 1$). */
   sd: number
-  /** The two-sided pooled t-test p-value of concept against random scores, and whether it is below α. */
+  /**
+   * The two-sided pooled t-test p-value of concept against random scores (1 or 0 when both are constant: whether the
+   * constants agree).
+   */
   pValue: number
+  /** Whether `pValue` is below $\alpha$. */
   significant: boolean
   /** The CAV against the first random set, for display. */
   cav: Float64Array
   /**
-   * The mean directional derivative S_C over the class's examples, averaged over the random sets: the score only counts
-   * signs, so a concept the logit barely responds to can still score 0 or 1; this says how much it responds.
+   * The mean directional derivative $S_C$ over the class's examples, averaged over the random sets: the score only
+   * counts signs, so a concept the logit barely responds to can still score 0 or 1; this says how much it responds.
    */
   sensitivity: number
 }
 
 /**
- * TCAV of a class: `head` maps activations [h] to the class logit, `activations` [m, h] are the class's examples at
- * the layer, `concept` [p, h] the concept's examples and `randoms` (at least two sets, each [q, h]) random examples.
- * Trains a CAV against each random set and between consecutive random sets (r₀ vs r₁, r₁ vs r₂, …), scores each, and
- * tests the difference at level α (default 0.05).
+ * TCAV of a class: trains a CAV of the concept against each random set and one between each random set and the next
+ * (cyclically: $r_0$ against $r_1$, ..., $r_{n-1}$ against $r_0$), scores each, and tests the difference between the
+ * two groups of scores. Throws `DomainError` for fewer than two random sets.
+ *
+ * @param head The rest of the network: maps one activation vector ($h$ values) to the class logit.
+ * @param activations The class's examples' activations at the layer ($m \times h$).
+ * @param concept The concept's examples' activations ($p \times h$).
+ * @param randoms At least two sets of random examples' activations (each $q \times h$).
+ * @param options The probes' penalty and the test's level.
+ * @param options.l2 The probes' L2 penalty (default 0.01).
+ * @param options.alpha The significance level $\alpha$ (default 0.05).
+ * @returns The scores, the null scores, the test and the CAV (see `TcavResult`).
+ *
+ * @example The logit rises along the concept's direction
+ * // The logit a0 * a1 rises with a0 where a1 > 0, as it is for the class; the concept's examples sit far along a0.
+ * const head = (a) => mul(get(a, 0), get(a, 1))
+ * const examples = add(normals(stream(0), [10, 2]), tensor([0, 2]))
+ * const concept = add(normals(stream(1), [10, 2]), tensor([3, 0]))
+ * const randoms = [2, 3, 4, 5, 6, 7, 8, 9].map((k) => normals(stream(k), [10, 2]))
+ * const r = tcav(head, examples, concept, randoms)
+ * print('scores =', r.scores, ' random =', r.randomScores)
+ * print('p =', r.pValue, ' significant =', r.significant, ' sensitivity =', r.sensitivity)
  */
 export function tcav(
   head: Differentiable,

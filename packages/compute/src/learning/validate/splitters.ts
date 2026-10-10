@@ -1,7 +1,13 @@
 /**
  * Splitters (plan §5.5): pure functions of a dataset's size, labels and groups and a stream, returning train and test
- * index sets. Non-random splitters agree with scikit-learn's `KFold`, `StratifiedKFold`, `GroupKFold`, `LeaveOneOut`
- * and `TimeSeriesSplit` on the same indices; random ones draw only from the stream they are given.
+ * index sets.
+ *
+ * Each constructor returns a `Splitter`, whose `split(data, s)` takes either a `SplitInput` (`{ n, y?, groups? }`) or
+ * a dataset (its rows counted from `x`), and returns one `Split` per fold: sorted int32 row indices of the training and
+ * test sets. Non-random splitters agree with scikit-learn's `KFold`, `StratifiedKFold`, `GroupKFold`, `LeaveOneOut`
+ * and `TimeSeriesSplit` on the same indices; random ones (`randomised: true`) draw only from the stream they are
+ * given, and throw `DomainError` without one. A splitter that cannot split the rows it is given (too few rows, groups
+ * or class members) throws `DomainError`.
  */
 
 import { rowCount, type Column, type Dataset, type Features } from 'aifn-compute/learning/estimators'
@@ -11,6 +17,7 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** What a splitter reads: the number of rows, and labels (stratified) or groups (grouped) where it needs them. */
 export interface SplitInput {
+  /** The number of rows $n$; splits index rows $0, \dots, n - 1$. */
   n: number
   /** Class labels, for stratification. */
   y?: Column
@@ -20,15 +27,19 @@ export interface SplitInput {
 
 /** One split: sorted int32 row indices of the training and test sets. Rows in neither are unused. */
 export interface Split {
+  /** The training rows, a sorted int32 vector. */
   train: Tensor
+  /** The test rows, a sorted int32 vector. */
   test: Tensor
 }
 
 /** A splitter: a name, whether it needs a stream, and the split function. */
 export interface Splitter {
+  /** A readable name with the settings, e.g. `k-fold(5)`. */
   readonly name: string
   /** True when `split` draws from its stream (and throws without one). */
   readonly randomised: boolean
+  /** The splits of `data` (a `SplitInput` or a dataset), drawing from `s` when `randomised`. */
   split(data: SplitInput | Dataset<Features, Column>, s?: Stream): Split[]
 }
 
@@ -39,23 +50,50 @@ export const TEST = 1
 /** The `assignment` code of a row a split leaves out. */
 export const UNUSED = -1
 
+/**
+ * What a splitter reads from its argument: a `SplitInput` as it is, or a dataset's row count (from `x`), labels and
+ * groups.
+ *
+ * @param data A `SplitInput` (recognised by a numeric `n`) or a dataset.
+ * @returns The `SplitInput` of `data`.
+ */
 function inputOf(data: SplitInput | Dataset<Features, Column>): SplitInput {
   if ('n' in data && typeof data.n === 'number') return data as SplitInput
   const d = data as Dataset<Features, Column>
   return { n: rowCount(d.x), y: d.y, groups: d.groups }
 }
 
+/**
+ * The labels of a column as a plain array; throws `ShapeError` when there are not $n$ of them.
+ *
+ * @param c The column: a label list or a tensor (flattened).
+ * @param n The number of rows the labels must cover.
+ * @param what What the labels are, for the error message (`'labels'`, `'group labels'`).
+ * @returns One label per row.
+ */
 function labelsOf(c: Column, n: number, what: string): (string | number)[] {
   const out = Array.isArray(c) ? Array.from(c) : toFlat(c as Tensor)
   if (out.length !== n) throw new ShapeError('splitter', `splitter: ${out.length} ${what} for ${n} rows`)
   return out
 }
 
+/**
+ * Row indices as a sorted int32 vector.
+ *
+ * @param indices The indices, in any order; not modified.
+ * @returns A new int32 tensor of the indices in increasing order.
+ */
 function sorted(indices: number[]): Tensor {
   return fromData(Int32Array.from(indices).sort(), [indices.length])
 }
 
-/** Split from a test-fold number per row (−1: never in a test set); train is every other assigned row. */
+/**
+ * The splits given each row's test fold: fold $f$ tests the rows whose number is $f$ and trains on all the others.
+ *
+ * @param testFold The test fold of each row, $0, \dots, k - 1$ ($n$ values).
+ * @param k The number of folds.
+ * @returns $k$ splits, in fold order.
+ */
 function fromTestFolds(testFold: Int32Array, k: number): Split[] {
   const n = testFold.length
   return Array.from({ length: k }, (_, f) => {
@@ -66,24 +104,62 @@ function fromTestFolds(testFold: Int32Array, k: number): Split[] {
   })
 }
 
-/** Fold sizes of n rows in k folds: the first n mod k folds get one extra row (scikit-learn's convention). */
+/**
+ * Fold sizes of $n$ rows in $k$ folds: $\lfloor n / k \rfloor$ each, and the first $n \bmod k$ folds one row more
+ * (scikit-learn's convention).
+ *
+ * @param n The number of rows.
+ * @param k The number of folds.
+ * @returns The $k$ fold sizes, summing to $n$.
+ */
 function foldSizes(n: number, k: number): number[] {
   return Array.from({ length: k }, (_, f) => Math.floor(n / k) + (f < n % k ? 1 : 0))
 }
 
+/**
+ * Throws `DomainError` unless $k$ is a whole number with $2 \le k \le n$.
+ *
+ * @param k The number of folds asked for.
+ * @param n The number of rows.
+ * @param name The caller's name, for error messages.
+ */
 function checkK(k: number, n: number, name: string) {
   if (!(Number.isInteger(k) && k >= 2)) throw new DomainError(name, `${name}: k must be a whole number ≥ 2`)
   if (k > n) throw new DomainError(name, `${name}: k = ${k} folds for ${n} rows`)
 }
 
+/**
+ * The stream a shuffled split draws from; throws `DomainError` when there is none.
+ *
+ * @param s The stream passed to `split`, possibly undefined.
+ * @param name The caller's name, for error messages.
+ * @returns `s`.
+ */
 function needStream(s: Stream | undefined, name: string): Stream {
   if (!s) throw new DomainError(name, `${name}: a shuffled split needs a stream`)
   return s
 }
 
 /**
- * k-fold: k contiguous test blocks (the first n mod k one row larger), each tested once; with `shuffle`, the rows are
- * permuted by the stream first. Matches scikit-learn's `KFold(k)` without shuffling.
+ * $k$-fold: $k$ contiguous test blocks (the first $n \bmod k$ one row larger), each tested once, each training on
+ * the other $k - 1$; with `shuffle`, the rows are permuted by the stream first. Matches scikit-learn's `KFold(k)`
+ * without shuffling. `split` throws `DomainError` unless $2 \le k \le n$, and when shuffled without a stream.
+ *
+ * @param options The number of folds and whether to shuffle.
+ * @param options.k The number of folds $k$.
+ * @param options.shuffle Permute the rows (by the stream given to `split`) before cutting them into blocks.
+ * @returns A splitter of $k$ splits.
+ *
+ * @example Three folds of six rows
+ * const splits = kFold({ k: 3 }).split({ n: 6 })
+ * print('test: ', splits.map((s) => s.test))
+ * print('train:', splits.map((s) => s.train))
+ *
+ * @example Shuffled by a stream: the same seed gives the same folds
+ * const folds = kFold({ k: 3, shuffle: true })
+ * print('seed 0:', folds.split({ n: 6 }, stream(0)).map((s) => s.test))
+ * print('seed 0:', folds.split({ n: 6 }, stream(0)).map((s) => s.test))
+ * print('seed 1:', folds.split({ n: 6 }, stream(1)).map((s) => s.test))
  */
 export function kFold({ k = 5, shuffle: shuffled = false }: { k?: number; shuffle?: boolean } = {}): Splitter {
   const name = `k-fold(${k}${shuffled ? ', shuffled' : ''})`
@@ -108,10 +184,23 @@ export function kFold({ k = 5, shuffle: shuffled = false }: { k?: number; shuffl
 }
 
 /**
- * Stratified k-fold: each fold's class proportions match the whole set's as nearly as possible. Classes are taken in
- * order of first appearance; the sorted labels are dealt round-robin to the folds to decide how many of each class
- * each fold tests, and each class's rows are assigned to folds in order (shuffled by the stream with `shuffle`). This
- * is scikit-learn's `StratifiedKFold` algorithm, and matches it without shuffling.
+ * Stratified $k$-fold: each fold's class proportions match the whole set's as nearly as possible. Classes are coded
+ * in order of first appearance; the sorted codes are dealt round-robin to the folds to decide how many of each class
+ * each fold tests, and each class's rows are assigned to folds in order (the fold order shuffled per class by the
+ * stream with `shuffle`). This is scikit-learn's `StratifiedKFold` algorithm, and matches it without shuffling.
+ * `split` throws `DomainError` without labels `y`, unless $2 \le k \le n$, when no class has $k$ members, and when
+ * shuffled without a stream.
+ *
+ * @param options The number of folds and whether to shuffle.
+ * @param options.k The number of folds $k$.
+ * @param options.shuffle Shuffle, by the stream given to `split`, which of its folds each row of a class goes to.
+ * @returns A splitter of $k$ splits that reads the labels `y`.
+ *
+ * @example Each fold tests one row of class a and one of class b
+ * const y = ['a', 'a', 'a', 'b', 'b', 'b']
+ * const splits = stratifiedKFold({ k: 3 }).split({ n: 6, y })
+ * print('test rows:', splits.map((s) => s.test))
+ * print('test labels:', splits.map((s) => toFlat(s.test).map((i) => y[i])))
  */
 export function stratifiedKFold({
   k = 5,
@@ -155,9 +244,20 @@ export function stratifiedKFold({
 }
 
 /**
- * Grouped k-fold: every group lies wholly in one test fold. Groups are taken largest first and each goes to the fold
+ * Grouped $k$-fold: every group lies wholly in one test fold. Groups are taken largest first and each goes to the fold
  * with the fewest rows so far (the first of ties), balancing fold sizes, as scikit-learn's `GroupKFold`. Ties in group
- * size are broken by the sorted order of the group labels.
+ * size are broken by the sorted order of the group labels. Not random. `split` throws `DomainError` without `groups`
+ * and when there are fewer than $k$ groups.
+ *
+ * @param options The number of folds.
+ * @param options.k The number of folds $k$.
+ * @returns A splitter of $k$ splits that reads the group labels `groups`.
+ *
+ * @example Three patients, two folds: no patient is on both sides
+ * const groups = ['p1', 'p1', 'p1', 'p2', 'p2', 'p3']
+ * const splits = groupKFold({ k: 2 }).split({ n: 6, groups })
+ * print('test rows:', splits.map((s) => s.test))
+ * print('test groups:', splits.map((s) => toFlat(s.test).map((i) => groups[i])))
  */
 export function groupKFold({ k = 5 }: { k?: number } = {}): Splitter {
   return {
@@ -197,7 +297,17 @@ export function groupKFold({ k = 5 }: { k?: number } = {}): Splitter {
   }
 }
 
-/** Leave-one-out: n splits, each testing one row. */
+/**
+ * Leave-one-out: $n$ splits, split $i$ testing row $i$ and training on the other $n - 1$. Not random. `split` throws
+ * `DomainError` for fewer than two rows.
+ *
+ * @returns A splitter of $n$ splits.
+ *
+ * @example Four rows, four splits
+ * const splits = leaveOneOut().split({ n: 4 })
+ * print('test: ', splits.map((s) => s.test))
+ * print('train:', splits.map((s) => s.train))
+ */
 export function leaveOneOut(): Splitter {
   return {
     name: 'leave-one-out',
@@ -214,8 +324,18 @@ export function leaveOneOut(): Splitter {
 }
 
 /**
- * Repeat a randomised splitter `repeats` times on independent substreams `stream.child('repeat', r)`, e.g. repeated
- * (stratified) k-fold. The splits of all repeats are concatenated.
+ * Repeat a randomised splitter `repeats` times on independent substreams `child(s, 'repeat', r)`, e.g. repeated
+ * (stratified) $k$-fold. The splits of all repeats are concatenated, repeat by repeat. The result is randomised, so
+ * `split` throws `DomainError` without a stream, even when `splitter` is not.
+ *
+ * @param splitter The splitter to repeat, usually a shuffled one (a non-random one gives the same splits each time).
+ * @param repeats The number of repeats $r$.
+ * @returns A splitter of $r$ times the splits of `splitter`.
+ *
+ * @example Two shuffled 3-fold runs of six rows
+ * const splits = repeated(kFold({ k: 3, shuffle: true }), 2).split({ n: 6 }, stream(0))
+ * print('splits:', splits.length)
+ * print('test sets:', splits.map((s) => s.test))
  */
 export function repeated(splitter: Splitter, repeats: number): Splitter {
   return {
@@ -229,8 +349,23 @@ export function repeated(splitter: Splitter, repeats: number): Splitter {
 }
 
 /**
- * Shuffle-split: `splits` independent random splits, each testing ⌈testSize·n⌉ rows (a fraction below 1, or a count)
- * and training on ⌊trainSize·n⌋ (default: the rest). Rows may be unused, and a row may be tested in several splits.
+ * Shuffle-split: `splits` independent random splits, each testing $\lceil t n \rceil$ rows for a fraction $t < 1$
+ * (`testSize`, or a count when at least 1) and training on $\lfloor u n \rfloor$ for a fraction $u$ (`trainSize`, or
+ * a count; default: the rest). Rows may be unused, and a row may be tested in several splits. Split $r$ is a
+ * permutation drawn from `child(s, 'split', r)`. `split` throws `DomainError` without a stream and when the sizes do
+ * not fit the rows.
+ *
+ * @param options The number of splits and the sizes of their sets.
+ * @param options.splits The number of random splits.
+ * @param options.testSize The test set's size: a fraction of the rows when below 1, otherwise a count.
+ * @param options.trainSize The training set's size: a fraction of the rows when below 1, otherwise a count. Left out,
+ *   every row not tested is trained on.
+ * @returns A randomised splitter of `splits` splits.
+ *
+ * @example Three random splits of ten rows, testing a third
+ * const splits = shuffleSplit({ splits: 3, testSize: 0.3 }).split({ n: 10 }, stream(0))
+ * print('test: ', splits.map((s) => s.test))
+ * print('train sizes:', splits.map((s) => s.train.shape[0]))
  */
 export function shuffleSplit({
   splits = 10,
@@ -257,8 +392,22 @@ export function shuffleSplit({
 
 /**
  * Expanding-window time-series splits, as scikit-learn's `TimeSeriesSplit`: `splits` consecutive test blocks of
- * `testSize` rows (default ⌊n / (splits + 1)⌋) ending at the last row; each trains on every earlier row (at most
- * `maxTrainSize` of the latest), leaving `gap` rows out before the test block. No training row comes after a test row.
+ * `testSize` rows (default $\lfloor n / (s + 1) \rfloor$ for $s$ splits) ending at the last row; each trains on every
+ * earlier row (at most `maxTrainSize` of the latest), leaving `gap` rows out before the test block. No training row
+ * comes after a test row. Rows are taken in their order, which must be time order. Not random. `split` throws
+ * `DomainError` when the rows are too few to leave at least one training row before the first test block.
+ *
+ * @param options The number of splits and the sizes of the windows.
+ * @param options.splits The number of splits $s$ (test blocks).
+ * @param options.testSize The rows in each test block. Left out, $\lfloor n / (s + 1) \rfloor$.
+ * @param options.gap Rows left out between the end of the training set and the start of the test block.
+ * @param options.maxTrainSize The most training rows, the latest kept. Left out, every earlier row is used.
+ * @returns A splitter of `splits` splits.
+ *
+ * @example Six time steps, three splits: the training window grows
+ * const splits = expandingWindow({ splits: 3 }).split({ n: 6 })
+ * print('train:', splits.map((s) => s.train))
+ * print('test: ', splits.map((s) => s.test))
  */
 export function expandingWindow({
   splits = 5,
@@ -292,7 +441,20 @@ export function expandingWindow({
  * Rolling-origin evaluation with a fixed window (Tashman, 2000, "Out-of-sample tests of forecasting accuracy",
  * International Journal of Forecasting 16): train on the `window` rows before the origin, test the next `horizon` rows
  * after a `gap`, then move the origin forward by `step` (default `horizon`) until the test block would pass the end.
- * The first origin is at `window`. With a growing window use `expandingWindow`.
+ * The first origin is at `window`. With a growing window use `expandingWindow`. Not random. `split` throws
+ * `DomainError` when the rows are too few for one split.
+ *
+ * @param options The window, horizon and step.
+ * @param options.window The number of training rows, just before the origin.
+ * @param options.horizon The number of test rows.
+ * @param options.step How far the origin moves between splits. Left out, `horizon`, so test blocks do not overlap.
+ * @param options.gap Rows left out between the origin and the test block.
+ * @returns A splitter with one split per origin.
+ *
+ * @example A window of three rows sliding along seven
+ * const splits = rollingOrigin({ window: 3, horizon: 2 }).split({ n: 7 })
+ * print('train:', splits.map((s) => s.train))
+ * print('test: ', splits.map((s) => s.test))
  */
 export function rollingOrigin({
   window,
@@ -326,8 +488,17 @@ export function rollingOrigin({
 }
 
 /**
- * The fold assignment matrix [splits, n], int32: `TEST` (1) where row i is tested in split f, `TRAIN` (0) where it is
- * trained on, `UNUSED` (−1) otherwise. A figure draws it directly (e.g. a categorical heatmap).
+ * The fold assignment matrix, int32 of shape $s \times n$ for $s$ splits: entry $(f, i)$ is `TEST` (1) where row $i$
+ * is tested in split $f$, `TRAIN` (0) where it is trained on, and `UNUSED` ($-1$) otherwise. A figure draws it
+ * directly (e.g. a categorical heatmap).
+ *
+ * @param splits The splits, as a splitter returns them.
+ * @param n The number of rows; every index in the splits must be below it.
+ * @returns The $s \times n$ int32 assignment matrix, one row per split.
+ *
+ * @example A time-series split leaves the last rows unused in early splits
+ * const splits = expandingWindow({ splits: 2, testSize: 1 }).split({ n: 5 })
+ * print('assignment =', assignment(splits, 5))
  */
 export function assignment(splits: readonly Split[], n: number): Tensor {
   const out = new Int32Array(splits.length * n).fill(UNUSED)

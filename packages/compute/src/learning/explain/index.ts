@@ -1,18 +1,37 @@
 /**
  * `aifn-compute/learning/explain`: explanations of a model's predictions.
  *
- * - Local attributions: exact Shapley values, KernelSHAP over an interventional value function (and its sampling
- *   spread), TreeSHAP (one tree or an additive ensemble) and exact tree SHAP interaction values, Shapley interaction
- *   values of any set function, LIME, gradient attributions by autodiff (saliency, gradient × input, integrated
- *   gradients, expected gradients, SmoothGrad), DeepLIFT (rescale) and DeepSHAP through a `DenseNetwork`, occlusion.
- * - Counterfactuals: Wachter et al., DiCE, FACE, Growing Spheres, with actionability constraints.
- * - Rules: anchors (beam search with KL-LUCB), decision lists by sequential covering, tree rules, surrogate fidelity.
- * - Concepts: concept activation vectors and TCAV with its random-concept t-test.
- * - Data: influence functions (exact or LiSSA), TracIn, TMC data Shapley, exact KNN-Shapley.
- * - Global: permutation importance, partial dependence with ICE, accumulated local effects, Friedman's H-statistic,
- *   functional ANOVA.
- * - Evaluation: deletion and insertion curves, faithfulness correlation, cascading model randomisation with rank
- *   similarity (sanity checks), local Lipschitz stability.
+ * - Shapley attributions: `exactShapley` and `shapleyInteractions` of any set function (by enumeration),
+ *   `interventionalValue` to turn a model into one, `kernelShap` (exact when it enumerates, sampled otherwise, with
+ *   `shapleyKernelWeight`) and `kernelShapVariance` for its sampling spread; for trees, `treeShap`,
+ *   `treeShapInteractions`, `ensembleTreeShap`, `ensembleTreeShapInteractions`, with `pathDependentValue`,
+ *   `expectedValue` and `treeEnsembleOutput`.
+ * - Other local attributions: `lime`; gradients by autodiff, `inputGradient` (saliency and gradient times input),
+ *   `integratedGradients`, `expectedGradients` and `smoothGrad`; `deepLift` and `deepShap` through a `DenseNetwork`;
+ *   `occlusion` of windows.
+ * - Networks as data, for the methods that look inside one: `denseLayers`, `denseForward`, `denseFunction`,
+ *   `denseOutput`, `fromMlpParams`, `activate`, `activateDerivative`.
+ * - Counterfactuals: `wachterCounterfactual` (one, by gradient), `diverseCounterfactuals` (DiCE, several at once),
+ *   `face` (`faceGraph` and `faceSearch`: an actual data point reached through dense regions), `growingSpheres`
+ *   (model-agnostic, by sampling); `isActionable`, `projectActionable` and `medianAbsoluteDeviation` for the
+ *   constraints and the distance.
+ * - Rules: `anchor` (with `klLucb`, `klBounds`, `bernoulliKl`), `ruleList` and `applyRuleList` (sequential covering),
+ *   `treeRules`, `fidelity` of a surrogate; predicates with `satisfies`, `ruleCoverage`, `simplifyRule`,
+ *   `quantileEdges` and `binPredicates`.
+ * - Concepts: `tcav` with its random-concept t-test, built from `linearProbe`, `conceptActivationVector`,
+ *   `activationGradients`, `conceptSensitivity` and `tcavScore`.
+ * - Data: `influenceFunctions` (exact or LiSSA) on `exampleGradients`, `tracIn`, `dataShapley` (truncated Monte Carlo)
+ *   and `knnShapley` (exact).
+ * - Global: `permutationImportance`, `partialDependence` with ICE on a `featureGrid`, `accumulatedLocalEffects`
+ *   (faithful under correlated features), Friedman's `hStatistic`, `functionalAnova`.
+ * - Evaluation: `deletionCurve` (deletion and insertion) in `attributionOrder`, `perturbationCurve`, `aopc` and `aopcr`
+ *   for a masked predictor, `faithfulnessCorrelation`, `randomiseNetwork` with `explanationSimilarity` (sanity
+ *   checks), `localLipschitz` stability, `relevanceMass` against a ground-truth mask.
+ *
+ * Models are plain functions: a batch of rows ($m \times d$) to one output per row (`ScalarModel`), a differentiable
+ * function of one input (`Differentiable`), or a classifier returning a label per row. Inputs are numbers, nested
+ * arrays or tensors; results are plain arrays and records. Every random method takes a `Stream`, so a seed fixes its
+ * result. `explainFunctions` is the module's registry.
  */
 
 export {

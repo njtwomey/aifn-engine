@@ -1,7 +1,8 @@
 /**
  * The registry of covariance kernels (design S §2.10): each factory with its hyperparameters as a `Space` (the fields
- * of its options object; `matern` and `polynomial` also take ν or the degree first) and whether it is stationary. The
- * kernel view (profile, Gram heatmap, prior draws) and the lab's kernel picker enumerate this table.
+ * of its options object; `matern` and `polynomial` also take $\nu$ or the degree first) and whether it is stationary.
+ * The kernel view (profile, Gram heatmap, prior draws) and the lab's kernel picker enumerate this table. The module's
+ * other functions (`gram`, `kernelDiagonal`, `kernelProfile`) are registered as functions, in `kernelsFunctions`.
  */
 
 import { definer, entries, type Entry, type FunctionInfo, type KernelInfo } from 'aifn-compute/foundation/registry'

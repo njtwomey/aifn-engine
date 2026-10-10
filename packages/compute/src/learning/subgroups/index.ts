@@ -1,9 +1,26 @@
 /**
- * `aifn-compute/learning/subgroups`: subgroup discovery and exceptional model mining over a table. A description language of
- * nominal and numeric selectors (with equal-frequency, equal-width or on-the-fly discretisation) and bitset covers;
- * quality measures (WRAcc and the Klösgen family, binomial test, lift, coverage, χ², the numeric mean shift) with their
- * optimistic estimates; search by `aifn-compute/optim/search` (beam, best-first, exhaustive, branch and bound) with redundancy
- * filtering; SD-Map; and exceptional-model classes (correlation, regression slope, logistic classifier, association).
+ * `aifn-compute/learning/subgroups`: subgroup discovery and exceptional model mining over a table, finding the
+ * conjunctive descriptions whose rows are most unusual in a target.
+ *
+ * - Covers as bitsets: `bitset`, `bitsetFull`, `bitsetHas`, `bitsetAnd`, `bitsetAndNot`, `bitsetNot`, `bitsetCount`,
+ *   `bitsetAndCount`, `bitsetIndices` and `bitsetJaccard`.
+ * - The description language: `selectorLanguage` (nominal `=` and `≠`, numeric `≥` and `≤` at cut points by
+ *   equal-frequency, equal-width or on-the-fly discretisation, with memoised covers and a canonical refinement
+ *   operator), `cutPoints`, `compatibleSelector`, and `selectorKey`, `descriptionKey` and `formatDescription` to name
+ *   selectors and descriptions.
+ * - Quality measures with optimistic estimates: for a binary target `standardQuality` (the Klösgen family
+ *   $(n/N)^a (p - p_0)$), `wraccQuality`, `binomialQuality`, `liftQuality`, `coverageQuality` and `chiSquareQuality`;
+ *   for a numeric one `meanShiftQuality`.
+ * - Search: `subgroupDiscovery` for the top $k$ (beam, best-first, depth-first or breadth-first by
+ *   `aifn-compute/optim/search`, with branch and bound and a redundancy filter), `subgroupDiscoverySteps` to step
+ *   through it, `subgroupSpace` and `subgroupRedundancy` for the search itself, and `subgroupOf` for a description
+ *   chosen by hand; `sdMap`, exhaustive by FP-growth for count-based measures of a binary target.
+ * - Exceptional model mining, where the target is a model fitted inside and outside: `correlationModel`,
+ *   `regressionModel`, `logisticModel` and `associationModel`, each a quality measure without an optimistic estimate.
+ * - The registry entries of the module: `subgroupAlgorithms` and `subgroupFunctions`.
+ *
+ * Everything is deterministic. An empty cover has quality $-\infty$; invalid options and inconsistent columns throw
+ * `DomainError`.
  */
 
 export {

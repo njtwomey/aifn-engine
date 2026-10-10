@@ -28,28 +28,50 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 // ── Positive–unlabelled risks ────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The surrogate ℓ(z, y) of the 0–1 loss used inside the PU risks, for a score z and a label y ∈ {−1, +1}: `sigmoid`
- * ℓ = σ(−yz) (bounded, as Kiryo et al. recommend) or `logistic` ℓ = log(1 + e^{−yz}).
+ * The surrogate $\ell(z, y)$ of the 0–1 loss used inside the PU risks, for a score $z$ and a label $y \in \{-1, +1\}$:
+ * `sigmoid` $\ell = \sigma(-yz)$ (bounded, as Kiryo et al. recommend) or `logistic` $\ell = \log(1 + e^{-yz})$.
  */
 export type PuSurrogate = 'sigmoid' | 'logistic'
 
 /** Options of `unbiasedPu` and `nonNegativePu`. */
 export type PuOptions = {
-  /** The class prior π = P(y = +1), known or estimated. */
+  /** The class prior $\pi = P(y = +1)$, known or estimated; it must lie in $(0, 1)$. */
   prior: number
   /** The surrogate loss (default `sigmoid`). */
   surrogate?: PuSurrogate
 }
 
+/**
+ * The surrogate loss $\ell(z, y)$, elementwise.
+ *
+ * @param z The scores.
+ * @param y The label every score is scored against, $+1$ or $-1$.
+ * @param kind Which surrogate.
+ * @returns $\ell(z, y)$, shaped like `z`.
+ */
 const surrogate = (z: Value, y: 1 | -1, kind: PuSurrogate): Value =>
   kind === 'sigmoid' ? sigmoid(y === 1 ? neg(z) : z) : softplus(y === 1 ? neg(z) : z)
 
+/**
+ * Throw `DomainError` unless the class prior lies in $(0, 1)$.
+ *
+ * @param prior The class prior $\pi$.
+ * @param where The caller's name, for the error message.
+ */
 function checkPrior(prior: number, where: string) {
   if (!(prior > 0 && prior < 1))
     throw new DomainError(where, `${where}: the class prior must lie in (0, 1), got ${prior}`)
 }
 
-/** The three empirical risks of the PU decomposition: R_P⁺, R_P⁻ (labelled positives) and R_U⁻ (unlabelled). */
+/**
+ * The three empirical risks of the PU decomposition: $R_P^+$ and $R_P^-$ (the labelled positives scored as positive
+ * and as negative) and $R_U^-$ (the unlabelled scored as negative), each a mean of the surrogate.
+ *
+ * @param positive The scores of the labelled positives.
+ * @param unlabelled The scores of the unlabelled examples.
+ * @param kind Which surrogate.
+ * @returns `positivePlus` $R_P^+$, `positiveMinus` $R_P^-$ and `unlabelledMinus` $R_U^-$.
+ */
 function puRisks(positive: Value, unlabelled: Value, kind: PuSurrogate) {
   return {
     positivePlus: mean(surrogate(positive, 1, kind)),
@@ -59,11 +81,22 @@ function puRisks(positive: Value, unlabelled: Value, kind: PuSurrogate) {
 }
 
 /**
- * The unbiased PU risk (du Plessis, Niu and Sugiyama, 2014, 2015): with scores g(x) on labelled positives and on
- * unlabelled examples drawn from the marginal, R(g) = π R_P⁺(g) + R_U⁻(g) − π R_P⁻(g), where R_P^± is the mean surrogate
- * loss of the positives labelled ±1 and R_U⁻ that of the unlabelled labelled −1. Its expectation is the
- * positive–negative risk, because the unlabelled mean of ℓ(g, −1) counts the hidden positives with weight π, which the
- * last term removes. With a flexible model the estimate goes negative (overfitting); see `nonNegativePu`.
+ * The unbiased PU risk (du Plessis, Niu and Sugiyama, 2014, 2015): with scores $g(\xvec)$ on labelled positives and on
+ * unlabelled examples drawn from the marginal, $R(g) = \pi R_P^+(g) + R_U^-(g) - \pi R_P^-(g)$, where $R_P^{\pm}$ is
+ * the mean surrogate loss of the positives labelled $\pm 1$ and $R_U^-$ that of the unlabelled labelled $-1$. Its
+ * expectation is the positive–negative risk, because the unlabelled mean of $\ell(g, -1)$ counts the hidden positives
+ * with weight $\pi$, which the last term removes. With a flexible model the estimate goes negative (overfitting); see
+ * `nonNegativePu`. A prior outside $(0, 1)$ throws `DomainError`.
+ *
+ * @param positive The scores $g(\xvec)$ of the labelled positives, of any shape.
+ * @param unlabelled The scores of the unlabelled examples, of any shape.
+ * @param options The class prior $\pi$ and the surrogate.
+ * @returns The risk, a number (or a traced scalar).
+ *
+ * @example Negative when the unlabelled positives are fitted as negatives
+ * const options = { prior: 0.5 }
+ * print('a fair fit:', unbiasedPu(tensor([2, 2]), tensor([2, -2]), options))
+ * print('every unlabelled as negative:', unbiasedPu(tensor([5, 5]), tensor([-5, -5]), options))
  */
 export const unbiasedPu = defineLoss(
   {
@@ -85,21 +118,33 @@ export const unbiasedPu = defineLoss(
 export type NonNegativePuOptions = PuOptions & {
   /**
    * Return the training objective of Kiryo et al.'s algorithm rather than the risk: when the negative-class part
-   * R_U⁻ − π R_P⁻ falls below −β, the objective is −γ (R_U⁻ − π R_P⁻), whose gradient step pushes it back up. Default
-   * false (the risk itself).
+   * $R_U^- - \pi R_P^-$ falls below $-\beta$, the objective is $-\gamma (R_U^- - \pi R_P^-)$, whose gradient step
+   * pushes it back up; otherwise it is $\pi R_P^+ + R_U^- - \pi R_P^-$, unclipped. Default false (the risk itself).
    */
   training?: boolean
-  /** The tolerance β ≥ 0 below zero allowed before the correction (default 0). */
+  /** The tolerance $\beta \ge 0$ below zero allowed before the correction (default 0). */
   beta?: number
-  /** The correction's step factor γ ∈ (0, 1] (default 1). */
+  /** The correction's step factor $\gamma \in (0, 1]$ (default 1). */
   gamma?: number
 }
 
 /**
- * The non-negative PU risk (Kiryo, Niu, du Plessis and Sugiyama, 2017): R(g) = π R_P⁺(g) + max(0, R_U⁻(g) − π R_P⁻(g)).
- * The second term estimates the negative class's risk (1 − π) R_N⁻, which cannot be negative; clipping it at zero
- * stops a flexible model from driving the unbiased estimate below zero by fitting the unlabelled positives as negatives.
- * With `training: true` it returns the objective of their algorithm instead (see `NonNegativePuOptions`).
+ * The non-negative PU risk (Kiryo, Niu, du Plessis and Sugiyama, 2017):
+ * $R(g) = \pi R_P^+(g) + \max(0, R_U^-(g) - \pi R_P^-(g))$. The second term estimates the negative class's risk
+ * $(1 - \pi) R_N^-$, which cannot be negative; clipping it at zero stops a flexible model from driving the unbiased
+ * estimate below zero by fitting the unlabelled positives as negatives. With `training: true` it returns the objective
+ * of their algorithm instead (see `NonNegativePuOptions`). A prior outside $(0, 1)$ throws `DomainError`.
+ *
+ * @param positive The scores $g(\xvec)$ of the labelled positives, of any shape.
+ * @param unlabelled The scores of the unlabelled examples, of any shape.
+ * @param options The class prior $\pi$, the surrogate, and the training objective's switch, $\beta$ and $\gamma$.
+ * @returns The risk (or the training objective), a number (or a traced scalar).
+ *
+ * @example The overfitted case of `unbiasedPu`, clipped
+ * const [pos, unl] = [tensor([5, 5]), tensor([-5, -5])]
+ * print('uPU:', unbiasedPu(pos, unl, { prior: 0.5 }))
+ * print('nnPU:', nonNegativePu(pos, unl, { prior: 0.5 }))
+ * print('training objective:', nonNegativePu(pos, unl, { prior: 0.5, training: true }))
  */
 export const nonNegativePu = defineLoss(
   {
@@ -126,15 +171,30 @@ export const nonNegativePu = defineLoss(
 
 /** Options of `proportionLoss`. */
 export type ProportionLossOptions = ReductionOptions & {
-  /** Added to the bag's mean probabilities inside the log (default 1e-12), so an empty class does not give −∞. */
+  /** Added to the bag's mean probabilities inside the log (default 1e-12), so an empty class gives no $-\infty$. */
   epsilon?: number
 }
 
 /**
  * The proportion loss of learning from label proportions (Ardehaly and Culotta, 2017; Tsai and Lin, 2020): instance
- * logits z [n, K] are turned into probabilities, averaged within each bag b into p̄_b = (1/|b|) Σ_{i ∈ b} softmax(z_i),
- * and compared with the bag's known class proportions π_b by the cross-entropy −Σ_k π_bk log p̄_bk. `bags` gives each
- * instance's bag index in 0 … B − 1 and `proportions` is [B, K]. The reduction is over bags.
+ * logits $\zvec_i$ (rows of `[n, K]`) are turned into probabilities, averaged within each bag $b$ into
+ * $\bar{\pvec}_b = \tfrac{1}{\lvert b \rvert} \sum_{i \in b} \operatorname{softmax}(\zvec_i)$, and compared with the
+ * bag's known class proportions $\pivec_b$ by the cross-entropy $-\sum_k \pi_{bk} \log \bar{p}_{bk}$. `bags` gives each
+ * instance's bag index in $0, \dots, B - 1$ and `proportions` is `[B, K]`. The reduction is over bags. Logits that are
+ * not a matrix, a bag id per instance missing, or an id outside $[0, B)$ throw.
+ *
+ * @param logits The instance logits, `[n, K]`.
+ * @param bags Each instance's bag index, $n$ integers in $[0, B)$; constants.
+ * @param proportions The class proportions of each bag, `[B, K]` (rows summing to one); constants. $B$ is read from
+ *   its first axis.
+ * @param options The $\varepsilon$ inside the log, and the reduction (over bags).
+ * @returns The loss, reduced over bags (mean by default).
+ *
+ * @example When a bag's mean prediction matches its proportions, its loss is their entropy
+ * const logits = tensor([[2, 0], [0, 2], [Math.log(9), 0], [Math.log(9), 0]])
+ * const proportions = tensor([[0.5, 0.5], [0.9, 0.1]])
+ * print('per bag:', proportionLoss(logits, [0, 0, 1, 1], proportions, { reduction: 'none' }))
+ * print('entropies:', Math.log(2), -(0.9 * Math.log(0.9) + 0.1 * Math.log(0.1)))
  */
 export const proportionLoss = defineLoss(
   {
@@ -175,17 +235,36 @@ export const proportionLoss = defineLoss(
 /** Options of `complementaryLabelLoss`. */
 export type ComplementaryLabelOptions = ReductionOptions & {
   /**
-   * `unbiased`: the unbiased risk estimator with cross-entropy of Ishida et al. (2019), −(K − 1) ℓ(z, ȳ) + Σ_k ℓ(z, k);
-   * `forward`: the forward correction under uniform complements (Yu et al., 2018), −log((1 − p_ȳ)/(K − 1)), the
-   * cross-entropy of the complementary-label distribution the model implies. Default `forward`.
+   * `unbiased`: the unbiased risk estimator with cross-entropy of Ishida et al. (2019),
+   * $-(K - 1) \ell(\zvec, \bar{y}) + \sum_k \ell(\zvec, k)$ with $\ell(\zvec, k) = -\log p_k$; `forward`: the forward
+   * correction under uniform complements (Yu et al., 2018), $-\log((1 - p_{\bar{y}}) / (K - 1))$, the cross-entropy of
+   * the complementary-label distribution the model implies. Default `forward`.
    */
   method?: 'unbiased' | 'forward'
 }
 
 /**
- * Losses for complementary labels: each example comes with a class ȳ it does not belong to, drawn uniformly from the
- * other K − 1 classes. Logits are [n, K] and `complementary` holds ȳ for each row. The `unbiased` form equals the
- * ordinary cross-entropy risk in expectation over ȳ but goes negative per example; the `forward` form is bounded below.
+ * Losses for complementary labels: each example comes with a class $\bar{y}$ it does not belong to, drawn uniformly
+ * from the other $K - 1$ classes. Logits are `[n, K]` and `complementary` holds $\bar{y}$ for each row, with
+ * $\pvec = \operatorname{softmax}(\zvec)$. The `unbiased` form equals the ordinary cross-entropy risk in expectation
+ * over $\bar{y}$ but goes negative per example; the `forward` form is bounded below. Logits that are not a matrix, or
+ * fewer than two classes, throw.
+ *
+ * @param logits The logits $\zvec$, `[n, K]`.
+ * @param complementary The complementary label $\bar{y}$ of each row, an integer in $[0, K)$; constants.
+ * @param options The method (`forward` or `unbiased`) and the reduction (over rows).
+ * @returns The loss, reduced over rows (mean by default).
+ *
+ * @example Uniform logits cost log K by either method
+ * const z = tensor([[0, 0, 0]])
+ * print('forward:', complementaryLabelLoss(z, [0]))
+ * print('unbiased:', complementaryLabelLoss(z, [0], { method: 'unbiased' }))
+ * print('log 3 =', Math.log(3))
+ *
+ * @example Avoiding the complementary class: the unbiased form goes negative, the forward one stays above log(K - 1)
+ * const z = tensor([[5, 0, 5]])
+ * print('forward:', complementaryLabelLoss(z, [1]), ' log 2 =', Math.log(2))
+ * print('unbiased:', complementaryLabelLoss(z, [1], { method: 'unbiased' }))
  */
 export const complementaryLabelLoss = defineLoss(
   {

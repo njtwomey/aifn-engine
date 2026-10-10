@@ -1,6 +1,9 @@
 /**
  * Datasets and estimators: the shapes every `fit` takes and returns. `Dataset` is the contract's (`kind: 'dataset'`);
  * `dataset(x, y?)` builds one, and `takeRows`/`takeData` select rows of tensors, label lists, tables and datasets.
+ *
+ * Features are a tensor whose first axis is the rows, a list of labels, or a table (a record of named columns with the
+ * same number of rows). Selecting rows never changes its input: it returns new tensors, lists and records.
  */
 
 import type { Column, Dataset, Features, Size, Table } from 'aifn-compute/foundation/contracts'
@@ -19,10 +22,19 @@ export type Supervised<X extends Features = Tensor, Y = Tensor> = Dataset<X, Y> 
 export type DatasetExtras = Partial<Pick<Dataset, 'groups' | 't' | 'f' | 'meta'>>
 
 /**
- * A dataset from features `x` (n rows), optional targets `y` and optional extras (group labels, a colouring
- * coordinate `t`, the noise-free target `f`, metadata).
+ * A dataset from features `x` ($n$ rows), optional targets `y` and optional extras (group labels, a colouring
+ * coordinate `t`, the noise-free target `f`, metadata). Nothing is copied or checked: the fields are the values given.
  *
- * @example linearRegression().fit(dataset(x, y))
+ * @param x The features: a tensor with one row per example, a label list or a table.
+ * @param y The targets, one per row. Left out, the dataset has no `y` field (unsupervised).
+ * @param extras Further fields: `groups`, `t`, `f` and `meta`.
+ * @returns The dataset `{ kind: 'dataset', x, y, ...extras }`.
+ *
+ * @example A labelled dataset with groups
+ * const data = dataset(tensor([[0, 1], [1, 0], [1, 1]]), tensor([0, 1, 1]), { groups: ['a', 'a', 'b'] })
+ * print('kind:', data.kind)
+ * print('rows:', rowCount(data.x))
+ * print('groups:', data.groups)
  */
 export function dataset<X extends Features, Y = Tensor>(x: X, y: Y, extras?: DatasetExtras): Supervised<X, Y>
 export function dataset<X extends Features>(x: X, y?: undefined, extras?: DatasetExtras): Dataset<X, never>
@@ -47,6 +59,7 @@ export interface Estimator<D, M> {
   readonly name: string
   /** The hyperparameters it was made with. */
   readonly params?: unknown
+  /** Fit on `data`, with randomness and tracing from `options`, returning a new fitted model. */
   fit(data: D, options?: FitOptions): M
 }
 
@@ -59,7 +72,18 @@ export type DataOf<E> = E extends { fit(data: infer D, ...rest: never[]): unknow
 
 // ── Rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Number of rows of a tensor (its first axis), label list or table (all columns must agree). */
+/**
+ * Number of rows of a tensor (its first axis), label list or table (all columns must agree). Throws `ShapeError` for
+ * a scalar tensor or a table whose columns disagree, and `DomainError` for a table with no columns.
+ *
+ * @param x The features or a column.
+ * @returns The number of rows $n$.
+ *
+ * @example A tensor, a label list and a table
+ * print('matrix:', rowCount(tensor([[1, 2], [3, 4], [5, 6]])))
+ * print('labels:', rowCount(['a', 'b']))
+ * print('table:', rowCount({ age: tensor([20, 30]), city: ['Cork', 'Bath'] }))
+ */
 export function rowCount(x: Features | Column): Size {
   if (isTensor(x)) {
     if (x.shape.length === 0) throw new ShapeError('rowCount', 'rowCount: a scalar has no rows')
@@ -77,8 +101,17 @@ export function rowCount(x: Features | Column): Size {
 }
 
 /**
- * The rows `index` (in that order, repeats allowed) of a tensor (by `aifn-compute/foundation/tensor`'s `take`, keeping its
- * dtype), label list or table.
+ * The rows `index` (in that order, repeats allowed) of a tensor (by `aifn-compute/foundation/tensor`'s `take`, keeping
+ * its dtype), label list or table (each column taken alike).
+ *
+ * @param x The features or a column; not modified.
+ * @param index Row indices, each in $0, \dots, n - 1$.
+ * @returns A new value of the same kind as `x` with one row per index.
+ *
+ * @example Reorder and repeat rows
+ * print('tensor:', takeRows(tensor([[1, 2], [3, 4], [5, 6]]), [2, 0, 2]))
+ * print('labels:', takeRows(['a', 'b', 'c'], [2, 0, 2]))
+ * print('table:', takeRows({ age: tensor([20, 30, 40]), city: ['Cork', 'Bath', 'Oslo'] }, [1]))
  */
 export function takeRows<X extends Features | Column>(x: X, index: ArrayLike<number>): X {
   if (isTensor(x)) {
@@ -91,7 +124,21 @@ export function takeRows<X extends Features | Column>(x: X, index: ArrayLike<num
   return out as X
 }
 
-/** The rows `index` of every row-aligned field of a dataset (`x`, `y`, `groups`, `t`, `f`); `meta` is kept. */
+/**
+ * The rows `index` of every row-aligned field of a dataset (`x`, `y`, `groups`, `t`, `f`); every other field (`meta`,
+ * `kind`) is kept as it is.
+ *
+ * @param data The dataset; not modified.
+ * @param index Row indices, each in $0, \dots, n - 1$.
+ * @returns A new dataset of the selected rows.
+ *
+ * @example A training fold of a grouped dataset
+ * const data = dataset(tensor([[0], [1], [2], [3]]), tensor([0, 0, 1, 1]), { groups: ['a', 'a', 'b', 'b'] })
+ * const fold = takeData(data, [0, 2])
+ * print('x:', fold.x)
+ * print('y:', fold.y)
+ * print('groups:', fold.groups)
+ */
 export function takeData<D extends Dataset<Features, unknown>>(data: D, index: ArrayLike<number>): D {
   const out: Record<string, unknown> = { ...(data as object) }
   for (const key of ['x', 'y', 'groups', 't', 'f'] as const) {

@@ -1,8 +1,10 @@
 /**
  * Cross-validation (plan §5.5; Stone, 1974, "Cross-validatory choice and assessment of statistical predictions",
  * JRSS B 36; Hastie, Tibshirani and Friedman, 2009, "The Elements of Statistical Learning", §7.10): fit on each
- * split's training rows, evaluate on its test rows, keep everything. Metrics are registered metrics, read by their
- * `info.capability` and keyed by `info.key`.
+ * split's training rows, evaluate on its test rows, keep everything. Metrics are registered metrics (those of
+ * `aifn-compute/learning/metrics`, or any function carrying a `MetricInfo`), read by their `info.capability` and keyed
+ * by `info.key`. Randomness comes from one stream, split into a child for the splitter and one per fold's fit, so a
+ * cross-validation is reproducible from its seed.
  */
 
 import type { MetricCapability } from 'aifn-compute/foundation/contracts'
@@ -26,20 +28,24 @@ import { fromData, isTensor, type Tensor } from 'aifn-compute/foundation/tensor'
 import { now, type Trace } from 'aifn-compute/foundation/trace'
 import { assignment, type Split, type Splitter } from './splitters'
 
-/** A dataset for cross-validation: inputs, targets and optional group labels. */
+/** A dataset for cross-validation: inputs `x`, targets `y` (a tensor) and optional group labels `groups`. */
 export type CrossValidationData<X extends Features> = Supervised<X, Tensor> & { readonly groups?: Column }
 
-/** Something with `fit` on supervised data. */
+/** Something with `fit` on supervised data: an estimator, a pipeline or a search's estimator. */
 export type Fittable<X extends Features, M> = {
+  /** A readable name. */
   readonly name: string
+  /** Fit on supervised data, returning the fitted model `M`. */
   fit(data: Supervised<X, Tensor>, options?: FitOptions): M
 }
 
 /** One fold of a cross-validation. */
 export interface Fold<M> {
+  /** The fold's position $f$ among the splits, from 0. */
   index: number
-  /** Sorted row indices of the training and test sets. */
+  /** Sorted int32 row indices of the training set. */
   train: Tensor
+  /** Sorted int32 row indices of the test set. */
   test: Tensor
   /** The model fitted on the training rows, with all its fitted state. */
   model: M
@@ -57,21 +63,27 @@ export interface Fold<M> {
 
 /** The result of `crossValidate`. */
 export interface CrossValidation<M> {
+  /** The splitter's name. */
   splitter: string
+  /** The splits, as the splitter returned them. */
   splits: Split[]
-  /** Fold assignment [folds, n]: 1 test, 0 train, −1 unused (see `assignment`). */
+  /** Fold assignment, $k \times n$ for $k$ folds: 1 test, 0 train, $-1$ unused (see `assignment`). */
   assignment: Tensor
+  /** Every fold, in split order. */
   folds: Fold<M>[]
-  /** Each metric over folds, [folds]. */
+  /** Each metric's value per fold, a vector of $k$ values, by `info.key`. */
   scores: Record<string, Tensor>
+  /** Each metric's mean over folds, by `info.key`. */
   mean: Record<string, number>
-  /** Sample standard deviation over folds (÷ (folds − 1)). */
+  /** Each metric's sample standard deviation over folds (divided by $k - 1$; NaN for one fold), by `info.key`. */
   std: Record<string, number>
   /** Each metric's direction, by `info.key`. */
   directions: Record<string, 'higher' | 'lower'>
   /**
-   * Out-of-fold predictions [n] per tensor-valued capability ('decide', 'expect'; scores of shape [n]): each row's
-   * prediction from the model that did not train on it; NaN for rows never tested. With repeated splits the last wins.
+   * Out-of-fold predictions, $n$ values, for each capability the metrics read other than `'predictive'` (`'decide'`,
+   * and `'score'` when scores are one value per row): each row's prediction from the model that did not train on it;
+   * NaN for rows never tested. With repeated splits the last wins. A capability whose outputs are not one value per
+   * test row is left out.
    */
   outOfFold: Partial<Record<MetricCapability, Tensor>>
 }
@@ -84,6 +96,15 @@ export interface CrossValidateOptions {
   trainMetrics?: boolean
 }
 
+/**
+ * The outputs a model gives on some rows for the metrics, and the metrics' values on them.
+ *
+ * @param model The fitted model; it must have every capability the metrics read.
+ * @param x The inputs of the rows.
+ * @param y The targets of the rows.
+ * @param metrics The metrics to compute.
+ * @returns The outputs by capability (`predictions`), and each metric's value by `info.key` (`values`).
+ */
 function evaluateOn(
   model: unknown,
   x: unknown,
@@ -99,6 +120,36 @@ function evaluateOn(
  * `metrics` on the test rows. The fitted model must have every capability the metrics need (a compile error
  * otherwise). Everything is kept: the fold assignment matrix, each fold's fitted model, predictions, metrics and
  * training trace, per-metric scores over folds with their mean and standard deviation, and out-of-fold predictions.
+ * Folds are fitted in turn, on this thread; whatever the splitter or the fit throws is not caught.
+ *
+ * @param estimator What to fit on each training set: anything with `name` and `fit(data, options)`.
+ * @param data The rows: inputs `x`, targets `y` and, for a grouped splitter, `groups`. Its row-aligned fields are
+ *   subset per fold; it is not modified.
+ * @param splitter How to split the rows into training and test sets; it is given the row count, `y` and `groups`.
+ * @param metrics The metrics to compute on every test set, each a function of the targets and one model output
+ *   carrying a `MetricInfo` (`key`, `capability`, `direction`).
+ * @param options The stream, and whether to score the training rows too.
+ * @returns Every fold, the splits and assignment, each metric's scores per fold with their mean, standard deviation
+ *   and direction, and the out-of-fold predictions.
+ *
+ * @example A mean predictor, checked by hand
+ * // The model predicts the training mean; each fold's mean squared error can be checked by eye.
+ * const meanModel = {
+ *   name: 'mean',
+ *   fit: (d) => {
+ *     const m = mean(d.y)
+ *     return { decide: (x) => full([x.shape[0]], m) }
+ *   },
+ * }
+ * const mse = Object.assign((y, p) => mean(square(sub(y, p))), {
+ *   info: { key: 'mse', capability: 'decide', direction: 'lower' },
+ * })
+ * const data = { x: tensor([[0], [1], [2], [3], [4], [5]]), y: tensor([1, 2, 3, 4, 5, 6]) }
+ * const cv = crossValidate(meanModel, data, kFold({ k: 3 }), [mse])
+ * print('test rows:', cv.splits.map((s) => s.test))
+ * print('mse per fold:', cv.scores.mse)
+ * print('mean, std:', cv.mean.mse, cv.std.mse)
+ * print('out-of-fold predictions:', cv.outOfFold.decide)
  */
 export function crossValidate<
   X extends Features,

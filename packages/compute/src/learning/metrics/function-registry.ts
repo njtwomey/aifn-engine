@@ -1,6 +1,6 @@
 /**
- * The functions of `aifn-compute/learning/metrics` that are not metrics (curves, tables, decompositions and intervals), each
- * linked to the notes it serves. The metrics themselves are in `registry.ts`.
+ * The functions of `aifn-compute/learning/metrics` that are not metrics (curves, tables, decompositions and intervals),
+ * each registered with a name, a role and the notes it serves. The metrics themselves are in `registry.ts`.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -15,6 +15,7 @@ import * as ranking from './ranking'
 import * as regression from './regression'
 import * as uncertainty from './uncertainty'
 
+/** Registers a function of this module as a `function` entry of module `learning/metrics`. */
 const fn = definer<FunctionInfo>('function', 'learning/metrics')
 const ROC = ['receiver-operating-characteristic-curve-and-area']
 const PR = ['precision-recall-curve-and-average-precision']
@@ -313,7 +314,14 @@ fn(
   ranking.positionDiscount,
 )
 
-/** The functions of the module that are not metrics, keyed by name. */
+/**
+ * The functions of the module that are not metrics, keyed by name, each with its registry `info` (name, role and
+ * notes).
+ *
+ * @example The registered functions and one entry
+ * print('functions:', Object.keys(metricsFunctions).length)
+ * print(metricsFunctions.confusionMatrix.info)
+ */
 export const metricsFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
   entries<FunctionInfo>(
     'function',

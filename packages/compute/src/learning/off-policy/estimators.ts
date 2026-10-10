@@ -1,9 +1,16 @@
 /**
- * Off-policy evaluation of a target policy π from logged bandit feedback: rounds i = 1 … n with a context xᵢ, an
- * action aᵢ drawn by a logging policy π₀, its propensity π₀(aᵢ | xᵢ) and the reward rᵢ. The value
- * V(π) = E_x Σₐ π(a | x) μ(x, a) is estimated by inverse propensity scoring (plain, clipped and self-normalised), the
- * direct method (a reward model q̂), doubly robust (both) and switch-DR (doubly robust where the importance weight is
- * at most τ, the model elsewhere). Each returns the estimate, a standard error and the importance weights it used.
+ * Off-policy evaluation of a target policy $\pi$ from logged bandit feedback: rounds $i = 1, \dots, n$ with a context
+ * $x_i$, an action $a_i$ drawn by a logging policy $\pi_0$, its propensity $\pi_0(a_i \mid x_i)$ and the reward $r_i$.
+ * The value $V(\pi) = \expect_x \sum_a \pi(a \mid x) \mu(x, a)$, with $\mu(x, a)$ the mean reward of action $a$ in
+ * context $x$, is estimated by inverse propensity scoring (plain, clipped and self-normalised), the direct method (a
+ * reward model $\hat q$), doubly robust (both) and switch-DR (doubly robust where the importance weight is at most
+ * $\tau$, the model elsewhere). Each returns the estimate, a standard error and the importance weights it used.
+ *
+ * Policies and reward models are given as $n \times K$ matrices, row $i$ for round $i$ and column $a$ for action $a$:
+ * the target's $\pi(a \mid x_i)$ and the model's $\hat q(x_i, a)$. The contexts themselves are never read. The
+ * estimate is the mean of per-round terms, and its interval is the normal approximation
+ * $\hat V \pm z_{(1 + \ell)/2} \, \mathrm{SE}$ at level $\ell$. A malformed log (lengths that disagree, an action
+ * that is not an index, a propensity outside $(0, 1]$, no rounds) throws `DomainError`.
  */
 
 import type { MatrixLike, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -12,17 +19,18 @@ import { dense, type Tensor } from 'aifn-compute/foundation/tensor'
 import { normalQuantile } from 'aifn-compute/numerics/special'
 import { importanceEffectiveSampleSize } from 'aifn-compute/probability/stats'
 
+/** A dense float64 array, as `dense` reads vectors and matrices. */
 type F64 = dense.F64
 
 /** Logged bandit feedback: one entry per round. */
 export interface BanditLog {
-  /** The logged action aᵢ ∈ {0, …, K − 1} [n]. */
+  /** The logged actions $a_i \in \{0, \dots, K - 1\}$, $n$ values. */
   readonly actions: VectorLike
-  /** The observed reward rᵢ [n]. */
+  /** The observed rewards $r_i$, $n$ values. */
   readonly rewards: VectorLike
-  /** The logging propensity π₀(aᵢ | xᵢ) of the logged action [n]. */
+  /** The logging propensity $\pi_0(a_i \mid x_i)$ of each logged action, $n$ values in $(0, 1]$. */
   readonly propensities: VectorLike
-  /** π₀(a | xᵢ) for every action [n, K]; needed by switch-DR only. */
+  /** $\pi_0(a \mid x_i)$ for every action, $n \times K$; read by switch-DR only, to report the share switched. */
   readonly logging?: MatrixLike
 }
 
@@ -30,26 +38,45 @@ export interface BanditLog {
 export interface OffPolicyEstimate {
   /** The estimator's name. */
   readonly estimator: string
-  /** The estimate V̂(π). */
+  /** The estimate $\hat V(\pi)$. */
   readonly value: number
-  /** The standard error: the sample standard deviation of the per-round terms over √n (delta method for SNIPS). */
+  /**
+   * The standard error: the sample standard deviation of the per-round terms over $\sqrt n$ (by the delta method for
+   * SNIPS); 0 for one round.
+   */
   readonly standardError: number
-  /** The normal-approximation interval V̂ ± z SE at `level` (default 0.95). */
+  /** The lower end of the normal-approximation interval $\hat V \pm z \, \mathrm{SE}$ at `level` (default 0.95). */
   readonly lower: number
+  /** The upper end of the same interval. */
   readonly upper: number
-  /** The per-round terms whose mean is the estimate [n]. */
+  /** The per-round terms, $n$ values, whose mean is the estimate. */
   readonly terms: Tensor
-  /** The importance weights wᵢ = π(aᵢ | xᵢ)/π₀(aᵢ | xᵢ) used (after clipping where it applies) [n]. */
+  /**
+   * The importance weights $w_i = \pi(a_i \mid x_i)/\pi_0(a_i \mid x_i)$ used (after clipping or switching where it
+   * applies), $n$ values; all 1 for the direct method.
+   */
   readonly weights: Tensor
-  /** Kish's effective sample size (Σw)²/Σw² of those weights (n for the direct method; NaN with negative weights). */
+  /**
+   * Kish's effective sample size $(\sum_i w_i)^2 / \sum_i w_i^2$ of those weights ($n$ for the direct method; NaN
+   * with a negative weight or when every weight is 0).
+   */
   readonly effectiveSampleSize: number
 }
 
-/** Options of every estimator. */
+/** Options of every estimator: `level`, the coverage of the interval `lower`, `upper` (default 0.95). */
 export type EstimateOptions = { level?: number }
 
+/** A checked log: actions `a`, rewards `r`, propensities `p0` and the number of rounds `n`. */
 type Read = { a: Int32Array; r: F64; p0: F64; n: number }
 
+/**
+ * A log's arrays, checked: equal lengths, actions that are non-negative integers, propensities in $(0, 1]$ and at
+ * least one round. Throws `DomainError` otherwise.
+ *
+ * @param log The logged rounds.
+ * @param where The caller's name, for error messages.
+ * @returns The actions `a` (int32), rewards `r`, propensities `p0` and the number of rounds `n`.
+ */
 function readLog(log: BanditLog, where: string): Read {
   const a = dense.toF64(log.actions, where)
   const r = dense.toF64(log.rewards, where)
@@ -66,13 +93,37 @@ function readLog(log: BanditLog, where: string): Read {
   return { a: Int32Array.from(a), r, p0, n }
 }
 
+/**
+ * A policy's (or a model's) values as a dense row-major $n \times K$ array. Throws `DomainError` when it does not have
+ * one row per round.
+ *
+ * @param target The matrix, $n \times K$: row $i$ for round $i$, column $a$ for action $a$.
+ * @param n The number of rounds.
+ * @param where The caller's name, for error messages.
+ * @param name What the matrix is, for the error message.
+ * @returns The row-major values `pi` and the number of actions `K`.
+ */
 function readPolicy(target: MatrixLike, n: number, where: string, name = 'target policy'): { pi: F64; K: number } {
   const { data, m, n: K } = dense.toMatrixF64(target, where)
   if (m !== n) throw new DomainError(where, `${where}: the ${name} has ${m} rows for ${n} rounds`)
   return { pi: data, K }
 }
 
-/** The importance weights wᵢ = π(aᵢ | xᵢ)/π₀(aᵢ | xᵢ) of a log under a target policy π [n, K]. */
+/**
+ * The importance weights $w_i = \pi(a_i \mid x_i)/\pi_0(a_i \mid x_i)$ of a log under a target policy $\pi$. Throws
+ * `DomainError` for a malformed log, a policy without one row per round, or a logged action beyond its columns.
+ *
+ * @param log The logged actions and propensities (the rewards are checked but not used).
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @returns The $n$ weights.
+ *
+ * @example Weights of a deterministic target
+ * // Four logged rounds of two actions; the logger took action 1 with probability 0.8.
+ * const log = { actions: [1, 0, 1, 0], rewards: [1, 0, 0.5, 0.2], propensities: [0.8, 0.2, 0.8, 0.2] }
+ * // The target policy always takes action 1.
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * print('weights:', importanceWeights(log, target))
+ */
 export function importanceWeights(log: BanditLog, target: MatrixLike): Tensor {
   const where = 'importanceWeights'
   const { a, p0, n } = readLog(log, where)
@@ -80,12 +131,31 @@ export function importanceWeights(log: BanditLog, target: MatrixLike): Tensor {
   return dense.vec(Float64Array.from({ length: n }, (_, i) => pi[i * K + checkAction(a[i], K, where)] / p0[i]))
 }
 
+/**
+ * A logged action, checked against the policy's number of actions; throws `DomainError` when it is not below it.
+ *
+ * @param a The logged action.
+ * @param K The number of actions (columns) of the policy.
+ * @param where The caller's name, for error messages.
+ * @returns `a`.
+ */
 const checkAction = (a: number, K: number, where: string) => {
   if (a >= K) throw new DomainError(where, `${where}: action ${a} but the policy has ${K} actions`)
   return a
 }
 
-/** The estimate, standard error, interval and weight summary of per-round terms (shared by the slate estimators). */
+/**
+ * The estimate, standard error, interval and weight summary of per-round terms (shared by the slate estimators).
+ *
+ * @param estimator The estimator's name, reported in the result.
+ * @param terms The per-round terms, $n$ values; their mean is the estimate unless `value` is given.
+ * @param weights The importance weights to report and summarise by Kish's effective sample size.
+ * @param level The coverage of the normal-approximation interval, in $(0, 1)$.
+ * @param value The estimate, when it is not the mean of `terms`.
+ * @param seTerms The per-round terms whose sample standard deviation gives the standard error, when they are not
+ *   `terms` (the delta-method terms of SNIPS).
+ * @returns The estimate with its standard error, interval, terms, weights and effective sample size.
+ */
 export function summarise(
   estimator: string,
   terms: F64,
@@ -117,8 +187,25 @@ export function summarise(
 }
 
 /**
- * Inverse propensity scoring (Horvitz and Thompson, 1952): V̂ = (1/n) Σ wᵢrᵢ with wᵢ = π(aᵢ|xᵢ)/π₀(aᵢ|xᵢ). Unbiased
- * whenever π₀ > 0 wherever π > 0; its variance grows with the weights, so small propensities make it noisy.
+ * Inverse propensity scoring (Horvitz and Thompson, 1952): $\hat V = \frac1n \sum_i w_i r_i$ with
+ * $w_i = \pi(a_i \mid x_i)/\pi_0(a_i \mid x_i)$. Unbiased whenever $\pi_0 > 0$ wherever $\pi > 0$; its variance
+ * grows with the weights, so small propensities make it noisy.
+ *
+ * @param log The logged rounds.
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @param options The interval's level.
+ * @returns The estimate, with terms $w_i r_i$.
+ *
+ * @example IPS of a deterministic target, checked by hand
+ * // Four logged rounds of two actions; the logger took action 1 with probability 0.8.
+ * const log = { actions: [1, 0, 1, 0], rewards: [1, 0, 0.5, 0.2], propensities: [0.8, 0.2, 0.8, 0.2] }
+ * // The target policy always takes action 1.
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * // The weights are 1 / 0.8 = 1.25 on the rounds of action 1 and 0 elsewhere: (1.25 + 0.625) / 4.
+ * const est = ips(log, target)
+ * print('value:', est.value)
+ * print('weights:', est.weights)
+ * print('95% interval:', est.lower, est.upper)
  */
 export function ips(log: BanditLog, target: MatrixLike, options: EstimateOptions = {}): OffPolicyEstimate {
   const where = 'ips'
@@ -133,8 +220,23 @@ export function ips(log: BanditLog, target: MatrixLike, options: EstimateOptions
 }
 
 /**
- * Clipped (capped) IPS (Bottou et al., 2013): the weights are capped at M, wᵢ ← min(wᵢ, M). Clipping trades variance
- * for a downward bias (for non-negative rewards) that grows as M falls.
+ * Clipped (capped) IPS (Bottou et al., 2013): the weights are capped at $M$, $w_i \leftarrow \min(w_i, M)$, and
+ * $\hat V = \frac1n \sum_i w_i r_i$. Clipping trades variance for a downward bias (for non-negative rewards) that
+ * grows as $M$ falls. Throws `DomainError` unless $M > 0$.
+ *
+ * @param log The logged rounds.
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @param options The interval's level, and the cap.
+ * @param options.clip The cap $M$ on the weights (default 10).
+ * @returns The estimate, with the clipped weights.
+ *
+ * @example A propensity of 0.1 gives a weight of 10; a cap of 5 halves it
+ * const log = { actions: [1, 1, 0, 0], rewards: [1, 1, 0, 0], propensities: [0.1, 0.5, 0.5, 0.9] }
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * const plain = ips(log, target)
+ * const clipped = clippedIps(log, target, { clip: 5 })
+ * print('IPS:', plain.value, 'weights', plain.weights)
+ * print('clipped:', clipped.value, 'weights', clipped.weights)
  */
 export function clippedIps(
   log: BanditLog,
@@ -155,9 +257,24 @@ export function clippedIps(
 }
 
 /**
- * Self-normalised IPS (Swaminathan and Joachims, 2015): V̂ = Σ wᵢrᵢ / Σ wᵢ. Biased but consistent, bounded by the
- * range of the rewards, and invariant to adding a constant to every reward; its standard error is by the delta
- * method, from the terms wᵢ(rᵢ − V̂)/w̄.
+ * Self-normalised IPS (Swaminathan and Joachims, 2015): $\hat V = \sum_i w_i r_i / \sum_i w_i$. Biased but
+ * consistent, bounded by the range of the rewards, and invariant to adding a constant to every reward; its standard
+ * error is by the delta method, from the terms $w_i (r_i - \hat V)/\bar w$ with $\bar w$ the mean weight. Throws
+ * `DomainError` when every weight is zero.
+ *
+ * @param log The logged rounds.
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @param options The interval's level.
+ * @returns The estimate, with terms $w_i r_i / \bar w$ (whose mean is the estimate).
+ *
+ * @example Self-normalising divides by the total weight, not by n
+ * // Four logged rounds of two actions; the logger took action 1 with probability 0.8.
+ * const log = { actions: [1, 0, 1, 0], rewards: [1, 0, 0.5, 0.2], propensities: [0.8, 0.2, 0.8, 0.2] }
+ * // The target policy always takes action 1.
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * // The sum of w r is 1.25 + 0.625 and the sum of w is 2.5: the mean reward of the two rounds of action 1.
+ * print('IPS:', ips(log, target).value)
+ * print('SNIPS:', snips(log, target).value)
  */
 export function snips(log: BanditLog, target: MatrixLike, options: EstimateOptions = {}): OffPolicyEstimate {
   const where = 'snips'
@@ -172,13 +289,30 @@ export function snips(log: BanditLog, target: MatrixLike, options: EstimateOptio
   return summarise('SNIPS', terms, w, options.level ?? 0.95, value, delta)
 }
 
-/** Σₐ π(a|xᵢ) q̂(xᵢ, a) for each round: the model's value of π at each context. */
+/**
+ * $\sum_a \pi(a \mid x_i) \hat q(x_i, a)$ for each round: the model's value of $\pi$ at each context.
+ *
+ * @param pi The target policy, row-major $n \times K$.
+ * @param q The reward model, row-major $n \times K$.
+ * @param n The number of rounds.
+ * @param K The number of actions.
+ * @returns A new array of $n$ values.
+ */
 function modelValues(pi: F64, q: F64, n: number, K: number): F64 {
   const out = new Float64Array(n)
   for (let i = 0; i < n; i++) for (let k = 0; k < K; k++) out[i] += pi[i * K + k] * q[i * K + k]
   return out
 }
 
+/**
+ * A reward model as a dense row-major array, checked to be $n \times K$. Throws `DomainError` otherwise.
+ *
+ * @param model The reward model $\hat q$, $n \times K$.
+ * @param n The number of rounds.
+ * @param K The number of actions of the target policy.
+ * @param where The caller's name, for error messages.
+ * @returns The row-major values.
+ */
 function readModel(model: MatrixLike, n: number, K: number, where: string): F64 {
   const { data, m, n: k } = dense.toMatrixF64(model, where)
   if (m !== n || k !== K) throw new DomainError(where, `${where}: the reward model is ${m}×${k}, expected ${n}×${K}`)
@@ -186,8 +320,24 @@ function readModel(model: MatrixLike, n: number, K: number, where: string): F64 
 }
 
 /**
- * The direct method: V̂ = (1/n) Σᵢ Σₐ π(a|xᵢ) q̂(xᵢ, a) from a reward model q̂ [n, K]. Low variance, and biased exactly
- * as much as the model is wrong on the actions π takes. The log's actions and rewards are not used.
+ * The direct method: $\hat V = \frac1n \sum_i \sum_a \pi(a \mid x_i) \hat q(x_i, a)$ from a reward model $\hat q$.
+ * Low variance, and biased exactly as much as the model is wrong on the actions $\pi$ takes. The log's actions and
+ * rewards are not used (only checked), and every reported weight is 1.
+ *
+ * @param log The logged rounds; only their number is used.
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @param model The reward model, $n \times K$: entry $(i, a)$ is $\hat q(x_i, a)$.
+ * @param options The interval's level.
+ * @returns The estimate, with terms $\sum_a \pi(a \mid x_i) \hat q(x_i, a)$.
+ *
+ * @example The model's value of the target
+ * // Four logged rounds of two actions; the logger took action 1 with probability 0.8.
+ * const log = { actions: [1, 0, 1, 0], rewards: [1, 0, 0.5, 0.2], propensities: [0.8, 0.2, 0.8, 0.2] }
+ * // The target policy always takes action 1.
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * // A reward model that predicts 0.1 for action 0 and 0.7 for action 1 in every round.
+ * const model = [[0.1, 0.7], [0.1, 0.7], [0.1, 0.7], [0.1, 0.7]]
+ * print('DM:', directMethod(log, target, model).value)
  */
 export function directMethod(
   log: BanditLog,
@@ -203,9 +353,28 @@ export function directMethod(
 }
 
 /**
- * Doubly robust (Dudík, Langford and Li, 2011): V̂ = (1/n) Σᵢ [Σₐ π(a|xᵢ) q̂(xᵢ, a) + wᵢ(rᵢ − q̂(xᵢ, aᵢ))]: the direct
- * method corrected by IPS on its residuals. Unbiased when either the propensities or the model are right, and of
- * lower variance than IPS when the model is good.
+ * Doubly robust (Dudík, Langford and Li, 2011):
+ * $\hat V = \frac1n \sum_i \big[\sum_a \pi(a \mid x_i) \hat q(x_i, a) + w_i (r_i - \hat q(x_i, a_i))\big]$: the
+ * direct method corrected by IPS on its residuals. Unbiased when either the propensities or the model are right, and
+ * of lower variance than IPS when the model is good.
+ *
+ * @param log The logged rounds.
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @param model The reward model, $n \times K$: entry $(i, a)$ is $\hat q(x_i, a)$.
+ * @param options The interval's level.
+ * @returns The estimate, with the per-round terms in brackets above.
+ *
+ * @example The direct method corrected by the residuals, checked by hand
+ * // Four logged rounds of two actions; the logger took action 1 with probability 0.8.
+ * const log = { actions: [1, 0, 1, 0], rewards: [1, 0, 0.5, 0.2], propensities: [0.8, 0.2, 0.8, 0.2] }
+ * // The target policy always takes action 1.
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * // A reward model that predicts 0.1 for action 0 and 0.7 for action 1 in every round.
+ * const model = [[0.1, 0.7], [0.1, 0.7], [0.1, 0.7], [0.1, 0.7]]
+ * // Residuals on the rounds of action 1: 1 - 0.7 and 0.5 - 0.7, each weighted 1.25.
+ * print('DM:', directMethod(log, target, model).value)
+ * print('DR:', doublyRobust(log, target, model).value)
+ * print('by hand:', 0.7 + (1.25 * 0.3 - 1.25 * 0.2) / 4)
  */
 export function doublyRobust(
   log: BanditLog,
@@ -224,10 +393,37 @@ export function doublyRobust(
 }
 
 /**
- * Switch-DR (after Wang, Agarwal and Dudík, 2017): for each round, the actions whose importance weight
- * π(a|xᵢ)/π₀(a|xᵢ) is at most τ are estimated doubly robustly and the rest by the model alone:
- * V̂ = (1/n) Σᵢ [Σₐ π(a|xᵢ) q̂(xᵢ, a) + wᵢ(rᵢ − q̂(xᵢ, aᵢ)) 1{wᵢ ≤ τ}]. τ = ∞ is DR; τ = 0 is the direct method.
- * Needs the logging probabilities of every action (`log.logging`) only to report the share of π's mass switched.
+ * Switch-DR (after Wang, Agarwal and Dudík, 2017, "Optimal and adaptive off-policy evaluation in contextual bandits",
+ * ICML): a round whose importance weight $w_i$ is at most $\tau$ is estimated doubly robustly, and one whose weight is
+ * larger by the model alone: $\hat V = \frac1n \sum_i t_i$ with
+ * $t_i = \sum_a \pi(a \mid x_i) \hat q(x_i, a) + w_i (r_i - \hat q(x_i, a_i)) \indicator\{w_i \le \tau\}$.
+ * $\tau = \infty$ is DR; $\tau = 0$ is the direct method. Needs the logging probabilities of every action
+ * (`log.logging`) only to report the share of $\pi$'s mass switched: the mean over rounds of the target's mass on
+ * actions with $\pi(a \mid x_i) > \tau \pi_0(a \mid x_i)$. Throws `DomainError` for a negative $\tau$.
+ *
+ * @param log The logged rounds, with `logging` to report the share switched.
+ * @param target The target policy, $n \times K$: row $i$ is $\pi(\cdot \mid x_i)$.
+ * @param model The reward model, $n \times K$: entry $(i, a)$ is $\hat q(x_i, a)$.
+ * @param options The interval's level, and the threshold.
+ * @param options.tau The threshold $\tau$ on the importance weight (default 10).
+ * @returns The estimate, with the weights used (0 where switched to the model) and `switched`, the share of the
+ *   target's mass switched (NaN without `log.logging`).
+ *
+ * @example A low threshold switches to the model
+ * // Four logged rounds of two actions; the logger took action 1 with probability 0.8.
+ * const log = {
+ *   actions: [1, 0, 1, 0], rewards: [1, 0, 0.5, 0.2], propensities: [0.8, 0.2, 0.8, 0.2],
+ *   logging: [[0.2, 0.8], [0.2, 0.8], [0.2, 0.8], [0.2, 0.8]],
+ * }
+ * // The target policy always takes action 1.
+ * const target = [[0, 1], [0, 1], [0, 1], [0, 1]]
+ * // A reward model that predicts 0.1 for action 0 and 0.7 for action 1 in every round.
+ * const model = [[0.1, 0.7], [0.1, 0.7], [0.1, 0.7], [0.1, 0.7]]
+ * // The weights of the target's action are 1.25: tau = 1 gives the direct method, tau = 2 gives DR.
+ * const low = switchDoublyRobust(log, target, model, { tau: 1 })
+ * const high = switchDoublyRobust(log, target, model, { tau: 2 })
+ * print('tau = 1:', low.value, 'switched', low.switched)
+ * print('tau = 2:', high.value, 'switched', high.switched)
  */
 export function switchDoublyRobust(
   log: BanditLog,

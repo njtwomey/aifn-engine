@@ -1,6 +1,6 @@
 /**
- * The registry of `aifn-compute/learning/conformal`: the conformal quantile, the regression and classification procedures,
- * Mondrian quantiles and the coverage summaries, all functions.
+ * The registry of `aifn-compute/learning/conformal`: the conformal quantile, the regression and classification
+ * procedures, Mondrian quantiles and the coverage summaries, all registered as functions with the notes they serve.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

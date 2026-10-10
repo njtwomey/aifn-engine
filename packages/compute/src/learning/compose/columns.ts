@@ -1,6 +1,10 @@
 /**
  * Column-wise transforms of a table into one feature matrix, after scikit-learn's `ColumnTransformer` (Buitinck et al.,
  * 2013, "API design for machine learning software: experiences from the scikit-learn project").
+ *
+ * A table is a record of named columns, each a numeric tensor or a list of labels, all with the same $n$ rows. Each
+ * named column is transformed, passed through or dropped, and the blocks are placed side by side in a row-major
+ * float64 matrix of $n$ rows, with a name per output column.
  */
 
 import { child } from 'aifn-compute/foundation/random'
@@ -17,30 +21,54 @@ export type ColumnSpec =
 
 /** The fitted column transform. */
 export interface ColumnsModel<C extends Record<string, ColumnSpec>> extends Transforms<Table, Tensor> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** Which composition made the model. */
   readonly composition: 'columns'
   /** Each transformed column's fitted transform, by name. */
   readonly steps: { readonly [K in keyof C as C[K] extends 'drop' | 'passthrough' ? never : K]: FittedOf<C[K]> }
-  /** The output columns [start, end) of each input column, by name. */
+  /** The output columns $[\text{start}, \text{end})$ of each input column, by name. */
   readonly slices: Readonly<Record<string, readonly [number, number]>>
-  /** A name per output column, "column:feature". */
+  /**
+   * A name per output column: `column:feature` with the transformer's `featureNames`, otherwise the column's name for
+   * a one-column block and `column:j` for column $j$ of a wider one.
+   */
   readonly featureNames: readonly string[]
 }
 
-/** Numeric columns become [n, k] matrices; label lists are passed as they are. */
+/**
+ * A column as a transformer's input: a numeric vector becomes an $n \times 1$ matrix; matrices and label lists are
+ * passed as they are.
+ *
+ * @param c The column.
+ * @returns The column, reshaped when it is a vector.
+ */
 function asInput(c: Column): Column {
   if (isTensor(c) && c.shape.length === 1) return reshape(c, [c.shape[0], 1])
   return c
 }
 
+/**
+ * A column passed through: it must be numeric. Throws `DomainError` for a label list.
+ *
+ * @param name The column's name, for the error message.
+ * @param c The column.
+ * @returns The column as a matrix of $n$ rows (a vector becomes $n \times 1$).
+ */
 function numeric(name: string, c: Column): Tensor {
   const t = asInput(c)
   if (!isTensor(t)) throw new DomainError('columns', `columns: "${name}" is not numeric and cannot pass through`)
   return t
 }
 
-/** Row-major copy of each block side by side: [n, Σ kᵢ]. */
+/**
+ * Blocks placed side by side: a new row-major float64 matrix of shape $n \times \sum_i k_i$ for blocks of $k_i$
+ * columns.
+ *
+ * @param blocks The blocks, each $n \times k_i$; read through their strides (views are fine), not modified.
+ * @param n The number of rows of every block.
+ * @returns The concatenated matrix.
+ */
 function concatColumns(blocks: Tensor[], n: number): Tensor {
   const widths = blocks.map((b) => b.shape[1])
   const width = widths.reduce((a, b) => a + b, 0)
@@ -59,11 +87,33 @@ function concatColumns(blocks: Tensor[], n: number): Tensor {
 
 /**
  * Apply a transformer to each named column of a table and place the outputs side by side, in the order of `spec`'s
- * keys, then (with `remainder: 'passthrough'`) the remaining numeric columns. Numeric columns of shape [n] are given
- * to transformers as [n, 1]; label lists are given as they are (for encoders). Targets pass to every transformer's
- * fit, so target encoding works per column.
+ * keys, then (with `remainder: 'passthrough'`) the remaining numeric columns. Numeric columns of $n$ values are given
+ * to transformers as $n \times 1$ matrices; label lists are given as they are (for encoders). Targets pass to every
+ * transformer's fit, so target encoding works per column; column $k$ of `spec` gets the stream
+ * `child(stream, 'column', k)`. Fitting or transforming throws `DomainError` when a named column is missing, or a
+ * column passed through is not numeric.
  *
- * @example columns({ age: standardScaler(), city: oneHotEncoder() })
+ * @param spec What to do with each named column: a transformer (its fitted model must `transform` to a matrix),
+ *   `'passthrough'` or `'drop'`. Its key order is the order of the output blocks.
+ * @param options What to do with the columns `spec` does not name.
+ * @param options.remainder `'drop'` leaves them out; `'passthrough'` appends them, in the table's order (they must be
+ *   numeric).
+ * @returns An estimator on datasets whose `x` is a table, fitting to a `ColumnsModel`.
+ *
+ * @example Centre one column, pass the rest through, drop an id
+ * const centre = {
+ *   name: 'centre',
+ *   fit: (d) => {
+ *     const m = mean(d.x)
+ *     return { transform: (x) => sub(x, m) }
+ *   },
+ * }
+ * const table = { age: tensor([20, 30, 40]), id: tensor([7, 8, 9]), height: tensor([1.6, 1.8, 1.7]) }
+ * const spec = columns({ age: centre, id: 'drop' }, { remainder: 'passthrough' })
+ * const model = spec.fit({ x: table, y: tensor([0, 1, 0]) })
+ * print('feature names:', model.featureNames)
+ * print('slices:', model.slices)
+ * print('features:', model.transform(table))
  */
 export function columns<const C extends Record<string, ColumnSpec>>(
   spec: C,

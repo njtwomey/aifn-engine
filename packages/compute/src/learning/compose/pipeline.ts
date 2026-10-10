@@ -1,6 +1,12 @@
 /**
  * Pipelines (plan §5.4): transforms chained into a final estimator, with exactly the capabilities of the final step,
- * after scikit-learn's `Pipeline` (Buitinck et al., 2013).
+ * after scikit-learn's `Pipeline` (Buitinck et al., 2013, "API design for machine learning software: experiences from
+ * the scikit-learn project").
+ *
+ * Because every step is fitted inside the pipeline's own `fit`, preprocessing learns only from the rows it is fitted
+ * on: cross-validating a pipeline refits the scalers on each training fold, which keeps the test fold out of them. The
+ * types here (`Lift` and the step types) carry the final step's capabilities through to the fitted pipeline, so the
+ * compiler knows what a pipeline can be asked for.
  */
 
 import type { Capability, Dataset, FitOptions } from 'aifn-compute/learning/estimators'
@@ -18,11 +24,14 @@ import type { Distribution } from 'aifn-compute/learning/estimators'
 import { child, type Stream } from 'aifn-compute/foundation/random'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** Anything with a `fit`: an estimator or a transformer. */
+/** Anything with a `fit`: an estimator or a transformer, with a readable `name` and `fit(data, options)`. */
 // oxlint-disable-next-line no-explicit-any -- estimator data types vary per step; the step list is typed below
 export type AnyEstimator = { readonly name: string; fit(data: any, options?: FitOptions): object }
 
-/** A step whose fitted model transforms (every step but the last). */
+/**
+ * A step whose fitted model transforms (every step but the last): a readable `name`, and `fit(data, options)`
+ * returning a model with `transform`.
+ */
 // oxlint-disable-next-line no-explicit-any -- as above
 export type TransformStep = { readonly name: string; fit(data: any, options?: FitOptions): Transforms<any, any> }
 
@@ -57,6 +66,7 @@ export type FittedSteps<S extends readonly unknown[]> = { readonly [K in keyof S
 
 /** A fitted pipeline: the fitted steps, and the final step's capabilities on the pipeline's inputs. */
 export type PipelineModel<S extends readonly AnyEstimator[]> = Lift<FittedOf<Last<S>>, InputOfStep<S[0]>> & {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** Which composition made the model. */
   readonly composition: 'pipeline'
@@ -66,7 +76,10 @@ export type PipelineModel<S extends readonly AnyEstimator[]> = Lift<FittedOf<Las
   readonly names: readonly string[]
   /** Run every step but the last: the features the final model sees. */
   features(x: InputOfStep<S[0]>): unknown
-  /** The output of every step on x: `[x, step₀(x), step₁(step₀(x)), …]` up to the final model's input. */
+  /**
+   * The input and the output of every step but the last on `x`: $[x, t_0(x), t_1(t_0(x)), \dots]$ for steps
+   * $t_0, t_1, \dots$, up to the final model's input.
+   */
   stages(x: InputOfStep<S[0]>): unknown[]
 }
 
@@ -82,14 +95,37 @@ const LIFTED = [
 
 /**
  * A pipeline of transforms ending in an estimator (or another transform). Fitting fits each step on the previous
- * steps' output of the training inputs (targets and groups pass through unchanged); step k gets the stream
- * `child(stream, 'step', k)`. The fitted pipeline has exactly the capabilities of its final step, on the pipeline's
- * inputs, and exposes every step's fitted state in `steps`.
+ * steps' output of the training inputs (targets, groups and every other field of the data pass through unchanged);
+ * step $k$ gets the stream `child(stream, 'step', k)`. The fitted pipeline has exactly the capabilities of its final
+ * step, on the pipeline's inputs (`forward`, `decide`, `predictive`, `expect`, `score`, `transform` and `sample`, and
+ * its `training` trace), and exposes every step's fitted state in `steps`. Throws `DomainError` for no steps.
  *
- * @example
- * const model = pipeline(standardScaler(), logisticRegression({ l2: 0.1 })).fit({ x, y })
- * model.steps[0].mean // the scaler's fitted means
- * model.predictive(xNew) // Bernoulli, after scaling xNew
+ * @param steps The steps, in order: every one but the last must fit to a model with `transform`; the last may be any
+ *   estimator. They are not modified, and the pipeline can be fitted many times.
+ * @returns An estimator whose `fit(data, options)` returns the fitted pipeline.
+ *
+ * @example Centre the inputs, then fit a line
+ * // Step 1 subtracts the training mean of x; step 2 fits y = mean(y) + slope * (centred x).
+ * const centre = {
+ *   name: 'centre',
+ *   fit: (d) => {
+ *     const m = mean(d.x)
+ *     return { mean: m, transform: (x) => sub(x, m) }
+ *   },
+ * }
+ * const line = {
+ *   name: 'line',
+ *   fit: (d) => {
+ *     const slope = sum(mul(d.x, d.y)) / sum(mul(d.x, d.x))
+ *     const intercept = mean(d.y)
+ *     return { slope, intercept, decide: (x) => add(mul(x, slope), intercept) }
+ *   },
+ * }
+ * const model = pipeline(centre, line).fit({ x: tensor([1, 2, 3]), y: tensor([2, 4, 6]) })
+ * print('centre: mean =', model.steps[0].mean)
+ * print('line: slope =', model.steps[1].slope, 'intercept =', model.steps[1].intercept)
+ * print('features of x = 4, 5:', model.features(tensor([4, 5])))
+ * print('predictions at x = 4, 5:', model.decide(tensor([4, 5])))
  */
 export function pipeline<const S extends readonly [...TransformStep[], AnyEstimator]>(
   ...steps: S

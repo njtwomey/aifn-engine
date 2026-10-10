@@ -1,8 +1,12 @@
 /**
  * Propensity estimation: when a log records the actions but not the probabilities the logging policy gave them, the
- * propensities π̂₀(a | x) are estimated by a model of the action given the context: a multinomial logistic regression
- * (fitted by L-BFGS on the softmax cross-entropy with an L2 penalty), or, for discrete contexts, the smoothed share of
- * each action within each context.
+ * propensities $\hat\pi_0(a \mid x)$ are estimated by a model of the action given the context: a multinomial logistic
+ * regression (fitted by `minimize` of `aifn-compute/optim/minimize` on the softmax cross-entropy with an L2 penalty),
+ * or, for discrete contexts, the smoothed share of each action within each context.
+ *
+ * Actions are indices $0, \dots, K - 1$ and contexts are rows of an $n \times d$ matrix; the estimated propensities of
+ * the logged actions are what the off-policy estimators take as `propensities`. Malformed input (lengths that
+ * disagree, an action or group that is not an index) throws `DomainError`.
  */
 
 import type { MatrixLike, Objective, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -25,23 +29,45 @@ import { minimize } from 'aifn-compute/optim/minimize'
 
 /** A fitted propensity model. */
 export interface PropensityModel {
-  /** The coefficients [d + 1, K]: one column per action, the last row the intercepts. */
+  /** The coefficients, $(d + 1) \times K$: one column per action, the last row the intercepts. */
   readonly coefficients: Tensor
-  /** π̂₀(a | xᵢ) for the training contexts [n, K]. */
+  /** $\hat\pi_0(a \mid x_i)$ for the training contexts, $n \times K$. */
   readonly probabilities: Tensor
-  /** π̂₀(aᵢ | xᵢ), the estimated propensity of each logged action [n]. */
+  /** $\hat\pi_0(a_i \mid x_i)$, the estimated propensity of each logged action, $n$ values. */
   readonly propensities: Tensor
   /** The mean cross-entropy at the fit (without the penalty). */
   readonly logLoss: number
+  /** Whether the optimiser reported convergence within `maxSteps`. */
   readonly converged: boolean
-  /** π̂₀(· | x) for new contexts [m, d] → [m, K]. */
+  /**
+   * $\hat\pi_0(\cdot \mid x)$ for new contexts: an $m \times d$ matrix in, an $m \times K$ matrix out. Throws
+   * `DomainError` for a different number of features.
+   */
   predict(contexts: MatrixLike): Tensor
 }
 
 /**
  * Estimate the logging propensities by multinomial logistic regression of the logged action on the context: the
- * coefficients minimise the mean softmax cross-entropy plus (λ/2)‖W‖² (the intercepts unpenalised). When the logging
- * policy is a softmax of a linear score of x, the model is well specified and π̂₀ → π₀.
+ * coefficients $\Wmat$ minimise the mean softmax cross-entropy plus $\frac{\lambda}{2} \norm{\Wmat}^2$ (the intercepts
+ * unpenalised), starting from zero. When the logging policy is a softmax of a linear score of $x$, the model is well
+ * specified and $\hat\pi_0 \to \pi_0$. Throws `DomainError` when the counts disagree or an action is not an index.
+ *
+ * @param contexts The contexts, $n \times d$, one row per logged round.
+ * @param actions The logged actions, $n$ indices.
+ * @param options The number of actions, the penalty and the optimiser's budget.
+ * @param options.actions The number of actions $K$, when some were never logged (default: the largest logged action
+ *   plus 1).
+ * @param options.l2 The penalty $\lambda$ on the non-intercept coefficients (default $10^{-3}$).
+ * @param options.maxSteps The most optimiser steps (default 500).
+ * @returns The fitted model, with the estimated propensities of the logged actions.
+ *
+ * @example A binary context; the logger took action 1 a third of the time at 0 and two thirds at 1
+ * const contexts = [[0], [0], [0], [1], [1], [1]]
+ * const actions = [0, 0, 1, 1, 1, 0]
+ * const model = estimatePropensities(contexts, actions)
+ * print('converged:', model.converged)
+ * print('at x = 0 and x = 1:', model.predict([[0], [1]]))
+ * print('propensities of the logged actions:', model.propensities)
  */
 export function estimatePropensities(
   contexts: MatrixLike,
@@ -94,9 +120,28 @@ export function estimatePropensities(
 }
 
 /**
- * Propensities for discrete contexts: π̂₀(a | g) = (count(g, a) + α)/(count(g) + Kα), the share of action a among the
- * rounds of context group g, with additive smoothing α (default 0). Returns π̂₀(aᵢ | gᵢ) for each round [n] and the
- * table [G, K].
+ * Propensities for discrete contexts:
+ * $\hat\pi_0(a \mid g) = (\mathrm{count}(g, a) + \alpha)/(\mathrm{count}(g) + K\alpha)$, the share of action $a$ among
+ * the rounds of context group $g$, with additive smoothing $\alpha$ (default 0). A group with no rounds and no
+ * smoothing gets $1/K$ for every action. Throws `DomainError` when the counts disagree or a group or action is not an
+ * index.
+ *
+ * @param groups The context group $g_i$ of each round, $n$ indices $0, \dots, G - 1$.
+ * @param actions The logged action $a_i$ of each round, $n$ indices.
+ * @param options The number of actions and the smoothing.
+ * @param options.actions The number of actions $K$, when some were never logged (default: the largest logged action
+ *   plus 1).
+ * @param options.smoothing The pseudo-count $\alpha$ added to every (group, action) count.
+ * @returns `propensities`, $\hat\pi_0(a_i \mid g_i)$ for each round ($n$ values), and `table`, $\hat\pi_0(a \mid g)$
+ *   as a $G \times K$ matrix.
+ *
+ * @example Shares of actions within two groups, with and without smoothing
+ * const groups = [0, 0, 0, 1, 1]
+ * const actions = [0, 1, 1, 0, 0]
+ * const raw = empiricalPropensities(groups, actions)
+ * print('table:', raw.table)
+ * print('propensities:', raw.propensities)
+ * print('smoothed table:', empiricalPropensities(groups, actions, { smoothing: 1 }).table)
  */
 export function empiricalPropensities(
   groups: VectorLike,

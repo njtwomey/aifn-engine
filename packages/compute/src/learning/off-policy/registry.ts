@@ -1,6 +1,6 @@
 /**
- * The registry of `aifn-compute/learning/off-policy`: the off-policy value estimators, the slate estimators and the propensity
- * models, all functions (`role: 'estimator'` or `'fit'`).
+ * The registry of `aifn-compute/learning/off-policy`: the off-policy value estimators, the slate estimators and the
+ * propensity models, all functions (`role: 'estimator'` or `'fit'`), with the notes they serve and their sources.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -140,6 +140,7 @@ fn(
   propensity.empiricalPropensities,
 )
 
+/** The registry's entries, keyed by function name. */
 type Table = Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>>
 
 /** The functions of the module, keyed by name. */

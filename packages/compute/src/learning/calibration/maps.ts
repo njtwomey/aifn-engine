@@ -2,7 +2,12 @@
  * Calibration maps fitted on held-out predictions: temperature scaling and Dirichlet calibration of multiclass
  * outputs, beta calibration and histogram binning of binary scores, the isotonic map (pool adjacent violators) as a
  * function of new scores, and the top-label confidence used to draw multiclass reliability diagrams. Platt scaling of
- * real-valued scores is in `./platt`. Every parametric map is fitted by L-BFGS on the cross-entropy, through autodiff.
+ * real-valued scores is in `./platt`. Every parametric map is fitted by L-BFGS (`minimize`) on the mean
+ * cross-entropy, through autodiff.
+ *
+ * Each fit returns its parameters and an `apply` that maps new predictions. Labels are class indices
+ * $0, \dots, K - 1$ (0 and 1 for binary scores); a label out of range, labels and predictions that differ in number,
+ * or a score outside $[0, 1]$ for beta calibration or histogram binning throw `DomainError`.
  */
 
 import type { MatrixLike, Objective, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -30,9 +35,18 @@ import { isotonicRegression, type IsotonicFit } from './isotonic'
 
 type F64 = dense.F64
 
-/** Probabilities are clipped to [EPS, 1 − EPS] before a log. */
+/** Probabilities are clipped to $[\varepsilon, 1 - \varepsilon]$ with $\varepsilon$ = `EPS` before a log. */
 const EPS = 1e-12
 
+/**
+ * Class labels, checked: throws `DomainError` unless there are $n$ and each is an integer in $0, \dots, K - 1$.
+ *
+ * @param labels The labels to read.
+ * @param n The number of predictions they must match.
+ * @param K The number of classes.
+ * @param where The caller's name, for error messages.
+ * @returns The labels as integers.
+ */
 function readLabels(labels: VectorLike, n: number, K: number, where: string): Int32Array {
   const y = dense.toF64(labels, where)
   if (y.length !== n) throw new DomainError(where, `${where}: ${n} predictions and ${y.length} labels`)
@@ -42,12 +56,26 @@ function readLabels(labels: VectorLike, n: number, K: number, where: string): In
   return Int32Array.from(y)
 }
 
+/**
+ * Binary scores, checked: throws `DomainError` for a score outside $[0, 1]$ (or NaN).
+ *
+ * @param scores The scores to read.
+ * @param where The caller's name, for error messages.
+ * @returns The scores as a `Float64Array`.
+ */
 function readScores(scores: VectorLike, where: string): F64 {
   const s = dense.toF64(scores, where)
   for (const v of s) if (!(v >= 0 && v <= 1)) throw new DomainError(where, `${where}: score ${v} is not in [0, 1]`)
   return s
 }
 
+/**
+ * The mean softmax cross-entropy of logits against labels.
+ *
+ * @param logits The logits, one row of $K$ per case ($n \times K$).
+ * @param y The class of each case, $n$ indices in $0, \dots, K - 1$.
+ * @returns The mean over cases of $-\log \operatorname{softmax}(\zvec_i)_{y_i}$.
+ */
 const meanCrossEntropy = (logits: Tensor, y: Int32Array): number =>
   softmaxCrossEntropy(logits, y, { reduction: 'mean' }) as number
 
@@ -55,19 +83,39 @@ const meanCrossEntropy = (logits: Tensor, y: Int32Array): number =>
 
 /** A fitted temperature. */
 export interface TemperatureScaling {
-  /** T > 0: the logits are divided by T. */
+  /** $T > 0$: the logits are divided by $T$. */
   readonly temperature: number
-  /** The mean cross-entropy before (T = 1) and after. */
+  /** The mean cross-entropy of the held-out logits as given ($T = 1$). */
   readonly logLossBefore: number
+  /** The mean cross-entropy of the held-out logits divided by the fitted $T$. */
   readonly logLossAfter: number
-  /** softmax(z/T) for logits [m, K]. */
+  /** $\operatorname{softmax}(\zvec/T)$ of each row $\zvec$ of logits ($m \times K$): the calibrated probabilities. */
   apply(logits: MatrixLike): Tensor
 }
 
 /**
- * Temperature scaling (Guo et al., 2017): one T > 0 dividing every logit, chosen to minimise the mean cross-entropy
- * on held-out logits [n, K] and labels [n]. The predicted class never changes. The loss is convex in 1/T; it is
- * minimised over log T by L-BFGS.
+ * Temperature scaling (Guo et al., 2017): one $T > 0$ dividing every logit, chosen to minimise the mean cross-entropy
+ * on held-out logits and labels. The predicted class never changes. The loss is convex in $1/T$; it is minimised over
+ * $\log T$ by L-BFGS from $T = 1$.
+ *
+ * @param logits The model's logits on $n$ held-out cases, one row of $K$ per case ($n \times K$).
+ * @param labels The true class of each case, an index in $0, \dots, K - 1$.
+ * @returns The fitted $T$, the log-loss before and after, and `apply` for new logits.
+ *
+ * @example Overconfident logits: three of four right, so the right class should get 0.75
+ * // sigmoid(2 / T) = 0.75 gives T = 2 / ln 3.
+ * const fit = temperatureScaling(
+ *   [
+ *     [2, 0],
+ *     [0, 2],
+ *     [2, 0],
+ *     [0, 2],
+ *   ],
+ *   [0, 1, 0, 0],
+ * )
+ * print('T =', fit.temperature, ' 2 / ln 3 =', 2 / Math.log(3))
+ * print('log-loss before =', fit.logLossBefore, 'after =', fit.logLossAfter)
+ * print('calibrated [2, 0] =', fit.apply([[2, 0]]))
  */
 export function temperatureScaling(logits: MatrixLike, labels: VectorLike): TemperatureScaling {
   const where = 'temperatureScaling'
@@ -111,18 +159,31 @@ export function temperatureScaling(logits: MatrixLike, labels: VectorLike): Temp
 
 /** A fitted beta calibration map. */
 export interface BetaCalibration {
-  /** μ(s) = σ(a ln s − b ln(1 − s) + c). */
+  /** The coefficient $a \ge 0$ of $\ln s$ in $\mu(s) = \sigma(a \ln s - b \ln(1 - s) + c)$. */
   readonly a: number
+  /** The coefficient $b \ge 0$ of $-\ln(1 - s)$. */
   readonly b: number
+  /** The intercept $c$. */
   readonly c: number
+  /** $\mu(s)$ for each new score $s$ (clipped to $[\varepsilon, 1 - \varepsilon]$ first, not checked). */
   apply(scores: VectorLike): Tensor
 }
 
 /**
- * Beta calibration (Kull, Silva Filho and Flach, 2017): μ(s) = σ(a ln s − b ln(1 − s) + c) for binary scores s ∈
- * [0, 1], a logistic regression on the features ln s and −ln(1 − s). The family contains the identity (a = b = 1,
- * c = 0) and is the exact posterior when each class's scores are beta-distributed. As the paper recommends, a or b is
- * held at 0 (and the fit repeated) if it comes out negative, so the map is monotone.
+ * Beta calibration (Kull, Silva Filho and Flach, 2017): $\mu(s) = \sigma(a \ln s - b \ln(1 - s) + c)$ for binary
+ * scores $s \in [0, 1]$, a logistic regression on the features $\ln s$ and $-\ln(1 - s)$ fitted from the identity.
+ * The family contains the identity ($a = b = 1$, $c = 0$) and is the exact posterior when each class's scores are
+ * beta-distributed. As the paper recommends, $a$ or $b$ is held at 0 (and the fit repeated) if it comes out negative,
+ * so the map is monotone.
+ *
+ * @param scores The model's scores $s_i \in [0, 1]$ on $n$ held-out cases.
+ * @param labels The true class of each case, 0 or 1.
+ * @returns The fitted $a$, $b$ and $c$, and `apply` for new scores.
+ *
+ * @example Eight roughly calibrated scores give a map close to the identity
+ * const fit = betaCalibration([0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9], [0, 0, 1, 0, 1, 0, 1, 1])
+ * print('a =', fit.a, 'b =', fit.b, 'c =', fit.c)
+ * print('calibrated 0.25, 0.5, 0.75:', fit.apply([0.25, 0.5, 0.75]))
  */
 export function betaCalibration(scores: VectorLike, labels: VectorLike): BetaCalibration {
   const where = 'betaCalibration'
@@ -188,20 +249,44 @@ export function betaCalibration(scores: VectorLike, labels: VectorLike): BetaCal
 
 /** A fitted Dirichlet calibration map. */
 export interface DirichletCalibration {
-  /** The matrix W [K, K] and offsets b [K] of softmax(W ln q + b). */
+  /** The matrix $\Wmat$ ($K \times K$) of $\operatorname{softmax}(\Wmat \ln \qvec + \bvec)$. */
   readonly weights: Tensor
+  /** The offsets $\bvec$ ($K$ values). */
   readonly bias: Tensor
+  /** The mean cross-entropy of the held-out probabilities as given. */
   readonly logLossBefore: number
+  /** The mean cross-entropy of the calibrated held-out probabilities (without the penalty). */
   readonly logLossAfter: number
-  /** The map for probability rows [m, K]. */
+  /** The map for probability rows ($m \times K$): one calibrated row per case. */
   apply(probabilities: MatrixLike): Tensor
 }
 
 /**
- * Dirichlet calibration (Kull et al., 2019): q ↦ softmax(W ln q + b) for probability rows q [n, K], a multinomial
- * logistic regression on the log-probabilities, fitted from the identity (W = I, b = 0) by L-BFGS. The ODIR penalty
- * λ/(K(K − 1)) Σ_{i≠j} W²ᵢⱼ + μ/K Σ b²ⱼ shrinks the off-diagonal entries and the offsets (defaults λ = μ = 10⁻³). With
- * W = I/T and b = 0 it is temperature scaling on the log-probabilities.
+ * Dirichlet calibration (Kull et al., 2019): $\qvec \mapsto \operatorname{softmax}(\Wmat \ln \qvec + \bvec)$ for
+ * rows of probabilities $\qvec$, a multinomial logistic regression on the log-probabilities, fitted from the identity
+ * ($\Wmat = \Imat$, $\bvec = \zeros$) by L-BFGS. The ODIR penalty
+ * $\frac{\lambda}{K(K - 1)} \sum_{i \ne j} W_{ij}^2 + \frac{\mu}{K} \sum_j b_j^2$ shrinks the off-diagonal entries and
+ * the offsets. With $\Wmat = \Imat/T$ and $\bvec = \zeros$ it is temperature scaling on the log-probabilities.
+ * Probabilities are clipped to $[\varepsilon, 1]$ before the log.
+ *
+ * @param probabilities The model's probabilities on $n$ held-out cases, one row of $K$ per case ($n \times K$).
+ * @param labels The true class of each case, an index in $0, \dots, K - 1$.
+ * @param options `lambda` ($\lambda$, default $10^{-3}$) and `mu` ($\mu$, default $10^{-3}$), the penalties on the
+ *   off-diagonal entries and on the offsets, and `maxSteps`, the most L-BFGS steps (default 500).
+ * @returns $\Wmat$, $\bvec$, the log-loss before and after, and `apply` for new probabilities.
+ *
+ * @example A model that says 0.9 but is right three times in five
+ * // Five cases per predicted class: three of that class and one of each other.
+ * const probabilities = []
+ * const labels = []
+ * for (const k of [0, 1, 2])
+ *   for (const y of [k, k, k, (k + 1) % 3, (k + 2) % 3]) {
+ *     probabilities.push([0, 1, 2].map((j) => (j === k ? 0.9 : 0.05)))
+ *     labels.push(y)
+ *   }
+ * const fit = dirichletCalibration(probabilities, labels)
+ * print('log-loss before =', fit.logLossBefore, 'after =', fit.logLossAfter)
+ * print('calibrated [0.9, 0.05, 0.05] =', fit.apply([[0.9, 0.05, 0.05]]))
  */
 export function dirichletCalibration(
   probabilities: MatrixLike,
@@ -277,18 +362,34 @@ export function dirichletCalibration(
 
 /** A fitted histogram-binning map. */
 export interface HistogramBinning {
-  /** The bin edges [M + 1] (0 … 1 for uniform bins; score quantiles for equal-mass bins). */
+  /**
+   * The $M + 1$ bin edges, from 0 to 1: equally spaced for uniform bins, score quantiles inside for equal-mass bins.
+   */
   readonly edges: Tensor
-  /** The calibrated value of each bin: its fraction of positives (the bin's centre when it is empty) [M]. */
+  /** The calibrated value of each of the $M$ bins: its fraction of positives (the bin's centre when it is empty). */
   readonly values: Tensor
+  /** The number of training scores in each bin ($M$ values). */
   readonly counts: Tensor
+  /** The value of the bin each new score falls in, by the same rule as the training scores. */
   apply(scores: VectorLike): Tensor
 }
 
 /**
- * Histogram binning (Zadrozny and Elkan, 2001): binary scores are cut into M bins (equal width or equal mass) and each
- * bin's scores are replaced by the fraction of positives among its training cases. The bins are those of the
+ * Histogram binning (Zadrozny and Elkan, 2001): binary scores are cut into $M$ bins (equal width or equal mass) and
+ * each bin's scores are replaced by the fraction of positives among its training cases. The bins are those of the
  * reliability diagram (`reliabilityDiagram` in `aifn-compute/learning/metrics`); an empty bin keeps its centre.
+ *
+ * @param scores The model's scores in $[0, 1]$ on $n$ held-out cases.
+ * @param labels The true class of each case, 0 or 1.
+ * @param options `bins`, the number of bins $M$ (default 10), and `strategy`: `uniform` (equal width, the default) or
+ *   `quantile` (equal mass).
+ * @returns The edges, the value and count of each bin, and `apply` for new scores.
+ *
+ * @example Two bins: a quarter of the low scores and three quarters of the high ones are positive
+ * const fit = histogramBinning([0.05, 0.15, 0.3, 0.35, 0.6, 0.65, 0.9, 0.95], [0, 0, 0, 1, 1, 0, 1, 1], { bins: 2 })
+ * print('edges =', fit.edges, 'counts =', fit.counts)
+ * print('values =', fit.values)
+ * print('calibrated 0.2, 0.7:', fit.apply([0.2, 0.7]))
  */
 export function histogramBinning(
   scores: VectorLike,
@@ -326,7 +427,10 @@ export function histogramBinning(
 
 /** A fitted isotonic calibration map. */
 export interface IsotonicCalibration extends IsotonicFit {
-  /** The step function: each score takes the value of the last block that starts at or below it. */
+  /**
+   * The step function: each score takes the value of the last block that starts at or below it (the first block's
+   * value below the first threshold).
+   */
   apply(scores: VectorLike): Tensor
 }
 
@@ -334,6 +438,15 @@ export interface IsotonicCalibration extends IsotonicFit {
  * Isotonic calibration (Zadrozny and Elkan, 2002): the monotone non-decreasing map of scores to probabilities that
  * fits the labels best in squared error, found by pool adjacent violators (`isotonicRegression`), and applied to new
  * scores as a step function.
+ *
+ * @param scores The model's scores on $n$ held-out cases: any real numbers, larger meaning more likely positive.
+ * @param labels The true class of each case, 0 or 1.
+ * @returns The isotonic fit of the labels on the scores (`fit`, `thresholds`, `values`) and `apply` for new scores.
+ *
+ * @example Six scores: the dip in the labels is pooled
+ * const fit = isotonicCalibration([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], [0, 1, 0, 0, 1, 1])
+ * print('thresholds =', fit.thresholds, 'values =', fit.values)
+ * print('calibrated 0.05, 0.25, 0.55:', fit.apply([0.05, 0.25, 0.55]))
  */
 export function isotonicCalibration(scores: VectorLike, labels: VectorLike): IsotonicCalibration {
   const where = 'isotonicCalibration'
@@ -356,8 +469,26 @@ export function isotonicCalibration(scores: VectorLike, labels: VectorLike): Iso
 }
 
 /**
- * The top-label view of multiclass probabilities [n, K] and labels [n]: each case's confidence maxₖ pₖ and whether its
- * top class is correct (1) or not (0), the inputs of a confidence reliability diagram and of top-label ECE.
+ * The top-label view of multiclass probabilities and labels: each case's confidence $\max_k p_k$ and whether its top
+ * class is correct (1) or not (0), the inputs of a confidence reliability diagram and of top-label ECE. A tie for the
+ * top goes to the lowest class index.
+ *
+ * @param probabilities One row of $K$ class probabilities per case ($n \times K$); rows are not checked to sum to 1.
+ * @param labels The true class of each case, an index in $0, \dots, K - 1$.
+ * @returns For each case, `confidence` ($\max_k p_k$), `correct` (1 or 0) and `predicted` (the top class).
+ *
+ * @example Three cases, one right
+ * const { confidence, correct, predicted } = topLabelConfidence(
+ *   [
+ *     [0.7, 0.2, 0.1],
+ *     [0.2, 0.5, 0.3],
+ *     [0.4, 0.4, 0.2],
+ *   ],
+ *   [0, 2, 1],
+ * )
+ * print('confidence =', confidence)
+ * print('predicted =', predicted)
+ * print('correct =', correct)
  */
 export function topLabelConfidence(
   probabilities: MatrixLike,

@@ -1,10 +1,62 @@
 /**
- * `aifn-compute/learning/metrics`: evaluation metrics, each defined once with its registry metadata (as sklearn.metrics):
- * confusion counts, classification rates, curves (ROC, precision–recall, DET, cost, gain), proper scoring rules and
- * calibration, regression errors and deviances, clustering indices, agreement, bootstrap and DeLong intervals, ranking
- * metrics, vector distances, embedding alignment and uniformity, and ordinal metrics; `metricRegistry`, `getMetric`,
- * `listMetrics`. Application metrics (text, detection, quality, generative, fairness, beyond-accuracy) are in
- * `aifn-methods/evaluation`.
+ * `aifn-compute/learning/metrics`: evaluation metrics, each defined once with its registry metadata, as
+ * sklearn.metrics.
+ *
+ * - Confusion counts, from which every threshold metric is built: `confusionMatrix` (rows true classes) and
+ *   `confusionMargins`; `binaryCounts`, `countsAtThreshold` and every rate of one table, `binaryRates`; per class,
+ *   `oneVsRest`, `tallies`, `perClass` and the averaging rules of `averaged`.
+ * - Metrics of predicted labels: `accuracy`, `errorRate`, `balancedAccuracy`, `precision`, `recall`, `fBeta`, `f1`,
+ *   `precisionRecallFscoreSupport` (per class), `specificity`, `negativePredictiveValue`, `falsePositiveRate`,
+ *   `falseNegativeRate`, `informedness`, `markedness`, `jaccardScore`, `matthewsCorrelation`, `cohensKappa` and
+ *   `kappaFromTable`, the multi-label `hammingLoss` and `exactMatch`, and the likelihood ratios
+ *   `positiveLikelihoodRatio`, `negativeLikelihoodRatio` and `diagnosticOddsRatio`.
+ * - Curves of scores over every threshold, as `Curve` values a chart draws: `rocCurve` with `auroc` (binary or
+ *   multiclass), `partialAuroc` and `rocConvexHull`; `precisionRecallCurve` with `averagePrecision` and
+ *   `precisionRecallTrapezoid`; `precisionRecallGainCurve`, `detCurve`, `costCurve` with `normalisedExpectedCost`, and
+ *   `gainCurve` (with lift). Operating points: `equalErrorRate` and `eer`, `youdenPoint`, `operatingPoint`,
+ *   `specificityAtSensitivity`, `tprAtFpr`, `recallAtPrecision`. The binormal model's closed forms: `binormalRates`,
+ *   `binormalCurves`, `binormalAuroc`, `binormalEqualErrorRate`, `binormalAveragePrecision`.
+ * - Proper scoring rules for probabilities and predictive distributions: `logLoss`, `brierScore` with
+ *   `brierDecomposition`, `sphericalScore`, `logScore` (any predictive), `gaussianLogScore`, `crpsGaussian`,
+ *   `crpsEnsemble`, `intervalScore` with `coverage`, `pitValues` and `perplexity`. Calibration, which depends on the
+ *   binning: `expectedCalibrationError`, `maximumCalibrationError`, `rmsCalibrationError`,
+ *   `debiasedSquaredCalibrationError`, `sweepCalibrationError`, `confidenceCalibrationError`,
+ *   `classwiseCalibrationError`, drawn by `reliabilityDiagram` with `consistencyBars`.
+ * - Regression errors and deviances: `meanSquaredError`, `rootMeanSquaredError`, `meanAbsoluteError`,
+ *   `medianAbsoluteError`, `maxError`, `r2Score`, `adjustedR2Score`, `explainedVariance`,
+ *   `normalisedRootMeanSquaredError`, `huberLoss`, `logCoshError`, `meanSquaredLogError`, `pinballLoss`,
+ *   `tweedieDeviance`, `tweedieUnitDeviance`, `poissonDeviance`, `gammaDeviance`; percentage and scaled errors for
+ *   forecasts, `meanAbsolutePercentageError`, `symmetricMeanAbsolutePercentageError`,
+ *   `weightedMeanAbsolutePercentageError`, `meanAbsoluteScaledError`, `rootMeanSquaredScaledError`.
+ * - Ranking: `precisionAtK`, `recallAtK`, `rPrecision`, `hitRate`, `meanAveragePrecision`, `meanReciprocalRank`,
+ *   `dcg` and `ndcg` (with `gainFunction` and `positionDiscount`), `expectedReciprocalRank`.
+ * - Clustering, against true classes: `contingencyTable`, `pairConfusion`, `randIndex`, `adjustedRandIndex`,
+ *   `fowlkesMallows`, `mutualInformationScore`, `normalisedMutualInformation`, `adjustedMutualInformation`,
+ *   `homogeneity`, `completeness`, `vMeasure`, `homogeneityCompletenessV`, `variationOfInformation`; and from the
+ *   features alone, `silhouetteSamples`, `silhouetteScore`, `calinskiHarabasz`, `daviesBouldin`, `dunnIndex`.
+ * - Agreement and association: `pearsonCorrelation`, `spearmanCorrelation`, `kendallCorrelation`,
+ *   `concordanceCorrelation`, `intraclassCorrelation`, `fleissKappa`, `krippendorffAlpha`, `chiSquareStatistic`,
+ *   `cramersV`, `tschuprowT`, `contingencyCoefficient`, `theilsU`.
+ * - Ordinal classes: `ordinalMeanAbsoluteError`, `macroMeanAbsoluteError`, `withinToleranceAccuracy`,
+ *   `quadraticWeightedKappa`, `rankedProbabilityScore`, `ordinalConcordanceIndex`.
+ * - Distances and embeddings: `euclideanDistance`, `manhattanDistance`, `chebyshevDistance`, `minkowskiDistance`,
+ *   `cosineSimilarity`, `cosineDistance`, `angularDistance`, `mahalanobisDistance`, `hausdorffDistance` and
+ *   `hausdorffDistances`, `orthogonalProcrustes` and `procrustesDisparity`; `alignment` and `uniformity` of
+ *   representations.
+ * - Uncertainty of a metric: `bootstrapMetric`, `pairedBootstrap`, `aurocDeLong` and `delongTest`, `waldInterval`,
+ *   `wilsonInterval`.
+ * - The registry: `defineMetric` and `isMetric`, `metricRegistry`, `getMetric`, `listMetrics`, `isBetter`, and
+ *   `metricsFunctions` for the functions that are not metrics. The input helpers `classesOf`, `compareLabels`,
+ *   `labelList`, `encodeLabels`, `positiveOf`, `isMatrixLike`, `denseMatrix`, `matrix`, `metricValues`, `sameLength`
+ *   and `divide` let metrics defined elsewhere follow the same conventions.
+ *
+ * Every metric is a function returning a number, with `info` stating what it reads (`inputs`), whether `higher` or
+ * `lower` is better, its range and its notes. Labels may be numbers, strings or booleans, and classes are listed in
+ * sorted order; the positive class of a binary problem is `1`, else `true`, else the last class, unless `positive`
+ * is given. A threshold $t$ predicts positive the cases with score $s_i \ge t$. A ratio with a zero denominator is
+ * NaN (or `zeroDivision`, where offered), so an undefined value is reported rather than hidden; inputs of different
+ * lengths throw `ShapeError`. Application metrics (text, detection, quality, generative, fairness, beyond-accuracy)
+ * are in `aifn-methods/evaluation`.
  */
 
 export {

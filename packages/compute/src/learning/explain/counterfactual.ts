@@ -1,23 +1,26 @@
 /**
- * Counterfactual explanations: the smallest change to an input x that changes a model's decision, and constraints on
- * which changes a person could act on.
+ * Counterfactual explanations: the smallest change to an input $\xvec$ that changes a model's decision, and
+ * constraints on which changes a person could act on.
  *
- * - `wachterCounterfactual` (Wachter, Mittelstadt and Russell, 2017): minimise λ (f(x′) − y′)² + Σᵢ |x′ᵢ − xᵢ| / MADᵢ by
- *   gradient steps (Adam), raising λ until |f(x′) − y′| ≤ ε. The L1 distance scaled by each feature's median absolute
- *   deviation favours sparse changes.
- * - `diverseCounterfactuals` (Mothilal, Sharma and Tan, 2020, DiCE): k counterfactuals at once, minimising the mean
- *   hinge loss on the target logit plus λ₁ × the mean MAD-scaled distance to x, minus λ₂ × the determinant of the
- *   kernel Kᵢⱼ = 1/(1 + dist(cᵢ, cⱼ)) (a determinantal point process term that rewards spread).
+ * - `wachterCounterfactual` (Wachter, Mittelstadt and Russell, 2017): minimise
+ *   $\lambda (f(\xvec') - y')^2 + \sum_i \lvert x'_i - x_i \rvert / \text{MAD}_i$ by gradient steps (Adam), raising
+ *   $\lambda$ until $\lvert f(\xvec') - y' \rvert \le \epsilon$. The L1 distance scaled by each feature's median
+ *   absolute deviation favours sparse changes.
+ * - `diverseCounterfactuals` (Mothilal, Sharma and Tan, 2020, DiCE): $k$ counterfactuals at once, minimising the mean
+ *   hinge loss on the target logit plus $\lambda_1$ times the mean MAD-scaled distance to $\xvec$, minus $\lambda_2$
+ *   times the determinant of the kernel $K_{ij} = 1/(1 + \text{dist}(\cvec_i, \cvec_j))$ (a determinantal point process
+ *   term that rewards spread).
  * - `faceGraph` and `faceSearch`, together `face` (Poyiadzi, Sokol, Santos-Rodríguez, De Bie and Flach, 2020, FACE):
- *   a counterfactual that is an actual data point, reached from x by a path of short steps through dense regions.
- *   The f-distance of a path γ is ∫ f(p(γ(t))) |γ′(t)| dt; on a graph over the data (an ε-graph, a kNN graph or an
- *   ε-graph with KDE weights) each edge weighs f(p̂) ‖xᵢ − xⱼ‖ with p̂ estimated at the edge, f(p) = −log p by default.
- *   Candidates are data points the classifier gives the target with probability ≥ t_p and whose density is ≥ t_d;
- *   Dijkstra's algorithm finds the cheapest. Edges that break the actionability conditions are left out, so every step
- *   of the path is feasible.
- * - `growingSpheres` (Laugel et al., 2018): sample uniformly in a ball around x, halving its radius until it holds no
- *   enemy (a point classified otherwise), then in growing spherical shells until one does; take the closest enemy and
- *   sparsify it by resetting its smallest changes while the class stays changed.
+ *   a counterfactual that is an actual data point, reached from $\xvec$ by a path of short steps through dense regions.
+ *   The $f$-distance of a path $\gamma$ is $\int f(p(\gamma(t))) \lvert \gamma'(t) \rvert\, dt$; on a graph over the
+ *   data (an $\epsilon$-graph, a kNN graph or an $\epsilon$-graph with KDE weights) each edge weighs
+ *   $f(\hat p) \lVert \xvec_i - \xvec_j \rVert$ with $\hat p$ estimated at the edge, $f(p) = -\log p$ by default.
+ *   Candidates are data points the classifier gives the target with probability at least $t_p$ and whose density is
+ *   at least $t_d$; Dijkstra's algorithm finds the cheapest. Edges that break the actionability conditions are left
+ *   out, so every step of the path is feasible.
+ * - `growingSpheres` (Laugel et al., 2018): sample uniformly in a ball around $\xvec$, halving its radius until it
+ *   holds no enemy (a point classified otherwise), then in growing spherical shells until one does; take the closest
+ *   enemy and sparsify it by resetting its smallest changes while the class stays changed.
  * - Actionability (Ustun, Spangher and Liu, 2019): immutable features, features that may only rise or only fall, and
  *   bounds. `isActionable` tests a change; `projectActionable` maps a candidate onto the allowed set.
  */
@@ -51,21 +54,45 @@ import { median, multivariateKde } from 'aifn-compute/probability/stats'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import type { Differentiable } from './gradients'
 
+/**
+ * A scalar function's value as a number.
+ *
+ * @param v A number, or a tensor whose first element is read.
+ * @returns The number.
+ */
 const scalar = (v: Value): number => (typeof v === 'number' ? v : toFlat(v as Tensor)[0])
 
 // ── Actionability ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Which changes are allowed: features that may not change, may only increase or only decrease, and bounds. */
 export type Actionability = {
+  /** Features that may not change. */
   immutable?: readonly Size[]
+  /** Features that may only increase. */
   increasing?: readonly Size[]
+  /** Features that may only decrease. */
   decreasing?: readonly Size[]
-  /** Per-feature bounds [d] (±Infinity for none). */
+  /** Lower bound per feature ($d$ values; $-\infty$ for none). */
   lower?: VectorLike
+  /** Upper bound per feature ($d$ values; $\infty$ for none). */
   upper?: VectorLike
 }
 
-/** True when moving from `from` to `to` respects the constraints (to within `tolerance`). */
+/**
+ * Whether moving from one point to another respects the constraints, to within a tolerance.
+ *
+ * @param from The starting point ($d$ values).
+ * @param to The point moved to ($d$ values).
+ * @param constraints The constraints (default none).
+ * @param tolerance The slack allowed on every comparison.
+ * @returns True when every constraint holds.
+ *
+ * @example Age is fixed, debt may only fall, and nothing may be negative
+ * const rules = { immutable: [0], decreasing: [1], lower: [0, 0, 0] }
+ * print('pay down debt:', isActionable([30, 5, 2], [30, 3, 4], rules))
+ * print('grow older:', isActionable([30, 5, 2], [31, 3, 4], rules))
+ * print('borrow more:', isActionable([30, 5, 2], [30, 6, 4], rules))
+ */
 export function isActionable(
   from: ArrayLike<number>,
   to: ArrayLike<number>,
@@ -84,7 +111,19 @@ export function isActionable(
   return true
 }
 
-/** The nearest allowed point to z when starting from `from`: immutable features reset, monotone ones and bounds clipped. */
+/**
+ * The nearest allowed point to a candidate when starting from a given point: bounds clipped, then monotone features
+ * clipped at their starting values, then immutable features reset.
+ *
+ * @param from The starting point ($d$ values).
+ * @param z The candidate ($d$ values); not modified.
+ * @param constraints The constraints (default none).
+ * @returns The projected candidate ($d$ values).
+ *
+ * @example A candidate that breaks every rule
+ * const rules = { immutable: [0], decreasing: [1], lower: [0, 0, 0] }
+ * print(projectActionable([30, 5, 2], [25, 7, -1], rules))
+ */
 export function projectActionable(
   from: ArrayLike<number>,
   z: ArrayLike<number>,
@@ -103,7 +142,16 @@ export function projectActionable(
   return out
 }
 
-/** The median absolute deviation of each column of X [n, d], med |xᵢⱼ − med xⱼ| (1 where it is 0). */
+/**
+ * The median absolute deviation of each column, $\operatorname{med}_i \lvert x_{ij} - \operatorname{med} x_j \rvert$,
+ * with 1 where it is 0 so that it can divide: the per-feature scale of Wachter et al. and DiCE.
+ *
+ * @param X The data ($n \times d$).
+ * @returns The scale of each column ($d$ values).
+ *
+ * @example One spread column and one constant
+ * print(medianAbsoluteDeviation([[1, 10], [2, 10], [4, 10], [10, 10]]))
+ */
 export function medianAbsoluteDeviation(X: MatrixLike): Float64Array {
   const { data, m, n } = dense.toMatrixF64(X, 'medianAbsoluteDeviation')
   return Float64Array.from({ length: n }, (_, j) => {
@@ -113,7 +161,13 @@ export function medianAbsoluteDeviation(X: MatrixLike): Float64Array {
   })
 }
 
-/** Rows [T, d] from a list of vectors. */
+/**
+ * A matrix whose rows are the given vectors.
+ *
+ * @param rows The vectors ($T$ of them, $d$ values each).
+ * @param d Their length.
+ * @returns The $T \times d$ matrix.
+ */
 const stackRows = (rows: readonly Float64Array[], d: Size): Tensor => {
   const out = new Float64Array(rows.length * d)
   rows.forEach((r, k) => out.set(r, k * d))
@@ -124,27 +178,46 @@ const stackRows = (rows: readonly Float64Array[], d: Size): Tensor => {
 
 /** Options of `wachterCounterfactual`. */
 export type WachterOptions = {
-  /** The desired model output y′ (default 0.5). */
+  /** The desired model output $y'$ (default 0.5). */
   target?: number
-  /** Stop once |f(x′) − y′| ≤ tolerance (default 0.05). */
+  /** Stop once $\lvert f(\xvec') - y' \rvert \le \text{tolerance}$ (default 0.05). */
   tolerance?: number
-  /** The first λ (default 0.1), multiplied by `growth` (default 2) after each round that misses. */
+  /** The first $\lambda$ (default 0.1). */
   lambda?: number
+  /** The factor $\lambda$ is multiplied by after each round that misses (default 2). */
   growth?: number
-  /** At most this many rounds of λ (default 12) and Adam steps per round (default 100) at step size `rate` (0.05). */
+  /** At most this many rounds, one per value of $\lambda$ (default 12). */
   rounds?: Size
+  /** Adam steps per round, from a fresh Adam state (default 100). */
   steps?: Size
+  /** Adam's step size (default 0.05). */
   rate?: number
   /** The per-feature scale of the L1 distance (default 1; pass `medianAbsoluteDeviation(data)` as the paper). */
   scale?: VectorLike
+  /** Constraints every iterate is projected onto (default none). */
   constraints?: Actionability
   /** Where the search starts (default x). */
   start?: VectorLike
 }
 
 /**
- * A Wachter counterfactual of the scalar model f at x [d]: the point, its output, the λ reached, whether it is within
- * tolerance, its scaled L1 distance, and the path of iterates [T, d] with the output and λ at each.
+ * A Wachter counterfactual of a differentiable scalar model at $\xvec$ (see the file comment): rounds of Adam steps
+ * on the penalised objective, each iterate projected onto the constraints, with $\lambda$ raised between rounds
+ * until the output is within tolerance of the target. Throws `ShapeError` when `scale` does not match $\xvec$.
+ *
+ * @param f The model: a differentiable function of one input ($d$ values) to a score or probability.
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param options The target, the schedule of $\lambda$, the optimiser, the scale and the constraints.
+ * @returns `counterfactual`, the last iterate $\xvec'$, and `output`, $f(\xvec')$; `lambda`, the $\lambda$ of the last
+ *   round; `valid`, whether the output is within tolerance; `distance`, the scaled L1 distance to $\xvec$; and the
+ *   whole search: `path`, every iterate from the start ($T \times d$), with `outputs` and `lambdas` at each.
+ *
+ * @example The cheapest way to raise a linear score from 3 to 5
+ * // f = x0 + 2 x1: one unit of x1 buys twice the score of one unit of x0, so only x1 should move.
+ * const f = (x) => add(get(x, 0), mul(2, get(x, 1)))
+ * const r = wachterCounterfactual(f, [1, 1], { target: 5, lambda: 1, steps: 50 })
+ * print('counterfactual =', r.counterfactual, ' output =', r.output)
+ * print('valid =', r.valid, ' lambda =', r.lambda, ' distance =', r.distance)
  */
 export function wachterCounterfactual(
   f: Differentiable,
@@ -225,14 +298,17 @@ export type DiverseOptions = {
   count?: Size
   /** The class wanted: 1 (logit > 0, default) or 0. */
   desired?: 0 | 1
-  /** λ₁ on proximity (default 0.5) and λ₂ on diversity (default 1), as DiCE. */
+  /** $\lambda_1$, the weight on proximity (default 0.5, as DiCE). */
   proximityWeight?: number
+  /** $\lambda_2$, the weight on diversity (default 1, as DiCE); 0 drops the term. */
   diversityWeight?: number
-  /** Adam steps (default 500) and step size (default 0.05). */
+  /** Adam steps (default 500). */
   steps?: Size
+  /** Adam's step size (default 0.05). */
   rate?: number
   /** Feature scale of the distance (default 1; DiCE uses the MAD of the training data). */
   scale?: VectorLike
+  /** Constraints the start and every iterate are projected onto (default none). */
   constraints?: Actionability
   /** Standard deviation of the random start around x, in units of `scale` (default 1). */
   spread?: number
@@ -241,10 +317,26 @@ export type DiverseOptions = {
 }
 
 /**
- * DiCE counterfactuals of the logit model f at x [d] (see the module comment): the counterfactuals [k, d] and their
- * logits, which of them reach the desired class, the mean scaled distance to x (proximity), the mean pairwise scaled
- * distance (diversity), the mean count of changed features (|Δ| > 0.1 × scale), the loss per step and snapshots
- * [T, k, d].
+ * DiCE counterfactuals of a logit model at $\xvec$ (see the file comment): $k$ counterfactuals started at random
+ * around $\xvec$ and moved together by Adam, each iterate projected onto the constraints. Distances are scaled L1
+ * distances divided by $d$, as DiCE. Throws `DomainError` when `count` is not a positive integer.
+ *
+ * @param f The model: a differentiable function of one input ($d$ values) to the logit of class 1 (batched by `vmap`).
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param stream The random stream: the starting points are drawn from `child(stream, 'start')`.
+ * @param options The number of counterfactuals, the class wanted, the weights, the optimiser and the constraints.
+ * @returns `counterfactuals` ($k \times d$) and their `logits`; `valid`, which reach the desired class; `proximity`,
+ *   their mean distance to $\xvec$; `diversity`, their mean pairwise distance; `sparsity`, their mean number of changed
+ *   features (a change above $0.1$ times the feature's scale); `loss`, the objective before each step; and
+ *   `snapshots`, the counterfactuals at the start, every `every` steps and at the end ($T \times k \times d$).
+ *
+ * @example Three different ways over a linear boundary
+ * // The logit x0 + x1 - 3 is negative at (1, 1).
+ * const f = (x) => sub(add(get(x, 0), get(x, 1)), 3)
+ * const r = diverseCounterfactuals(f, [1, 1], stream(0), { count: 3, steps: 200 })
+ * print('counterfactuals =', r.counterfactuals)
+ * print('logits =', r.logits, ' valid =', r.valid)
+ * print('proximity =', r.proximity, ' diversity =', r.diversity)
  */
 export function diverseCounterfactuals(
   f: Differentiable,
@@ -352,43 +444,78 @@ export function diverseCounterfactuals(
 /** How FACE builds its graph and weighs its edges. */
 export type FaceGraphOptions = {
   /**
-   * `kde` (default): an ε-graph whose edge weight is f(p̂((xᵢ + xⱼ)/2)) ‖xᵢ − xⱼ‖ with p̂ a Gaussian KDE; `knn`: each
-   * point joined to its k nearest, weight f(p̂ᵢⱼ) ‖xᵢ − xⱼ‖ with the k-NN estimate p̂ᵢⱼ = (k/n)/(η_d ‖xᵢ − xⱼ‖^d);
-   * `epsilon`: an ε-graph, whose density estimate (k/n)/(η_d ε^d) is the same on every edge, so the weight is the length.
+   * `kde` (default): an $\epsilon$-graph whose edge weight is
+   * $f(\hat p((\xvec_i + \xvec_j)/2)) \lVert \xvec_i - \xvec_j \rVert$ with $\hat p$ a Gaussian KDE; `knn`: each point
+   * joined to its $k$ nearest (and they to it), weight $f(\hat p_{ij}) \lVert \xvec_i - \xvec_j \rVert$ with the
+   * $k$-NN estimate $\hat p_{ij} = (k/n)/(\eta_d \lVert \xvec_i - \xvec_j \rVert^d)$, $\eta_d$ the volume of the unit
+   * ball; `epsilon`: an $\epsilon$-graph, whose density estimate $(k/n)/(\eta_d \epsilon^d)$ is the same on every
+   * edge, so the weight is the length.
    */
   graph?: 'kde' | 'knn' | 'epsilon'
-  /** The ε of the ε-graphs: the longest edge (default the median distance to the 5th nearest neighbour × 2). */
+  /**
+   * The $\epsilon$ of the $\epsilon$-graphs: the longest edge (default twice the median, over the data points, of the
+   * distance to the 5th nearest node).
+   */
   epsilon?: number
   /** Neighbours per point of the kNN graph (default 10). */
   k?: Size
   /** The KDE's bandwidth factor (default Scott's rule, as `multivariateKde`). */
   bandwidth?: number
   /**
-   * f in f(p̂) ‖xᵢ − xⱼ‖, applied to the density relative to its largest value at a data point (p̃ = p̂/max p̂, at most
-   * 1); default −log p̃, which is ≥ 0, so Dijkstra's algorithm applies.
+   * $f$ in $f(\hat p) \lVert \xvec_i - \xvec_j \rVert$, applied to the density relative to its largest value at a
+   * data point ($\tilde p = \hat p / \max \hat p$, at most 1); default $-\log \tilde p$, which is at least 0, so
+   * Dijkstra's algorithm applies. A negative cost is raised to 0. Not used by the `epsilon` graph.
    */
   cost?: (density: number) => number
-  /** Edges i → j are kept only when the move xᵢ → xⱼ is actionable. */
+  /** Edges $i \to j$ are kept only when the move from $\xvec_i$ to $\xvec_j$ is actionable. */
   constraints?: Actionability
 }
 
-/** A FACE graph over the data and the query (node n): edges, weights and densities. */
+/** A FACE graph over the data (nodes $0, \dots, n - 1$) and the query (node $n$): edges, weights and densities. */
 export type FaceGraph = {
-  /** The data [n, d] and the query [d]. */
+  /** The data ($n \times d$). */
   points: Tensor
+  /** The query $\xvec$ ($d$ values). */
   query: Float64Array
-  /** Directed edges as node pairs [from, to] and their weights. */
+  /** Directed edges as node pairs `[from, to]`. */
   edges: [number, number][]
+  /** The weight of each edge, in the order of `edges`. */
   weights: Float64Array
-  /** Relative density p̃ ∈ (0, 1] at each data point and at the query (index n). */
+  /**
+   * Relative density $\tilde p \in (0, 1]$ at each data point and at the query (index $n$): the KDE for `kde`, the
+   * $k$-NN estimate for `knn`, and the 5-NN estimate for `epsilon`.
+   */
   density: Float64Array
+  /** The $\epsilon$ used (computed even for the kNN graph, which does not use it). */
   epsilon: number
+  /** The kind of graph built. */
   graph: 'kde' | 'knn' | 'epsilon'
 }
 
+/**
+ * The log volume of the unit ball in $d$ dimensions, $\log \eta_d = \frac{d}{2}\log\pi - \log\Gamma(d/2 + 1)$.
+ *
+ * @param d The dimension.
+ * @returns $\log \eta_d$.
+ */
 const logUnitBall = (d: Size) => (d / 2) * Math.log(Math.PI) - (logGamma(d / 2 + 1) as number)
 
-/** Build the FACE graph over the rows of X [n, d] and the query x [d] (see `FaceGraphOptions`). */
+/**
+ * Build the FACE graph over the rows of $\Xmat$ and the query $\xvec$ (see `FaceGraphOptions`). Edges that break the
+ * actionability constraints are left out. Throws `ShapeError` when $\xvec$ does not have $\Xmat$'s width.
+ *
+ * @param X The data ($n \times d$): nodes $0, \dots, n - 1$.
+ * @param x The query $\xvec$ ($d$ values): node $n$.
+ * @param options The kind of graph, its $\epsilon$ or $k$, the KDE's bandwidth, the cost and the constraints.
+ * @returns The graph.
+ *
+ * @example An epsilon-graph whose edges are at most 1 long
+ * // A dense line of points along x1 = 0 and one isolated point; the classifier says 1 where x0 > 2.
+ * const X = [[0, 0], [0.5, 0], [1, 0], [1.5, 0], [2, 0], [2.5, 0], [3, 0], [3.5, 0], [4, 0], [2.2, 1.5]]
+ * const g = faceGraph(X, [0, 0.8], { graph: 'epsilon', epsilon: 1 })
+ * print('edges =', g.edges.length, ' from the query:', g.edges.filter(([i]) => i === 10))
+ * print('density =', g.density)
+ */
 export function faceGraph(X: MatrixLike, x: VectorLike, options: FaceGraphOptions = {}): FaceGraph {
   const { data, m: n, n: d } = dense.toMatrixF64(X, 'faceGraph')
   const q = Float64Array.from(dense.toF64(x, 'faceGraph'))
@@ -465,31 +592,49 @@ export function faceGraph(X: MatrixLike, x: VectorLike, options: FaceGraphOption
 
 /** Options of `faceSearch`. */
 export type FaceSearchOptions = {
-  /** t_p: candidates have target probability ≥ this (default 0.75). */
+  /** $t_p$: candidates have target probability at least this (default 0.75). */
   predictionThreshold?: number
-  /** t_d: candidates have relative density p̃ ≥ this (default 0). */
+  /** $t_d$: candidates have relative density $\tilde p$ at least this (default 0). */
   densityThreshold?: number
 }
 
 /** A FACE counterfactual: the data point reached, its path from the query and its cost. */
 export type FaceResult = {
-  /** Row of X chosen (−1 when no candidate is reachable). */
+  /** Row of $\Xmat$ chosen ($-1$ when no candidate is reachable). */
   index: number
+  /** The chosen row ($d$ values), or `null` when no candidate is reachable. */
   counterfactual: Float64Array | null
-  /** Node path from the query (n) to the counterfactual; empty when unreachable. */
+  /** Node path from the query (node $n$) to the counterfactual; empty when unreachable. */
   path: number[]
+  /** The path's cost, the sum of its edge weights (`Infinity` when unreachable). */
   cost: number
   /** Rows meeting both thresholds. */
   candidates: number[]
-  /** Shortest-path cost from the query to every node (Infinity when unreachable). */
+  /** Shortest-path cost from the query to every node, the query included ($n + 1$; `Infinity` when unreachable). */
   distance: Float64Array
-  /** The candidate nearest x in straight-line distance, for comparison (−1 when there is none). */
+  /**
+   * The candidate nearest $\xvec$ in straight-line distance, reachable or not, for comparison ($-1$ when there is
+   * none).
+   */
   nearest: number
 }
 
 /**
- * Search a FACE graph for the cheapest candidate, given the target-class probability of each row of the graph's data
- * [n] (see the module comment).
+ * Search a FACE graph for the cheapest candidate (see the file comment): Dijkstra's algorithm from the query, then the
+ * reachable candidate with the smallest path cost. Throws `ShapeError` when there is not one probability per data row.
+ *
+ * @param g The graph, as `faceGraph` builds it.
+ * @param probability The classifier's probability of the target class at each data row ($n$ values).
+ * @param options The candidates' thresholds.
+ * @returns The counterfactual, its path and cost, the candidates and the costs to every node.
+ *
+ * @example The path walks along the dense line
+ * // A dense line of points along x1 = 0 and one isolated point; the classifier says 1 where x0 > 2.
+ * const X = [[0, 0], [0.5, 0], [1, 0], [1.5, 0], [2, 0], [2.5, 0], [3, 0], [3.5, 0], [4, 0], [2.2, 1.5]]
+ * const g = faceGraph(X, [0, 0.8], { graph: 'epsilon', epsilon: 1 })
+ * const r = faceSearch(g, [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+ * print('index =', r.index, ' path =', r.path, ' cost =', r.cost)
+ * print('candidates =', r.candidates, ' nearest =', r.nearest)
  */
 export function faceSearch(g: FaceGraph, probability: ArrayLike<number>, options: FaceSearchOptions = {}): FaceResult {
   const { predictionThreshold = 0.75, densityThreshold = 0 } = options
@@ -545,7 +690,23 @@ export function faceSearch(g: FaceGraph, probability: ArrayLike<number>, options
   }
 }
 
-/** FACE in one call: `faceGraph` then `faceSearch` with the classifier's target probabilities on X. */
+/**
+ * FACE in one call: `faceGraph`, then `faceSearch` with the classifier's target probabilities on $\Xmat$.
+ *
+ * @param X The data ($n \times d$).
+ * @param probability The classifier: from the data ($n \times d$ tensor) to the target class's probability per row.
+ * @param x The query $\xvec$ ($d$ values).
+ * @param options The graph's and the search's options together.
+ * @returns The search's result, with the `graph`.
+ *
+ * @example The nearest candidate is isolated; FACE picks one reachable through the data
+ * // A dense line of points along x1 = 0 and one isolated point; the classifier says 1 where x0 > 2.
+ * const X = [[0, 0], [0.5, 0], [1, 0], [1.5, 0], [2, 0], [2.5, 0], [3, 0], [3.5, 0], [4, 0], [2.2, 1.5]]
+ * const probability = (P) => toArray(P).map(([a]) => (a > 2 ? 1 : 0))
+ * const r = face(X, probability, [0, 0.8], { epsilon: 1 })
+ * print('nearest candidate =', r.nearest, ' chosen =', r.index, r.counterfactual)
+ * print('path =', r.path, ' cost =', r.cost)
+ */
 export function face(
   X: MatrixLike,
   probability: (X: Tensor) => ArrayLike<number> | Tensor,
@@ -564,19 +725,34 @@ export function face(
 export type GrowingSpheresOptions = {
   /** Points sampled per ball or shell (default 500). */
   samples?: Size
-  /** The first radius η (default 1). */
+  /** The first radius $\eta$ (default 1). */
   radius?: number
   /** At most this many halvings and shells (default 200). */
   maxLayers?: Size
-  /** The class wanted (default: any class other than x's). */
+  /** The class wanted (default: any class other than $\xvec$'s). */
   target?: number
+  /** Constraints every sample is projected onto (default none). */
   constraints?: Actionability
 }
 
 /**
- * Growing Spheres counterfactual of a classifier `predict` (a class per row of a batch [m, d]) at x [d]: the closest
- * enemy found, its sparsified version (`sparse`), the shells searched (inner and outer radius and the enemies found in
- * each) and the last shell's samples [samples, d].
+ * Growing Spheres counterfactual of a classifier at $\xvec$ (see the file comment). After halving, the shells are
+ * $(\eta, 2\eta], (2\eta, 3\eta], \dots$ for the last radius $\eta$ whose ball held no enemy.
+ *
+ * @param predict The classifier: from a batch of rows ($m \times d$ tensor) to a class per row.
+ * @param x The instance $\xvec$ ($d$ values).
+ * @param stream The random stream: ball or shell $l$ draws from `child(stream, 'layer', l)`.
+ * @param options The samples per layer, the first radius, the most layers, the class wanted and the constraints.
+ * @returns `enemy`, the closest enemy found, and `sparse`, it with its smallest changes reset (both `null` when no
+ *   layer held an enemy); `layers`, each ball or shell searched, with its inner and outer radius and the enemies found;
+ *   `samples`, the last layer's samples; and `evaluations`, the rows classified.
+ *
+ * @example Only one feature needs to move
+ * // Class 1 where x0 > 2.
+ * const predict = (X) => toArray(X).map(([a]) => (a > 2 ? 1 : 0))
+ * const r = growingSpheres(predict, [1, 1], stream(0), { samples: 100 })
+ * print('enemy =', r.enemy, ' sparse =', r.sparse)
+ * print('layers =', r.layers.map((l) => [l.inner, l.outer, l.enemies]), ' evaluations =', r.evaluations)
  */
 export function growingSpheres(
   predict: (X: Tensor) => ArrayLike<number> | Tensor,

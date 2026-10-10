@@ -153,7 +153,9 @@ export type KtoOptions = ReductionOptions & {
  * @returns The loss, reduced over examples (mean by default).
  *
  * @example A desirable response gains, an undesirable one loses, as its log-ratio rises
- * for (const r of [-1, 0, 1]) print(`r = ${r}: desirable`, kto(r, 0, true, 0, { beta: 1 }), ' undesirable', kto(r, 0, false, 0, { beta: 1 }))
+ * for (const r of [-1, 0, 1]) {
+ *   print(`r = ${r}: desirable`, kto(r, 0, true, 0, { beta: 1 }), ' undesirable', kto(r, 0, false, 0, { beta: 1 }))
+ * }
  */
 export const kto = defineLoss(
   {
@@ -185,9 +187,10 @@ export type SimpoOptions = ReductionOptions & {
 }
 
 /**
- * Simple preference optimisation (Meng, Xia and Chen, 2024, eq. 6): $\ell = -\log \sigma(\beta(\bar\ell_w - \bar\ell_l)
- * - \gamma)$ on the length-averaged log-probabilities $\bar\ell = \log \pi_\theta(y) / |y|$, with no reference policy;
- * the margin $\gamma$ asks the chosen response to win by at least $\gamma / \beta$ nats per token.
+ * Simple preference optimisation (Meng, Xia and Chen, 2024, eq. 6):
+ * $\ell = -\log \sigma(\beta(\bar\ell_w - \bar\ell_l) - \gamma)$ on the length-averaged log-probabilities
+ * $\bar\ell = \log \pi_\theta(y) / |y|$, with no reference policy; the margin $\gamma$ asks the chosen response to win
+ * by at least $\gamma / \beta$ nats per token.
  *
  * @param avgLogpW The policy's length-averaged log-probability of each chosen response.
  * @param avgLogpL The policy's length-averaged log-probability of each rejected response.
@@ -233,9 +236,9 @@ function logOdds(a: Value): Value {
 
 /**
  * Odds-ratio preference optimisation (Hong, Lee and Thorne, 2024, eqs. 6–7), supervised fine-tuning and preference
- * alignment in one loss with no reference policy: $\ell = \mathrm{NLL}_w - \lambda \log \sigma(\log \mathrm{odds}_w -
- * \log \mathrm{odds}_l)$, where $\mathrm{odds} = p/(1 - p)$ of the length-averaged likelihood
- * $p = \exp(\bar\ell)$.
+ * alignment in one loss with no reference policy:
+ * $\ell = \mathrm{NLL}_w - \lambda \log \sigma(\log \mathrm{odds}_w - \log \mathrm{odds}_l)$, where
+ * $\mathrm{odds} = p/(1 - p)$ of the length-averaged likelihood $p = \exp(\bar\ell)$.
  *
  * @param avgLogpW The policy's length-averaged log-probability of each chosen response, negative.
  * @param avgLogpL The policy's length-averaged log-probability of each rejected response, negative.

@@ -1,5 +1,6 @@
 /**
- * The registry of `aifn-compute/learning/calibration`.
+ * The registry of `aifn-compute/learning/calibration`: pool adjacent violators as a step-through algorithm (the roles
+ * of its state's fields in `state`), and the fits and maps as functions with the notes they serve.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

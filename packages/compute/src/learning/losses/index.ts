@@ -1,9 +1,35 @@
 /**
- * `aifn-compute/learning/losses`: training losses, each a composition of `aifn-compute/foundation/tensor` primitives with its registry
- * metadata: classification, regression, divergence, representation (InfoNCE, CLIP's learnable temperature),
- * adversarial (GAN games, gradient penalty), energy-based (contrastive divergence), mixture density (MDN heads)
- * weak-supervision (uPU, nnPU, LLP proportion, complementary-label) and preference (`dpo`, `ipo`, `kto`, `simpo`,
- * `orpo`) losses; `lossRegistry`, `getLoss`, `listLosses`. Ranking and retrieval losses are in `aifn-methods/retrieval/losses`.
+ * `aifn-compute/learning/losses`: training losses, each a composition of `aifn-compute/foundation/tensor` primitives
+ * with its registry metadata.
+ *
+ * - Classification: `binaryCrossEntropyWithLogits` (exact for any logit) and `binaryCrossEntropy` (from
+ *   probabilities), `softmaxCrossEntropy` (labels or probability rows, with label smoothing), `focalLoss` and
+ *   `softmaxFocalLoss`; the margin surrogates of the 0–1 loss for labels in $\{-1, +1\}$ (`hinge`, `squaredHinge`,
+ *   `logisticLoss`, `exponentialLoss`, `modifiedHuber`, and the table `surrogates`); the multiclass hinges
+ *   `crammerSingerHinge` (the worst rival) and `westonWatkinsHinge` (every rival).
+ * - Regression, each named by the statistic its minimiser estimates: `meanSquaredErrorLoss` (mean),
+ *   `meanAbsoluteErrorLoss` (median), `huber` and `logCosh` (in between), `pinball` (a quantile), `expectileLoss` (an
+ *   expectile), and the negative log-likelihoods `poissonNll` and `gaussianNll`.
+ * - Mixture density heads: `mixtureDensityNll` on raw outputs of width `mixtureHeadSize`, `mixtureDensityParams` (the
+ *   differentiable split into weights, means and scales) and `mixtureDensityHead` (plain numbers, with moments, draws
+ *   and modes).
+ * - Divergences: `klLoss` between distribution objects, `jensenShannonLoss` between probability vectors,
+ *   `distillation` between teacher and student logits.
+ * - Representation: `infoNce` (in-batch negatives, symmetric as in CLIP) and `learnedTemperature`.
+ * - Adversarial: `discriminatorLoss` and `generatorLoss` for the games of `adversarialGames`, and the WGAN-GP
+ *   `gradientPenalty` with its weight `GRADIENT_PENALTY_WEIGHT`.
+ * - Energy-based: `contrastiveDivergenceLoss`.
+ * - Weak supervision: positive–unlabelled risks `unbiasedPu` and `nonNegativePu`, `proportionLoss` (label
+ *   proportions of bags) and `complementaryLabelLoss`.
+ * - Preference, on whole-response log-probabilities: `dpo`, `ipo` and `kto` against a reference policy, `simpo` and
+ *   `orpo` without one.
+ * - Registry and definition: `lossRegistry`, `getLoss`, `listLosses`; `defineLoss`, `isLoss`; `oneHot`; and, for
+ *   losses defined elsewhere, `reduce`, `constantTarget`, `flatValues` and `expectRank`.
+ *
+ * Predictions may be traced, so every loss is differentiable in them; targets and labels are read as constants. Most
+ * losses end with an options object whose `reduction` (`mean` by default, `sum` or `none`) combines the per-example
+ * values, as PyTorch's losses do; the adversarial, energy-based and positive–unlabelled losses return their means
+ * directly. Ranking and retrieval losses are in `aifn-methods/retrieval/losses`.
  */
 
 export {

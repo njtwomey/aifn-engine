@@ -1,6 +1,12 @@
 /**
  * Confusion matrices and the per-class counts every threshold metric is built from: binary, multiclass (one against
  * the rest) and multi-label, with the averaging rules of scikit-learn (micro, macro, weighted, samples).
+ *
+ * A confusion matrix $\Cmat$ of $K$ classes counts in $C_{jk}$ the cases of true class $j$ predicted as class $k$
+ * (Fawcett, 2006), so rows are true classes and columns predictions, as in sklearn.metrics. Read one class against the
+ * rest it gives the four binary counts $\mathrm{TP}$, $\mathrm{FP}$, $\mathrm{FN}$ and $\mathrm{TN}$, from which
+ * each threshold metric is a `CountStatistic`; `averaged` and `perClass` apply one to the `tallies` of every class.
+ * A ratio with a zero denominator is NaN unless a `zeroDivision` value is given.
  */
 
 import type { Tensor } from 'aifn-compute/foundation/tensor'
@@ -30,9 +36,9 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 export type ConfusionMatrix = {
   /** The class labels, in the order of the rows and columns. */
   classes: Label[]
-  /** K × K counts (or weighted counts, or proportions when normalised). Rows are true classes. */
+  /** $K \times K$ counts (or weighted counts, or proportions when normalised). Rows are true classes. */
   matrix: Tensor
-  /** Number of cases (sum of weights when weighted). */
+  /** Number of cases counted, those with both labels in `classes` (sum of weights when weighted). */
   n: number
 }
 
@@ -47,8 +53,26 @@ export type ConfusionOptions = {
 }
 
 /**
- * The confusion matrix C of labels `yTrue` and predictions `yPred` (n each): C[j][k] counts the cases of true class j
- * predicted as class k (Fawcett 2006). Cases whose label is not in `labels` are left out.
+ * The confusion matrix $\Cmat$ of labels `yTrue` and predictions `yPred` ($n$ each): $C_{jk}$ counts the cases of
+ * true class $j$ predicted as class $k$ (Fawcett, 2006), as scikit-learn's `confusion_matrix`. Cases whose true or
+ * predicted label is not in `labels` are left out. Inputs of different lengths throw `ShapeError`. A row or column of
+ * zeros normalises to NaN.
+ *
+ * @param yTrue The true labels: numbers, strings or booleans, or a tensor of numbers.
+ * @param yPred The predicted labels, one per case of `yTrue`.
+ * @param options The classes and their order, case weights, and normalisation (default counts).
+ * @returns The `classes`, the $K \times K$ `matrix` with rows as true classes, and `n`, the number of cases counted.
+ *
+ * @example Two classes
+ * const cm = confusionMatrix([0, 0, 1, 1, 1], [0, 1, 1, 1, 0])
+ * print('classes =', cm.classes)
+ * print('C =', cm.matrix)
+ * print('row-normalised =', confusionMatrix([0, 0, 1, 1, 1], [0, 1, 1, 1, 0], { normalise: 'true' }).matrix)
+ *
+ * @example String labels in a chosen order (the scikit-learn example)
+ * const yTrue = ['cat', 'ant', 'cat', 'cat', 'ant', 'bird']
+ * const yPred = ['ant', 'ant', 'cat', 'cat', 'ant', 'cat']
+ * print(confusionMatrix(yTrue, yPred, { labels: ['ant', 'bird', 'cat'] }).matrix)
  */
 export function confusionMatrix(yTrue: Labels, yPred: Labels, options: ConfusionOptions = {}): ConfusionMatrix {
   const t = labelList(yTrue)
@@ -87,29 +111,29 @@ export function confusionMatrix(yTrue: Labels, yPred: Labels, options: Confusion
  * The margins of a confusion matrix and the rates read along them (confusion-matrix): each row's total and the share
  * of it on the diagonal, each column's total and the share of it on the diagonal, and the grand total.
  *
- * For two classes with the positive class k: row k's rate is the TPR (recall, sensitivity) and its complement the FNR;
- * the other row's rate is the TNR (specificity) and its complement the FPR; column k's rate is the PPV (precision)
- * and its complement the FDR; the other column's rate is the NPV and its complement the FOR. With K classes the same
- * quantities are each class's one-against-rest recall and precision.
+ * For two classes with the positive class $k$: row $k$'s rate is the TPR (recall, sensitivity) and its complement the
+ * FNR; the other row's rate is the TNR (specificity) and its complement the FPR; column $k$'s rate is the PPV
+ * (precision) and its complement the FDR; the other column's rate is the NPV and its complement the FOR. With $K$
+ * classes the same quantities are each class's one-against-rest recall and precision.
  */
 export type ConfusionMargins = {
   /** The class labels, in the order of the rows and columns. */
   classes: Label[]
-  /** Row totals [K]: the cases of each actual class. */
+  /** Row totals ($K$ values): the cases of each actual class. */
   actual: Tensor
-  /** Column totals [K]: the cases predicted as each class. */
+  /** Column totals ($K$ values): the cases predicted as each class. */
   predicted: Tensor
   /** The grand total. */
   n: number
-  /** Cⱼⱼ / row j [K]: the recall of each class (TPR and TNR for two classes). */
+  /** $C_{jj}$ over the total of row $j$ ($K$ values): the recall of each class (TPR and TNR for two classes). */
   rowRate: Tensor
-  /** 1 − rowRate [K]: the miss rate of each class (FNR and FPR for two classes). */
+  /** $1 -$ `rowRate` ($K$ values): the miss rate of each class (FNR and FPR for two classes). */
   rowMiss: Tensor
-  /** Cₖₖ / column k [K]: the precision of each class (PPV and NPV for two classes). */
+  /** $C_{kk}$ over the total of column $k$ ($K$ values): the precision of each class (PPV and NPV for two classes). */
   columnRate: Tensor
-  /** 1 − columnRate [K]: the false discovery rate of each class (FDR and FOR for two classes). */
+  /** $1 -$ `columnRate` ($K$ values): the false discovery rate of each class (FDR and FOR for two classes). */
   columnMiss: Tensor
-  /** Row total / n [K]: each class's share of the cases (the prevalence of the positive class). */
+  /** Row total over $n$ ($K$ values): each class's share of the cases (the prevalence of the positive class). */
   prevalence: Tensor
   /** The diagonal's share of the cases. */
   accuracy: number
@@ -118,6 +142,18 @@ export type ConfusionMargins = {
 /**
  * The margins of a confusion matrix of counts: row and column totals, the diagonal's share of each (recall and
  * precision per class, with their complements) and the accuracy. Undefined ratios (an empty row or column) are NaN.
+ *
+ * @param cm A confusion matrix as `confusionMatrix` returns it (counts, not normalised): its `classes` and `matrix`
+ *   are read.
+ * @returns The totals and rates of every row and column, the grand total and the accuracy.
+ *
+ * @example Recall and precision per class, with a class never predicted
+ * const cm = confusionMatrix(['cat', 'ant', 'cat', 'cat', 'ant', 'bird'], ['ant', 'ant', 'cat', 'cat', 'ant', 'cat'])
+ * const m = confusionMargins(cm)
+ * print('classes =', m.classes)
+ * print('recall (rowRate) =', m.rowRate)
+ * print('precision (columnRate) =', m.columnRate)
+ * print('accuracy =', m.accuracy)
  */
 export function confusionMargins(cm: ConfusionMatrix): ConfusionMargins {
   const K = cm.classes.length
@@ -149,12 +185,29 @@ export function confusionMargins(cm: ConfusionMatrix): ConfusionMargins {
   }
 }
 
-/** The four cells of a binary confusion matrix. */
+/**
+ * The four cells of a binary confusion matrix: `tp` positives predicted positive, `fp` negatives predicted positive,
+ * `fn` positives predicted negative and `tn` negatives predicted negative (sums of weights when weighted).
+ */
 export type BinaryCounts = { tp: number; fp: number; fn: number; tn: number }
 
 /**
  * The binary confusion counts of labels and predictions for one positive class (default `1`, else `true`, else the
- * last label in order).
+ * last label in order, among the labels of both inputs). Every label other than the positive class is negative.
+ * Inputs of different lengths throw `ShapeError`.
+ *
+ * @param yTrue The true labels.
+ * @param yPred The predicted labels, one per case of `yTrue`.
+ * @param options The positive class, and case weights.
+ * @param options.positive The label counted as positive; left out, chosen as `positiveOf` chooses it.
+ * @param options.sampleWeight A weight per case: each cell is then a sum of weights rather than a count.
+ * @returns The counts `tp`, `fp`, `fn` and `tn`.
+ *
+ * @example Counts of 0/1 labels
+ * print(binaryCounts([0, 1, 1, 0, 1], [0, 1, 0, 1, 1]))
+ *
+ * @example A positive class given by name
+ * print(binaryCounts(['spam', 'ham', 'spam', 'ham'], ['spam', 'spam', 'ham', 'ham'], { positive: 'spam' }))
  */
 export function binaryCounts(
   yTrue: Labels,
@@ -180,8 +233,22 @@ export function binaryCounts(
 }
 
 /**
- * The binary confusion counts when cases with `score ≥ threshold` are predicted positive (the convention of
- * scikit-learn's curves, so that a threshold equal to a score includes that case).
+ * The binary confusion counts when cases with score $s_i \ge t$ for the threshold $t$ are predicted positive (the
+ * convention of scikit-learn's curves, so that a threshold equal to a score includes that case). Inputs of different
+ * lengths throw `ShapeError`.
+ *
+ * @param yTrue The true labels.
+ * @param scores A score per case, higher meaning more likely positive.
+ * @param threshold The threshold $t$: a case is predicted positive when its score is at least $t$.
+ * @param options The positive class.
+ * @param options.positive The label of the positive class; left out, chosen by `positiveOf` from the labels of `yTrue`.
+ * @returns The counts `tp`, `fp`, `fn` and `tn` (unweighted).
+ *
+ * @example Two thresholds on four scores
+ * const yTrue = [0, 0, 1, 1]
+ * const scores = [0.1, 0.4, 0.35, 0.8]
+ * print('t = 0.4: ', countsAtThreshold(yTrue, scores, 0.4))
+ * print('t = 0.35:', countsAtThreshold(yTrue, scores, 0.35))
  */
 export function countsAtThreshold(
   yTrue: Labels,
@@ -203,20 +270,36 @@ export function countsAtThreshold(
   return out
 }
 
-/** Per-class one-against-rest counts read off a confusion matrix, as tensors of length K. */
+/** Per-class one-against-rest counts read off a confusion matrix, as tensors of length $K$. */
 export type OneVsRestCounts = {
+  /** The class labels, in the order of the counts. */
   classes: Label[]
+  /** True positives of each class: its diagonal entry. */
   tp: Tensor
+  /** False positives of each class: the rest of its column. */
   fp: Tensor
+  /** False negatives of each class: the rest of its row. */
   fn: Tensor
+  /** True negatives of each class: everything outside its row and column. */
   tn: Tensor
   /** Cases of each true class (row sums). */
   support: Tensor
 }
 
 /**
- * The one-against-rest binary counts of each class of a K-class confusion matrix: TPₖ = Cₖₖ, FNₖ the rest of row k,
- * FPₖ the rest of column k, TNₖ everything else.
+ * The one-against-rest binary counts of each class of a $K$-class confusion matrix: $\mathrm{TP}_k = C_{kk}$,
+ * $\mathrm{FN}_k$ the rest of row $k$, $\mathrm{FP}_k$ the rest of column $k$, $\mathrm{TN}_k$ everything else.
+ *
+ * @param cm A confusion matrix of counts, as `confusionMatrix` returns it.
+ * @returns The four counts and the support of each class, as tensors aligned with `cm.classes`.
+ *
+ * @example Three classes, each against the rest
+ * const r = oneVsRest(confusionMatrix([0, 0, 1, 2, 2, 2], [0, 0, 2, 0, 2, 2]))
+ * print('tp =', r.tp)
+ * print('fp =', r.fp)
+ * print('fn =', r.fn)
+ * print('tn =', r.tn)
+ * print('support =', r.support)
  */
 export function oneVsRest(cm: ConfusionMatrix): OneVsRestCounts {
   const t = talliesFromMatrix(cm)
@@ -230,42 +313,77 @@ export function oneVsRest(cm: ConfusionMatrix): OneVsRestCounts {
   }
 }
 
-/** Every rate of a binary confusion matrix (NaN where a denominator is 0). */
+/**
+ * Every rate of a binary confusion matrix (NaN where a denominator is 0), with $P = \mathrm{TP} + \mathrm{FN}$ the
+ * positives and $N = \mathrm{FP} + \mathrm{TN}$ the negatives.
+ */
 export type BinaryRates = {
+  /** The number of cases, $\mathrm{TP} + \mathrm{FP} + \mathrm{FN} + \mathrm{TN}$. */
   n: number
+  /** The share of positives, $P / n$. */
   prevalence: number
+  /** $(\mathrm{TP} + \mathrm{TN}) / n$. */
   accuracy: number
+  /** $1 -$ `accuracy`. */
   errorRate: number
+  /** The mean of recall and specificity. */
   balancedAccuracy: number
-  /** Recall, sensitivity, true-positive rate: TP / P. */
+  /** Recall, sensitivity, true-positive rate: $\mathrm{TP} / P$. */
   recall: number
-  /** Specificity, true-negative rate: TN / N. */
+  /** Specificity, true-negative rate: $\mathrm{TN} / N$. */
   specificity: number
+  /** Fall-out, $\mathrm{FP} / N$. */
   falsePositiveRate: number
+  /** Miss rate, $\mathrm{FN} / P$. */
   falseNegativeRate: number
-  /** Precision, positive predictive value: TP / (TP + FP). */
+  /** Precision, positive predictive value: $\mathrm{TP} / (\mathrm{TP} + \mathrm{FP})$. */
   precision: number
+  /** $\mathrm{TN} / (\mathrm{TN} + \mathrm{FN})$. */
   negativePredictiveValue: number
+  /** $\mathrm{FP} / (\mathrm{TP} + \mathrm{FP})$, the complement of precision. */
   falseDiscoveryRate: number
+  /** $2\mathrm{TP} / (2\mathrm{TP} + \mathrm{FP} + \mathrm{FN})$, the harmonic mean of precision and recall. */
   f1: number
-  /** TP / (TP + FP + FN), the Jaccard index of the positive class. */
+  /** $\mathrm{TP} / (\mathrm{TP} + \mathrm{FP} + \mathrm{FN})$, the Jaccard index of the positive class. */
   jaccard: number
+  /** The Matthews correlation coefficient; NaN when any margin is 0. */
   matthewsCorrelation: number
+  /** Cohen's $\kappa$ between the truth and the predictions. */
   cohensKappa: number
-  /** Youden's J: TPR + TNR − 1. */
+  /** Youden's $J$: $\mathrm{TPR} + \mathrm{TNR} - 1$. */
   informedness: number
-  /** PPV + NPV − 1. */
+  /** $\mathrm{PPV} + \mathrm{NPV} - 1$. */
   markedness: number
+  /** $\mathrm{LR}^+ = \mathrm{TPR} / \mathrm{FPR}$. */
   positiveLikelihoodRatio: number
+  /** $\mathrm{LR}^- = \mathrm{FNR} / \mathrm{TNR}$. */
   negativeLikelihoodRatio: number
+  /** $(\mathrm{TP} \cdot \mathrm{TN}) / (\mathrm{FP} \cdot \mathrm{FN})$. */
   diagnosticOddsRatio: number
-  /** Fraction predicted positive, (TP + FP) / n. */
+  /** Fraction predicted positive, $(\mathrm{TP} + \mathrm{FP}) / n$. */
   selectionRate: number
 }
 
 /**
  * Every threshold metric of a binary confusion matrix, as in the notes' summary table (confusion-matrix,
  * sensitivity-specificity-and-predictive-values). Undefined ratios are NaN.
+ *
+ * @param options The four cells of the table, as `binaryCounts` or `countsAtThreshold` returns them.
+ * @param options.tp True positives.
+ * @param options.fp False positives.
+ * @param options.fn False negatives.
+ * @param options.tn True negatives.
+ * @returns Every rate, each as defined on `BinaryRates`.
+ *
+ * @example The rates of one table
+ * const r = binaryRates({ tp: 2, fp: 1, fn: 1, tn: 1 })
+ * print('recall =', r.recall, ' specificity =', r.specificity)
+ * print('precision =', r.precision, ' f1 =', r.f1)
+ * print('MCC =', r.matthewsCorrelation, ' kappa =', r.cohensKappa)
+ *
+ * @example A table with no negatives predicted
+ * const r = binaryRates({ tp: 3, fp: 0, fn: 0, tn: 0 })
+ * print('precision =', r.precision, ' specificity =', r.specificity)
  */
 export function binaryRates({ tp, fp, fn, tn }: BinaryCounts): BinaryRates {
   const n = tp + fp + fn + tn
@@ -306,23 +424,36 @@ export function binaryRates({ tp, fp, fn, tn }: BinaryCounts): BinaryRates {
 // ── Tallies: the per-class counts the averaged metrics use ───────────────────────────────────────────────────────────
 
 /**
- * Per-class one-against-rest counts, and for multi-label data the per-case counts that `samples` averaging needs.
- * Internal to the module.
+ * Per-class one-against-rest counts, and for multi-label data the per-case counts that `samples` averaging needs. What
+ * `averaged` and `perClass` read.
  */
 export type Tallies = {
+  /** The classes, in the order of the counts; for multi-label data the column indices $0, \dots, L - 1$. */
   classes: Label[]
+  /** True positives of each class. */
   tp: Float64Array
+  /** False positives of each class. */
   fp: Float64Array
+  /** False negatives of each class. */
   fn: Float64Array
+  /** True negatives of each class. */
   tn: Float64Array
+  /** The true cases of each class, $\mathrm{TP} + \mathrm{FN}$. */
   support: Float64Array
-  /** Number of cases. */
+  /** Number of cases (sum of weights for weighted single-label data). */
   n: number
+  /** True when the input was multi-label rows. */
   multilabel: boolean
   /** Multi-label only: per-case TP, FP, FN, TN over the labels. */
   cases?: { tp: Float64Array; fp: Float64Array; fn: Float64Array; tn: Float64Array }
 }
 
+/**
+ * The one-against-rest tallies of every class of a confusion matrix.
+ *
+ * @param cm A confusion matrix of counts (or weighted counts).
+ * @returns The four counts and the support per class, with `n` the matrix total.
+ */
 function talliesFromMatrix(cm: ConfusionMatrix): Tallies {
   const K = cm.classes.length
   const c = cm.matrix.data as Float64Array
@@ -350,8 +481,27 @@ function talliesFromMatrix(cm: ConfusionMatrix): Tallies {
 }
 
 /**
- * Tallies of single-label predictions (vectors of labels) or multi-label predictions (n × L matrices of 0/1, rows as
- * cases and columns as labels).
+ * Tallies of single-label predictions (vectors of labels) or multi-label predictions ($n \times L$ matrices of 0/1,
+ * rows as cases and columns as labels). Input is multi-label when either argument is a matrix; any non-zero entry
+ * counts as 1. Multi-label inputs of different shapes throw `ShapeError`. The per-case counts in `cases` are
+ * unweighted.
+ *
+ * @param yTrue The true labels, or the $n \times L$ matrix of true label sets.
+ * @param yPred The predicted labels or label sets, matching `yTrue`.
+ * @param options The classes (single-label only), and case weights.
+ * @param options.labels The classes to count and their order; default those present in either input. Ignored for
+ *   multi-label data, whose classes are its columns.
+ * @param options.sampleWeight A weight per case: the per-class counts become sums of weights.
+ * @returns The per-class counts, and the per-case counts for multi-label data.
+ *
+ * @example Three classes, one against the rest
+ * const t = tallies([0, 1, 2, 2], [0, 2, 2, 1])
+ * print('classes =', t.classes, ' tp =', t.tp, ' fp =', t.fp, ' fn =', t.fn)
+ *
+ * @example Multi-label rows: per label and per case
+ * const t = tallies([[1, 0], [1, 1]], [[1, 1], [0, 1]])
+ * print('per label: tp =', t.tp, ' fp =', t.fp, ' fn =', t.fn)
+ * print('per case:  tp =', t.cases.tp, ' fp =', t.cases.fp, ' fn =', t.cases.fn)
  */
 export function tallies(
   yTrue: Labels | Rows,
@@ -421,10 +571,32 @@ export type AverageOptions = {
   sampleWeight?: Data
 }
 
-/** A metric of one binary table: (TP, FP, FN, TN) → value, NaN or `zero` where undefined. */
+/**
+ * A metric of one binary table: $(\mathrm{TP}, \mathrm{FP}, \mathrm{FN}, \mathrm{TN}) \mapsto$ value, with `zero`
+ * (NaN by default) where it is undefined.
+ */
 export type CountStatistic = (tp: number, fp: number, fn: number, tn: number, zero: number) => number
 
-/** Apply a count statistic to tallies with an averaging rule. */
+/**
+ * Apply a count statistic to tallies with an averaging rule. `macro` and `weighted` skip classes of zero weight (for
+ * `weighted`, those absent from the truth), and `binary` throws `DomainError` for multi-label input or more than two
+ * classes, as `samples` does for single-label input. A positive class absent from the tallies scores as a table of
+ * true negatives only.
+ *
+ * @param stat The count statistic, such as precision as $\mathrm{TP} / (\mathrm{TP} + \mathrm{FP})$.
+ * @param t The tallies, as `tallies` returns them.
+ * @param options The averaging rule (default `binary` for two classes, `macro` otherwise and for multi-label data),
+ *   the positive class for `binary`, and `zeroDivision`; `labels` and `sampleWeight` are not read here.
+ * @returns The averaged value.
+ *
+ * @example Precision averaged three ways
+ * const precisionStat = (tp, fp, fn, tn, zero) => divide(tp, tp + fp, zero)
+ * const t = tallies([0, 0, 1, 1, 2, 2], [0, 1, 1, 1, 2, 0])
+ * print('per class =', perClass(precisionStat, t))
+ * print('macro =', averaged(precisionStat, t, { average: 'macro' }))
+ * print('micro =', averaged(precisionStat, t, { average: 'micro' }))
+ * print('weighted =', averaged(precisionStat, t, { average: 'weighted' }))
+ */
 export function averaged(stat: CountStatistic, t: Tallies, options: AverageOptions): number {
   const zero = options.zeroDivision ?? NaN
   const K = t.classes.length
@@ -464,7 +636,20 @@ export function averaged(stat: CountStatistic, t: Tallies, options: AverageOptio
   }
 }
 
-/** Per-class values of a count statistic, as a tensor aligned with `tallies.classes`. */
+/**
+ * Per-class values of a count statistic, as a tensor aligned with `tallies.classes`.
+ *
+ * @param stat The count statistic.
+ * @param t The tallies, as `tallies` returns them.
+ * @param zeroDivision The value of a ratio whose denominator is 0.
+ * @returns The statistic of each class, one against the rest.
+ *
+ * @example Recall of each class
+ * const recallStat = (tp, fp, fn, tn, zero) => divide(tp, tp + fn, zero)
+ * const t = tallies(['a', 'a', 'b', 'c'], ['a', 'b', 'b', 'b'])
+ * print('classes =', t.classes)
+ * print('recall =', perClass(recallStat, t))
+ */
 export function perClass(stat: CountStatistic, t: Tallies, zeroDivision = NaN): Tensor {
   return vector(Array.from(t.classes, (_, k) => stat(t.tp[k], t.fp[k], t.fn[k], t.tn[k], zeroDivision)))
 }
