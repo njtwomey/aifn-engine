@@ -1,8 +1,12 @@
-/** The registry of `aifn-methods/information/channels`: capacity and rate–distortion by Blahut–Arimoto. */
+/**
+ * The registry of `aifn-methods/information/channels`: the capacity and rate–distortion Blahut–Arimoto iterations as
+ * traceable algorithms, and the solvers that run them to convergence as functions.
+ */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as channel from './channel'
 
+/** A table of the module's registry entries, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'information/channels')
 const fn = definer<FunctionInfo>('function', 'information/channels')

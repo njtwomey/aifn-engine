@@ -1,8 +1,12 @@
-/** The registry of `aifn-methods/information/coding`: source codes and code bounds. */
+/**
+ * The registry of `aifn-methods/information/coding`: Huffman's algorithm as a traceable algorithm, and the source
+ * codes, encoders, code properties and code-size bounds as functions.
+ */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as coding from './coding'
 
+/** A table of the module's registry entries, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const fn = definer<FunctionInfo>('function', 'information/coding')
 const SRC = ['source-coding-theorem', 'entropy']

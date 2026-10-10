@@ -1,4 +1,7 @@
-/** The registry of `aifn-methods/vision/two-view`. */
+/**
+ * The registry of `aifn-methods/vision/two-view`: the synthetic scene (a simulation) and the homography and
+ * fundamental-matrix RANSAC problems (constructions), as functions.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as scene from './scene'

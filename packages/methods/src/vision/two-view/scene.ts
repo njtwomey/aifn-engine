@@ -1,9 +1,17 @@
 /**
- * A two-view scene with known ground truth: two pinhole cameras looking at scene points (on a plane, or spread in
- * depth), their image correspondences with pixel noise, and a fraction replaced by outliers. The true homography (for
- * a planar scene) and fundamental matrix come with it, so a figure can compare what RANSAC recovers with the truth.
- * The RANSAC problems for a homography and a fundamental matrix connect `aifn-compute/numerics/geometry` to
- * `aifn-compute/numerics/robust`.
+ * A synthetic two-view scene with known ground truth, and the RANSAC problems that fit a homography or a fundamental
+ * matrix to its correspondences.
+ *
+ * Two pinhole cameras $\Pmat_1 = \Kmat[\Imat \mid \zeros]$ and $\Pmat_2 = \Kmat[\Rmat \mid \tvec]$ look at scene
+ * points on a plane or spread in depth; their images are perturbed by Gaussian pixel noise, and a fraction of the
+ * correspondences are replaced by outliers. The true fundamental matrix
+ * $\Fmat = \Kmat^{-\top}[\tvec]_{\times}\Rmat\Kmat^{-1}$ and, for a planar scene, the true homography come with it
+ * (Hartley and Zisserman, 2004, §9.2 and §13.1), so a figure can compare what RANSAC recovers with the truth. The
+ * problems connect the estimators of `aifn-compute/numerics/geometry` (four-point DLT, the normalised eight-point
+ * algorithm) to the `ransac` of `aifn-compute/numerics/robust`.
+ *
+ * Points are $n \times 2$ matrices of pixel coordinates, row $i$ of the first view corresponding to row $i$ of the
+ * second, and the world frame is camera 1's.
  */
 
 import {
@@ -22,45 +30,106 @@ import type { MatrixLike } from 'aifn-compute/foundation/contracts'
 
 /** Options for `twoViewScene`. */
 export interface TwoViewOptions {
-  /** Number of correspondences. Default 80. */
+  /** Number of correspondences $n$. Default 80. */
   count?: number
-  /** Fraction replaced by random point pairs. Default 0.3. */
+  /**
+   * Fraction of the correspondences that are outliers (clamped to $[0, 1]$; default 0.3): $\operatorname{round}(fn)$
+   * of them, chosen at random, have their second-view point replaced by a uniform draw over the image.
+   */
   outlierFraction?: number
-  /** Pixel noise σ on the inliers. Default 0.5. */
+  /**
+   * Standard deviation $\sigma$, in pixels, of the Gaussian noise added to each coordinate of every point in both
+   * views (before the outliers are drawn). Default 0.5.
+   */
   noise?: number
-  /** `plane` (all scene points on one plane: a homography relates the views) or `depth` (spread in depth). */
+  /**
+   * `'plane'` (default): the scene points lie on one plane, so a homography relates the views. `'depth'`: they fill a
+   * box in depth, and only the fundamental matrix does.
+   */
   kind?: 'plane' | 'depth'
-  /** The second camera's rotation about the vertical axis (radians) and sideways baseline. Defaults 0.25 and 1. */
+  /**
+   * The angle $\theta$, in radians, of the second camera's turn about the vertical ($Y$) axis: $\Rmat$ is the rotation
+   * by $-\theta$. Default 0.25.
+   */
   rotation?: number
+  /** The second camera's sideways offset: its centre is at $(b, 0, 0)$. Default 1. */
   baseline?: number
-  /** Image size in pixels (square). Default 400. */
+  /**
+   * Image width and height in pixels (default 400): the focal length is $0.9$ times it and the principal point is the
+   * image centre.
+   */
   size?: number
 }
 
 /** A two-view scene and its correspondences. */
 export interface TwoViewScene {
+  /** The shared intrinsics $\Kmat$ ($3 \times 3$): focal length $0.9 \cdot$ `size`, principal point at the centre. */
   K: Matrix
+  /** Camera 1, $\Pmat_1 = \Kmat[\Imat \mid \zeros]$ ($3 \times 4$), at the origin looking down $+Z$. */
   P1: Matrix
+  /** Camera 2, $\Pmat_2 = \Kmat[\Rmat \mid \tvec]$ ($3 \times 4$), with $\tvec = -\Rmat\cvec$ ($\cvec$ its centre). */
   P2: Matrix
-  /** Scene points (n × 3) and their images in each view (n × 2), outliers included. */
+  /** The scene points ($n \times 3$), in camera 1's frame; an outlier keeps its true scene point. */
   X: Matrix
+  /** The noisy images of the scene points in view 1 ($n \times 2$, pixels). */
   x1: Matrix
+  /** The noisy images in view 2 ($n \times 2$, pixels), with the outliers' rows replaced by uniform draws. */
   x2: Matrix
-  /** 1 for an outlier, 0 for an inlier. */
+  /** Per correspondence, 1 for an outlier and 0 for an inlier. */
   outlier: number[]
-  /** The true homography (plane scenes only, else null) and the true fundamental matrix. */
+  /**
+   * The true homography from view 1 to view 2, $\Hmat = \Kmat(\Rmat + \tvec\nvec^\top / d)\Kmat^{-1}$ for the plane
+   * $\nvec^\top\mathbf{X} = d$, scaled so that $H_{33} = 1$; null for a `'depth'` scene.
+   */
   H: Matrix | null
+  /**
+   * The true fundamental matrix, $\xvec_2^\top\Fmat\xvec_1 = 0$ for homogeneous image points, scaled to unit
+   * Frobenius norm with its largest-magnitude entry positive.
+   */
   F: Matrix
+  /** The image size in pixels, as given. */
   size: number
 }
 
+/**
+ * The entries of a $3 \times 3$ matrix as a flat row-major array.
+ *
+ * @param m The matrix.
+ * @returns Its nine entries, row by row.
+ */
 const mat3 = (m: Tensor) => dense.data(m)
 
 /**
- * A synthetic two-view scene. Camera 1 is at the origin looking down +Z; camera 2 is moved sideways by `baseline` and
- * turned by `rotation` about the vertical axis toward the scene. Scene points lie on a plane tilted in depth (or fill a
- * box in depth), at Z ≈ 5 … 8. Correspondences are projected, perturbed by Gaussian noise, and a fraction are replaced
- * by uniform random pairs. The true F = K⁻ᵀ[t]ₓRK⁻¹ and, for a plane n·X = d (camera-1 frame), H = K(R + tnᵀ/d)K⁻¹.
+ * A synthetic two-view scene. Camera 1 is at the origin looking down $+Z$; camera 2 is moved sideways to $(b, 0, 0)$
+ * ($b$ the `baseline`) and turned about the vertical axis, $\Rmat$ being the rotation by $-\theta$ ($\theta$ the
+ * `rotation`). With positive $b$ and $\theta$ that turns its optical axis towards $+X$, away from the scene, so the
+ * second view is shifted left and part of it can fall outside the image: coordinates are not clipped. The scene points
+ * have $X, Y$ uniform on $[-2.2, 2.2]$ and lie on the plane $Z = 6.5 + 0.4X - 0.3Y$ (that is,
+ * $\nvec^\top\mathbf{X} = d$ with $\nvec = (-0.4, 0.3, 1)$, $d = 6.5$) or have $Z$ uniform on $[5, 8]$. They are
+ * projected into both views, Gaussian noise is added to every coordinate, and a fraction of the second-view points are
+ * replaced by uniform draws over the image. The true $\Fmat = \Kmat^{-\top}[\tvec]_{\times}\Rmat\Kmat^{-1}$ and, for
+ * the plane, $\Hmat = \Kmat(\Rmat + \tvec\nvec^\top / d)\Kmat^{-1}$ come with it.
+ *
+ * @param s The random stream; the points, the noise of each view, the choice of outliers and their positions each
+ *   draw from their own child of it.
+ * @param options The size of the scene, its noise and outliers, its kind and the second camera's pose; see
+ *   `TwoViewOptions`.
+ * @returns The cameras, the scene points, the correspondences with their outlier flags, and the true $\Hmat$ and
+ *   $\Fmat$.
+ *
+ * @example Noise-free correspondences satisfy $\xvec_2^\top\Fmat\xvec_1 = 0$
+ * const scene = twoViewScene(stream(0), { count: 4, kind: 'depth', noise: 0, outlierFraction: 0 })
+ * const [x1, x2, F] = [toArray(scene.x1), toArray(scene.x2), toArray(scene.F)]
+ * const epipolar = x1.map(([u, v], i) => {
+ *   const Fx = F.map((row) => row[0] * u + row[1] * v + row[2])
+ *   return x2[i][0] * Fx[0] + x2[i][1] * Fx[1] + Fx[2]
+ * })
+ * print('x2ᵀ F x1 =', epipolar)
+ *
+ * @example A planar scene has a homography; outliers are flagged
+ * const scene = twoViewScene(stream(0), { count: 6, outlierFraction: 0.5 })
+ * print('H =', scene.H)
+ * print('outlier =', scene.outlier)
  */
 export function twoViewScene(s: Stream, options: TwoViewOptions = {}): TwoViewScene {
   const n = options.count ?? 80
@@ -152,14 +221,37 @@ export function twoViewScene(s: Stream, options: TwoViewOptions = {}): TwoViewSc
   }
 }
 
-/** The rows of an n × 2 matrix at the given indices. */
+/**
+ * The rows of an $n \times 2$ matrix at the given indices, as a new matrix.
+ *
+ * @param x The matrix as a row-major array of $2n$ values (row $i$ is entries $2i$ and $2i + 1$); not modified.
+ * @param idx The row indices to take, in order.
+ * @returns A matrix of `idx.length` rows and 2 columns.
+ */
 function rows(x: Float64Array, idx: readonly number[]): Matrix {
   const out = new Float64Array(2 * idx.length)
   idx.forEach((i, k) => out.set([x[2 * i], x[2 * i + 1]], 2 * k))
   return fromData(out, [idx.length, 2])
 }
 
-/** The RANSAC problem of a homography between correspondences x1 → x2: four-point DLT, transfer error in pixels. */
+/**
+ * The RANSAC problem of a homography $\Hmat$ mapping the points of view 1 to those of view 2: a sample of four
+ * correspondences is fitted by the DLT of `homography`, and each correspondence is scored by its transfer error
+ * $\lVert \xvec_2 - \Hmat\xvec_1 \rVert$ in pixels. A sample whose fit throws or is not finite is degenerate (`fit`
+ * returns null).
+ *
+ * @param x1 The points of view 1 ($n \times 2$, pixels).
+ * @param x2 The corresponding points of view 2 ($n \times 2$, pixels), row by row.
+ * @returns The problem for `ransac`: $n$ data, samples of 4, the fit and the residuals.
+ *
+ * @example Four noise-free inliers give the homography; the outliers stand out
+ * const scene = twoViewScene(stream(0), { count: 10, outlierFraction: 0.2, noise: 0 })
+ * const problem = homographyProblem(scene.x1, scene.x2)
+ * const inliers = scene.outlier.flatMap((o, i) => (o ? [] : [i]))
+ * const H = problem.fit(inliers.slice(0, 4))
+ * print('outlier =', scene.outlier)
+ * print('transfer error (px) =', problem.residuals(H))
+ */
 export function homographyProblem(x1: MatrixLike, x2: MatrixLike): RansacProblem<Matrix> {
   const a = dense.toMatrixF64(x1, 'homographyProblem x1').data
   const b = dense.toMatrixF64(x2, 'homographyProblem x2').data
@@ -180,7 +272,26 @@ export function homographyProblem(x1: MatrixLike, x2: MatrixLike): RansacProblem
   }
 }
 
-/** The RANSAC problem of a fundamental matrix: eight-point fits, the square root of the Sampson distance in pixels. */
+/**
+ * The RANSAC problem of a fundamental matrix $\Fmat$ with $\xvec_2^\top\Fmat\xvec_1 = 0$: a sample of eight
+ * correspondences is fitted by the normalised eight-point algorithm of `fundamentalMatrix`, and each correspondence is
+ * scored by the square root of its Sampson distance, in pixels. A sample whose fit throws or is not finite is
+ * degenerate (`fit` returns null).
+ *
+ * @param x1 The points of view 1 ($n \times 2$, pixels).
+ * @param x2 The corresponding points of view 2 ($n \times 2$, pixels), row by row.
+ * @returns The problem for `ransac`: $n$ data, samples of 8, the fit and the residuals.
+ *
+ * @example The fundamental matrix from eight point correspondences
+ * const scene = twoViewScene(stream(0), { count: 12, kind: 'depth', noise: 0 })
+ * const problem = fundamentalProblem(scene.x1, scene.x2)
+ * const inliers = scene.outlier.flatMap((o, i) => (o ? [] : [i]))
+ * const F = problem.fit(inliers.slice(0, 8))
+ * print('F =', F)
+ * print('true F =', scene.F)
+ * print('outlier =', scene.outlier)
+ * print('residual (px) =', problem.residuals(F))
+ */
 export function fundamentalProblem(x1: MatrixLike, x2: MatrixLike): RansacProblem<Matrix> {
   const a = dense.toMatrixF64(x1, 'fundamentalProblem x1').data
   const b = dense.toMatrixF64(x2, 'fundamentalProblem x2').data

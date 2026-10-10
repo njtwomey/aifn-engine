@@ -1,4 +1,4 @@
-/** The functions of `aifn-methods/information/projection`. */
+/** The registry of `aifn-methods/information/projection`: the KL projection onto the normal family, as a function. */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as projection from './projection'
