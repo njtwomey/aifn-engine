@@ -5,8 +5,9 @@
  *   three microphones, the classic ICA demonstration (Hyvärinen and Oja, 2000, §1).
  * - `strokeGlyphs`: binary glyphs on a small grid, each the union of a few strokes (bars across, down and the two
  *   diagonals); the strokes are the parts that NMF can recover (Lee and Seung, 1999).
- * - `latentFactorModel`, `latentFactors`: x = Wz + μ + ε with z ~ N(0, I_q) and noise variances that differ by
- *   feature, the setting where factor analysis and probabilistic PCA differ.
+ * - `latentFactorModel`, `latentFactors`: $\xvec = \Wmat\zvec + \muvec + \epsilonvec$ with
+ *   $\zvec \sim \Gauss(\zeros, \Imat_q)$ and noise variances that differ by feature, the setting where factor analysis
+ *   and probabilistic PCA differ.
  */
 
 import type { DatasetInfo, FunctionInfo } from 'aifn-compute/foundation/contracts'
@@ -18,19 +19,36 @@ import { checkCount, matrix, type Dataset } from '../types'
 
 /** The sources, their mixture and the mixing matrix of `cocktailParty`. */
 export type CocktailParty = {
-  /** Sample times [n]. */
+  /** Sample times, $n$ values evenly spaced from 0 (step $8/n$). */
   t: Tensor
-  /** The three sources as columns [n, 3]: sine, square wave, sawtooth (each of zero mean). */
+  /**
+   * The three sources as columns, $n \times 3$: $\sin 2t$, the square wave $\sgn \sin 3t$ and the sawtooth
+   * $(1.7t \bmod 2) - 1$, each with values in $[-1, 1]$ and mean near zero.
+   */
   sources: Tensor
-  /** The microphones as columns [n, 3]: sources · mixingᵀ plus noise. */
+  /** The microphones as columns, $n \times 3$: $\Smat\Amat^\top$ plus noise, $\Smat$ the sources. */
   mixed: Tensor
-  /** The mixing matrix A [3, 3] (row i: microphone i's weights on the sources). */
+  /** The mixing matrix $\Amat$, $3 \times 3$ (row $i$: microphone $i$'s weights on the sources). */
   mixing: Tensor
 }
 
 /**
- * Three sources over t ∈ [0, 8) mixed by A into three microphones (A's entries uniform on [0.2, 1.2], drawn from the
- * stream; `noise` adds Gaussian sensor noise of that standard deviation).
+ * Three sources over $t \in [0, 8)$ mixed by $\Amat$ into three microphones ($\Amat$'s entries uniform on
+ * $[0.2, 1.2]$, drawn from the stream; `noise` adds Gaussian sensor noise of that standard deviation). The sources are
+ * deterministic; only the mixing and the noise are random. Throws `DomainError` when $n$ is not a non-negative integer.
+ *
+ * @param s The stream the mixing matrix (child `'mixing'`) and the sensor noise (child `'noise'`) are drawn from.
+ * @param options `n` (default 400), the number of samples; `noise` (default 0), the standard deviation of the sensor
+ *   noise.
+ * @returns The times, the sources, the microphone signals and the mixing matrix.
+ *
+ * @example Without noise the microphones are exactly the mixed sources
+ * const c = cocktailParty(stream(1), { n: 400 })
+ * print('t:', c.t.shape, ' sources:', c.sources.shape, ' mixed:', c.mixed.shape)
+ * print('mixing A =', c.mixing)
+ * print('first sources:', toArray(c.sources).slice(0, 2))
+ * print('first mixed:', toArray(c.mixed).slice(0, 2))
+ * print('S A^T, first rows:', toArray(matmul(c.sources, transpose(c.mixing))).slice(0, 2))
  */
 export function cocktailParty(s: Stream, options: { n?: number; noise?: number } = {}): CocktailParty {
   const { n = 400, noise = 0 } = options
@@ -58,8 +76,21 @@ export function cocktailParty(s: Stream, options: { n?: number; noise?: number }
 }
 
 /**
- * The strokes of `strokeGlyphs` on a size × size grid, as rows [strokes, size²] of 0s and 1s: the middle row, the
- * middle column, the top and bottom rows, the left and right columns, and the two diagonals (8 strokes).
+ * The strokes of `strokeGlyphs` on a grid of side $m$, as the rows of an $8 \times m^2$ matrix of 0s and 1s (one
+ * row-major grid per stroke): the middle row, the middle column, the top and bottom rows, the left and right columns,
+ * and the two diagonals. Deterministic.
+ *
+ * @param options The grid.
+ * @param options.size The side $m$ of the grid in pixels; for an even side the middle row and column are the ones
+ *   just below and right of centre.
+ * @returns The strokes, $8 \times m^2$.
+ *
+ * @example The eight strokes of a 5 by 5 grid
+ * const strokes = toArray(glyphStrokes({ size: 5 }))
+ * print('strokes:', strokes.length, ' pixels each:', strokes[0].length)
+ * print('pixels on per stroke:', strokes.map((r) => r.reduce((a, v) => a + v, 0)))
+ * // The last stroke, the anti-diagonal, drawn as a grid.
+ * print([0, 1, 2, 3, 4].map((r) => strokes[7].slice(5 * r, 5 * r + 5).map((v) => (v ? '#' : '.')).join('')).join('\n'))
  */
 export function glyphStrokes({ size = 7 }: { size?: number } = {}): Tensor {
   const mid = Math.floor(size / 2)
@@ -79,9 +110,23 @@ export function glyphStrokes({ size = 7 }: { size?: number } = {}): Tensor {
 }
 
 /**
- * Glyphs made of strokes: each of n glyphs switches each stroke of `glyphStrokes` on with probability `p` (at least
- * one), takes the union (pixels capped at 1) and adds Gaussian noise of standard deviation `noise`, clipped at 0 so the
- * data stay non-negative. x is n × size²; y counts the strokes in each glyph.
+ * Glyphs made of strokes: each of $n$ glyphs switches each stroke of `glyphStrokes` on with probability `p` (when none
+ * is, one is chosen uniformly), takes the union (pixels capped at 1) and adds Gaussian noise of standard deviation
+ * `noise`, clipped at 0 so the data stay non-negative. `x` is $n \times m^2$ for a grid of side $m$; `y` counts the
+ * strokes in each glyph. Throws `DomainError` when $n$ is not a non-negative integer.
+ *
+ * @param s The stream the glyphs are drawn from (glyph $i$ from `child(s, 'glyph', i)`).
+ * @param options `n` (default 200), the number of glyphs; `size` (default 7), the side $m$ of the grid; `p` (default
+ *   0.3), the probability of each stroke; `noise` (default 0.05), the standard deviation of the pixel noise.
+ * @returns An image dataset: `x` the glyphs, one row of $m^2$ pixels each, and `y` the number of strokes in each.
+ *
+ * @example About 8p strokes per glyph
+ * const d = strokeGlyphs(stream(1), { n: 1000, p: 0.3 })
+ * const y = toArray(d.y)
+ * print('x:', d.x.shape, ' first stroke counts:', y.slice(0, 10))
+ * print('first pixels of glyph 0:', toArray(d.x)[0].slice(0, 7))
+ * // 8 x 0.3 = 2.4, plus the glyphs that would have had none.
+ * print('mean strokes:', y.reduce((a, v) => a + v, 0) / y.length)
  */
 export function strokeGlyphs(
   s: Stream,
@@ -122,15 +167,32 @@ export function strokeGlyphs(
 
 /** The true parameters of `latentFactors`. */
 export type LatentFactorModel = {
-  /** Loadings W [d, q]: factor j loads on a block of features, with a smaller share on the next block. */
+  /**
+   * Loadings $\Wmat$, $d \times q$: the features are split into $q$ consecutive blocks of $b = \lceil d/q \rceil$; the
+   * $i$th feature of block $j$ (counting from 0) loads $1 + 0.25i$ on factor $j$ and 0.3 on factor $j + 1$
+   * (cyclically).
+   */
   loadings: Tensor
-  /** Noise variances ψ [d], from 0.05 to `spread`, rising geometrically with the feature index. */
+  /** Noise variances $\psi$, $d$ values from 0.05 to `spread`, rising geometrically with the feature index. */
   noise: Tensor
-  /** The mean μ [d] (zero). */
+  /** The mean $\muvec$, $d$ values (zero). */
   mean: Tensor
 }
 
-/** The deterministic model of `latentFactors` for d features and q factors. */
+/**
+ * The deterministic model of `latentFactors` for $d$ features and $q$ factors (see `LatentFactorModel`).
+ *
+ * @param options The sizes and the noise.
+ * @param options.d The number of features $d$.
+ * @param options.latent The number of factors $q$.
+ * @param options.spread The largest noise variance, that of the last feature; the first's is 0.05.
+ * @returns The loadings, the noise variances and the (zero) mean.
+ *
+ * @example Block loadings and noise rising across the features
+ * const m = latentFactorModel({ d: 4, latent: 2, spread: 2 })
+ * print('W =', m.loadings)
+ * print('psi =', m.noise)
+ */
 export function latentFactorModel({
   d = 8,
   latent = 2,
@@ -147,7 +209,25 @@ export function latentFactorModel({
   return { loadings: matrix(W, d, latent), noise: fromData(psi, [d]), mean: fromData(new Float64Array(d), [d]) }
 }
 
-/** n draws of x = Wz + ε from `latentFactorModel` (x [n, d]; the latent z [n, q] in `t`'s place is not kept). */
+/**
+ * $n$ draws of $\xvec = \Wmat\zvec + \epsilonvec$, $\zvec \sim \Gauss(\zeros, \Imat_q)$ and
+ * $\epsilonvec \sim \Gauss(\zeros, \diag(\psi))$, from `latentFactorModel` (`x` is $n \times d$; the latent $\zvec$
+ * is not returned). Throws `DomainError` when $n$ is not a non-negative integer.
+ *
+ * @param s The stream the draws are taken from (child `'draws'`).
+ * @param options `n` (default 300), the number of draws; `d` (default 8), `latent` (default 2) and `spread` (default
+ *   2), as for `latentFactorModel`.
+ * @returns A dataset of the draws `x`, with no targets.
+ *
+ * @example The sample variances match the model's
+ * const d = latentFactors(stream(1), { n: 4000, d: 4, latent: 2 })
+ * const x = toArray(d.x)
+ * print('x:', d.x.shape, ' first row:', x[0])
+ * const m = latentFactorModel({ d: 4, latent: 2 })
+ * const [W, psi] = [toArray(m.loadings), toArray(m.noise)]
+ * print('model variances:', W.map((r, f) => r.reduce((a, w) => a + w * w, 0) + psi[f]))
+ * print('sample variances:', [0, 1, 2, 3].map((f) => x.reduce((a, r) => a + r[f] * r[f], 0) / x.length))
+ */
 export function latentFactors(
   s: Stream,
   options: { n?: number; d?: number; latent?: number; spread?: number } = {},

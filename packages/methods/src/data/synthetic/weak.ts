@@ -1,8 +1,11 @@
 /**
  * Data for weak supervision with known ground truth: labelling functions with known accuracies and coverages, crowd
  * workers with known confusion matrices, positive–unlabelled samples with a known label frequency, bags with known
- * class proportions, multiple-instance bags with known witnesses, and complementary labels. Features come from Gaussian
- * blobs (`blobs`), one per class, so the true labels are learnable from x.
+ * class proportions, multiple-instance bags with known witnesses, and complementary labels. Features are 2-d Gaussian
+ * blobs of unit standard deviation, one per class on a regular polygon (`blobs` with the `polygon` layout, or the same
+ * placement drawn directly), so the true labels are learnable from $\xvec$. Every generator returns the true labels
+ * beside the weak ones, and the parameters it drew (accuracies, confusions, proportions), so that an estimate can be
+ * checked against them.
  */
 
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
@@ -13,36 +16,59 @@ import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { checkCount, labels, matrix, type DatasetMeta } from '../types'
 import { blobs } from './points'
 
-/** Features and true labels from `classes` Gaussian blobs on a polygon, `separation` standard deviations apart. */
+/**
+ * Features and true labels from `classes` Gaussian blobs of unit standard deviation on a polygon, `separation`
+ * standard deviations apart, grouped by class with equal class sizes (the first `n mod classes` one larger).
+ *
+ * @param s The random stream passed to `blobs`.
+ * @param n The number of points.
+ * @param classes The number of classes, one blob each.
+ * @param separation The distance between neighbouring blob centres, in standard deviations.
+ * @returns `x`, the points ($n \times 2$), and `y`, the true class of each.
+ */
 function features(s: Stream, n: number, classes: number, separation: number) {
   const d = blobs(s, { n, centers: classes, separation, layout: 'polygon', sd: 1 })
   return { x: d.x, y: Int32Array.from(toFlat(d.y!)) }
 }
 
+/**
+ * A draw uniform on an interval.
+ *
+ * @param s The random stream; one uniform is drawn from it.
+ * @param range The interval as `[lo, hi]`.
+ * @returns A value uniform on $[\mathrm{lo}, \mathrm{hi})$.
+ */
 const between = (s: Stream, [lo, hi]: readonly [number, number]) => lo + (hi - lo) * uniform(s)
 
 /** Votes of labelling functions with their true accuracies and coverages. */
 export interface LabellingFunctions {
+  /** Always `'dataset'`. */
   kind: 'dataset'
+  /** The features, $n \times 2$, grouped by class. */
   x: Tensor
   /** True labels (int32), unseen by the label models. */
   y: Tensor
-  /** Votes [n, m] (int32): a class, or −1 for an abstention. */
+  /** Votes, $n \times m$ (int32): a class, or $-1$ for an abstention. */
   votes: Tensor
-  /** P(vote = y | voted) and P(voted) of each function. */
+  /** Each function's accuracy $\alpha_j = P(\text{vote} = y \mid \text{voted})$, $m$ values. */
   accuracy: Tensor
+  /** Each function's coverage $\beta_j = P(\text{voted})$, $m$ values. */
   coverage: Tensor
+  /** The description and the stream key. */
   meta: DatasetMeta
 }
 
 /** Options of `labellingFunctions`. */
 export interface LabellingFunctionOptions {
+  /** Number of examples (default 400). */
   n?: number
+  /** Number of classes $K$ (default 2). */
   classes?: number
-  /** Labelling functions m (default 8). */
+  /** Labelling functions, not counting the copies (default 8). */
   functions?: number
-  /** Accuracies and coverages are drawn uniformly from these ranges (default [0.55, 0.9] and [0.2, 0.8]). */
+  /** Each function's accuracy is drawn uniformly from this range (default `[0.55, 0.9]`). */
   accuracy?: readonly [number, number]
+  /** Each function's coverage is drawn uniformly from this range (default `[0.2, 0.8]`). */
   coverage?: readonly [number, number]
   /** Extra copies of function 0 that repeat its votes (breaking conditional independence; default 0). */
   copies?: number
@@ -51,11 +77,29 @@ export interface LabellingFunctionOptions {
 }
 
 /**
- * Labelling functions in the data-programming model (Ratner et al., 2016): function j votes on an example with
- * probability β_j (its coverage) and, when it votes, names the true class with probability α_j and each other class with
- * probability (1 − α_j)/(K − 1). The accuracies and coverages are drawn per function and returned, so a label model's
- * estimates can be compared with the truth. `copies` duplicates function 0, which double-counts it for any model that
- * assumes independent functions.
+ * Labelling functions in the data-programming model (Ratner et al., 2016): function $j$ votes on an example with
+ * probability $\beta_j$ (its coverage) and, when it votes, names the true class with probability $\alpha_j$ and each
+ * other class with probability $(1 - \alpha_j)/(K - 1)$. The accuracies and coverages are drawn per function and
+ * returned, so a label model's estimates can be compared with the truth. `copies` duplicates function 0: the copies,
+ * the last columns of `votes`, repeat its votes exactly, which double-counts it for any model that assumes independent
+ * functions. Throws `DomainError` unless `n` is a non-negative integer.
+ *
+ * @param s The random stream: the features come from its child `x`, function $j$'s accuracy and coverage from
+ *   `accuracy` $j$ and `coverage` $j$, its vote on example $i$ from `vote` $i$ $j$.
+ * @param options The sizes, the accuracy and coverage ranges, the copies and the feature separation; see
+ *   `LabellingFunctionOptions`.
+ * @returns The features, true labels, the $n \times m$ votes ($m$ the functions plus the copies) and each function's
+ *   accuracy and coverage.
+ *
+ * @example Votes and the accuracies behind them
+ * const lf = labellingFunctions(stream(0), { n: 1000, functions: 4 })
+ * print('x:', lf.x.shape, ' votes:', lf.votes.shape, ' first rows of votes:', toArray(lf.votes).slice(0, 3))
+ * print('accuracy:', lf.accuracy)
+ * // Function 0's share of votes cast, and the share of those that name the true class.
+ * const y = toArray(lf.y)
+ * const cast = toArray(lf.votes).map((row, i) => [row[0], y[i]]).filter(([v]) => v >= 0)
+ * print('function 0 coverage:', cast.length / 1000, ' true:', toArray(lf.coverage)[0])
+ * print('function 0 accuracy:', cast.filter(([v, t]) => v === t).length / cast.length)
  */
 export function labellingFunctions(s: Stream, options: LabellingFunctionOptions = {}): LabellingFunctions {
   const {
@@ -111,29 +155,55 @@ export function labellingFunctions(s: Stream, options: LabellingFunctionOptions 
 
 /** Crowd labels with the workers' true confusion matrices. */
 export interface CrowdLabels {
+  /** The true class of each item (int32). */
   y: Tensor
-  /** Votes [n, workers] (int32), −1 where a worker did not label the item. */
+  /** Votes, $n \times$ workers (int32), $-1$ where a worker did not label the item. */
   votes: Tensor
-  /** P(worker says l | class k) [workers, K, K]. */
+  /**
+   * The confusion matrices, workers $\times K \times K$: entry $(w, k, l)$ is the probability that worker $w$ says
+   * $l$ of an item of class $k$.
+   */
   confusions: Tensor
+  /** The description and the stream key. */
   meta: DatasetMeta
 }
 
 /** Options of `crowdLabels`. */
 export interface CrowdLabelOptions {
+  /** Number of items (default 200). */
   n?: number
+  /** Number of classes $K$ (default 3). */
   classes?: number
+  /** Number of workers (default 10). */
   workers?: number
-  /** Workers per item (default 3). */
+  /** Workers per item, at most `workers` (default 3). */
   perItem?: number
-  /** Each worker's accuracy is drawn from this range (default [0.35, 0.95]); errors favour one confusable class. */
+  /** Each worker's accuracy is drawn from this range (default `[0.35, 0.95]`); errors favour one confusable class. */
   skill?: readonly [number, number]
 }
 
 /**
- * Crowdsourced labels in the Dawid–Skene model (Dawid and Skene, 1979): each item is labelled by `perItem` workers
- * drawn without replacement; worker j answers from row y of its confusion matrix, whose diagonal is its skill and whose
- * errors go mostly (70%) to one confusable class per true class and otherwise uniformly.
+ * Crowdsourced labels in the Dawid–Skene model (Dawid and Skene, 1979): each item's class is uniform over the $K$
+ * classes, and it is labelled by `perItem` workers drawn without replacement; worker $w$ answers from row $y$ of its
+ * confusion matrix, whose diagonal is its skill $a_w$ and whose errors go to one confusable class per true class with
+ * probability $0.7(1 - a_w)$ and are otherwise spread uniformly over the other classes (with two classes every error
+ * names the other class). Throws `DomainError` unless `n` is a non-negative integer.
+ *
+ * @param s The random stream: worker $w$'s skill comes from its child `skill` $w$, the confusable classes from
+ *   `confusable`, item $i$'s class from `y` $i$, its workers from `assign` and their answers from `answer`.
+ * @param options The numbers of items, classes, workers and workers per item, and the skill range; see
+ *   `CrowdLabelOptions`.
+ * @returns The true classes, the votes ($-1$ where a worker did not label an item) and the true confusion matrices.
+ *
+ * @example Votes and a worker's confusion matrix
+ * const c = crowdLabels(stream(0), { n: 600 })
+ * print('votes:', c.votes.shape, ' first row:', toArray(c.votes)[0], ' its class:', toArray(c.y)[0])
+ * print('labels per item:', toArray(c.votes)[0].filter((v) => v >= 0).length)
+ * print('worker 0 confusion:', toArray(c.confusions)[0])
+ * // Worker 0's share of correct answers, against the diagonal of its matrix.
+ * const y = toArray(c.y)
+ * const answers = toArray(c.votes).map((row, i) => [row[0], y[i]]).filter(([v]) => v >= 0)
+ * print('worker 0 accuracy:', answers.filter(([v, t]) => v === t).length / answers.length)
  */
 export function crowdLabels(s: Stream, options: CrowdLabelOptions = {}): CrowdLabels {
   const { n = 200, classes: K = 3, workers = 10, perItem = 3, skill = [0.35, 0.95] } = options
@@ -183,21 +253,42 @@ export function crowdLabels(s: Stream, options: CrowdLabelOptions = {}): CrowdLa
 
 /** A positive–unlabelled sample. */
 export interface PositiveUnlabelled {
+  /** Always `'dataset'`. */
   kind: 'dataset'
+  /** The features, $n \times 2$, the negatives first. */
   x: Tensor
-  /** True classes (1 positive) and the observed labels s (1 labelled positive, 0 unlabelled). */
+  /** True classes (int32, 1 positive). */
   y: Tensor
+  /** The observed labels $s$ (int32, 1 labelled positive, 0 unlabelled). */
   labelled: Tensor
-  /** The true class prior and label frequency c = P(s = 1 | y = 1). */
+  /** The true class prior $\pi$, the share of positives. */
   prior: number
+  /** The label frequency $c = P(s = 1 \mid y = 1)$. */
   labelFrequency: number
+  /** The description and the stream key. */
   meta: DatasetMeta
 }
 
 /**
- * Positive and unlabelled data under "selected completely at random": points from two Gaussian classes with prior π
- * for the positive class; each positive is labelled with probability c independently of x, and every other point is
- * unlabelled.
+ * Positive and unlabelled data under "selected completely at random": points from two Gaussian classes, exactly
+ * $\mathrm{round}(n\pi)$ of them positive; each positive is labelled with probability $c$ independently of $\xvec$,
+ * and every other point is unlabelled. Throws `DomainError` unless `n` is a non-negative integer.
+ *
+ * @param s The random stream: the features come from its child `x`, point $i$'s labelling from `label` $i$.
+ * @param options `n`, the number of points (default 400); `prior`, the positive share $\pi$ (default 0.4);
+ *   `labelFrequency`, the probability $c$ that a positive is labelled (default 0.3); `separation`, the distance
+ *   between the class centres in standard deviations (default 3).
+ * @returns The features, true classes, observed labels, and the prior and label frequency.
+ *
+ * @example Only positives are labelled
+ * const pu = positiveUnlabelled(stream(0), { n: 2000 })
+ * const y = toArray(pu.y)
+ * const s = toArray(pu.labelled)
+ * const positives = y.filter((v) => v === 1).length
+ * const labelled = s.filter((v) => v === 1).length
+ * print('x:', pu.x.shape, ' positives:', positives, ' labelled:', labelled)
+ * print('labelled negatives:', s.filter((v, i) => v === 1 && y[i] === 0).length)
+ * print('labelled share of positives:', labelled / positives, ' c:', pu.labelFrequency)
  */
 export function positiveUnlabelled(
   s: Stream,
@@ -228,19 +319,41 @@ export function positiveUnlabelled(
 
 /** Bags labelled by their class proportions. */
 export interface ProportionBags {
+  /** Always `'dataset'`. */
   kind: 'dataset'
+  /** The features, $n \times 2$, bag by bag. */
   x: Tensor
+  /** The true class of each instance (int32), hidden from a learner from proportions. */
   y: Tensor
-  /** Each instance's bag (int32) and each bag's class proportions [B, K]. */
+  /** Each instance's bag (int32). */
   bag: Tensor
+  /** Each bag's realised class proportions, $B \times K$. */
   proportions: Tensor
+  /** The description and the stream key. */
   meta: DatasetMeta
 }
 
 /**
- * Bags for learning from label proportions: bag b draws a class mixture from a symmetric Dirichlet(`concentration`),
- * then `bagSize` labels from it and each instance's features from its class's Gaussian; only the bag's realised class
- * proportions are revealed.
+ * Bags for learning from label proportions: bag $b$ draws a class mixture from a symmetric Dirichlet with parameter
+ * $\alpha$ = `concentration`, then `bagSize` labels from it and each instance's features from its class's Gaussian
+ * (unit standard deviation, the centres on a polygon `separation` apart); only the bag's realised class proportions are
+ * revealed. The Dirichlet is drawn as normalised Gamma draws, each a sum of $\max(1, \mathrm{round}(\alpha))$
+ * exponentials, so a non-integer $\alpha$ is rounded and one below 1.5 acts as $\alpha = 1$. Throws `DomainError`
+ * unless `bags` is a non-negative integer.
+ *
+ * @param s The random stream: bag $b$'s mixture comes from its child `mix` $b$, instance $i$'s class from `label` $i$
+ *   and its features from `x` $i$.
+ * @param options `bags`, the number of bags $B$ (default 20); `bagSize`, the instances per bag (default 20);
+ *   `classes`, the number of classes $K$ (default 2); `concentration`, the Dirichlet parameter $\alpha$ (default 1);
+ *   `separation`, the distance between neighbouring class centres (default 3).
+ * @returns The features, true classes, each instance's bag and each bag's class proportions.
+ *
+ * @example Bags and their proportions
+ * const b = proportionBags(stream(0), { bags: 4, bagSize: 10 })
+ * print('x:', b.x.shape, ' bags of the first instances:', toArray(b.bag).slice(0, 12))
+ * print('proportions:', b.proportions)
+ * // The proportions are the bags' class shares: bag 0's share of class 1.
+ * print('bag 0, class 1:', toArray(b.y).slice(0, 10).filter((v) => v === 1).length / 10)
  */
 export function proportionBags(
   s: Stream,
@@ -302,21 +415,40 @@ export function proportionBags(
 
 /** Multiple-instance bags. */
 export interface InstanceBags {
+  /** Always `'dataset'`. */
   kind: 'dataset'
+  /** The instances' features, $n \times 2$, bag by bag. */
   x: Tensor
-  /** Each instance's bag, the bag labels, and which instances are witnesses (the positive ones). */
+  /** Each instance's bag (int32). */
   bag: Tensor
+  /** Each bag's label (int32, 1 positive), one per bag. */
   bagLabel: Tensor
-  /** The instance labels (1 for witnesses); `y` holds the same. */
+  /** The instance labels (1 for witnesses, the positive instances); `instanceLabel` holds the same. */
   y: Tensor
+  /** The instance labels, as `y`. */
   instanceLabel: Tensor
+  /** The description and the stream key. */
   meta: DatasetMeta
 }
 
 /**
- * Bags for multiple-instance learning: instances come from a background of two broad Gaussians; a positive bag also
- * holds one to three witnesses from a small region the background rarely reaches. A bag is positive exactly when it
- * holds a witness (the standard MIL assumption).
+ * Bags for multiple-instance learning: instances come from a background of two broad Gaussians, at $(0.9, -0.6)$ and
+ * $(-0.9, 0.6)$ with standard deviation 0.8; a positive bag's first one to three instances are instead witnesses, from
+ * $\Gauss((1.6, 1.6), 0.25^2\Imat)$, a small region the background rarely reaches. A bag is positive exactly when it
+ * holds a witness (the standard MIL assumption). Throws `DomainError` unless `bags` is a non-negative integer.
+ *
+ * @param s The random stream; bag $b$ is drawn from its child `bag` $b$.
+ * @param options `bags`, the number of bags (default 40); `size`, the smallest and largest bag size, the size uniform
+ *   between them inclusive (default `[5, 12]`); `positiveShare`, the probability that a bag is positive (default 0.5).
+ * @returns The instances, their bags, the bag labels and the instance labels.
+ *
+ * @example A bag is positive exactly when it holds a witness
+ * const mil = instanceBags(stream(0), { bags: 10 })
+ * print('x:', mil.x.shape, ' bag labels:', mil.bagLabel)
+ * const bag = toArray(mil.bag)
+ * const witnesses = new Array(10).fill(0)
+ * toArray(mil.y).forEach((w, i) => (witnesses[bag[i]] += w))
+ * print('witnesses per bag:', witnesses)
  */
 export function instanceBags(
   s: Stream,
@@ -362,7 +494,25 @@ export function instanceBags(
   }
 }
 
-/** Complementary labels: for each example, a class it is not, drawn uniformly from the other K − 1. */
+/**
+ * Complementary labels: for each example, a class it is not, drawn uniformly from the other $K - 1$. The features are
+ * $K$ Gaussian blobs, grouped by class. Throws `DomainError` unless `n` is a non-negative integer.
+ *
+ * @param s The random stream: the features come from its child `x`, example $i$'s complementary label from `bar` $i$.
+ * @param options `n`, the number of examples (default 300); `classes`, the number of classes $K$ (default 3);
+ *   `separation`, the distance between neighbouring class centres in standard deviations (default 4).
+ * @returns The dataset: `x` ($n \times 2$), the true labels `y`, and `complementary`, a class each example is not
+ *   (int32).
+ *
+ * @example A class each point is not
+ * const c = complementaryLabels(stream(0), { n: 300 })
+ * print('x:', c.x.shape)
+ * print('first true labels:', toArray(c.y).slice(0, 4), ' complementary:', toArray(c.complementary).slice(0, 4))
+ * const y = toArray(c.y)
+ * const bar = toArray(c.complementary)
+ * print('complementary equals true:', bar.filter((v, i) => v === y[i]).length)
+ * print('complementary counts:', [0, 1, 2].map((k) => bar.filter((v) => v === k).length))
+ */
 export function complementaryLabels(
   s: Stream,
   options: { n?: number; classes?: number; separation?: number } = {},

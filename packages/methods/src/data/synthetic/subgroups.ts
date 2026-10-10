@@ -18,6 +18,14 @@ import { int, real, space } from 'aifn-compute/foundation/space'
 import type { Description } from 'aifn-compute/learning/subgroups'
 import type { TableData } from '../types'
 
+/**
+ * One of `levels`, chosen by a uniform draw with the given weights (inverse CDF).
+ *
+ * @param u A uniform draw in $[0, 1)$.
+ * @param levels The values to choose from.
+ * @param weights One non-negative weight per level, not necessarily summing to 1 (default all equal).
+ * @returns The level whose share of the cumulative weight contains `u`.
+ */
 const pick = <T>(u: number, levels: readonly T[], weights?: readonly number[]): T => {
   const w = weights ?? levels.map(() => 1)
   let v = u * w.reduce((a, b) => a + b, 0)
@@ -27,7 +35,19 @@ const pick = <T>(u: number, levels: readonly T[], weights?: readonly number[]): 
   }
   return levels[levels.length - 1]
 }
+/**
+ * A number rounded to one decimal place.
+ *
+ * @param v The number.
+ * @returns `v` to the nearest tenth.
+ */
 const round1 = (v: number) => Math.round(v * 10) / 10
+/**
+ * Throws `DomainError` unless the table size is an integer of at least 20.
+ *
+ * @param n The number of rows asked for.
+ * @param where The caller's name, for the error message.
+ */
 const check = (n: number, where: string) => {
   if (!(Number.isInteger(n) && n >= 20)) throw new DomainError(where, `${where}: n must be an integer ≥ 20`)
 }
@@ -42,24 +62,46 @@ export interface PlantedSubgroupsOptions {
   rate?: number
   /** Outcome rate inside `region = north ∧ exercise = none` (default 0.45). */
   secondaryRate?: number
-  /** Cost increase inside `age ≥ 50 ∧ smoker = yes`, in population standard deviations of the base cost (default 1.5). */
+  /**
+   * Cost increase inside `age ≥ 50 ∧ smoker = yes`, in population standard deviations of the base cost (default 1.5).
+   */
   costShift?: number
 }
 
+/** The main subgroup planted by `plantedSubgroups`, `age ≥ 50 ∧ smoker = yes`: a higher outcome rate and cost. */
 export const PLANTED_MAIN: Description = [
   { attribute: 'age', op: '≥', value: 50 },
   { attribute: 'smoker', op: '=', value: 'yes' },
 ]
+/** The secondary subgroup planted by `plantedSubgroups`, `region = north ∧ exercise = none`: a higher outcome rate. */
 export const PLANTED_SECONDARY: Description = [
   { attribute: 'region', op: '=', value: 'north' },
   { attribute: 'exercise', op: '=', value: 'none' },
 ]
 
 /**
- * A population of `n` people: age (18–85), smoker, sex, region, exercise, BMI and income, with a binary `outcome`
+ * A population of $n$ people: age (18–85), smoker, sex, region, exercise, BMI and income, with a binary `outcome`
  * and a numeric `cost`. The outcome rate is `rate` inside `age ≥ 50 ∧ smoker = yes`, `secondaryRate` inside
  * `region = north ∧ exercise = none` (the larger where both hold) and `baseRate` elsewhere; the cost is higher by
- * `costShift` base standard deviations inside the first.
+ * `costShift` base standard deviations inside the first. The attributes are independent: age uniform over whole years,
+ * 30% smokers, sexes and regions equally likely, exercise `none`, `weekly` and `daily` in shares 0.3, 0.4 and 0.3, BMI
+ * $\Gauss(27, 4^2)$ and income skewed over 15 to 100; the base cost is $\Gauss(1000, 250^2)$, rounded. Throws
+ * `DomainError` when $n$ is not an integer of at least 20.
+ *
+ * @param s The stream the attributes (child `'attributes'`), the BMI and cost noise (child `'noise'`) and the outcomes
+ *   (child `'outcome'`) are drawn from.
+ * @param options The size, the three outcome rates and the cost shift.
+ * @returns A table with the nine columns, the targets `outcome` and `cost`, and the two planted patterns.
+ *
+ * @example The planted subgroup's outcome rate and cost stand out
+ * const d = plantedSubgroups(stream(1), { n: 2000 })
+ * const { age, smoker, outcome, cost } = d.table
+ * print('columns:', Object.keys(d.table), ' targets:', d.targets)
+ * print('first row:', Object.keys(d.table).map((c) => d.table[c][0]))
+ * const inside = age.map((a, i) => a >= 50 && smoker[i] === 'yes')
+ * const mean = (v, keep) => v.filter((_, i) => keep(i)).reduce((a, x, _, all) => a + x / all.length, 0)
+ * print('outcome rate inside:', mean(outcome, (i) => inside[i]), ' outside:', mean(outcome, (i) => !inside[i]))
+ * print('mean cost inside:', mean(cost, (i) => inside[i]), ' outside:', mean(cost, (i) => !inside[i]))
  */
 export function plantedSubgroups(s: Stream, options: PlantedSubgroupsOptions = {}): TableData {
   const { n = 800, baseRate = 0.2, rate = 0.7, secondaryRate = 0.45, costShift = 1.5 } = options
@@ -128,26 +170,55 @@ definer<DatasetInfo>('dataset', 'data/synthetic')(
 export interface PlantedModelFlipOptions {
   /** Rows (default 600). */
   n?: number
-  /** |correlation| of x and y, positive outside the planted subgroup and negative inside (default 0.7). */
+  /**
+   * $\rho$, the size of the correlation of `x` and `y`, in $[0, 1)$: positive outside the planted subgroup and negative
+   * inside (default 0.7).
+   */
   rho?: number
   /** Logistic slope of the label on x, positive outside and negative inside the second subgroup (default 2.5). */
   slope?: number
 }
 
+/** The subgroup of `plantedModelFlip` where the correlation of `x` and `y` flips, `group = b ∧ level ≥ 5`. */
 export const PLANTED_CORRELATION: Description = [
   { attribute: 'group', op: '=', value: 'b' },
   { attribute: 'level', op: '≥', value: 5 },
 ]
+/**
+ * The subgroup of `plantedModelFlip` where the label's slope on `x` and the association of `a` and `b` flip,
+ * `flag = yes ∧ region = east`.
+ */
 export const PLANTED_CLASSIFIER: Description = [
   { attribute: 'flag', op: '=', value: 'yes' },
   { attribute: 'region', op: '=', value: 'east' },
 ]
 
 /**
- * Four attributes (group, level 0–10, flag, region) and five targets: x and y with correlation +ρ, flipped to −ρ
- * inside `group = b ∧ level ≥ 5`; a label with P(1 | x) = σ(slope · x), its slope negated inside
- * `flag = yes ∧ region = east`; and two binary columns a and b that agree with probability 0.85, and disagree with
- * that probability inside the same subgroup.
+ * Four attributes (group, level 0–10, flag, region) and five targets: `x` and `y` standard normal with correlation
+ * $\rho$, flipped to $-\rho$ inside `group = b ∧ level ≥ 5`; a label with $\pr(1 \mid x) = \sigma(\beta x)$, $\beta$
+ * the `slope`, negated inside `flag = yes ∧ region = east`; and two binary columns `a` and `b` that agree with
+ * probability 0.85, and disagree with that probability inside the same subgroup. The attributes are independent: groups
+ * `a` to `d` and regions `north`, `south`, `east` equally likely, level uniform on $[0, 10]$ to one decimal, and 40% of
+ * flags `yes`. Throws `DomainError` when $n$ is not an integer of at least 20 or $\rho$ is not in $[0, 1)$.
+ *
+ * @param s The stream the attributes (child `'attributes'`), `x` and `y` (child `'targets'`) and the binary columns
+ *   (child `'labels'`) are drawn from.
+ * @param options The size, the correlation and the slope.
+ * @returns A table with the nine columns, the five targets, and the two planted patterns.
+ *
+ * @example The correlation flips inside the planted subgroup
+ * const d = plantedModelFlip(stream(1), { n: 2000, rho: 0.7 })
+ * const { group, level, x, y } = d.table
+ * print('columns:', Object.keys(d.table), ' first row:', Object.keys(d.table).map((c) => d.table[c][0]))
+ * const corr = (keep) => {
+ *   const i = x.map((_, k) => k).filter(keep)
+ *   const m = (v) => i.reduce((a, k) => a + v[k], 0) / i.length
+ *   const [mx, my] = [m(x), m(y)]
+ *   const c = (u, mu, v, mv) => i.reduce((a, k) => a + (u[k] - mu) * (v[k] - mv), 0)
+ *   return c(x, mx, y, my) / Math.sqrt(c(x, mx, x, mx) * c(y, my, y, my))
+ * }
+ * const inside = (k) => group[k] === 'b' && level[k] >= 5
+ * print('correlation inside:', corr(inside), ' outside:', corr((k) => !inside(k)))
  */
 export function plantedModelFlip(s: Stream, options: PlantedModelFlipOptions = {}): TableData {
   const { n = 600, rho = 0.7, slope = 2.5 } = options

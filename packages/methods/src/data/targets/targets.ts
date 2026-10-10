@@ -1,8 +1,9 @@
 /**
  * Standard target log-densities (`kind: 'log-density'`) for samplers and variational inference: a banana (twisted
- * Gaussian), a Gaussian, an isotropic Gaussian mixture and Neal's funnel. Each log-density is written with the
- * registered distributions of `aifn-compute/probability/distributions`, so it is differentiable; `grad` gives the closed form,
- * and `truth` the known moments where they exist.
+ * Gaussian), a Gaussian, an isotropic Gaussian mixture, and Neal's funnel in its centred and non-centred forms. Each
+ * log-density is written with the registered distributions of `aifn-compute/probability/distributions`, so it is
+ * differentiable; `grad` gives the gradient in closed form, and `truth` the known moments where they exist. Every
+ * target is normalised (its log-density has no missing constant).
  */
 
 import type { LogDensity, Value, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -29,7 +30,13 @@ import { definer } from 'aifn-compute/foundation/registry'
 import { int, real, space } from 'aifn-compute/foundation/space'
 import { ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A vector input as a fresh Float64Array. */
+/**
+ * A vector input as a fresh Float64Array.
+ *
+ * @param v A tensor (its first axis is read, through its strides and offset; a scalar counts as one value) or an
+ *   array of numbers.
+ * @returns A copy of the values.
+ */
 function vec(v: Tensor | VectorLike): Float64Array {
   if (isTensor(v)) {
     const n = v.shape.length === 0 ? 1 : v.shape[0]
@@ -38,13 +45,32 @@ function vec(v: Tensor | VectorLike): Float64Array {
   return Float64Array.from(v as ArrayLike<number>)
 }
 
+/**
+ * A float64 matrix from its rows.
+ *
+ * @param rows The rows, all of the same length (the first row's length is the column count).
+ * @returns The matrix, one row per entry of `rows`.
+ */
 const matrixOf = (rows: readonly (readonly number[])[]): Tensor =>
   fromData(Float64Array.from(rows.flat()), [rows.length, rows[0]?.length ?? 0])
 
 /**
  * The banana (twisted Gaussian of Haario, Saksman and Tamminen, 1999, "Adaptive proposal distribution for random walk
- * Metropolis algorithm", Computational Statistics 14) in two dimensions: x ~ N(0, a²) and y | x ~ N(b(x² − a²), 1), so
- * the mean is (0, 0), Var x = a², Var y = 1 + 2b²a⁴, and b bends the ridge (b = 0 is a Gaussian). Default a = 1, b = 1.
+ * Metropolis algorithm", Computational Statistics 14) in two dimensions: $x \sim \Gauss(0, a^2)$ and
+ * $y \mid x \sim \Gauss(b(x^2 - a^2), 1)$, so the mean is $(0, 0)$, $\var x = a^2$, $\var y = 1 + 2b^2 a^4$, and $b$
+ * bends the ridge ($b = 0$ is a Gaussian). The point is $\thetavec = (x, y)$.
+ *
+ * @param options The scale and the curvature.
+ * @param options.a The standard deviation $a$ of $x$.
+ * @param options.b The curvature $b$ of the ridge $y = b(x^2 - a^2)$.
+ * @returns The log-density with its closed-form gradient, and its exact `mean` and per-coordinate `variance` (also
+ *   in `truth.mean`).
+ *
+ * @example The density peaks on the ridge
+ * const target = banana()
+ * print('log density at (0, -1), on the ridge:', target.logDensity(tensor([0, -1])))
+ * print('log density at (0, 1), off it:', target.logDensity(tensor([0, 1])))
+ * print('variances of x and y (a² and 1 + 2b²a⁴):', target.variance)
  */
 export function banana(options: { a?: number; b?: number } = {}): LogDensity & { mean: Tensor; variance: Tensor } {
   const { a = 1, b = 1 } = options
@@ -73,8 +99,21 @@ export function banana(options: { a?: number; b?: number } = {}): LogDensity & {
 }
 
 /**
- * A normalised multivariate Gaussian target N(mean, covariance): log π(θ) = −½(θ − μ)ᵀΣ⁻¹(θ − μ) − ½ log|2πΣ|, with
- * gradient −Σ⁻¹(θ − μ). `precision` is Σ⁻¹ (d × d).
+ * A normalised multivariate Gaussian target $\Gauss(\muvec, \Sigmamat)$:
+ * $\log \pi(\thetavec) = -\tfrac12 \deltavec^\top \Sigmamat^{-1} \deltavec - \tfrac12 \log\det(2\pi\Sigmamat)$ for
+ * $\deltavec = \thetavec - \muvec$, with gradient $-\Sigmamat^{-1}\deltavec$. Throws `ShapeError` unless the
+ * covariance is $d \times d$ for a mean of length $d$.
+ *
+ * @param mean The mean $\muvec$, $d$ values (a tensor or an array).
+ * @param covariance The covariance $\Sigmamat$, $d \times d$ (a tensor or an array of rows); it must be positive
+ *   definite.
+ * @returns The log-density with its closed-form gradient, and its `mean`, `covariance` and `precision`
+ *   $\Sigmamat^{-1}$ (also the `truth` mean and covariance).
+ *
+ * @example The gradient points back to the mean
+ * const target = gaussianTarget([1, 2], [[2, 0], [0, 0.5]])
+ * print('precision:', target.precision)
+ * print('gradient at the origin:', target.grad(tensor([0, 0])))
  */
 export function gaussianTarget(
   mean: Tensor | VectorLike,
@@ -113,8 +152,19 @@ export function gaussianTarget(
 }
 
 /**
- * An isotropic Gaussian mixture Σₖ wₖ N(θ | mₖ, σ²I) (normalised): the log of the weighted sum of a batch of K
- * multivariate normals. `means` is K × d; `weights` default to equal.
+ * An isotropic Gaussian mixture $\sum_k w_k \Gauss(\thetavec \mid \mvec_k, \sigma^2 \Imat)$ (normalised): the log of
+ * the weighted sum of a batch of $K$ multivariate normals, by `logsumexp`. Its exact mean $\sum_k w_k \mvec_k$ is in
+ * `truth.mean`.
+ *
+ * @param means The component means $\mvec_k$: $K$ rows of $d$ values each.
+ * @param sd The standard deviation $\sigma$ shared by every component and coordinate.
+ * @param weights One non-negative weight per component, normalised to sum to one. Default equal weights.
+ * @returns The log-density with its closed-form gradient, the `means` ($K \times d$) and the normalised `weights`.
+ *
+ * @example Two modes, one three times as heavy
+ * const target = gaussianMixtureTarget([[-2, 0], [2, 0]], 0.5, [1, 3])
+ * print('weights:', target.weights, ' mean:', target.truth.mean)
+ * print('log density at each mode:', target.logDensity(tensor([-2, 0])), target.logDensity(tensor([2, 0])))
  */
 export function gaussianMixtureTarget(
   means: readonly (readonly number[])[],
@@ -159,9 +209,20 @@ export function gaussianMixtureTarget(
 }
 
 /**
- * Neal's funnel (Neal, 2003, "Slice sampling", Annals of Statistics 31(3), §8) in d dimensions: v ~ N(0, s²) and
- * xᵢ | v ~ N(0, eᵛ) for i = 1 … d − 1, with θ = (v, x₁, …). Its neck (v ≪ 0) needs small steps and its mouth large
- * ones, so fixed-step HMC diverges there. Default d = 2, s = 3.
+ * Neal's funnel (Neal, 2003, "Slice sampling", Annals of Statistics 31(3), §8) in $d$ dimensions:
+ * $v \sim \Gauss(0, s^2)$ and $x_i \mid v \sim \Gauss(0, e^v)$ for $i = 1, \dots, d - 1$, with
+ * $\thetavec = (v, x_1, \dots, x_{d-1})$. Its neck ($v \ll 0$) needs small steps and its mouth large ones, so
+ * fixed-step HMC diverges there. Its mean, the origin, is in `truth.mean`.
+ *
+ * @param options The dimension and the scale of $v$.
+ * @param options.dim The dimension $d$ of $\thetavec$, at least 2.
+ * @param options.scale The standard deviation $s$ of $v$.
+ * @returns The log-density with its closed-form gradient.
+ *
+ * @example The gradient is steep in the neck and gentle in the mouth
+ * const target = funnel()
+ * print('gradient in the neck, at (-3, 0.1):', target.grad(tensor([-3, 0.1])))
+ * print('gradient in the mouth, at (3, 0.1):', target.grad(tensor([3, 0.1])))
  */
 export function funnel(options: { dim?: number; scale?: number } = {}): LogDensity {
   const { dim = 2, scale = 3 } = options
@@ -192,12 +253,24 @@ export function funnel(options: { dim?: number; scale?: number } = {}): LogDensi
 }
 
 /**
- * Neal's funnel in its non-centred parameterisation: θ = (v, z₁, …) with v ~ N(0, s²) and zᵢ ~ N(0, 1) independent.
- * It is `transformLogDensity(funnel, T)` for the map T(v, z) = (v, z e^{v/2}) onto the funnel's (v, x), whose
- * log |det J_T| = (d − 1) v/2; `toOriginal` maps a draw back to the funnel and
- * `fromOriginal` the other way. The density is an axis-aligned Gaussian, so one step size suits it everywhere and HMC
- * does not diverge (Papaspiliopoulos, Roberts & Sköld, 2007, "A general framework for the parametrization of
- * hierarchical models", Statistical Science 22(1)). Default d = 2, s = 3.
+ * Neal's funnel in its non-centred parameterisation: $\uvec = (v, z_1, \dots, z_{d-1})$ with $v \sim \Gauss(0, s^2)$
+ * and $z_i \sim \Gauss(0, 1)$ independent. It is `transformLogDensity(funnel, T)` for the map
+ * $T(v, \zvec) = (v, \zvec e^{v/2})$ onto the funnel's $(v, \xvec)$, whose
+ * $\log \lvert \det \Jmat_T \rvert = (d - 1) v / 2$; `toOriginal` maps a draw back to the funnel and `fromOriginal`
+ * the other way. The density is an axis-aligned Gaussian, so one step size suits it everywhere and HMC does not diverge
+ * (Papaspiliopoulos, Roberts and Sköld, 2007, "A general framework for the parametrization of hierarchical models",
+ * Statistical Science 22(1)). Its mean, the origin, is in `truth.mean`.
+ *
+ * @param options The dimension and the scale of $v$, as for `funnel`.
+ * @param options.dim The dimension $d$ of $\uvec$, at least 2.
+ * @param options.scale The standard deviation $s$ of $v$.
+ * @returns The log-density with its closed-form gradient and the maps to and from the funnel.
+ *
+ * @example A draw mapped back to the funnel
+ * const target = nonCentredFunnel()
+ * print('(v, z) = (1, 2) on the funnel:', target.toOriginal(tensor([1, 2])))
+ * print('and back:', target.fromOriginal(target.toOriginal(tensor([1, 2]))))
+ * print('gradient at (1, 2):', target.grad(tensor([1, 2])))
  */
 export function nonCentredFunnel(options: { dim?: number; scale?: number } = {}): TransformedLogDensity {
   const { dim = 2, scale = 3 } = options
@@ -226,6 +299,7 @@ export function nonCentredFunnel(options: { dim?: number; scale?: number } = {})
 
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/** Registers a target of this file (kind `log-density`, area `data/targets`). */
 const logDensity = definer<LogDensityInfo>('log-density', 'data/targets')
 
 logDensity(

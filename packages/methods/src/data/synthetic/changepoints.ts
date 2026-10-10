@@ -4,10 +4,12 @@
  * segment index of every step in `y` (int32), the time index in `t`, and the segments in `meta.truth` (a
  * `ChangepointTruth`).
  *
- * Segment boundaries are given (`changepoints`), or drawn with geometric gaps of mean `meanGap` (a constant hazard
- * 1/meanGap, the memoryless prior of Adams and MacKay, 2007), never shorter than `minGap`. Segment parameters are
- * given, or drawn independently from a prior, as the model of BOCPD assumes. Every draw has its own substream:
- * `child(s, 'gaps')`, `child(s, 'params')`, `child(s, 'values')`.
+ * Segment boundaries are given (`changepoints`), or drawn with geometric gaps of mean $g$ = `meanGap` (a constant
+ * hazard $1/g$, the memoryless prior of Adams and MacKay, 2007), each raised to `minGap` when shorter. Segment
+ * parameters are given, or drawn independently from a prior, as the model of BOCPD assumes; a drawn parameter is
+ * redrawn (up to 100 times) until it differs from its neighbour's by at least `minJump` or `minRatio`, so that every
+ * changepoint is visible. Every draw has its own substream: `child(s, 'gaps')`, `child(s, 'params')`,
+ * `child(s, 'values')`.
  */
 
 import { child, normal, uniform, type Stream } from 'aifn-compute/foundation/random'
@@ -24,14 +26,24 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 export interface SegmentOptions {
   /** Length of the series. Default 300. */
   n?: number
-  /** Indices where new segments begin (0 < c < n, ascending). Drawn when omitted. */
+  /** Indices where new segments begin: integers $c$ with $0 < c < n$, ascending. Drawn when omitted. */
   changepoints?: readonly number[]
-  /** Mean gap between drawn changepoints (hazard 1/meanGap). Default 60. */
+  /** Mean gap $g$ between drawn changepoints (a hazard of $1/g$); at least 1. Default 60. */
   meanGap?: number
-  /** Shortest drawn segment. Default 5. */
+  /** Shortest drawn gap: a shorter geometric draw is raised to it. Default 5. */
   minGap?: number
 }
 
+/**
+ * Changepoints with geometric gaps of mean `meanGap`, each at least `minGap`, from 0 until one reaches $n$. Throws
+ * `DomainError` when `meanGap` is below 1.
+ *
+ * @param s The stream the gaps are drawn from (one child per gap).
+ * @param n The length of the series: the changepoints are below it.
+ * @param meanGap The mean $g$ of the geometric gaps, on $1, 2, \dots$
+ * @param minGap The least gap; a shorter draw is raised to it.
+ * @returns The changepoints, ascending (0 excluded).
+ */
 function drawnBoundaries(s: Stream, n: number, meanGap: number, minGap: number): number[] {
   if (!(meanGap >= 1)) throw new DomainError('changepoints', `changepoints: meanGap must be at least 1, got ${meanGap}`)
   const gap = Geometric(1 / meanGap)
@@ -44,6 +56,14 @@ function drawnBoundaries(s: Stream, n: number, meanGap: number, minGap: number):
   }
 }
 
+/**
+ * The segment starts of a series: the given changepoints, checked, or drawn ones. Throws `DomainError` when $n$ is not
+ * a non-negative integer or a changepoint is not an integer in $(0, n)$ above the one before.
+ *
+ * @param s The generator's stream; drawn changepoints come from `child(s, 'gaps')`.
+ * @param options The length and the changepoints, or how to draw them.
+ * @returns `n`, the length, and `starts`, the first index of every segment (0, then the changepoints).
+ */
 function boundaries(s: Stream, options: SegmentOptions): { n: number; starts: number[] } {
   const { n = 300, meanGap = 60, minGap = 5 } = options
   checkCount(n, 'changepoints')
@@ -55,6 +75,20 @@ function boundaries(s: Stream, options: SegmentOptions): { n: number; starts: nu
   return { n, starts: [0, ...cps] }
 }
 
+/**
+ * The dataset of a piecewise series: the values in `x` ($n \times 1$), the segment index of every step in `y`, the time
+ * index in `t`, the segments in `meta.truth` and the call in `meta.recipe`.
+ *
+ * @param s The generator's stream, whose key is recorded.
+ * @param base The generator's name, used as the dataset's name and the recipe's base.
+ * @param family What changes between segments, for the truth.
+ * @param n The length of the series.
+ * @param segments The segments, contiguous from 0 to $n$.
+ * @param values The $n$ values of the series; kept as `x`, not copied.
+ * @param description The dataset's one-line description.
+ * @param knobs The generator's options, recorded in the recipe without undefined values and functions.
+ * @returns The dataset.
+ */
 function build(
   s: Stream,
   base: string,
@@ -91,6 +125,16 @@ function build(
   }
 }
 
+/**
+ * A segment's parameter: the given one, or a draw when none are given. Throws `ShapeError` when values are given but
+ * fewer than the segments.
+ *
+ * @param given The values given by the caller, one per segment (extras are ignored), or undefined to draw.
+ * @param j The segment's index.
+ * @param draw Draws a value; called only when nothing is given.
+ * @param what The caller's name for error messages.
+ * @returns The segment's value.
+ */
 function pick<T>(given: readonly T[] | undefined, j: number, draw: () => T, what: string): T {
   if (!given) return draw()
   if (j >= given.length) throw new ShapeError(what, `${what}: ${given.length} values given for more segments`)
@@ -100,6 +144,11 @@ function pick<T>(given: readonly T[] | undefined, j: number, draw: () => T, what
 /**
  * Draw until the value differs enough from the previous segment's (at most 100 tries, then the last draw), so that
  * drawn neighbours are distinguishable.
+ *
+ * @param draw Draws a candidate value.
+ * @param previous The previous segment's value, or undefined for the first segment (whose first draw is kept).
+ * @param farEnough Whether a candidate (first argument) is far enough from the previous value (second).
+ * @returns The first draw far enough from `previous`, or the 101st draw.
  */
 function apart(draw: () => number, previous: number | undefined, farEnough: (a: number, b: number) => boolean): number {
   let v = draw()
@@ -107,23 +156,55 @@ function apart(draw: () => number, previous: number | undefined, farEnough: (a: 
   return v
 }
 
+/**
+ * A count with its noun, in the plural unless it is 1: "1 segment", "3 segments".
+ *
+ * @param k The count.
+ * @param word The noun in the singular.
+ * @returns The phrase.
+ */
 const plural = (k: number, word: string) => `${k} ${word}${k === 1 ? '' : 's'}`
 
 // ── Mean shifts ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Options for `meanShifts`. */
 export interface MeanShiftOptions extends SegmentOptions {
-  /** Segment means, one per segment. Drawn from N(0, jump²) when omitted. */
+  /** Segment means, one per segment. Drawn from $\Gauss(0, \text{jump}^2)$ when omitted. */
   means?: readonly number[]
   /** Spread of drawn segment means. Default 3. */
   jump?: number
-  /** Least difference between drawn neighbouring means. Default 1 (one noise sd at the default sd). */
+  /**
+   * Least difference between drawn neighbouring means. Default 1 (one noise standard deviation at the default `sd`).
+   */
   minJump?: number
-  /** Noise sd within every segment. Default 1. */
+  /** Noise standard deviation within every segment. Default 1. */
   sd?: number
 }
 
-/** Gaussian noise around a mean that jumps at each changepoint (the setting of the well-log data). */
+/**
+ * Gaussian noise around a mean that jumps at each changepoint (the setting of the well-log data): segment $j$ holds
+ * $x_t \sim \Gauss(\mu_j, \sigma^2)$. Throws `ShapeError` when fewer `means` than segments are given, and
+ * `DomainError` for bad changepoints.
+ *
+ * @param s The stream the changepoints, the means and the values are drawn from.
+ * @param options The length and the changepoints (`SegmentOptions`), the means or their prior, and the noise.
+ * @returns The values in `x` ($n \times 1$), the segment of every step in `y`, the time in `t`, and the segments (with
+ *   `params: { mean, sd }`) in `meta.truth`.
+ *
+ * @example Given changepoints and means
+ * const d = meanShifts(stream(1), { n: 200, changepoints: [60, 140], means: [0, 4, -2] })
+ * const x = toArray(d.x).map(([v]) => v)
+ * const y = toArray(d.y)
+ * const avg = (j) => x.filter((_, i) => y[i] === j).reduce((a, v) => a + v, 0) / y.filter((g) => g === j).length
+ * print('x:', d.x.shape, ' first values:', x.slice(0, 3))
+ * print('changepoints:', d.meta.truth.changepoints)
+ * print('segment means (0, 4, -2):', [0, 1, 2].map(avg))
+ *
+ * @example Drawn changepoints and means
+ * const d = meanShifts(stream(2), { n: 300, meanGap: 60 })
+ * print('changepoints:', d.meta.truth.changepoints)
+ * print('drawn means:', d.meta.truth.segments.map((g) => g.mean))
+ */
 export function meanShifts(s: Stream, options: MeanShiftOptions = {}): Dataset {
   const { jump = 3, sd = 1, minJump = 1 } = options
   const { n, starts } = boundaries(s, options)
@@ -160,17 +241,34 @@ export function meanShifts(s: Stream, options: MeanShiftOptions = {}): Dataset {
 
 /** Options for `varianceShifts`. */
 export interface VarianceShiftOptions extends SegmentOptions {
-  /** Segment standard deviations. Drawn log-uniformly in [sdRange[0], sdRange[1]] when omitted. */
+  /** Segment standard deviations. Drawn log-uniformly between the ends of `sdRange` when omitted. */
   sds?: readonly number[]
-  /** Range of drawn sds. Default [0.3, 3]. */
+  /** Range of drawn standard deviations, low then high. Default [0.3, 3]. */
   sdRange?: readonly [number, number]
-  /** Least ratio between drawn neighbouring sds. Default 1.5. */
+  /** Least ratio (larger over smaller) between drawn neighbouring standard deviations. Default 1.5. */
   minRatio?: number
   /** The mean, shared by every segment. Default 0. */
   mean?: number
 }
 
-/** Zero-mean noise whose standard deviation changes at each changepoint (the setting of the Dow Jones returns). */
+/**
+ * Noise of a fixed mean whose standard deviation changes at each changepoint (the setting of the Dow Jones returns):
+ * segment $j$ holds $x_t \sim \Gauss(\mu, \sigma_j^2)$. Throws `ShapeError` when fewer `sds` than segments are given,
+ * and `DomainError` for bad changepoints.
+ *
+ * @param s The stream the changepoints, the standard deviations and the values are drawn from.
+ * @param options The length and the changepoints (`SegmentOptions`), the standard deviations or their range, and the
+ *   mean.
+ * @returns The values in `x` ($n \times 1$), the segment of every step in `y`, the time in `t`, and the segments (with
+ *   `params: { mean, sd }`) in `meta.truth`.
+ *
+ * @example The spread changes, the mean does not
+ * const d = varianceShifts(stream(1), { n: 300, changepoints: [150], sds: [0.5, 2] })
+ * const x = toArray(d.x).map(([v]) => v)
+ * const sd = (v) => Math.sqrt(v.reduce((a, u) => a + u * u, 0) / v.length)
+ * print('x:', d.x.shape, ' changepoints:', d.meta.truth.changepoints)
+ * print('sample sd before and after (0.5, 2):', sd(x.slice(0, 150)), sd(x.slice(150)))
+ */
 export function varianceShifts(s: Stream, options: VarianceShiftOptions = {}): Dataset {
   const { sdRange = [0.3, 3], mean = 0, minRatio = 1.5 } = options
   const { n, starts } = boundaries(s, options)
@@ -208,16 +306,33 @@ export function varianceShifts(s: Stream, options: VarianceShiftOptions = {}): D
 
 /** Options for `poissonShifts`. */
 export interface PoissonShiftOptions extends SegmentOptions {
-  /** Segment rates. Drawn from Gamma(shape, rate) when omitted. */
+  /** Segment rates. Drawn from $\GammaD(\text{shape}, \text{rate})$ when omitted. */
   rates?: readonly number[]
-  /** Gamma prior of drawn rates: shape and rate (mean shape/rate). Defaults 2 and 0.5. */
+  /** Shape of the Gamma prior of drawn rates, whose mean is shape over rate. Default 2. */
   shape?: number
+  /** Rate (inverse scale) of the Gamma prior of drawn rates. Default 0.5. */
   rate?: number
-  /** Least ratio between drawn neighbouring rates. Default 1.5. */
+  /** Least ratio (larger over smaller) between drawn neighbouring rates. Default 1.5. */
   minRatio?: number
 }
 
-/** Counts per step from a Poisson rate that changes at each changepoint (the setting of the coal-mining disasters). */
+/**
+ * Counts per step from a Poisson rate that changes at each changepoint (the setting of the coal-mining disasters):
+ * segment $j$ holds $x_t \sim \Poisson(\lambda_j)$. Throws `ShapeError` when fewer `rates` than segments are given,
+ * and `DomainError` for bad changepoints.
+ *
+ * @param s The stream the changepoints, the rates and the counts are drawn from.
+ * @param options The length and the changepoints (`SegmentOptions`), the rates or their Gamma prior.
+ * @returns The counts in `x` ($n \times 1$), the segment of every step in `y`, the time in `t`, and the segments (with
+ *   `params: { rate }`) in `meta.truth`.
+ *
+ * @example The mean count of each segment is near its rate
+ * const d = poissonShifts(stream(1), { n: 300, changepoints: [100, 200], rates: [1, 6, 2] })
+ * const x = toArray(d.x).map(([v]) => v)
+ * const avg = (v) => v.reduce((a, u) => a + u, 0) / v.length
+ * print('x:', d.x.shape, ' first counts:', x.slice(0, 8))
+ * print('mean counts (1, 6, 2):', [x.slice(0, 100), x.slice(100, 200), x.slice(200)].map(avg))
+ */
 export function poissonShifts(s: Stream, options: PoissonShiftOptions = {}): Dataset {
   const { shape = 2, rate = 0.5, minRatio = 1.5 } = options
   const { n, starts } = boundaries(s, options)
@@ -258,17 +373,25 @@ export function poissonShifts(s: Stream, options: PoissonShiftOptions = {}): Dat
 /** Options for `arRegimes`. */
 export interface ArRegimeOptions extends SegmentOptions {
   /**
-   * The regimes' AR coefficients a₁ … a_p (all of one order p). Segments cycle through them in order, so neighbours
-   * differ. Default [[0.9], [-0.7]]: a slowly wandering regime and a rapidly alternating one.
+   * The regimes' AR coefficients $a_1, \dots, a_p$ (all of one order $p$). Segments cycle through them in order, so
+   * neighbours differ when there are two or more. Default [[0.9], [-0.7]]: a slowly wandering regime and a rapidly
+   * alternating one.
    */
   regimes?: readonly (readonly number[])[]
-  /** Innovation sd. Default 1. */
+  /** Standard deviation of the innovations. Default 1. */
   sd?: number
 }
 
 /**
- * The stationary variance of an AR(p) process with innovation sd σ: σ² Σⱼ ψⱼ², with the MA(∞) weights ψ₀ = 1,
- * ψⱼ = Σₖ aₖ ψⱼ₋ₖ. Infinite when the weights do not die out (a non-stationary regime).
+ * The stationary variance of an AR($p$) process with innovation standard deviation $\sigma$:
+ * $\sigma^2 \sum_j \psi_j^2$, with the MA($\infty$) weights $\psi_0 = 1$, $\psi_j = \sum_{k=1}^{p} a_k \psi_{j-k}$
+ * ($\psi_j = 0$ for $j < 0$). The sum stops once $p + 1$ weights in a row have $\psi_j^2 < 10^{-20}$, and is infinite
+ * once it passes $10^{12}$ (an explosive regime). A unit-root regime, whose weights neither grow nor die out, gets the
+ * sum of its first $10^5$ terms instead.
+ *
+ * @param a The coefficients $a_1, \dots, a_p$.
+ * @param sd The innovations' standard deviation $\sigma$.
+ * @returns The stationary variance, or infinity.
  */
 function stationaryVariance(a: readonly number[], sd: number): number {
   const psi = [1]
@@ -285,9 +408,24 @@ function stationaryVariance(a: readonly number[], sd: number): number {
 }
 
 /**
- * An autoregression x_t = Σ_k a_k x_{t−k} + e_t, e_t ~ N(0, sd²), whose coefficients switch between regimes at each
- * changepoint. The recursion runs straight across boundaries (the lags carry over), from zeros with a burn-in of 200
- * steps in the first regime. The truth's per-segment mean and variance are the regime's stationary ones.
+ * An autoregression $x_t = \sum_{k=1}^{p} a_k x_{t-k} + e_t$, $e_t \sim \Gauss(0, \sigma^2)$, whose coefficients
+ * switch between regimes at each changepoint. The recursion runs straight across boundaries (the lags carry over),
+ * from zeros with a burn-in of 200 steps in the first regime. The truth's per-segment mean (0) and variance are the
+ * regime's stationary ones. Throws `DomainError` when no regime is given or the regimes' orders differ.
+ *
+ * @param s The stream the changepoints (`child(s, 'gaps')`) and the innovations (`child(s, 'values')`) are drawn from.
+ * @param options The length and the changepoints (`SegmentOptions`), the regimes and the innovations' standard
+ *   deviation.
+ * @returns The values in `x` ($n \times 1$), the segment of every step in `y`, the time in `t`, and the segments (with
+ *   `params: { coefficients, sd, regime }`) in `meta.truth`.
+ *
+ * @example The lag-1 autocorrelation follows the regime's coefficient
+ * const d = arRegimes(stream(1), { n: 400, changepoints: [200] })
+ * const x = toArray(d.x).map(([v]) => v)
+ * const r1 = (v) => v.slice(1).reduce((a, u, i) => a + u * v[i], 0) / v.reduce((a, u) => a + u * u, 0)
+ * print('x:', d.x.shape, ' changepoints:', d.meta.truth.changepoints)
+ * print('lag-1 autocorrelation (0.9, -0.7):', r1(x.slice(0, 200)), r1(x.slice(200)))
+ * print('stationary variances:', d.meta.truth.segments.map((g) => g.variance))
  */
 export function arRegimes(s: Stream, options: ArRegimeOptions = {}): Dataset {
   const { regimes = [[0.9], [-0.7]], sd = 1 } = options

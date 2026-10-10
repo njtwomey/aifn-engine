@@ -24,10 +24,20 @@ export interface ClassSizeOptions {
 }
 
 /**
- * Split `n` into counts proportional to `weights` by the largest-remainder (Hamilton) method: each class gets
- * ⌊n wⱼ / Σw⌋, and the units left over go to the classes with the largest fractional parts, ties to the lower index.
- * The counts sum to `n` exactly and each is within one of its quota; equal weights reproduce scikit-learn's split
- * (the first `n mod k` classes get one extra).
+ * Split `n` into counts proportional to `weights` by the largest-remainder (Hamilton) method: class $j$ gets
+ * $\lfloor n w_j / \sum_i w_i \rfloor$, and the units left over go to the classes with the largest fractional parts,
+ * ties to the lower index. The counts sum to `n` exactly and each is within one of its quota; equal weights reproduce
+ * scikit-learn's split (the first $n \bmod k$ classes get one extra). Throws `DomainError` unless `n` is a
+ * non-negative integer and the weights are non-negative with a positive sum.
+ *
+ * @param n The total number of points to split.
+ * @param weights One non-negative weight per class (not necessarily normalised).
+ * @returns One count per class, summing to `n`.
+ *
+ * @example Equal weights, and a tie broken to the lower index
+ * print('10 over three equal classes:', classCounts(10, [1, 1, 1]))
+ * print('10 at weights 1 : 3:', classCounts(10, [1, 3]))
+ * print('5 at weights 1 : 1 : 2:', classCounts(5, [1, 1, 2]))
  */
 export function classCounts(n: number, weights: readonly number[]): number[] {
   checkCount(n, 'classCounts')
@@ -45,7 +55,17 @@ export function classCounts(n: number, weights: readonly number[]): number[] {
   return counts
 }
 
-/** Normalised class proportions from a prevalence or weights (equal when neither is given). */
+/**
+ * Normalised class proportions from a prevalence or weights (equal when neither is given). A prevalence $p$ gives
+ * $(1 - p, p)$. Throws `DomainError` when both are given, when a prevalence is given for other than two classes or is
+ * outside $[0, 1]$, or when the weights are not non-negative with a positive sum; throws `ShapeError` when there is
+ * not one weight per class.
+ *
+ * @param options The `prevalence` or the `classWeights` to read (`n` is not read).
+ * @param k The number of classes.
+ * @param what The caller's name, for error messages.
+ * @returns $k$ proportions summing to one.
+ */
 export function classWeightsOf(options: ClassSizeOptions, k: number, what: string): number[] {
   const { prevalence, classWeights } = options
   if (prevalence !== undefined && classWeights !== undefined)
@@ -68,7 +88,16 @@ export function classWeightsOf(options: ClassSizeOptions, k: number, what: strin
 
 /**
  * Resolve `ClassSizeOptions` into per-class counts and the population class proportions (`priors`) the counts
- * represent: the requested proportions, or the counts' own shares when explicit counts are given.
+ * represent: the requested proportions, or the counts' own shares when explicit counts are given (equal shares when
+ * they are all zero). Throws `DomainError` when counts and proportions are both given or a count is not a non-negative
+ * integer, and `ShapeError` when there is not one count per class; see `classWeightsOf` for the proportions.
+ *
+ * @param options The total or the per-class counts, and the prevalence or class weights.
+ * @param k The number of classes.
+ * @param defaultN The total used when `options.n` is not given.
+ * @param what The caller's name, for error messages.
+ * @returns `sizes`, the count of each class; `priors`, the proportions they stand for; and `controlled`, true when
+ *   the sizes were asked for (explicit counts, a prevalence or class weights), false for the default equal split.
  */
 export function resolveClassSizes(
   options: ClassSizeOptions,

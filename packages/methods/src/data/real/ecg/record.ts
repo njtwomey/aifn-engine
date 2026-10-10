@@ -12,6 +12,7 @@
  * 108000 samples at 360 Hz; 509 annotated beats (N 358, V 93, F 56, Q 2).
  */
 
+/** The SHA-256 hash of SciPy's `ecg.dat`, the file the samples were taken from. */
 export const SOURCE_SHA256 = 'f20ad3365fb9b7f845d0e5c48b6fe67081377ee466c3a220b7f69f35c8958baf'
 
 /** The sampling rate, in Hz. */

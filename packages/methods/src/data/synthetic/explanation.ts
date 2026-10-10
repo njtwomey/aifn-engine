@@ -3,13 +3,18 @@
  *
  * - `feasibilityTask`: two dense classes joined by a curved corridor of data, with empty space between them, so the
  *   shortest change that crosses the decision boundary lands where no data lie (counterfactuals: Wachter against FACE).
- * - `correlatedEffects`: two strongly correlated features and an additive target x₁ + x₂², so the true effect of each
- *   feature is known while partial dependence must average over combinations that never occur (ALE against PD).
- * - `plantedPatterns`: noise images (8 × 8) or sequences (length 32) in which class 1 carries a motif at a random place;
- *   `t` records where, and `plantedMask` gives the motif's cells (attribution against ground truth).
- * - `conceptImages` and `conceptExamples`: 8 × 8 images built from three visual concepts (horizontal stripes, a corner
- *   dot, a vertical bar), each present at random; the label follows a rule over the concepts, and images that always
- *   hold one concept serve TCAV.
+ * - `correlatedEffects`: two strongly correlated features and an additive target $x_1 + x_2^2$, so the true effect of
+ *   each feature is known while partial dependence must average over combinations that never occur (ALE against PD).
+ * - `interactionTask`: three independent features with three main effects and one pairwise interaction of chosen
+ *   strength, so the functional ANOVA decomposition is known (main effects and interactions against the truth).
+ * - `plantedPatterns`: noise images ($8 \times 8$) or sequences (length 32) in which class 1 carries a motif at a random
+ *   place; `t` records where, and `plantedMask` gives the motif's cells (attribution against ground truth).
+ * - `conceptImages` and `conceptExamples`: $8 \times 8$ images built from three visual concepts (horizontal stripes, a
+ *   corner dot, a vertical bar), each present at random; the label follows a rule over the concepts, and images that
+ *   always hold one concept serve TCAV.
+ *
+ * Every generator draws from `child(s, 'rows')` (and the regression tasks their noise from `child(s, 'noise')`), so the
+ * same stream gives the same data, and throws `DomainError` when `n` is not a non-negative integer.
  */
 
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
@@ -23,9 +28,24 @@ import { checkCount, labels, matrix, type Dataset } from '../types'
 // ── Feasibility ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * n points in two dimensions: a class-0 blob at (−1.6, 0.6) (35%), a class-1 blob at (1.6, 0.9) (25%) and a corridor
- * (40%) along the lower arc (−1.6 cos πt, 0.6 − 2 sin πt), labelled 1 where x₁ > 0; Gaussian jitter of sd `noise`
- * (default 0.15) on the corridor and 0.3 on the blobs. The space between the blobs near (0, 0.7) is empty.
+ * $n$ points in two dimensions: a class-0 blob at $(-1.6, 0.6)$ (35%), a class-1 blob at $(1.6, 0.9)$ (25%) and a
+ * corridor (40%) along the lower arc $(-1.6 \cos \pi t, 0.6 - 2 \sin \pi t)$, $t \sim \Unif(0, 1)$, labelled 1 where
+ * the jittered $x_1 > 0$; Gaussian jitter of standard deviation `noise` on the corridor and 0.3 on the blobs. Each row
+ * picks its part with one uniform draw. The space between the blobs near $(0, 0.7)$ is empty, so the shortest move
+ * across the boundary from a class-0 point lands where there are no data.
+ *
+ * @param s The stream the rows are drawn from.
+ * @param options `n`, the number of points (default 300), and `noise`, the jitter's standard deviation on the
+ *   corridor (default 0.15; the blobs keep 0.3).
+ * @returns The points in `x` ($n \times 2$) and the class labels in `y` (int32, 0 or 1).
+ *
+ * @example The blobs, the corridor and the empty middle
+ * const d = feasibilityTask(stream(1), { n: 200 })
+ * const x = toArray(d.x)
+ * print('x:', d.x.shape, ' y:', d.y.shape)
+ * print('first rows:', x.slice(0, 3), ' labels:', toArray(d.y).slice(0, 3))
+ * print('points within 0.4 of (0, 0.7):', x.filter(([a, b]) => Math.hypot(a, b - 0.7) < 0.4).length)
+ * print('points below x2 = -0.5 (the corridor):', x.filter(([, b]) => b < -0.5).length)
  */
 export function feasibilityTask(s: Stream, options: { n?: number; noise?: number } = {}): Dataset {
   const { n = 300, noise = 0.15 } = options
@@ -69,15 +89,53 @@ export function feasibilityTask(s: Stream, options: { n?: number; noise?: number
 
 // ── Correlated effects ───────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The true effect of feature j (0 or 1) of `correlatedEffects` at v, before centring: v, or v². */
+/**
+ * The true effect of a feature of `correlatedEffects` at a value $v$, before centring: $v$ for $x_1$, $v^2$ for $x_2$.
+ *
+ * @param feature The feature's index: 0 for $x_1$; any other value is taken as $x_2$.
+ * @param v The feature's value.
+ * @returns The feature's term of the target, $v$ or $v^2$.
+ *
+ * @example The two terms at the same value
+ * print('x1 term at 0.5:', correlatedEffectsTerm(0, 0.5))
+ * print('x2 term at 0.5:', correlatedEffectsTerm(1, 0.5))
+ */
 export const correlatedEffectsTerm = (feature: number, v: number): number => (feature === 0 ? v : v * v)
 
-/** The target of `correlatedEffects` without noise: x₁ + x₂². */
+/**
+ * The target of `correlatedEffects` without noise: $x_1 + x_2^2$.
+ *
+ * @param x A row of two features, $x_1$ then $x_2$; only the first two entries are read.
+ * @returns $x_1 + x_2^2$.
+ *
+ * @example The noise-free target matches `f`
+ * const d = correlatedEffects(stream(1), { n: 3 })
+ * const x = toArray(d.x)
+ * print('truth:', x.map(correlatedEffectsTruth))
+ * print('f:', d.f)
+ */
 export const correlatedEffectsTruth = (x: ArrayLike<number>): number => x[0] + x[1] ** 2
 
 /**
- * n rows of x₁ ~ U(−1, 1) and x₂ = ρx₁ + √(1 − ρ²) z, z ~ U(−1, 1) (correlation ρ, default 0.9), with
- * y = x₁ + x₂² + noise (sd `noise`, default 0.1); `f` holds the noise-free target.
+ * $n$ rows of $x_1 \sim \Unif(-1, 1)$ and $x_2 = \rho x_1 + \sqrt{1 - \rho^2}\, z$ with $z \sim \Unif(-1, 1)$, so
+ * $\corr(x_1, x_2) = \rho$, and $y = x_1 + x_2^2 + \varepsilon$, $\varepsilon \sim \Gauss(0, \sigma^2)$. Throws
+ * `DomainError` when the correlation is outside $[0, 1]$.
+ *
+ * @param s The stream the rows (`child(s, 'rows')`) and the noise (`child(s, 'noise')`) are drawn from.
+ * @param options `n`, the number of rows (default 400); `correlation`, $\rho$ (default 0.9); and `noise`, the noise's
+ *   standard deviation $\sigma$ (default 0.1).
+ * @returns The features in `x` ($n \times 2$), the noisy target in `y` and the noise-free target in `f`.
+ *
+ * @example The features are correlated as asked
+ * const d = correlatedEffects(stream(1), { n: 500, correlation: 0.9 })
+ * const x = toArray(d.x)
+ * print('x:', d.x.shape, ' first rows:', x.slice(0, 2))
+ * const m = (v) => v.reduce((a, b) => a + b, 0) / v.length
+ * const [a, b] = [x.map((r) => r[0]), x.map((r) => r[1])]
+ * const c = m(a.map((v, i) => v * b[i])) - m(a) * m(b)
+ * const sa = Math.sqrt(m(a.map((v) => v * v)) - m(a) ** 2)
+ * const sb = Math.sqrt(m(b.map((v) => v * v)) - m(b) ** 2)
+ * print('sample correlation:', c / (sa * sb))
  */
 export function correlatedEffects(
   s: Stream,
@@ -119,14 +177,37 @@ export function correlatedEffects(
 
 // ── An additive model with an interaction ───────────────────────────────────────────────────────────────────────────
 
-/** The noise-free target of `interactionTask`: sin(πx₁) + x₂² + ½x₃ + βx₁x₂. */
+/**
+ * The noise-free target of `interactionTask`: $\sin(\pi x_1) + x_2^2 + \tfrac{1}{2} x_3 + \beta x_1 x_2$.
+ *
+ * @param x A row of three features, $x_1$, $x_2$ and $x_3$; only the first three entries are read.
+ * @param interaction The interaction's coefficient $\beta$.
+ * @returns The target at `x`.
+ *
+ * @example The interaction is all that differs from the additive part
+ * print('beta = 0:', interactionTaskTruth([0.5, 0.5, 0], 0))
+ * print('beta = 2:', interactionTaskTruth([0.5, 0.5, 0], 2))
+ */
 export const interactionTaskTruth = (x: ArrayLike<number>, interaction: number): number =>
   Math.sin(Math.PI * x[0]) + x[1] ** 2 + 0.5 * x[2] + interaction * x[0] * x[1]
 
 /**
- * n rows of three independent U(−1, 1) features with y = sin(πx₁) + x₂² + ½x₃ + βx₁x₂ + noise (β = `interaction`,
- * default 1; noise sd default 0.1): three main effects and one pairwise interaction, whose functional ANOVA is known
- * (x₁x₂ has no main effect under independent symmetric features).
+ * $n$ rows of three independent $\Unif(-1, 1)$ features with
+ * $y = \sin(\pi x_1) + x_2^2 + \tfrac{1}{2} x_3 + \beta x_1 x_2 + \varepsilon$, $\varepsilon \sim \Gauss(0, \sigma^2)$:
+ * three main effects and one pairwise interaction, whose functional ANOVA is known ($x_1 x_2$ has no main effect under
+ * independent symmetric features).
+ *
+ * @param s The stream the rows (`child(s, 'rows')`) and the noise (`child(s, 'noise')`) are drawn from.
+ * @param options `n`, the number of rows (default 500); `interaction`, $\beta$ (default 1); and `noise`, the noise's
+ *   standard deviation $\sigma$ (default 0.1).
+ * @returns The features in `x` ($n \times 3$), the noisy target in `y` and the noise-free target in `f`.
+ *
+ * @example The noise is what separates y from f
+ * const d = interactionTask(stream(1), { n: 400, noise: 0.1 })
+ * print('x:', d.x.shape, ' first row:', toArray(d.x)[0])
+ * const y = toArray(d.y)
+ * const f = toArray(d.f)
+ * print('RMS of y - f:', Math.sqrt(y.reduce((a, v, i) => a + (v - f[i]) ** 2, 0) / y.length))
  */
 export function interactionTask(
   s: Stream,
@@ -162,7 +243,7 @@ export function interactionTask(
 
 // ── Planted patterns ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The motif's cells: a 3 × 3 plus in an 8 × 8 image, or a bump of five in a sequence of 32. */
+/** The motif's cells: a $3 \times 3$ plus in an $8 \times 8$ image, or a bump of five in a sequence of 32. */
 const PLUS = [
   [0, 1],
   [1, 0],
@@ -172,12 +253,31 @@ const PLUS = [
 ]
 const BUMP = [0.5, 1, 1.5, 1, 0.5]
 
-/** The input shape of a planted-pattern kind. */
+/**
+ * The input shape of a planted-pattern kind: $8 \times 8$ for an image, $1 \times 32$ for a sequence.
+ *
+ * @param kind `'image'` or `'sequence'`.
+ * @returns The height and width.
+ *
+ * @example The two shapes
+ * print('image:', plantedShape('image'), ' sequence:', plantedShape('sequence'))
+ */
 export const plantedShape = (kind: 'image' | 'sequence'): [number, number] => (kind === 'image' ? [8, 8] : [1, 32])
 
 /**
- * The motif's weight at each cell [d] of a row whose motif starts at `t` (the top-left cell's index, row-major), or
- * zeros when t < 0.
+ * The motif's weight at each of the $d$ cells of a row whose motif starts at `t`, or zeros when $t < 0$: 1 on the five
+ * cells of a plus for an image, the bump $0.5, 1, 1.5, 1, 0.5$ for a sequence. Positions are not checked: an image
+ * motif whose column is above 5 wraps onto the next row.
+ *
+ * @param kind `'image'` or `'sequence'`.
+ * @param t Where the motif starts, as `plantedPatterns` records it: for an image the row-major index of the top-left
+ *   cell of the plus's $3 \times 3$ box, for a sequence its first step; $-1$ (no motif) gives zeros.
+ * @returns The $d$ weights, row-major ($d = 64$ for an image, 32 for a sequence).
+ *
+ * @example The plus of a motif placed at row 1, column 2
+ * const m = plantedMask('image', 1 * 8 + 2)
+ * print('cells:', [...m.keys()].filter((p) => m[p] > 0).map((p) => [Math.floor(p / 8), p % 8]))
+ * print('bump from step 3:', plantedMask('sequence', 3).slice(0, 10))
  */
 export function plantedMask(kind: 'image' | 'sequence', t: number): Float64Array {
   const [h, w] = plantedShape(kind)
@@ -192,9 +292,25 @@ export function plantedMask(kind: 'image' | 'sequence', t: number): Float64Array
 }
 
 /**
- * n noise rows (sd `noise`, default 0.35) of an 8 × 8 image or a length-32 sequence; class 1 (each row with
- * probability ½) adds a motif of height `strength` (default 1.2) at a uniform position: a 3 × 3 plus in an image, a
- * five-step bump in a sequence. `t` is the motif's first cell (−1 for class 0).
+ * $n$ rows of Gaussian noise of an $8 \times 8$ image or a length-32 sequence; class 1 (each row with probability
+ * $\tfrac{1}{2}$) adds `strength` times the motif of `plantedMask` at a uniform position: a $3 \times 3$ plus in an
+ * image (its box's top-left cell in rows and columns 0 to 5), a five-step bump in a sequence (starting at step 0 to
+ * 27), so the motif always fits.
+ *
+ * @param s The stream the rows are drawn from.
+ * @param options `n`, the number of rows (default 800); `kind`, `'image'` (default) or `'sequence'`; `noise`, the
+ *   noise's standard deviation (default 0.35); and `strength`, the scale of the motif (default 1.2).
+ * @returns The flattened inputs in `x` ($n \times 64$ or $n \times 32$, row-major), the labels in `y` (int32, 1 where
+ *   a motif was planted) and the motif's start in `t` ($-1$ for class 0), for `plantedMask`.
+ *
+ * @example The motif sits where t says
+ * const d = plantedPatterns(stream(1), { n: 6 })
+ * print('x:', d.x.shape, ' y:', toArray(d.y), ' t:', toArray(d.t))
+ * const i = toArray(d.y).indexOf(1)
+ * const row = toArray(d.x)[i]
+ * const mask = plantedMask('image', toArray(d.t)[i])
+ * print('mean on the motif:', row.filter((_, p) => mask[p] > 0).reduce((a, v) => a + v, 0) / 5)
+ * print('mean elsewhere:', row.filter((_, p) => mask[p] === 0).reduce((a, v) => a + v, 0) / 59)
  */
 export function plantedPatterns(
   s: Stream,
@@ -245,9 +361,16 @@ export function plantedPatterns(
 
 /** The visual concepts of `conceptImages`. */
 export const CONCEPTS = ['stripes', 'dot', 'bar'] as const
+/** One of the visual concepts: horizontal stripes, a corner dot or a vertical bar. */
 export type Concept = (typeof CONCEPTS)[number]
 
-/** The pixels each concept lights in an 8 × 8 image, and its height. */
+/**
+ * Paint a concept onto an $8 \times 8$ image: stripes add 0.9 on rows 1, 4 and 7; the dot adds 1.4 on the
+ * $2 \times 2$ block of rows 0 and 1, columns 6 and 7; the bar adds 0.9 on column 3.
+ *
+ * @param img The image, 64 values row-major; modified in place.
+ * @param concept The concept to add.
+ */
 function paint(img: Float64Array, concept: Concept): void {
   if (concept === 'stripes') for (const r of [1, 4, 7]) for (let c = 0; c < 8; c++) img[r * 8 + c] += 0.9
   else if (concept === 'dot')
@@ -264,6 +387,13 @@ function paint(img: Float64Array, concept: Concept): void {
 /** The label rule of `conceptImages`: which concepts make class 1. */
 export type ConceptRule = 'stripes' | 'dot' | 'stripes-or-dot' | 'stripes-and-dot'
 
+/**
+ * Whether a label rule holds for the concepts an image holds.
+ *
+ * @param rule The rule: one concept, or the stripes and the dot combined by or or by and.
+ * @param has Which concepts the image holds.
+ * @returns True when the image is class 1 under the rule.
+ */
 const ruleOf = (rule: ConceptRule, has: Record<Concept, boolean>) =>
   rule === 'stripes'
     ? has.stripes
@@ -274,9 +404,20 @@ const ruleOf = (rule: ConceptRule, has: Record<Concept, boolean>) =>
         : has.stripes && has.dot
 
 /**
- * n noisy 8 × 8 images (sd `noise`, default 0.3), each holding each concept (horizontal stripes on rows 1, 4 and 7;
- * a 2 × 2 dot in the top-right corner; a vertical bar on column 3) independently with probability ½; y = 1 when the
- * rule holds (default: stripes). The bar never matters.
+ * $n$ noisy $8 \times 8$ images, each holding each concept (horizontal stripes on rows 1, 4 and 7; a $2 \times 2$ dot
+ * in the top-right corner; a vertical bar on column 3) independently with probability $\tfrac{1}{2}$; $y = 1$ when the
+ * rule holds. The bar never matters.
+ *
+ * @param s The stream the images are drawn from.
+ * @param options `n`, the number of images (default 800); `rule`, the label rule (default `'stripes'`); and `noise`,
+ *   the standard deviation of the Gaussian noise under the concepts (default 0.3).
+ * @returns The images in `x` ($n \times 64$, row-major) and the labels in `y` (int32).
+ *
+ * @example Under the default rule the label is whether row 4 is lit
+ * const d = conceptImages(stream(1), { n: 8 })
+ * const x = toArray(d.x)
+ * print('x:', d.x.shape, ' y:', toArray(d.y))
+ * print('mean of row 4:', x.map((r) => r.slice(32, 40).reduce((a, v) => a + v, 0) / 8))
  */
 export function conceptImages(s: Stream, options: { n?: number; rule?: ConceptRule; noise?: number } = {}): Dataset {
   const { n = 800, rule = 'stripes', noise = 0.3 } = options
@@ -311,9 +452,22 @@ export function conceptImages(s: Stream, options: { n?: number; rule?: ConceptRu
 }
 
 /**
- * n examples of a concept (noise sd `noise`, default 0.3) as rows [n, 64]: images drawn as `conceptImages` draws them
- * (each other concept present with probability ½) but always holding this one, so that against `random` images (drawn
- * exactly as `conceptImages`) the only systematic difference is the concept: the contrast a CAV needs.
+ * $n$ examples of a concept: images drawn as `conceptImages` draws them (each other concept present with probability
+ * $\tfrac{1}{2}$) but always holding this one, so that against `'random'` images (drawn exactly as `conceptImages`) the
+ * only systematic difference is the concept: the contrast a CAV needs. The examples have no labels.
+ *
+ * @param s The stream the images are drawn from.
+ * @param concept The concept every image holds, or `'random'` for the images of `conceptImages` with their labels
+ *   removed.
+ * @param options `n`, the number of images (default 50), and `noise`, the noise's standard deviation (default 0.3).
+ * @returns The images in `x` ($n \times 64$, row-major).
+ *
+ * @example Every dot example lights the top-right corner
+ * const dots = toArray(conceptExamples(stream(1), 'dot', { n: 20 }).x)
+ * const random = toArray(conceptExamples(stream(2), 'random', { n: 20 }).x)
+ * const corner = (rows) => rows.reduce((a, r) => a + r[7], 0) / rows.length
+ * print('x:', [dots.length, dots[0].length])
+ * print('mean of pixel (0, 7), dot:', corner(dots), ' random:', corner(random))
  */
 export function conceptExamples(
   s: Stream,

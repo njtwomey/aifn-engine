@@ -2,17 +2,18 @@
  * Seeded data for flows that split, cross and spread (Twomey, Kozłowski & Santos-Rodríguez, 2020, "Neural ODEs with
  * stochastic vector field mixtures", ECAI):
  *
- * - `odeFailureCase`: the 1-d problems of the paper's fig. 1 that a neural ODE cannot solve. *Crossing*: starts near −1
- *   and +1 must swap places (x ↦ −x), but a 1-d flow is increasing. *Splitting*: one start maps to two targets, −1 or
- *   +1. *Scaling*: one start maps to targets spread along the same direction, at log-normal distances. Each row is a
- *   start x(0) with its target x(1).
- * - `floorplanWalks`: a synthetic stand-in for the paper's behavioural data (§4.1.2, fig. 12), which is not available:
+ * - `odeFailureCase`: the 1-d problems of the paper's fig. 1 that a neural ODE cannot solve. *Crossing*: starts near
+ *   $-1$ and $+1$ must swap places ($x \mapsto -x$), but a 1-d flow is increasing. *Splitting*: one start maps to two
+ *   targets, $-1$ or $+1$. *Scaling*: one start maps to targets spread along the same direction, at log-normal
+ *   distances. Each row is a start $x(0)$ with its target $x(1)$.
+ * - `floorplanWalks`: a synthetic stand-in for the paper's behavioural data (section 4.1.2, fig. 12), which is not
+ *   available:
  *   noisy human-like walks in a house from one origin (the sofa in the living room) to four targets (the front door,
  *   the kitchen, the landing at the foot of the stairs, the study), through the doorways, so paths share their first
  *   leg and branch where they diverge. Walking speed varies by walk, walkers accelerate and slow down, sometimes pause,
  *   and stay at the target once there. Each row is one walk sampled at regular times over a 10-second window, then the
  *   hour of the day; by day the four targets are equally likely, by night the landing (0.9) and the kitchen (0.1)
- *   (the paper's §4.4 counterfactual).
+ *   (the paper's section 4.4 counterfactual).
  */
 
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
@@ -29,18 +30,44 @@ export type OdeFailureKind = 'crossing' | 'splitting' | 'scaling'
 
 /** Options of `odeFailureCase`. */
 export interface OdeFailureOptions {
+  /** Which failure case to draw. Default `splitting`. */
   kind?: OdeFailureKind
+  /** Number of starts. Default 200. */
   n?: number
-  /** The sd of the jitter on the starts (and on the targets of crossing and splitting). Default 0.05. */
+  /**
+   * The standard deviation of the Gaussian jitter on the starts, and of an independent jitter on the targets of
+   * splitting (a crossing target is exactly $-x(0)$). Default 0.05.
+   */
   noise?: number
-  /** Scaling: the sd of the log distance travelled (median distance 2). Default 0.25. */
+  /** Scaling: the standard deviation of the log distance travelled (median distance 2). Default 0.25. */
   spread?: number
 }
 
 /**
- * A 1-d failure case of a neural ODE (fig. 1): starts x(0) (`x`, [n, 1]) and their targets x(1) (`y`, [n]).
- * Crossing: x(0) ≈ ∓1 → x(1) = −x(0). Splitting: x(0) ≈ 0 → x(1) ≈ ±1 with equal probability. Scaling: x(0) ≈ −1 →
- * x(1) = x(0) + L with log L ~ N(log 2, spread²).
+ * A 1-d failure case of a neural ODE (fig. 1): starts $x(0)$ (`x`, $n \times 1$) and their targets $x(1)$ (`y`,
+ * length $n$). Crossing: $x(0) \approx \mp 1$, $x(1) = -x(0)$. Splitting: $x(0) \approx 0$, $x(1) \approx \pm 1$ with
+ * equal probability. Scaling: $x(0) \approx -1$, $x(1) = x(0) + L$ with $\log L \sim \Gauss(\log 2, \sigma^2)$,
+ * $\sigma$ = `spread`. The branches come from `child(s, 'branch')`, the jitter from `child(s, 'noise')`. Throws
+ * `DomainError` when `n` is not a non-negative integer.
+ *
+ * @param s The stream the branches and the jitter are drawn from.
+ * @param options The kind, the number of starts, the jitter and the spread of the scaling distances
+ *   (`OdeFailureOptions`).
+ * @returns The starts in `x` ($n \times 1$) and the targets in `y`.
+ *
+ * @example Crossing: every target is the start reflected
+ * const d = odeFailureCase(stream(1), { kind: 'crossing', n: 6 })
+ * const [x, y] = [toArray(d.x).map(([v]) => v), toArray(d.y)]
+ * print('starts: ', x)
+ * print('targets:', y)
+ *
+ * @example Splitting and scaling
+ * const split = toArray(odeFailureCase(stream(1), { n: 400 }).y)
+ * print('share of splitting targets above 0 (1/2):', split.filter((v) => v > 0).length / split.length)
+ * const d = odeFailureCase(stream(2), { kind: 'scaling', n: 401 })
+ * const x = toArray(d.x)
+ * const gaps = toArray(d.y).map((v, i) => v - x[i][0]).sort((a, b) => a - b)
+ * print('median scaling distance (2):', gaps[200])
  */
 export function odeFailureCase(s: Stream, options: OdeFailureOptions = {}): Dataset {
   const { kind = 'splitting', n = 200, noise = 0.05, spread = 0.25 } = options
@@ -92,9 +119,11 @@ export type FloorPoint = readonly [number, number]
 
 /** The house the walks happen in (metres; x to the right, y up). */
 export type Floorplan = {
+  /** The house's width in metres. */
   width: number
+  /** The house's height in metres. */
   height: number
-  /** Wall segments [x₁, y₁, x₂, y₂]. */
+  /** Wall segments $[x_1, y_1, x_2, y_2]$, from one end to the other. */
   walls: readonly (readonly [number, number, number, number])[]
   /** Furniture and stair treads, as segments. */
   furniture: readonly (readonly [number, number, number, number])[]
@@ -106,8 +135,10 @@ export type Floorplan = {
   targets: readonly { name: string; at: FloorPoint }[]
 }
 
-/** The synthetic house: living room bottom left, hall and front door top left, dining room and study in the middle,
- * stairs top middle, kitchen on the right. */
+/**
+ * The synthetic house: living room bottom left, hall and front door top left, dining room and study in the middle,
+ * stairs top middle, kitchen on the right.
+ */
 export const FLOORPLAN: Floorplan = {
   width: 12,
   height: 7,
@@ -178,7 +209,14 @@ const ROUTES: readonly (readonly { at: FloorPoint; sd: FloorPoint }[])[] = [
   [{ at: [5.0, 2.05], sd: [0.05, 0.25] }],
 ]
 
-/** A uniform Catmull–Rom spline through points, sampled densely; returns the samples and their cumulative lengths. */
+/**
+ * A uniform Catmull–Rom spline through points (the end points repeated as their own neighbours), sampled densely;
+ * returns the samples and their cumulative lengths.
+ *
+ * @param points The points the curve passes through, in order; at least one.
+ * @param perSegment Samples per segment between consecutive points (the last point is added once at the end).
+ * @returns `out`, the samples, and `cum`, the arc length from the first sample to each, by straight segments.
+ */
 function smoothPath(points: readonly FloorPoint[], perSegment = 24) {
   const pts = [points[0], ...points, points[points.length - 1]]
   const out: [number, number][] = []
@@ -208,15 +246,18 @@ function smoothPath(points: readonly FloorPoint[], perSegment = 24) {
 export interface FloorplanWalksOptions {
   /** Walks. Default 160. */
   n?: number
-  /** Samples per walk over the window. Default 51. */
+  /** Samples per walk over the window, an integer of at least 2. Default 51. */
   samples?: number
   /** The window in seconds. Default 10. */
   duration?: number
-  /** The sd of position noise per sample in metres (SLAM error). Default 0.03. */
+  /** The standard deviation of position noise per sample, in metres (SLAM error). Default 0.03. */
   noise?: number
   /** Probability that a walk pauses once on the way. Default 0.3. */
   pause?: number
-  /** When the walks happen: by day (targets equally likely), by night (landing 0.9, kitchen 0.1) or both, half each. */
+  /**
+   * When the walks happen: by day (targets equally likely), by night (landing 0.9, kitchen 0.1) or both, half each (the
+   * odd-numbered walks by night). Default `day`.
+   */
   timeOfDay?: 'day' | 'night' | 'mixed'
 }
 
@@ -225,7 +266,31 @@ const NIGHT = [0, 0.1, 0.9, 0]
 
 /**
  * Walks in `FLOORPLAN` from the origin to one of four targets (labels 0 front door, 1 kitchen, 2 landing, 3 study).
- * Features: x₀, y₀, x₁, y₁, … (metres, at `samples` regular times over `duration` seconds), then the hour of the day.
+ * Features: $x_0, y_0, x_1, y_1, \dots$ (metres, at `samples` regular times from 0 to `duration` seconds), then the
+ * hour of the day. Day walks cycle through the targets in turn (walk $i$ goes to target $i \bmod 4$, so each gets
+ * $n/4$) at an hour uniform from 8 to 20; night walks draw their target (landing 0.9, kitchen 0.1) at an hour from 22
+ * to 6. Each walk follows a spline through jittered waypoints (the doorways), with a mean speed of 0.9 to 1.4 m/s
+ * (raised when needed to arrive within 92% of the window), a delay of up to 0.6 s standing up, with probability
+ * `pause` one pause of 0.5 to 1.5 s, and a smoothstep in time so it speeds up and slows down. Every walk draws from
+ * its own `child(s, 'walk', i)`. Throws `DomainError` when `samples` is not an integer of at least 2 or `n` is not a
+ * non-negative integer.
+ *
+ * @param s The stream the walks are drawn from.
+ * @param options The number of walks, the sampling, the noise, the pause probability and the time of day
+ *   (`FloorplanWalksOptions`).
+ * @returns The walks in `x` ($n \times (2M + 1)$ for $M$ samples: the positions, then the hour) and the targets in `y`
+ *   (int32).
+ *
+ * @example Walks start at the sofa and end at their target
+ * const d = floorplanWalks(stream(1), { n: 8, samples: 11 })
+ * const x = toArray(d.x)
+ * print('x:', d.x.shape, ' targets:', toArray(d.y))
+ * print('walk 0, first positions:', x[0].slice(0, 6), ' hour:', x[0][22])
+ * print('walk 1 ends at', x[1].slice(20, 22), ' kitchen:', FLOORPLAN.targets[1].at)
+ *
+ * @example By night most walks go to the landing
+ * const y = toArray(floorplanWalks(stream(1), { n: 200, samples: 5, timeOfDay: 'night' }).y)
+ * print('share to the landing (0.9):', y.filter((v) => v === 2).length / y.length)
  */
 export function floorplanWalks(s: Stream, options: FloorplanWalksOptions = {}): Dataset {
   const { n = 160, samples = 51, duration = 10, noise = 0.03, pause = 0.3, timeOfDay = 'day' } = options

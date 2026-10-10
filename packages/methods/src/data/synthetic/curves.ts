@@ -1,7 +1,7 @@
 /**
  * Seeded one-dimensional smooth regressions for GAM and expectile figures, each with its whole law known: a sine wave
  * whose noise spreads and pinches, a bump with skewed noise growing to the right, Poisson counts with a log link,
- * Bernoulli outcomes with a logit link and gamma responses with a log link. x is uniform on [0, 1] and sorted; the
+ * Bernoulli outcomes with a logit link and gamma responses with a log link. $x$ is uniform on $[0, 1]$ and sorted; the
  * truth (`meta.truth`, a `Curve1dTruth`) gives the mean, the link scale and the true expectile curves.
  */
 
@@ -18,7 +18,10 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 /** The cases of `curve1d`. */
 export type Curve1dCase = 'sine' | 'skewed' | 'counts' | 'binary' | 'gamma'
 
-/** Each case: its family and natural link, η(x), and a formula for captions. */
+/**
+ * Each case: its family and natural link, the linear predictor $\eta(x)$ (so $\mu(x) = g^{-1}(\eta(x))$ for the link
+ * $g$), and a formula for captions.
+ */
 export const CURVE1D_CASES: Readonly<
   Record<Curve1dCase, { family: FamilyName; link: LinkName; eta: (x: number) => number; formula: string }>
 > = {
@@ -48,23 +51,46 @@ export const CURVE1D_CASES: Readonly<
 export interface Curve1dOptions {
   /** Rows. Default 300. */
   n?: number
-  /** Default `sine`. */
+  /** Which curve and law, one of the keys of `CURVE1D_CASES` (default `'sine'`). */
   case?: Curve1dCase
   /**
-   * sine and skewed: σ₀, the noise sd where it is smallest (default 0.15); gamma: the coefficient of variation
-   * (default 0.5); ignored otherwise.
+   * `sine` and `skewed`: $\sigma_0$, the noise standard deviation where it is smallest (default 0.15); `gamma`: the
+   * coefficient of variation (default 0.5); ignored otherwise, though it must still be positive.
    */
   noise?: number
-  /** sine and skewed: the noise shape (default normal for sine, skewed for skewed). */
+  /** `sine` and `skewed`: the noise shape (default `'normal'` for `sine`, `'skewed'` for `skewed`). */
   noiseShape?: 'normal' | 'skewed'
   /**
-   * sine and skewed: h ≥ 0, how far the noise sd varies: σ(x) = σ₀(1 + h sin²(3πx/2)) for sine (it spreads and pinches
-   * twice) and σ₀(1 + hx) for skewed (it grows to the right). Default 2.
+   * `sine` and `skewed`: $h \ge 0$, how far the noise standard deviation varies:
+   * $\sigma(x) = \sigma_0(1 + h \sin^2(3\pi x/2))$ for `sine` (it spreads and pinches twice) and
+   * $\sigma(x) = \sigma_0(1 + hx)$ for `skewed` (it grows to the right). Default 2.
    */
   heteroscedastic?: number
 }
 
-/** A one-dimensional smooth regression (see the module comment); `f` holds μ(x). */
+/**
+ * A one-dimensional smooth regression (see the file comment): $x \sim \Unif(0, 1)$, sorted, and $y$ drawn from the
+ * case's law at each $x$. Throws `DomainError` when $n$ is not a non-negative integer, the case is unknown, `noise` is
+ * not positive or `heteroscedastic` is negative.
+ *
+ * @param s The stream the inputs (child `'x'`) and the responses (child `'y'`) are drawn from.
+ * @param options The size, the case, and the noise of the continuous cases.
+ * @returns A regression dataset: `x` ($n \times 1$, sorted), `y`, `f` the true mean $\mu(x)$, and `meta.truth` the
+ *   whole law (`Curve1dTruth`).
+ *
+ * @example The sine case: the noise is as wide as the truth says
+ * const d = curve1d(stream(1), { n: 400 })
+ * const [y, f, sd] = [toArray(d.y), toArray(d.f), toArray(d.meta.truth.sdAt(d.x))]
+ * print('x:', d.x.shape, ' first x:', toArray(d.x).slice(0, 3).map((r) => r[0]), ' first y:', y.slice(0, 3))
+ * print('mean squared standardised residual:', y.reduce((a, v, i) => a + ((v - f[i]) / sd[i]) ** 2, 0) / y.length)
+ *
+ * @example Poisson counts around the true mean
+ * const d = curve1d(stream(1), { n: 400, case: 'counts' })
+ * const [y, f] = [toArray(d.y), toArray(d.f)]
+ * print('first counts:', y.slice(0, 8))
+ * const mean = (v) => v.reduce((a, b) => a + b, 0) / v.length
+ * print('mean count:', mean(y), ' mean of mu:', mean(f))
+ */
 export function curve1d(s: Stream, options: Curve1dOptions = {}): Dataset {
   const { n = 300, heteroscedastic: h = 2 } = options
   const which = options.case ?? 'sine'

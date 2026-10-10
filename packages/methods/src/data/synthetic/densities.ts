@@ -3,10 +3,10 @@
  * Gaussians, a pinwheel, a Swiss-roll slice, and a uniform annulus for out-of-distribution points. Every point is
  * labelled with the mode it came from (a Gaussian, an arm, a stretch of the roll), so that `meta.truth` is a
  * classification truth whose class-conditional densities and priors give the data density
- * p(x) = Σⱼ πⱼ p(x | j) exactly (`marginalLogDensity`), and a generated point can be assigned to its mode by the Bayes
- * posterior. The rings and grids follow the GAN mode-collapse benchmarks (Metz et al., 2017; Srivastava et al., 2017);
- * the pinwheel after Johnson et al. (2016) and the roll after scikit-learn's `make_swiss_roll` are drawn here as
- * curves blurred by isotropic Gaussian noise, so their densities are one-dimensional integrals along the curve.
+ * $p(\xvec) = \sum_j \pi_j p(\xvec \mid j)$ exactly, and a generated point can be assigned to its mode by the Bayes
+ * posterior (`decide`). The rings and grids follow the GAN mode-collapse benchmarks (Metz et al., 2017; Srivastava
+ * et al., 2017); the pinwheel after Johnson et al. (2016) and the roll after scikit-learn's `make_swiss_roll` are drawn
+ * here as curves blurred by isotropic Gaussian noise, so their densities are one-dimensional integrals along the curve.
  */
 
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
@@ -33,6 +33,14 @@ const TAU = 2 * Math.PI
 
 // Reference samples (for Monte Carlo Bayes errors) call the generator again with the truth switched off.
 let referenceDepth = 0
+/**
+ * A lazily drawn reference sample of the population, for the Monte Carlo Bayes error: drawn once, on first use, with
+ * the truth switched off for the inner call.
+ *
+ * @param make Draws the reference dataset: the generator called again on a child stream with `REFERENCE_SIZE` points.
+ *   Called at most once.
+ * @returns A function returning the reference sample: the points of `make()` with equal weights, cached.
+ */
 function referenceOf(make: () => Dataset): () => Reference {
   let cached: Reference | undefined
   return () => {
@@ -46,12 +54,31 @@ function referenceOf(make: () => Dataset): () => Reference {
   }
 }
 
+/**
+ * The $2 \times 2$ isotropic covariance $\sigma^2\Imat$ as rows.
+ *
+ * @param sd The standard deviation $\sigma$ of each coordinate.
+ * @returns The matrix $\sigma^2\Imat$, as two rows.
+ */
 const isotropic = (sd: number) => [
   [sd * sd, 0],
   [0, sd * sd],
 ]
 
-/** A labelled 2-d dataset with the truth built from `model` (unless inside a reference draw). */
+/**
+ * A labelled 2-d dataset with the truth built from `model` (unless inside a reference draw), task `clustering`.
+ *
+ * @param name The dataset's name, also the recipe's generator key.
+ * @param description The one-line description in `meta`.
+ * @param x The points, row-major: $2n$ values, point $i$ at entries `2 * i` and `2 * i + 1`. Used as is, not copied.
+ * @param y The label of each point, $n$ values.
+ * @param model Builds the class model the truth is made from; called only outside a reference draw.
+ * @param labelNames The name of each class.
+ * @param s The stream the data was drawn from, whose key is recorded.
+ * @param knobs The generator's parameters, recorded in the recipe.
+ * @param source Where the dataset comes from, for `meta.source`; left out when there is none.
+ * @returns The dataset: `x` ($n \times 2$), `y` and `meta`.
+ */
 function assemble(
   name: string,
   description: string,
@@ -82,7 +109,16 @@ function assemble(
   }
 }
 
-/** Points from k Gaussian modes N(mⱼ, sd²I), `sizes[j]` from mode j, on the substream `mode j`. */
+/**
+ * Points from $k$ Gaussian modes $\Gauss(\mvec_j, \sigma^2\Imat)$, `sizes[j]` from mode $j$, on the substream
+ * `mode` $j$, in mode order.
+ *
+ * @param s The random stream; mode $j$ is drawn from its child `mode` $j$.
+ * @param means The mode centres $\mvec_j$, $k$ rows of two values.
+ * @param sd The standard deviation $\sigma$ of every mode.
+ * @param sizes The number of points of each mode, $k$ counts.
+ * @returns `x`, the points row-major ($2n$ values), and `y`, the mode of each.
+ */
 function drawGaussians(s: Stream, means: readonly (readonly number[])[], sd: number, sizes: readonly number[]) {
   const total = sizes.reduce((a, b) => a + b, 0)
   const x = new Float64Array(2 * total)
@@ -114,8 +150,24 @@ export interface GaussianRingOptions extends ClassSizeOptions {
 }
 
 /**
- * Gaussians spaced evenly on a circle, mode j at radius·(cos 2πj/k, sin 2πj/k) with standard deviation sd: the
- * "8 Gaussians" benchmark of GAN mode collapse (Metz et al., 2017, use radius 2 and sd 0.02). Label j is mode j.
+ * Gaussians spaced evenly on a circle, mode $j$ at $r(\cos 2\pi j/k, \sin 2\pi j/k)$ with standard deviation
+ * $\sigma$ ($r$ the `radius`, $k$ the `modes`, $\sigma$ the `sd`): the "8 Gaussians" benchmark of GAN mode collapse
+ * (Metz et al., 2017, use radius 2 and sd 0.02). Label $j$ is mode $j$; the modes are equally likely unless the class
+ * sizes say otherwise.
+ *
+ * @param s The random stream: mode $j$ is drawn from its child `mode` $j$, the truth's reference sample from `truth`.
+ * @param options The class sizes, number of modes, radius and spread; see `GaussianRingOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` the mode of each point, and the exact mixture in `meta.truth`.
+ *
+ * @example Eight modes on a ring of radius 2
+ * const d = gaussianRing(stream(0), { n: 80 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', Array.from({ length: 8 }, (_, j) => y.filter((v) => v === j).length))
+ * // Mode 2 is centred at (0, 2).
+ * const mode = toArray(d.x).filter((_, i) => y[i] === 2)
+ * print('mean of mode 2:', [0, 1].map((c) => mode.reduce((a, r) => a + r[c], 0) / mode.length))
+ * print('modes of (0, 2) and (-2, 0):', d.meta.truth.decide(tensor([[0, 2], [-2, 0]])))
  */
 export function gaussianRing(s: Stream, options: GaussianRingOptions = {}): Dataset {
   const { modes = 8, radius = 2, sd = 0.05 } = options
@@ -153,7 +205,7 @@ export function gaussianRing(s: Stream, options: GaussianRingOptions = {}): Data
 export interface GaussianGridOptions extends ClassSizeOptions {
   /** Total points, or one count per mode. Default 1000. */
   n?: ClassSizes
-  /** Modes per side (side² modes). Default 5. */
+  /** Modes per side ($m^2$ modes for $m$ per side). Default 5. */
   side?: number
   /** Distance between neighbouring modes. Default 1. */
   spacing?: number
@@ -162,8 +214,24 @@ export interface GaussianGridOptions extends ClassSizeOptions {
 }
 
 /**
- * Gaussians on a square grid centred at the origin, side × side modes `spacing` apart with standard deviation sd: the
- * "25 Gaussians" benchmark (Srivastava et al., 2017, VEEGAN). Mode j sits at row ⌊j/side⌋, column j mod side.
+ * Gaussians on a square grid centred at the origin, $m \times m$ modes ($m$ the `side`) `spacing` apart with standard
+ * deviation $\sigma$ = `sd`: the "25 Gaussians" benchmark (Srivastava et al., 2017, VEEGAN). Mode $j$ sits at row
+ * $\lfloor j/m \rfloor$ (the $x_2$ coordinate), column $j \bmod m$ (the $x_1$ coordinate), both counted from the
+ * lowest.
+ *
+ * @param s The random stream: mode $j$ is drawn from its child `mode` $j$, the truth's reference sample from `truth`.
+ * @param options The class sizes, grid size, spacing and spread; see `GaussianGridOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` the mode of each point, and the exact mixture in `meta.truth`.
+ *
+ * @example A 3 by 3 grid
+ * const d = gaussianGrid(stream(0), { n: 90, side: 3 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', Array.from({ length: 9 }, (_, j) => y.filter((v) => v === j).length))
+ * // Mode 0 is the lower-left corner, (-1, -1).
+ * const mode = toArray(d.x).filter((_, i) => y[i] === 0)
+ * print('mean of mode 0:', [0, 1].map((c) => mode.reduce((a, r) => a + r[c], 0) / mode.length))
+ * print('mode of (1, 0):', d.meta.truth.decide(tensor([[1, 0]])))
  */
 export function gaussianGrid(s: Stream, options: GaussianGridOptions = {}): Dataset {
   const { side = 5, spacing = 1, sd = 0.05 } = options
@@ -201,7 +269,16 @@ export function gaussianGrid(s: Stream, options: GaussianGridOptions = {}): Data
 
 // ── Curves: pinwheel and Swiss-roll slice ────────────────────────────────────────────────────────────────────────────
 
-/** Points spread uniformly in u along each curve and blurred by N(0, noise²I); `sizes[j]` on curve j. */
+/**
+ * Points spread uniformly in $u$ along each curve and blurred by $\Gauss(\zeros, \sigma^2\Imat)$; `sizes[j]` on
+ * curve $j$, drawn on the substream `mode` $j$, in curve order.
+ *
+ * @param s The random stream; curve $j$ is drawn from its child `mode` $j$.
+ * @param curves One curve per mode, mapping a position $u \in [0, 1)$ to a point of the plane.
+ * @param noise The standard deviation $\sigma$ of the noise.
+ * @param sizes The number of points on each curve.
+ * @returns `x`, the points row-major ($2n$ values), and `y`, the curve of each.
+ */
 function drawCurves(s: Stream, curves: ((u: number) => [number, number])[], noise: number, sizes: readonly number[]) {
   const total = sizes.reduce((a, b) => a + b, 0)
   const x = new Float64Array(2 * total)
@@ -219,6 +296,17 @@ function drawCurves(s: Stream, curves: ((u: number) => [number, number])[], nois
   return { x, y }
 }
 
+/**
+ * The class model of modes spread uniformly along curves and blurred by isotropic Gaussian noise: each class density is
+ * an integral along its curve.
+ *
+ * @param curves One curve per class, mapping a position $u \in [0, 1]$ to a point of the plane.
+ * @param noise The standard deviation of the noise; positive.
+ * @param priors The population class proportions, one per curve.
+ * @param reference The lazy reference sample used for the Monte Carlo Bayes error.
+ * @param family The name of the model, as the truth reports it.
+ * @returns The class model.
+ */
 function curveModel(
   curves: ((u: number) => [number, number])[],
   noise: number,
@@ -245,14 +333,27 @@ export interface PinwheelOptions extends ClassSizeOptions {
   arms?: number
   /** How far each arm turns, in radians per unit of radius. Default 1. */
   twist?: number
-  /** Isotropic Gaussian noise. Default 0.1. */
+  /** Standard deviation of the isotropic Gaussian noise; positive. Default 0.1. */
   noise?: number
 }
 
 /**
- * A pinwheel: `arms` curved arms, arm j the points at radius ρ ∈ [0.4, 2.4] (uniform) and angle 2πj/arms + twist·ρ,
- * blurred by isotropic noise. After the pinwheel of Johnson et al. (2016), with the radial spread made uniform along
- * the arm so that the density is an exact integral along it. Label j is arm j.
+ * A pinwheel: $a$ curved arms ($a$ the `arms`), arm $j$ the points at radius $\rho \in [0.4, 2.4)$ (uniform) and angle
+ * $2\pi j/a + w\rho$ ($w$ the `twist`), blurred by isotropic noise. After the pinwheel of Johnson et al. (2016), with
+ * the radial spread made uniform along the arm so that the density is an exact integral along it. Label $j$ is arm $j$.
+ *
+ * @param s The random stream: arm $j$ is drawn from its child `mode` $j$, the truth's reference sample from `truth`.
+ * @param options The class sizes, number of arms, twist and noise; see `PinwheelOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` the arm of each point, and the exact density in `meta.truth`.
+ *
+ * @example Five arms
+ * const d = pinwheel(stream(0), { n: 500 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', Array.from({ length: 5 }, (_, j) => y.filter((v) => v === j).length))
+ * // Without noise the radii would lie in [0.4, 2.4); the mean is about 1.4.
+ * const r = toArray(d.x).map(([u, v]) => Math.hypot(u, v))
+ * print('mean radius:', r.reduce((a, v) => a + v, 0) / r.length)
  */
 export function pinwheel(s: Stream, options: PinwheelOptions = {}): Dataset {
   const { arms = 5, twist = 1, noise = 0.1 } = options
@@ -287,16 +388,32 @@ export function pinwheel(s: Stream, options: PinwheelOptions = {}): Dataset {
 export interface SwissRoll2dOptions extends ClassSizeOptions {
   /** Total points, or one count per stretch. Default 1000. */
   n?: ClassSizes
-  /** The roll cut into this many stretches of equal length in t, the modes. Default 4. */
+  /** The roll cut into this many stretches of equal length in $t$, the modes. Default 4. */
   stretches?: number
-  /** Isotropic Gaussian noise. Default 0.08. */
+  /** Standard deviation of the isotropic Gaussian noise; positive. Default 0.08. */
   noise?: number
 }
 
 /**
- * The Swiss roll's cross-section as a 2-d density: points (t cos t, t sin t)/5 for t uniform on [1.5π, 4.5π] (the
- * x–z slice of `sklearn.datasets.make_swiss_roll`), blurred by isotropic noise, so it fits in [−3, 3]². The roll is
- * cut into `stretches` equal ranges of t, each a mode with its own label, so that coverage of the roll can be counted.
+ * The Swiss roll's cross-section as a 2-d density: points $(t\cos t, t\sin t)/5$ for $t$ uniform on
+ * $[1.5\pi, 4.5\pi)$ (the slice in $x$ and $z$ of `sklearn.datasets.make_swiss_roll`), blurred by isotropic
+ * noise, so it fits in $[-3, 3]^2$. The roll is cut into `stretches` equal ranges of $t$, each a mode with its own
+ * label (from the inside out), so that coverage of the roll can be counted.
+ *
+ * @param s The random stream: stretch $j$ is drawn from its child `mode` $j$, the truth's reference sample from
+ *   `truth`.
+ * @param options The class sizes, number of stretches and noise; see `SwissRoll2dOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` the stretch of each point, and the exact density in `meta.truth`.
+ *
+ * @example The roll in four stretches
+ * const d = swissRoll2d(stream(0), { n: 100 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', Array.from({ length: 4 }, (_, j) => y.filter((v) => v === j).length))
+ * // The radius is t / 5, so it grows from about 0.94 (inner stretch) to 2.83 (outer).
+ * const r = toArray(d.x).map(([u, v]) => Math.hypot(u, v))
+ * const stretch = (j) => r.filter((_, i) => y[i] === j)
+ * print('mean radius per stretch:', [0, 1, 2, 3].map((j) => stretch(j).reduce((a, v) => a + v, 0) / stretch(j).length))
  */
 export function swissRoll2d(s: Stream, options: SwissRoll2dOptions = {}): Dataset {
   const { stretches = 4, noise = 0.08 } = options
@@ -332,15 +449,32 @@ export function swissRoll2d(s: Stream, options: SwissRoll2dOptions = {}): Datase
 export interface AnnulusOptions {
   /** Points. Default 200. */
   n?: number
-  /** Inner and outer radius. Default 3 and 4. */
+  /** Inner radius, at least 0. Default 3. */
   inner?: number
+  /** Outer radius, above the inner. Default 4. */
   outer?: number
 }
 
 /**
- * Points uniform on the annulus inner ≤ |x| ≤ outer, a shell around data in a smaller disc: out-of-distribution
- * points for density and energy scores. Radius by inverse CDF, r = √(inner² + u(outer² − inner²)). The truth is the
- * uniform density 1/(π(outer² − inner²)) on the annulus, one class.
+ * Points uniform on the annulus $r_0 \le \lVert\xvec\rVert \le r_1$ ($r_0$ the `inner` radius, $r_1$ the `outer`),
+ * a shell around data in a smaller disc: out-of-distribution points for density and energy scores. Radius by inverse
+ * CDF, $r = \sqrt{r_0^2 + u(r_1^2 - r_0^2)}$. The truth is the uniform density $1/(\pi(r_1^2 - r_0^2))$ on the
+ * annulus, one class (every label is 0). Throws `DomainError` unless $0 \le r_0 < r_1$.
+ *
+ * @param s The random stream: the points come from its child `points`, the truth's reference sample from `truth`.
+ * @param options The number of points and the two radii; see `AnnulusOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` all 0, and the uniform density in `meta.truth`.
+ *
+ * @example A shell between radii 3 and 4
+ * const d = annulus(stream(0), { n: 200 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const r = toArray(d.x).map(([u, v]) => Math.hypot(u, v))
+ * print('radii from', Math.min(...r), 'to', Math.max(...r))
+ * // Uniform on the annulus, the mean squared radius is (9 + 16) / 2 = 12.5.
+ * print('mean squared radius:', r.reduce((a, v) => a + v * v, 0) / r.length)
+ * // The density is 1 / (7 pi) = 0.0455 inside and 0 outside.
+ * const logp = toArray(d.meta.truth.logDensity(tensor([[3.5, 0], [0, 0]])))
+ * print('density at radius 3.5 and 0:', logp.map(([v]) => Math.exp(v)))
  */
 export function annulus(s: Stream, options: AnnulusOptions = {}): Dataset {
   const { n = 200, inner = 3, outer = 4 } = options

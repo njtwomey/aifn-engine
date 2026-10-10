@@ -5,9 +5,9 @@
  * corpus, in rank order, each with its dictionary hyphenation points: 11401 points in all, about 79 KB. The rest of
  * the list is not kept.
  *
- * Labels are per letter: label i is 1 when the dictionary puts a hyphen after letter i. Dictionary points are one
- * convention among several acceptable ones (Moby splits by syllable, e.g. "man-y" and "ver-y", which a typesetter
- * would not use), so a "wrong" hyphen is sometimes a defensible one.
+ * Labels are per letter: label $i$ is 1 when the dictionary puts a hyphen after letter $i$ (counting from 0), and 0
+ * otherwise. Dictionary points are one convention among several acceptable ones (Moby splits by syllable, e.g. "man-y"
+ * and "ver-y", which a typesetter would not use), so a "wrong" hyphen is sometimes a defensible one.
  */
 
 import type { DatasetInfo, DatasetMeta, Size } from 'aifn-compute/foundation/contracts'
@@ -26,6 +26,7 @@ export interface DictionaryWord extends HyphenatedWord {
 
 /** One part of the split: words in rank order. */
 export interface HyphenationPart {
+  /** The part's words with their dictionary hyphens, most frequent first. */
   readonly words: readonly DictionaryWord[]
   /** Hyphenation points in all. */
   readonly points: Size
@@ -36,8 +37,11 @@ export interface HyphenationPart {
  * truth (`null`).
  */
 export interface HyphenationTruth {
+  /** The kind of truth: a lookup in the dictionary. */
   readonly kind: 'dictionary'
-  /** The dictionary's hyphens of a word (gaps after letter i), or null if it is not listed. */
+  /**
+   * The dictionary's hyphens of a word (the letters $i$, from 0, that a hyphen follows), or null if it is not listed.
+   */
   hyphens(word: string): readonly number[] | null
   /** Per-letter labels of a listed word (1: a hyphen follows the letter), or null. */
   labels(word: string): readonly number[] | null
@@ -45,12 +49,17 @@ export interface HyphenationTruth {
 
 /** The vendored words with a train/test split by word, and the dictionary as truth. */
 export interface HyphenationData {
+  /** Every kept word, in rank order. */
   readonly all: HyphenationPart
+  /** The training words: those not held out, in rank order. */
   readonly train: HyphenationPart
+  /** The held-out test words, in rank order. */
   readonly test: HyphenationPart
+  /** The dictionary over every kept word, training and test alike. */
   readonly truth: HyphenationTruth
   /** The longest word, in letters. */
   readonly longest: Size
+  /** Name, description, source and URL of the data, and `sha256`, the hash of the Moby source file. */
   readonly meta: DatasetMeta & { readonly sha256: string }
 }
 
@@ -62,9 +71,14 @@ export interface MobyHyphenationOptions {
   testFraction?: number
 }
 
+/** The parsed word list, filled on first use by `dictionary`. */
 let parsed: DictionaryWord[] | null = null
 
-/** Every vendored word, parsed once, in rank order. */
+/**
+ * Every vendored word, parsed once, in rank order.
+ *
+ * @returns The 8000 words with their hyphens and ranks; the same array on every call.
+ */
 function dictionary(): DictionaryWord[] {
   if (!parsed) parsed = WORDS.split('\n').map((line, rank) => ({ ...parseHyphenated(line), rank }))
   return parsed
@@ -73,12 +87,30 @@ function dictionary(): DictionaryWord[] {
 /** The number of vendored words. */
 export const MOBY_WORDS = 8000
 
+/**
+ * A part of the split from its words.
+ *
+ * @param words The part's words, in rank order; kept as given.
+ * @returns The words and their total number of hyphenation points.
+ */
 const part = (words: DictionaryWord[]): HyphenationPart => ({
   words,
   points: words.reduce((a, w) => a + w.hyphens.length, 0),
 })
 
-/** Per-letter labels of a hyphenated word: 1 at each letter a hyphen follows. */
+/**
+ * Per-letter labels of a hyphenated word: 1 at each letter a hyphen follows, 0 elsewhere.
+ *
+ * @param word The word and its hyphens, each the index (from 0) of the letter the hyphen follows.
+ * @returns One label per letter of `word.word`.
+ *
+ * @example The labels of a word
+ * print(hyphenLabels({ word: 'hyphenation', hyphens: [1, 5] }))
+ *
+ * @example The labels of the first dictionary words with a hyphen
+ * const { all } = mobyHyphenation(stream(1), { words: 20 })
+ * for (const w of all.words.filter((w) => w.hyphens.length > 0).slice(0, 3)) print(w.word, hyphenLabels(w))
+ */
 export function hyphenLabels(word: HyphenatedWord): number[] {
   const out = new Array<number>(word.word.length).fill(0)
   for (const i of word.hyphens) out[i] = 1
@@ -86,8 +118,30 @@ export function hyphenLabels(word: HyphenatedWord): number[] {
 }
 
 /**
- * The `words` most frequent vendored words (see the module comment), split at random by word into training words and
- * a held-out share `testFraction`, drawn from `child(s, 'split')`. Both parts keep rank order.
+ * The `words` most frequent vendored words (see the file comment), split at random by word into training words and a
+ * held-out share `testFraction`, drawn from `child(s, 'split')`. Both parts keep rank order. Throws `DomainError` when
+ * `words` is not an integer from 10 to `MOBY_WORDS`, or `testFraction` is not strictly between 0 and 1.
+ *
+ * Source: Grady Ward, Moby Hyphenator II, Project Gutenberg etext #3204, placed in the public domain by its author
+ * (January 2001); words ranked by their frequency in the Brown corpus (Francis and Kučera, 1979).
+ *
+ * @param s The random stream the split is drawn from.
+ * @param options How many words to keep and the share to hold out.
+ * @returns The kept words, the train and test parts, the dictionary as truth, the longest word's length and the
+ *   provenance. The test part has $\max(1, \operatorname{round}(f n))$ words, for $n$ = `words` and $f$ =
+ *   `testFraction`.
+ *
+ * @example Sizes and the first words
+ * const d = mobyHyphenation(stream(1), { words: 1000 })
+ * print('train:', d.train.words.length, 'words,', d.train.points, 'points')
+ * print('test:', d.test.words.length, 'words,', d.test.points, 'points  longest:', d.longest, 'letters')
+ * print('first:', d.all.words.slice(0, 3).map((w) => w.word))
+ * for (const w of d.all.words.filter((w) => w.hyphens.length).slice(0, 3)) print(w.word, 'hyphens after', w.hyphens)
+ *
+ * @example The dictionary as truth
+ * const { truth } = mobyHyphenation(stream(1), { words: 1000 })
+ * print('people:', truth.hyphens('people'), truth.labels('people'))
+ * print('not listed:', truth.hyphens('zzzz'))
  */
 export function mobyHyphenation(s: Stream, options: MobyHyphenationOptions = {}): HyphenationData {
   const { words = MOBY_WORDS, testFraction = 0.15 } = options

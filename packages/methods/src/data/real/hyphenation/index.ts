@@ -1,7 +1,12 @@
 /**
  * `aifn-methods/data/real/hyphenation`: common English words with dictionary hyphenation points from the Moby
- * Hyphenator II list (public domain), split by word into train and test, with the dictionary as truth. A separate
- * module so that the 79 KB word list is loaded only by pages that use it (its own registry,
+ * Hyphenator II list (public domain), split by word into train and test, with the dictionary as truth.
+ *
+ * - The dataset: `mobyHyphenation`, up to `MOBY_WORDS` ($8000$) words of 4 to 15 letters in Brown-corpus frequency
+ *   order, split at random by word, with the dictionary's hyphens of every kept word as truth.
+ * - Labels: `hyphenLabels`, one label per letter (1 where a hyphen follows), the target of a per-letter classifier.
+ *
+ * A separate module so that the 79 KB word list is loaded only by pages that use it (its own registry,
  * `hyphenationDatasetRegistry`, sits outside `aifn-methods/data`'s `datasetRegistry`).
  */
 

@@ -1,10 +1,54 @@
 /**
- * `aifn-methods/data/synthetic`: seeded synthetic datasets: points (blobs, moons, circles, spirals, …), regression,
- * 2-d densities for generative models (ring and grid of Gaussians, pinwheel, Swiss-roll slice, annulus), inverse
- * problems with multi-valued answers (Bishop's folded sine, two-link arm kinematics),
- * sequences, piecewise series with known changepoints, learners with zero-inflated responses, images, paired views
- * (image and caption) and recommender interactions; and modifiers (noise, outliers, shifts, missingness, linear maps).
- * Recipes, which replay generators and modifiers by key, are in `aifn-methods/data`.
+ * `aifn-methods/data/synthetic`: seeded synthetic datasets with known ground truth, and the modifiers that change them.
+ *
+ * - Point clouds for classification and clustering: `blobs`, `anisotropicBlobs`, `gaussians`, `moons`, `circles`,
+ *   `rings`, `spirals`, `xor`, `checkerboard` and `halfKernel`, the 3-d manifolds `swissRoll` and `sCurve`, and
+ *   `shuffleDataset` (generators group points by class).
+ * - Two-dimensional densities for generative models, each with its exact density: `gaussianRing`, `gaussianGrid`,
+ *   `pinwheel`, `swissRoll2d`, and `annulus` for out-of-distribution points.
+ * - Regression: `regression1d`, `linearRegressionData`, `friedman1`, additive models (`additiveData`,
+ *   `ADDITIVE_SHAPES`), smooth 1-d laws for GAMs and expectiles (`curve1d`, `CURVE1D_CASES`), a growth chart
+ *   (`growthChart`, `GROWTH_TRUTH`), mixtures of experts (`piecewiseLinear`, `quadrantPlanes`, `quadrantOf`,
+ *   `interleavedFunctions`, `regressionMixture`) and inverse problems with several answers (`bishopInverse`,
+ *   `twoLinkArm`, `twoLinkInverse`, `twoLinkJoints`).
+ * - Sequences and series: hidden Markov models (`hmmSample`, `casino`), `arSeries`, `seasonalSeries`, `randomWalk`,
+ *   `motifSeries`; series with known changepoints (`meanShifts`, `varianceShifts`, `poissonShifts`, `arRegimes`); named
+ *   Markov chains (`weatherChain`, `gamblersRuinChain`, `randomWalkChain`, `ehrenfestChain`); flows that split and
+ *   cross (`odeFailureCase`, `floorplanWalks`, `FLOORPLAN`); and labelled web traffic (`webTraffic`,
+ *   `WEB_TRAFFIC_CLASSES`).
+ * - Recommendation, decisions and ratings: `zipfWeights`, `zipfCatalogue`, `ratings`, `clickLog`, `implicitFeedback`,
+ *   `simulatedImpressions`; bandit logs and expert games (`banditProblem`, `logBandit`, `loggedBandit`, `slateBandit`,
+ *   `expertGame`); skill rating (`tournament`, `plackettLuceRankings`, `irtResponses`, `ratingPopulation`,
+ *   `ratingMatches`, `skillPath`, `winProbability`, `focalPlayerStream`, `focalPlayerMatches`); and learners'
+ *   responses (`learnerResponses`, `LEARNER_CONDITIONS`, `LEARNER_ITEM_FEATURES`, `LEARNER_UNSUITABILITY`).
+ * - Weak and noisy supervision: `labellingFunctions`, `crowdLabels`, `positiveUnlabelled`, `proportionBags`,
+ *   `instanceBags`, `complementaryLabels`; class-conditional label noise with its anchor points
+ *   (`classConditionalNoise`, `classConditionalNoiseTruth`, `noisyPosterior`, `noiseLayoutAnchors`,
+ *   `noiseLayoutPosterior`); and shifted domains and task sequences (`shiftedMoons`, `labelShiftDomains`,
+ *   `rotatingTasks`).
+ * - Evaluation and explanation test beds: model outputs to calibrate (`classifierOutputs`, `quantileModelOutputs`),
+ *   censored survival (`censoredSurvival`, `weibullPhSurvival`), planted anomalies (`plantedAnomalies`,
+ *   `ANOMALY_SHAPES`), planted subgroups (`plantedSubgroups`, `plantedModelFlip` and the `PLANTED_*` patterns), and
+ *   tasks with known explanations (`attributionTask`, `attributionScore`, `feasibilityTask`, `correlatedEffects`,
+ *   `correlatedEffectsTerm`, `correlatedEffectsTruth`, `interactionTask`, `interactionTaskTruth`, `plantedPatterns`,
+ *   `plantedMask`, `plantedShape`, `conceptExamples`, `conceptImages`, `CONCEPTS`).
+ * - Images, latent factors and paired views: test images (`checkerboardImage`, `gradientImage`, `shapesImage`,
+ *   `geometricScene`, `digits`, `digitGlyphs`, `barsAndStripes`), sources and factors (`cocktailParty`,
+ *   `strokeGlyphs`, `glyphStrokes`, `latentFactors`, `latentFactorModel`), and image and caption pairs
+ *   (`pairedShapes`, `PAIRED_COLOURS`, `PAIRED_RGB`, `PAIRED_SHAPES`, `PAIRED_SIZES`).
+ * - Algorithmic tasks for small transformers and grokking: `sequenceTasks` (`SEQUENCE_TASKS`, `SEQUENCE_VOCABULARY`,
+ *   `encodeSequence`, `decodeSequence`, `sequenceTaskTruth`) and $a \circ b \bmod p$ tables (`modularArithmetic`,
+ *   `MODULAR_OPERATIONS`, `modularValue`, `modularTruth`).
+ * - Modifiers, from one `Dataset` to another: label noise (`withLabelNoise`, `symmetricNoise`, `flippedMask`), class
+ *   balance (`withPrevalence`, `withLabelShift`), `withOutliers`, `withNuisanceFeatures`, linear maps (`withTransform`,
+ *   `rotation2d`, `shear2d`), `withMissing`, `withCovariateShift`, and `split` into train and test parts.
+ *
+ * Every random generator takes a `Stream` first and is a pure function of it, drawing its parts from named child
+ * streams. Labelled point generators take class sizes alike (a total with `prevalence` or `classWeights`, or per-class
+ * counts) and give exact counts. Where the generating process is known in closed form, the truth is attached in
+ * `meta.truth` (the Bayes posterior and error, the regression function, the segments) or returned beside the data, and
+ * the modifiers keep it consistent. Generators and modifiers are registered by key and record themselves in
+ * `meta.recipe`; recipes, which replay them, are in `aifn-methods/data`.
  */
 
 export {

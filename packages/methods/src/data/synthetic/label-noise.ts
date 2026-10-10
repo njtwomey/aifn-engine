@@ -1,21 +1,24 @@
 /**
  * Binary data corrupted by class-conditional label noise, with the true posterior known, for the anchor-point tests of
  * Poyiadzi et al. (2022, "Statistical hypothesis testing for class-conditional label noise", ECML-PKDD) and Yang et al.
- * (2024, AAAI). Notation as the papers: the clean label y ∈ {0, 1} (the papers' −1, +1), the noisy label ỹ, and the
- * noise rates α = P(ỹ = 0 | y = 1), β = P(ỹ = 1 | y = 0); uniform noise is α = β = τ, class-conditional noise α ≠ β.
- * The noisy posterior is η̃(x) = (1 − α − β) η(x) + β, so at an anchor point, where η(x) = ½, it is (1 − α + β)/2: ½
- * exactly when α = β.
+ * (2024, AAAI). Notation as the papers: the clean label $y \in \{0, 1\}$ (the papers' $-1$, $+1$), the noisy label
+ * $\tilde{y}$, and the noise rates $\alpha = \pr(\tilde{y} = 0 \mid y = 1)$, $\beta = \pr(\tilde{y} = 1 \mid y = 0)$;
+ * uniform noise is $\alpha = \beta = \tau$, class-conditional noise $\alpha \ne \beta$. The noisy posterior is
+ * $\tilde{\eta}(\xvec) = (1 - \alpha - \beta) \eta(\xvec) + \beta$, so at an anchor point, where $\eta(\xvec) = 1/2$,
+ * it is $(1 - \alpha + \beta)/2$: $1/2$ exactly when $\alpha = \beta$.
  *
  * Layouts, each with equal class priors:
- * - `gaussians`: N([1, 1], I) against N([−1, −1], I) (Poyiadzi et al. 2022, §5); η(x) = σ(2(x₁ + x₂)) is logistic,
- *   and the anchors η = ½ are the line x₂ = −x₁, drawn with x₁ ~ U[−4, 4].
- * - `xor`: class 1 an equal mixture of N([2, 2], I) and N([−2, −2], I), class 0 of N([−2, 2], I) and N([2, −2], I)
- *   (Yang et al. 2024, symmetric XOR); the anchors are the two axes.
- * - `asymmetric-xor`: class 1 at [4, 4] and [−2, −2], class 0 at [−1, 1] and [1, −1] (Yang et al. 2024); the anchors are
- *   found numerically.
+ * - `gaussians`: $\Gauss([1, 1], \Imat)$ against $\Gauss([-1, -1], \Imat)$ (Poyiadzi et al. 2022, §5);
+ *   $\eta(\xvec) = \sigma(2(x_1 + x_2))$ is logistic, and the anchors $\eta = 1/2$ are the line $x_2 = -x_1$, drawn
+ *   with $x_1 \sim \Unif(-4, 4)$.
+ * - `xor`: class 1 an equal mixture of $\Gauss([2, 2], \Imat)$ and $\Gauss([-2, -2], \Imat)$, class 0 of
+ *   $\Gauss([-2, 2], \Imat)$ and $\Gauss([2, -2], \Imat)$ (Yang et al. 2024, symmetric XOR); the anchors are the two
+ *   axes.
+ * - `asymmetric-xor`: class 1 at $[4, 4]$ and $[-2, -2]$, class 0 at $[-1, 1]$ and $[1, -1]$ (Yang et al. 2024); the
+ *   anchors are found numerically.
  *
- * Anchors lie in [−4, 4]²: strict ones (δ = 0) by bisection of η − ½ along random segments, relaxed ones
- * (η ∈ [½ − δ, ½ + δ]) by rejection sampling.
+ * Anchors lie in $[-4, 4]^2$: strict ones ($\delta = 0$) by bisection of $\eta - 1/2$ along random segments, relaxed
+ * ones ($\eta \in [1/2 - \delta, 1/2 + \delta]$) by rejection sampling.
  */
 
 import { child, normal, uniform, type Stream } from 'aifn-compute/foundation/random'
@@ -27,7 +30,7 @@ import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { classificationTruth, points, REFERENCE_SIZE, type ClassificationTruth } from '../truth'
 import { checkCount, labels, matrix, type DatasetMeta } from '../types'
 
-/** The class layouts of {@link classConditionalNoise}. */
+/** The class layouts of `classConditionalNoise`. */
 export type NoiseLayout = 'gaussians' | 'xor' | 'asymmetric-xor'
 
 /** Each layout's class-1 and class-0 mixture centres (unit covariance). */
@@ -55,10 +58,29 @@ const CENTRES: Record<NoiseLayout, { one: number[][]; zero: number[][] }> = {
   },
 }
 
+/**
+ * The density of an equal mixture of unit Gaussians at a point, up to the constant $1/(2\pi)$.
+ *
+ * @param x The point, two coordinates.
+ * @param centres The mixture's centres, each two coordinates.
+ * @returns The mean over the centres of $\exp(-\norm{\xvec - \cvec}^2/2)$.
+ */
 const density = (x: readonly number[], centres: number[][]) =>
   centres.reduce((s, c) => s + Math.exp(-0.5 * ((x[0] - c[0]) ** 2 + (x[1] - c[1]) ** 2)), 0) / centres.length
 
-/** The clean posterior η(x) = P(y = 1 | x) of a layout (equal priors). */
+/**
+ * The clean posterior $\eta(\xvec) = \pr(y = 1 \mid \xvec)$ of a layout (equal priors); $1/2$ where both densities
+ * underflow.
+ *
+ * @param layout The class layout.
+ * @returns $\eta$ as a function of a point (two coordinates).
+ *
+ * @example On the anchor line, and towards each class
+ * const eta = noiseLayoutPosterior('gaussians')
+ * print('eta(0, 0):', eta([0, 0]), ' eta(1, -1):', eta([1, -1]))
+ * print('eta(1, 1):', eta([1, 1]), ' sigma(4):', 1 / (1 + Math.exp(-4)))
+ * print('xor, eta(2, 2) and eta(-2, 2):', noiseLayoutPosterior('xor')([2, 2]), noiseLayoutPosterior('xor')([-2, 2]))
+ */
 export function noiseLayoutPosterior(layout: NoiseLayout): (x: readonly number[]) => number {
   const { one, zero } = CENTRES[layout]
   return (x) => {
@@ -68,7 +90,12 @@ export function noiseLayoutPosterior(layout: NoiseLayout): (x: readonly number[]
   }
 }
 
-/** log p(x | y = j) of a layout's two mixtures, [n, 2] (up to the shared Gaussian constant). */
+/**
+ * $\log p(\xvec \mid y = j)$ of a layout's two mixtures, $n \times 2$ (up to the shared Gaussian constant).
+ *
+ * @param layout The class layout.
+ * @returns A function of $n \times 2$ points giving, per row, the log density under class 0 then class 1.
+ */
 function layoutLogDensity(layout: NoiseLayout): (x: Tensor) => Tensor {
   const { one, zero } = CENTRES[layout]
   return (x) => {
@@ -85,7 +112,20 @@ function layoutLogDensity(layout: NoiseLayout): (x: Tensor) => Tensor {
 
 /**
  * The truth of a noisy layout as a classification model: clean densities and equal priors, then the noise matrix
- * T = [[1 − β, β], [α, 1 − α]] (T[i][j] = P(ỹ = j | y = i)), so `posterior` is η̃ and `cleanPosterior` is η.
+ * $\Tmat = \begin{pmatrix} 1 - \beta & \beta \\ \alpha & 1 - \alpha \end{pmatrix}$
+ * ($T_{ij} = \pr(\tilde{y} = j \mid y = i)$), so `posterior` is $\tilde{\eta}$ and `cleanPosterior` is $\eta$.
+ *
+ * @param s The stream of the clean reference sample the truth draws when asked for it (child `'reference'`).
+ * @param layout The class layout.
+ * @param alpha The rate $\alpha$ at which class-1 labels flip.
+ * @param beta The rate $\beta$ at which class-0 labels flip.
+ * @returns The classification truth, its posteriors over the noisy labels.
+ *
+ * @example At an anchor the noisy posterior is (1 - alpha + beta) / 2
+ * const truth = classConditionalNoiseTruth(stream(1), 'gaussians', 0.1, 0.3)
+ * const x = tensor([[0, 0], [2, 2]])
+ * print('clean posterior:', truth.cleanPosterior(x))
+ * print('noisy posterior:', truth.posterior(x))
  */
 export function classConditionalNoiseTruth(
   s: Stream,
@@ -114,16 +154,42 @@ export function classConditionalNoiseTruth(
   })
 }
 
-/** The noisy posterior η̃ = (1 − α − β) η + β. */
+/**
+ * The noisy posterior $\tilde{\eta} = (1 - \alpha - \beta) \eta + \beta$.
+ *
+ * @param eta The clean posterior $\eta = \pr(y = 1 \mid \xvec)$.
+ * @param alpha The rate $\alpha$ at which class-1 labels flip.
+ * @param beta The rate $\beta$ at which class-0 labels flip.
+ * @returns $\tilde{\eta} = \pr(\tilde{y} = 1 \mid \xvec)$.
+ *
+ * @example At an anchor point, uniform against class-conditional noise
+ * print('alpha = beta = 0.2:', noisyPosterior(0.5, 0.2, 0.2))
+ * print('alpha = 0, beta = 0.1:', noisyPosterior(0.5, 0, 0.1))
+ * print('eta = 1, alpha = 0.2:', noisyPosterior(1, 0.2, 0.1))
+ */
 export const noisyPosterior = (eta: number, alpha: number, beta: number): number => (1 - alpha - beta) * eta + beta
 
+/** Half the side of the box $[-4, 4]^2$ in which anchors are sought. */
 const BOX = 4
 
 /**
- * k anchor points of a layout in [−4, 4]²: |η(x) − ½| ≤ δ. With δ = 0 each is a root of η − ½ on a random segment
- * (bisection to machine precision); with δ > 0 points are drawn uniformly on the box and kept when they qualify. The
- * `gaussians` layout uses the papers' recipe directly: x = (u, −u), u ~ U[−4, 4] (plus a uniform offset along [1, 1]
- * inside the band for δ > 0, found by rejection).
+ * $k$ anchor points of a layout in $[-4, 4]^2$: $\abs{\eta(\xvec) - 1/2} \le \delta$. With $\delta = 0$ each is a root
+ * of $\eta - 1/2$ on a random segment (bisection to machine precision); with $\delta > 0$ points are drawn uniformly
+ * on the box and kept when they qualify. The `gaussians` layout uses the papers' recipe directly: $\xvec = (u, -u)$,
+ * $u \sim \Unif(-4, 4)$ (plus, for $\delta > 0$, an offset $v(1, 1)/\sqrt{2}$ with $v \sim \Unif(-1, 1)$, kept by
+ * rejection, which can reach just past the box). Throws `DomainError` when $k$ is not a non-negative integer, $\delta$
+ * is not in $[0, 1/2)$, or no $k$ anchors are found in $10000(k + 1)$ tries.
+ *
+ * @param s The stream the candidates are drawn from (try $i$ from `child(s, 'anchor', i)`).
+ * @param layout The class layout.
+ * @param k The number of anchor points.
+ * @param delta The half-width $\delta$ of the band of $\eta$ around $1/2$ that counts as an anchor; 0 for exact ones.
+ * @returns The $k$ anchor points, each two coordinates.
+ *
+ * @example Exact anchors of the XOR layout lie on the axes
+ * const anchors = noiseLayoutAnchors(stream(1), 'xor', 4)
+ * print('anchors:', anchors)
+ * print('eta there:', anchors.map(noiseLayoutPosterior('xor')))
  */
 export function noiseLayoutAnchors(s: Stream, layout: NoiseLayout, k: number, delta = 0): number[][] {
   checkCount(k, 'noiseLayoutAnchors')
@@ -167,7 +233,13 @@ export function noiseLayoutAnchors(s: Stream, layout: NoiseLayout, k: number, de
   return out
 }
 
-/** A point near the anchor line of `gaussians`: (u, −u) plus an offset v(1, 1)/√2 with v ~ U[−1, 1]. */
+/**
+ * A point near the anchor line of `gaussians`: $(u, -u)$ plus an offset $v(1, 1)/\sqrt{2}$, with $u \sim \Unif(-4, 4)$
+ * and $v \sim \Unif(-1, 1)$.
+ *
+ * @param r The stream $u$ and $v$ are drawn from (children `'u'` and `'v'`).
+ * @returns The point, two coordinates.
+ */
 function lineOffset(r: Stream): number[] {
   const u = BOX * (2 * uniform(child(r, 'u')) - 1)
   const v = 2 * uniform(child(r, 'v')) - 1
@@ -176,35 +248,59 @@ function lineOffset(r: Stream): number[] {
 
 /** A sample with class-conditional label noise. */
 export interface ClassConditionalNoiseSample {
+  /** Marks a dataset. */
   kind: 'dataset'
+  /** The points, $n \times 2$. */
   x: Tensor
-  /** The noisy labels ỹ (int32, 0/1): what a learner sees. */
+  /** The noisy labels $\tilde{y}$ (int32, 0/1): what a learner sees. */
   y: Tensor
-  /** The clean labels y and which labels were flipped. */
+  /** The clean labels $y$ (int32, 0/1). */
   clean: Tensor
+  /** Which labels were flipped (int32, 1 for a flip). */
   flipped: Tensor
+  /** The rate $\alpha$ at which class-1 labels were flipped. */
   alpha: number
+  /** The rate $\beta$ at which class-0 labels were flipped. */
   beta: number
+  /** The class layout. */
   layout: NoiseLayout
+  /** The name, description and, unless turned off, the truth (`classConditionalNoiseTruth`). */
   meta: DatasetMeta
 }
 
-/** Options of {@link classConditionalNoise}. */
+/** Options of `classConditionalNoise`. */
 export interface ClassConditionalNoiseOptions {
-  /** Training points N (default 1000), half of each class. */
+  /** Training points $N$ (default 1000), half of each class (class 1 gets the odd one). */
   n?: number
+  /** The class layout (default `'gaussians'`). */
   layout?: NoiseLayout
-  /** α = P(ỹ = 0 | y = 1) and β = P(ỹ = 1 | y = 0) (default 0 and 0.1, as Yang et al.). */
+  /** $\alpha = \pr(\tilde{y} = 0 \mid y = 1)$ (default 0, as Yang et al.). */
   alpha?: number
+  /** $\beta = \pr(\tilde{y} = 1 \mid y = 0)$ (default 0.1, as Yang et al.); $\alpha + \beta$ must be below 1. */
   beta?: number
   /** Attach the truth (default true). */
   truth?: boolean
 }
 
 /**
- * Draw N points of a layout (module notes), half of each class, and flip each label independently: a class-1 label with
- * probability α, a class-0 label with probability β. The flips use their own substream (`child(s, 'flip')`), so the
- * same seed with α = β = 0 gives the clean sample.
+ * Draw $N$ points of a layout (see the file comment), half of each class, and flip each label independently: a class-1
+ * label with probability $\alpha$, a class-0 label with probability $\beta$. The flips use their own substream
+ * (`child(s, 'flip')`), so the same seed with $\alpha = \beta = 0$ gives the clean sample. The first
+ * $\lceil N/2 \rceil$ rows are class 1. Throws `DomainError` when $N$ is not a non-negative integer, a rate is negative
+ * or $\alpha + \beta \ge 1$.
+ *
+ * @param s The stream the points are drawn from (per point, children `'component'`, `'x'` and `'flip'`; the truth's
+ *   reference sample from `child(s, 'truth')`).
+ * @param options The size, the layout, the noise rates, and whether to attach the truth.
+ * @returns The points with their noisy and clean labels, which were flipped, the rates and the layout.
+ *
+ * @example The flip rate of each class matches its noise rate
+ * const d = classConditionalNoise(stream(1), { n: 4000, alpha: 0.1, beta: 0.3 })
+ * const [clean, flipped] = [toArray(d.clean), toArray(d.flipped)]
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * print('first noisy labels:', toArray(d.y).slice(0, 8), ' clean:', clean.slice(0, 8))
+ * const rate = (c) => flipped.filter((f, i) => clean[i] === c && f === 1).length / clean.filter((v) => v === c).length
+ * print('class-1 flip rate (alpha 0.1):', rate(1), ' class-0 flip rate (beta 0.3):', rate(0))
  */
 export function classConditionalNoise(
   s: Stream,

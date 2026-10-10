@@ -1,4 +1,4 @@
-/** Seeded regression problems: a named 1-D function with noise, a linear model in d dimensions, and Friedman #1. */
+/** Seeded regression problems: a named 1-D function with noise, a linear model in $d$ dimensions, and Friedman #1. */
 
 import { normal, type Stream, child, uniform } from 'aifn-compute/foundation/random'
 import { regressionTruth } from '../truth'
@@ -29,12 +29,13 @@ const FUNCTIONS: Record<RegressionFunction, { f: (x: number) => number; range: [
 
 /** Options for `regression1d`. */
 export interface Regression1dOptions {
+  /** Points (default 50). */
   n?: number
   /** A named function or any function of one number. Default `sine`. */
   fn?: RegressionFunction | ((x: number) => number)
-  /** Noise standard deviation. Default 0.2. */
+  /** Noise standard deviation $\sigma_0$ (at the left end of the range when it grows). Default 0.2. */
   noise?: number
-  /** Input range; defaults to the named function's. */
+  /** Input range $[a, b]$; defaults to the named function's, or $[0, 1]$ for a custom one. */
   range?: readonly [number, number]
   /**
    * `random`: x uniform on the range (sorted); `even`: evenly spaced including both ends; `gapped`: non-uniform with a
@@ -42,13 +43,35 @@ export interface Regression1dOptions {
    * between. Default `random`.
    */
   spacing?: 'random' | 'even' | 'gapped'
-  /** Noise sd grows linearly from `noise` at the left end to `noise · (1 + heteroscedastic)` at the right. Default 0. */
+  /**
+   * $h$: the noise standard deviation grows linearly from $\sigma_0$ at the left end to $\sigma_0(1 + h)$ at the right.
+   * Default 0.
+   */
   heteroscedastic?: number
 }
 
 /**
- * A 1-D regression problem y = f(x) + ε with ε ~ N(0, σ(x)²). Returns x (n × 1, sorted), y, and `f`, the noise-free
- * values at x.
+ * A 1-D regression problem $y = f(x) + \varepsilon$ with $\varepsilon \sim \Gauss(0, \sigma(x)^2)$ and
+ * $\sigma(x) = \sigma_0(1 + h(x - a)/(b - a))$ on the range $[a, b]$. The named functions are `sine` ($\sin x$ on
+ * $[0, 2\pi]$), `linear` ($0.5 + 0.8x$ on $[-2, 2]$), `cubic` ($x^3 - x$ on $[-1.5, 1.5]$), `step` ($\sgn x$ on
+ * $[-2, 2]$), `sinc` ($\sin(\pi x)/(\pi x)$ on $[-4, 4]$), `bump` ($e^{-8x^2}$ on $[-1, 1]$) and `doppler`
+ * ($\sqrt{x(1 - x)} \sin(2.1\pi/(x + 0.05))$ on $[0, 1]$, Donoho and Johnstone, 1994). The truth (`meta.truth`) knows
+ * $f$ and $\sigma(x)$. Throws `DomainError` when $n$ is not a non-negative integer or the function name is unknown.
+ *
+ * @param s The stream the inputs (child `'x'`) and the noise (child `'noise'`) are drawn from.
+ * @param options The size, the function and its range, the noise and its growth, and the spacing of the inputs.
+ * @returns A regression dataset: `x` ($n \times 1$, sorted), `y`, and `f`, the noise-free values at `x`.
+ *
+ * @example Noisy sine: the residuals have the noise's standard deviation
+ * const d = regression1d(stream(1), { n: 500, fn: 'sine', noise: 0.2 })
+ * const [x, y, f] = [toArray(d.x).map((r) => r[0]), toArray(d.y), toArray(d.f)]
+ * print('x:', d.x.shape, ' first x:', x.slice(0, 3), ' first y:', y.slice(0, 3))
+ * print('sd of y - f:', Math.sqrt(y.reduce((a, v, i) => a + (v - f[i]) ** 2, 0) / y.length))
+ *
+ * @example Gapped inputs leave the middle of the range empty
+ * const x = toArray(regression1d(stream(1), { n: 200, fn: 'bump', spacing: 'gapped' }).x).map((r) => r[0])
+ * // On [-1, 1] the gap is from -0.1 to 0.3.
+ * print('left of the gap:', x.filter((v) => v < -0.1).length, ' in it:', x.filter((v) => v > -0.1 && v < 0.3).length)
  */
 export function regression1d(s: Stream, options: Regression1dOptions = {}): Dataset {
   const { n = 50, fn = 'sine', noise = 0.2, spacing = 'random', heteroscedastic = 0 } = options
@@ -103,20 +126,41 @@ export function regression1d(s: Stream, options: Regression1dOptions = {}): Data
 
 /** Options for `linearRegressionData`. */
 export interface LinearRegressionOptions {
+  /** Points (default 100). */
   n?: number
-  /** Number of features. Default 3 (ignored when `weights` is given). */
+  /** Number of features $d$. Default 3 (ignored when `weights` is given). */
   d?: number
-  /** True weights; drawn N(0, 1) from the substream `weights` when omitted. */
+  /** True weights $\wvec$; drawn $\Gauss(0, 1)$ from the substream `weights` when omitted. */
   weights?: readonly number[]
+  /** The intercept $b$ (default 0). */
   bias?: number
+  /** The standard deviation of the Gaussian noise (default 0.5). */
   noise?: number
-  /** Correlation between neighbouring features (an AR(1) design); 0 gives independent N(0, 1) features. */
+  /**
+   * Correlation $\rho$ between neighbouring features (an AR(1) design), in $(-1, 1)$; 0 (the default) gives independent
+   * $\Gauss(0, 1)$ features.
+   */
   correlation?: number
 }
 
 /**
- * A linear model y = xᵀw + b + ε with standard normal features (optionally AR(1)-correlated along the feature index)
- * and Gaussian noise. `f` holds xᵀw + b; the true weights are in the description and in `meta`.
+ * A linear model $y = \xvec^\top\wvec + b + \varepsilon$ with standard normal features (optionally AR(1)-correlated
+ * along the feature index: $x_j = \rho x_{j-1} + \sqrt{1 - \rho^2} z_j$) and Gaussian noise. `f` holds
+ * $\xvec^\top\wvec + b$; the true weights are returned as `weights` and `bias`, and given in the description. Throws
+ * `DomainError` when $n$ is not a non-negative integer; $\rho$ is not checked.
+ *
+ * @param s The stream the weights (child `'weights'`, when not given), the features (child `'x'`) and the noise (child
+ *   `'noise'`) are drawn from.
+ * @param options The size, the true weights or their number, the intercept, the noise and the feature correlation.
+ * @returns A regression dataset (`x` $n \times d$, `y`, `f`) with the true `weights` and `bias`.
+ *
+ * @example Correlated features and the noise's standard deviation
+ * const d = linearRegressionData(stream(1), { n: 1000, d: 3, correlation: 0.8, noise: 0.5 })
+ * const [x, y, f] = [toArray(d.x), toArray(d.y), toArray(d.f)]
+ * print('x:', d.x.shape, ' weights:', d.weights, ' bias:', d.bias)
+ * print('first row:', x[0], ' y:', y[0])
+ * print('mean of x1 x2 (the correlation):', x.reduce((a, r) => a + r[0] * r[1], 0) / 1000)
+ * print('sd of y - f:', Math.sqrt(y.reduce((a, v, i) => a + (v - f[i]) ** 2, 0) / 1000))
  */
 export function linearRegressionData(
   s: Stream,
@@ -172,8 +216,23 @@ export function linearRegressionData(
 
 /**
  * Friedman's first benchmark (Friedman, 1991, "Multivariate adaptive regression splines", Annals of Statistics 19(1)):
- * x uniform on [0, 1]^d (d ≥ 5) and y = 10 sin(π x₁x₂) + 20(x₃ − 1/2)² + 10x₄ + 5x₅ + ε; features beyond the fifth are
- * noise, as in `sklearn.datasets.make_friedman1`.
+ * $\xvec$ uniform on $[0, 1]^d$ ($d \ge 5$) and
+ * $y = 10 \sin(\pi x_1x_2) + 20(x_3 - 1/2)^2 + 10x_4 + 5x_5 + \varepsilon$, $\varepsilon \sim \Gauss(0, \sigma^2)$;
+ * features beyond the fifth are noise, as in `sklearn.datasets.make_friedman1`. Throws `DomainError` when $n$ is not a
+ * non-negative integer or $d < 5$.
+ *
+ * @param s The stream the features (child `'x'`) and the noise (child `'noise'`) are drawn from.
+ * @param options `n` (default 200), the number of points; `d` (default 10), the number of features, at least 5;
+ *   `noise` (default 1), the standard deviation $\sigma$ of the noise.
+ * @returns A regression dataset: `x` ($n \times d$), `y`, and `f` the noise-free values.
+ *
+ * @example The formula gives `f`, and the noise has standard deviation 1
+ * const d = friedman1(stream(1), { n: 1000 })
+ * const [x, y, f] = [toArray(d.x), toArray(d.y), toArray(d.f)]
+ * print('x:', d.x.shape, ' first row:', x[0])
+ * const [a, b, c, e, g] = x[0]
+ * print('formula:', 10 * Math.sin(Math.PI * a * b) + 20 * (c - 0.5) ** 2 + 10 * e + 5 * g, ' f:', f[0])
+ * print('sd of y - f:', Math.sqrt(y.reduce((t, v, i) => t + (v - f[i]) ** 2, 0) / 1000))
  */
 export function friedman1(s: Stream, options: { n?: number; d?: number; noise?: number } = {}): Dataset {
   const { n = 200, d = 10, noise = 1 } = options

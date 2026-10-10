@@ -1,20 +1,25 @@
 /**
  * Known truth for synthetic datasets. When the generating process has a closed form, a dataset carries it in
  * `meta.truth` as a model (`kind: 'model'`) with the contract's capabilities: the Bayes rule (`decide`), the Bayes
- * posterior or the conditional law of y (`predictive`), the regression function (`expect`), and the lowest risk any
+ * posterior or the conditional law of $y$ (`predictive`), the regression function (`expect`), and the lowest risk any
  * predictor can reach (`bayesRisk`). A figure draws the Bayes-optimal boundary and curves beside a fitted model's by
  * calling the same methods on both.
  *
- * A classification truth is built from class-conditional densities p(x | y = j), evaluated with the registered
- * distributions of `aifn-compute/probability/distributions`, and clean class priors πⱼ, followed by a list of label
- * operations: noise matrices T (T[i][j] = P(observed j | label i)) and class reweightings w (from resampling by
- * label). The joint of x and the observed label is then
+ * A classification truth is built from class-conditional densities $p(\xvec \mid y = j)$, evaluated with the
+ * registered distributions of `aifn-compute/probability/distributions`, and clean class priors $\pi_j$, followed by a
+ * list of label operations: noise matrices $\Tmat$ ($T_{ij} = \Pr(\text{observed } j \mid \text{label } i)$) and class
+ * reweightings $\wvec$ (from resampling by label). The joint of $\xvec$ and the observed label $\tilde y$ is then
  *
- *   p(x, ỹ) ∝ ((π ∘ p(x)) T₁ ∘ w₁ …)_ỹ,
+ * $p(\xvec, \tilde y) \propto \left((\pivec \circ \pvec(\xvec)) \Tmat_1 \circ \wvec_1 \cdots\right)_{\tilde y}$,
  *
  * applied left to right, and the Bayes posterior is that vector normalised (Duda, Hart and Stork, 2001, "Pattern
- * Classification", §2.2). Modifiers compose by editing this model. Every method takes a batch of points, an [n, d]
- * float64 matrix.
+ * Classification", §2.2). Modifiers compose by editing this model. Every method takes a batch of points, an
+ * $n \times d$ float64 matrix.
+ *
+ * The other truths follow the same contract: regression $y = m(\xvec) + \varepsilon$ (`regressionTruth`), additive
+ * models (`additiveTruth`), one-dimensional curves with their expectiles (`curve1dTruth`), series with a known power
+ * spectrum (`spectralTruth`), piecewise series (`changepointTruth`), gated mixtures of regimes (`regimeTruth`) and
+ * many-to-one inverse problems (`inverseTruth`).
  */
 
 import type { Distribution, Scores, Size, Truth as TruthContract } from 'aifn-compute/foundation/contracts'
@@ -52,12 +57,22 @@ import { expectiles } from 'aifn-compute/probability/stats'
 import { armaSpectrum } from 'aifn-compute/signal/statistical'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
+/**
+ * A tensor's values, flattened, as a fresh Float64Array.
+ *
+ * @param t Any tensor.
+ * @returns A copy of its values in row-major order.
+ */
 const toFlatArray = (t: Tensor) => Float64Array.from(toFlat(t))
 
 /** A point, one number per feature (used inside regression functions). */
 export type Row = ArrayLike<number>
 
-/** A label operation applied after the clean labels are drawn. */
+/**
+ * A label operation applied after the clean labels are drawn: label noise, whose `matrix` $\Tmat$ has
+ * $T_{ij} = \Pr(\text{observed } j \mid \text{label } i)$ ($k$ rows, each a probability vector), or a reweighting of
+ * the classes.
+ */
 export type LabelOp =
   | { kind: 'noise'; matrix: number[][] }
   | {
@@ -67,22 +82,25 @@ export type LabelOp =
     }
 
 /**
- * Points drawn from the population's marginal of x ([m, d]) with importance weights summing to one, for Monte Carlo
+ * Points drawn from the population's marginal of $\xvec$ with importance weights summing to one, for Monte Carlo
  * estimates (the Bayes error when no closed form applies).
  */
 export interface Reference {
+  /** The $m$ points, an $m \times d$ matrix. */
   x: Tensor
+  /** One weight per point, summing to one. */
   weights: Float64Array
 }
 
 /** The parts a classification truth is built from; modifiers edit these. */
 export interface ClassModel {
+  /** The number of clean classes $k$. */
   classes: Size
-  /** Clean class proportions πⱼ in the population. */
+  /** Clean class proportions $\pi_j$ in the population. */
   priors: number[]
   /**
-   * log p(x | clean y = j) for every row of x ([n, d]) and class j: an [n, k] matrix, up to a term per row shared by
-   * all classes. −∞ outside a class's support.
+   * $\log p(\xvec \mid \text{clean } y = j)$ for every row of $\xvec$ ($n \times d$) and class $j$: an $n \times k$
+   * matrix, up to a term per row shared by all classes. $-\infty$ outside a class's support.
    */
   logDensity: (x: Tensor) => Tensor
   /** Label operations in order. */
@@ -98,36 +116,49 @@ export interface ClassModel {
 }
 
 /**
- * The Bayes-optimal classifier of a synthetic classification problem, as a model. Methods take points ([n, d]) and
- * refer to the observed labels `y` of the dataset, after any label noise or resampling.
+ * The Bayes-optimal classifier of a synthetic classification problem, as a model. Methods take points ($n \times d$)
+ * and refer to the observed labels `y` of the dataset, after any label noise or resampling.
  */
 export interface ClassificationTruth extends TruthContract, Scores<Tensor> {
+  /** The task, always classification. */
   readonly task: 'classification'
   /** What the class densities are, e.g. "two moons". */
   readonly name: string
+  /** The number of classes $k$. */
   readonly classes: Size
   /** Clean class proportions in the population. */
   readonly priors: readonly number[]
   /** Observed class proportions in the population. */
   readonly prevalence: readonly number[]
-  /** log p(x | clean y = j) per row and class ([n, k]), up to a term shared by all classes. */
+  /** $\log p(\xvec \mid \text{clean } y = j)$ per row and class ($n \times k$), up to a term shared by all classes. */
   logDensity(x: Tensor): Tensor
-  /** P(clean y = j | x) per row and class ([n, k]). */
+  /** $\Pr(\text{clean } y = j \mid \xvec)$ per row and class ($n \times k$). */
   cleanPosterior(x: Tensor): Tensor
-  /** P(observed y = j | x) per row and class ([n, k]): the Bayes posterior. NaN where x has zero density under every class. */
+  /**
+   * $\Pr(\text{observed } y = j \mid \xvec)$ per row and class ($n \times k$): the Bayes posterior. NaN where $\xvec$
+   * has zero density under every class.
+   */
   posterior(x: Tensor): Tensor
   /**
    * The Bayes posterior as a distribution over the batch: a Bernoulli over class 1 for two classes, else a
    * Categorical. Rows with zero density under every class get the uniform law.
    */
   predictive(x: Tensor): AnyUnivariate
-  /** The Bayes rule: the most probable observed class per row (int32 [n]); −1 where the posterior is undefined. */
+  /** The Bayes rule: the most probable observed class per row (int32, $n$); $-1$ where the posterior is undefined. */
   decide(x: Tensor): Tensor
-  /** E[f(ỹ) | x] under the posterior ([n]); the mean class index without `f` (P(ỹ = 1 | x) for two classes). */
+  /**
+   * $\expect[f(\tilde y) \mid \xvec]$ under the posterior ($n$ values); the mean class index without `f`
+   * ($\Pr(\tilde y = 1 \mid \xvec)$ for two classes).
+   */
   expect(x: Tensor, f?: (y: number) => number): Tensor
-  /** The log odds of class 1 against the rest ([n]): a Bayes-optimal score for ROC and precision–recall curves. */
+  /**
+   * The log odds of class 1 against the rest ($n$ values): a Bayes-optimal score for ROC and precision–recall curves.
+   */
   score(x: Tensor): Tensor
-  /** The Bayes error E[1 − maxⱼ P(ỹ = j | x)], the lowest error any classifier can reach (computed on first access). */
+  /**
+   * The Bayes error $\expect[1 - \max_j \Pr(\tilde y = j \mid \xvec)]$, the lowest error any classifier can reach
+   * (computed on first access).
+   */
   readonly bayesError: number
   /** How `bayesError` is computed: exactly, or by Monte Carlo over a reference sample of the population. */
   readonly bayesErrorMethod: 'closed form' | 'monte carlo'
@@ -137,15 +168,18 @@ export interface ClassificationTruth extends TruthContract, Scores<Tensor> {
   readonly model: ClassModel
 }
 
-/** The parts a regression truth is built from: y = m(x) + ε, ε ~ N(0, σ(x)²). Modifiers edit these. */
+/**
+ * The parts a regression truth is built from: $y = m(\xvec) + \varepsilon$,
+ * $\varepsilon \sim \Gauss(0, \sigma(\xvec)^2)$. Modifiers edit these.
+ */
 export interface RegressionModel {
-  /** The regression function m(x) = E[y | x] at one point. */
+  /** The regression function $m(\xvec) = \expect[y \mid \xvec]$ at one point. */
   mean: (x: Row) => number
-  /** σ(x), the noise standard deviation at one point. */
+  /** $\sigma(\xvec)$, the noise standard deviation at one point. */
   sdAt: (x: Row) => number
   /** The noise standard deviation (at the left end of the input range when it varies). */
   noiseSd: number
-  /** The Bayes risk under squared loss, E[σ(x)²]. */
+  /** The Bayes risk under squared loss, $\expect[\sigma(\xvec)^2]$. */
   bayesRisk: number
   /** Fraction of targets replaced by gross outliers (see `withOutliers`), 0 by default. */
   outlierFraction: number
@@ -153,28 +187,39 @@ export interface RegressionModel {
   family: string
 }
 
-/** The truth of a synthetic regression problem y = m(x) + ε, ε ~ N(0, σ(x)²), as a model. */
+/**
+ * The truth of a synthetic regression problem $y = m(\xvec) + \varepsilon$,
+ * $\varepsilon \sim \Gauss(0, \sigma(\xvec)^2)$, as a model.
+ */
 export interface RegressionTruth extends TruthContract {
+  /** The task, always regression. */
   readonly task: 'regression'
+  /** What the regression function is, for captions (the model's `family`). */
   readonly name: string
-  /** The regression function m(x) per row ([n]); the same as `expect`. */
+  /** The regression function $m(\xvec)$ per row ($n$ values); the same as `expect`. */
   mean(x: Tensor): Tensor
-  /** σ(x) per row ([n]). */
+  /** $\sigma(\xvec)$ per row ($n$ values). */
   noiseSdAt(x: Tensor): Tensor
-  /** The conditional law of y: Normal(m(x), σ(x)) over the batch. Outliers (if any) are not part of it. */
+  /**
+   * The conditional law of $y$: $\Gauss(m(\xvec), \sigma(\xvec)^2)$ over the batch. Outliers (if any) are not part of
+   * it.
+   */
   predictive(x: Tensor): AnyUnivariate
-  /** The point prediction that minimises squared loss: m(x) ([n]). */
+  /** The point prediction that minimises squared loss: $m(\xvec)$ ($n$ values). */
   decide(x: Tensor): Tensor
-  /** E[f(y) | x] ([n]); m(x) without `f`, else by 32-point Gauss–Hermite quadrature. */
+  /** $\expect[f(y) \mid \xvec]$ ($n$ values); $m(\xvec)$ without `f`, else by 32-point Gauss–Hermite quadrature. */
   expect(x: Tensor, f?: (y: number) => number): Tensor
   /** The noise standard deviation (at the left end of the input range when it varies). */
   readonly noiseSd: number
   /** Fraction of targets replaced by gross outliers. */
   readonly outlierFraction: number
+  /** The model the truth is built from (for modifiers). */
   readonly model: RegressionModel
 }
 
-/** One segment of a piecewise series: indices start … end − 1, its parameters and the law of a value inside it. */
+/**
+ * One segment of a piecewise series: indices `start` to `end - 1`, its parameters and the law of a value inside it.
+ */
 export interface Segment {
   /** First index of the segment. */
   readonly start: Size
@@ -182,10 +227,14 @@ export interface Segment {
   readonly end: Size
   /** The generating parameters, e.g. `{ mean, sd }`, `{ rate }` or `{ coefficients, constant, sd }`. */
   readonly params: Readonly<Record<string, number | readonly number[]>>
-  /** Mean and variance of a value in the segment (the stationary ones for an autoregression). */
+  /** Mean of a value in the segment (the stationary mean for an autoregression). */
   readonly mean: number
+  /** Variance of a value in the segment (the stationary variance for an autoregression). */
   readonly variance: number
-  /** Mean squared error of predicting a value from the true parameters (the innovation variance for an autoregression). */
+  /**
+   * Mean squared error of predicting a value from the true parameters (the innovation variance for an
+   * autoregression).
+   */
   readonly risk: number
 }
 
@@ -193,69 +242,111 @@ export interface Segment {
 export type ChangepointFamily = 'mean' | 'variance' | 'poisson' | 'autoregressive'
 
 /**
- * The truth of a piecewise series: its segments and changepoints, as a model whose inputs are times t (float64 [m],
- * integer indices). `decide` gives the segment index (int32), `predictive` the law of the value at t (normal, or
- * Poisson for counts; the stationary marginal for an autoregression), `expect` its mean.
+ * The truth of a piecewise series: its segments and changepoints, as a model whose inputs are times $t$ (a float64
+ * vector of integer indices). `decide` gives the segment index (int32), `predictive` the law of the value at $t$
+ * (normal, or Poisson for counts; the stationary marginal for an autoregression), `expect` its mean.
  */
 export interface ChangepointTruth extends TruthContract {
+  /** The task, always changepoint detection. */
   readonly task: 'changepoint'
+  /** What the series is, for captions. */
   readonly name: string
+  /** What changes between segments. */
   readonly family: ChangepointFamily
   /** Length of the series. */
   readonly n: Size
   /** Indices where a new segment begins (0 excluded), ascending. */
   readonly changepoints: readonly Size[]
+  /** The segments in order, covering $0, \dots, n - 1$. */
   readonly segments: readonly Segment[]
-  /** The segment index at time t. */
+  /** The segment index at time $t$ (rounded to the nearest index and clamped to the series). */
   segmentAt(t: number): Size
+  /** The segment index at each time (int32). */
   decide(t: Tensor): Tensor
+  /** The law of the value at each time: normal, or Poisson for counts. */
   predictive(t: Tensor): AnyUnivariate
+  /**
+   * The mean of the value at each time without `f`; with `f`, $\expect[f(y)]$ under the normal law by Gauss–Hermite
+   * quadrature (counts: the Poisson sum up to a far tail).
+   */
   expect(t: Tensor, f?: (y: number) => number): Tensor
 }
 
 /**
- * The truth of a generalised additive model g(E[y | x]) = α + Σⱼ fⱼ(xⱼ) with y from an exponential-dispersion family
- * (`additiveData`): the true partial effects fⱼ on the link scale, each centred to mean zero over xⱼ ~ U(0, 1), and the
- * conditional law of y.
+ * The truth of a generalised additive model $g(\expect[y \mid \xvec]) = \alpha + \sum_j f_j(x_j)$ with $y$ from an
+ * exponential-dispersion family (`additiveData`): the true partial effects $f_j$ on the link scale, each centred to
+ * mean zero over $x_j \sim \Unif(0, 1)$, and the conditional law of $y$.
  */
 export interface AdditiveTruth extends TruthContract {
+  /** The task, always regression. */
   readonly task: 'regression'
+  /** The family and link, for captions. */
   readonly name: string
+  /** The exponential-dispersion family of $y$. */
   readonly family: FamilyName
+  /** The link $g$. */
   readonly link: LinkName
-  /** α: the mean of η over the population. */
+  /** $\alpha$: the mean of $\eta$ over the population. */
   readonly intercept: number
-  /** The dispersion φ (Gaussian: σ²; gamma: the squared coefficient of variation; 1 otherwise). */
+  /** The dispersion $\phi$ (Gaussian: $\sigma^2$; gamma: the squared coefficient of variation; 1 otherwise). */
   readonly dispersion: number
   /** Each feature's shape name. */
   readonly shapes: readonly string[]
   /**
-   * The true partial effect of feature j on a grid [m], centred to mean zero over U(0, 1), or over the values
-   * `centreOn` [n] when given (as a fitted GAM centres its smooths on the training data).
+   * The true partial effect of feature $j$ on a grid of $m$ values, centred to mean zero over $\Unif(0, 1)$, or over
+   * the $n$ values `centreOn` when given (as a fitted GAM centres its smooths on the training data).
    */
   partial(j: Size, grid: Tensor, centreOn?: Tensor): Tensor
-  /** η(x) = α + Σⱼ fⱼ(xⱼ), [n]. */
+  /** $\eta(\xvec) = \alpha + \sum_j f_j(x_j)$, $n$ values. */
   linearPredictor(x: Tensor): Tensor
-  /** μ(x) = g⁻¹(η(x)), [n]. */
+  /** $\mu(\xvec) = g^{-1}(\eta(\xvec))$, $n$ values. */
   mean(x: Tensor): Tensor
-  /** The family's law of y at μ(x) and φ. */
+  /** The family's law of $y$ at $\mu(\xvec)$ and $\phi$. */
   predictive(x: Tensor): Distribution
+  /** The prediction under squared loss, $\mu(\xvec)$. */
   decide(x: Tensor): Tensor
-  /** μ(x) without `f`; with `f`, Gaussian only (Gauss–Hermite). */
+  /** $\mu(\xvec)$ without `f`; with `f`, Gaussian only (Gauss–Hermite). */
   expect(x: Tensor, f?: (y: number) => number): Tensor
 }
 
 /** The parts of an additive truth. */
 export interface AdditiveModel {
+  /** The exponential-dispersion family of $y$. */
   family: FamilyName
+  /** The link $g$. */
   link: LinkName
+  /** The intercept $\alpha$ on the link scale. */
   intercept: number
+  /** The dispersion $\phi$. */
   dispersion: number
-  /** Each feature's effect on [0, 1], already centred over U(0, 1), with its name. */
+  /** Each feature's effect on $[0, 1]$, already centred over $\Unif(0, 1)$, with its name. */
   effects: readonly { name: string; f: (x: number) => number }[]
 }
 
-/** Build an additive truth (see `AdditiveTruth`). */
+/**
+ * Build an additive truth (see `AdditiveTruth`). Its Bayes risk $\expect[\phi V(\mu(\xvec))]$ ($V$ the family's
+ * variance function) is averaged over a midpoint grid of $[0, 1]^d$ of at most 4096 points. Its methods throw
+ * `ShapeError` for points with other than one column per effect, `partial` throws `DomainError` for an unknown
+ * feature, and `expect` with `f` throws `DomainError` unless the family is Gaussian.
+ *
+ * @param model The family, link, intercept, dispersion and centred effects.
+ * @returns The truth.
+ *
+ * @example A Gaussian additive model with two effects
+ * const truth = additiveTruth({
+ *   family: 'gaussian',
+ *   link: 'identity',
+ *   intercept: 1,
+ *   dispersion: 0.25,
+ *   effects: [
+ *     { name: 'linear', f: (x) => x - 0.5 },
+ *     { name: 'sine', f: (x) => Math.sin(2 * Math.PI * x) },
+ *   ],
+ * })
+ * print(truth.name)
+ * print('eta at (0.5, 0.25) and (1, 0.5):', truth.linearPredictor(tensor([[0.5, 0.25], [1, 0.5]])))
+ * print('Bayes risk (the noise variance):', truth.bayesRisk)
+ */
 export function additiveTruth(model: AdditiveModel): AdditiveTruth {
   const fam = familyByName(model.family)
   const g = linkByName(model.link)
@@ -324,54 +415,78 @@ export function additiveTruth(model: AdditiveModel): AdditiveTruth {
 }
 
 /**
- * The truth of a one-dimensional smooth regression (`curve1d`) with x ~ U(0, 1): the mean μ(x) = g⁻¹(η(x)) and the
- * whole law of y, so its expectiles e_τ(x) are known. A location–scale law y = μ(x) + σ(x)Z with standardised noise Z
- * (normal, or a skewed shifted log-normal) has e_τ(x) = μ(x) + σ(x)e_τ(Z); a gamma law y = μ(x)G has e_τ(x) =
- * μ(x)e_τ(G); Poisson and Bernoulli expectiles come from their masses at each x. Expectiles are computed numerically
- * from the law (`expectiles` on its atoms: 4000 equally weighted quantiles, or the masses), not in closed form.
+ * The truth of a one-dimensional smooth regression (`curve1d`) with $x \sim \Unif(0, 1)$: the mean
+ * $\mu(x) = g^{-1}(\eta(x))$ and the whole law of $y$, so its expectiles $e_\tau(x)$ are known. A location–scale law
+ * $y = \mu(x) + \sigma(x) Z$ with standardised noise $Z$ (normal, or a skewed shifted log-normal) has
+ * $e_\tau(x) = \mu(x) + \sigma(x) e_\tau(Z)$; a gamma law $y = \mu(x) G$ has $e_\tau(x) = \mu(x) e_\tau(G)$; Poisson
+ * and Bernoulli expectiles come from their masses at each $x$. Expectiles are computed numerically from the law
+ * (`expectiles` on its atoms: 4000 equally weighted quantiles, or the masses), not in closed form.
  */
 export interface Curve1dTruth extends TruthContract {
+  /** The task, always regression. */
   readonly task: 'regression'
+  /** The curve's name, for captions. */
   readonly name: string
   /** The family and link the data were drawn from (location–scale noise reports `gaussian`, `identity`). */
   readonly family: FamilyName
+  /** The link $g$. */
   readonly link: LinkName
-  /** The law of y around its mean, for captions. */
+  /** The law of $y$ around its mean, for captions. */
   readonly law: string
-  /** η(x) = g(μ(x)), [n]. */
+  /** $\eta(x) = g(\mu(x))$, $n$ values. */
   linearPredictor(x: Tensor): Tensor
-  /** μ(x) = E[y | x], [n]. */
+  /** $\mu(x) = \expect[y \mid x]$, $n$ values. */
   mean(x: Tensor): Tensor
-  /** The standard deviation of y at x, [n]. */
+  /** The standard deviation of $y$ at $x$, $n$ values. */
   sdAt(x: Tensor): Tensor
-  /** The τ-expectile of y given x, [n], τ ∈ (0, 1). */
+  /** The $\tau$-expectile of $y$ given $x$, $n$ values, for $\tau \in (0, 1)$. */
   expectile(x: Tensor, tau: number): Tensor
-  /** P(y < e_τ(x)) averaged over x ~ U(0, 1): the share of the population below the true τ-expectile curve. */
+  /**
+   * $\Pr(y < e_\tau(x))$ averaged over $x \sim \Unif(0, 1)$: the share of the population below the true
+   * $\tau$-expectile curve. Throws `DomainError` unless $\tau \in (0, 1)$.
+   */
   shareBelow(tau: number): number
+  /** The law of $y$ at each $x$: the family's, normal, or the shifted log-normal of the skewed noise. */
   predictive(x: Tensor): Distribution
+  /** The prediction under squared loss, $\mu(x)$. */
   decide(x: Tensor): Tensor
-  /** μ(x) without `f`; with `f`, E[f(y) | x] over the law's atoms. */
+  /** $\mu(x)$ without `f`; with `f`, $\expect[f(y) \mid x]$ over the law's atoms. */
   expect(x: Tensor, f?: (y: number) => number): Tensor
 }
 
-/** How y varies around μ(x) in a `Curve1dModel`. */
+/**
+ * How $y$ varies around $\mu(x)$ in a `Curve1dModel`: location–scale noise of standard deviation `sd(x)`, or the
+ * exponential family of the model with dispersion `dispersion`.
+ */
 export type Curve1dLaw =
-  /** y = μ(x) + σ(x)Z, Z standardised: normal, or a log-normal with log-scale sd `skew` (default 0.75), shifted. */
+  /**
+   * $y = \mu(x) + \sigma(x) Z$, $Z$ standardised: normal, or a log-normal with log-scale standard deviation `skew`
+   * (default 0.75), shifted.
+   */
   | { kind: 'location-scale'; noise: 'normal' | 'skewed'; sd: (x: number) => number; skew?: number }
-  /** y from the exponential family at μ(x) with dispersion φ (Poisson, Bernoulli, or gamma with CV² = φ). */
+  /**
+   * $y$ from the exponential family at $\mu(x)$ with dispersion $\phi$ (Poisson, Bernoulli, or gamma with squared
+   * coefficient of variation $\phi$).
+   */
   | { kind: 'family'; dispersion: number }
 
 /** The parts of a `Curve1dTruth`. */
 export interface Curve1dModel {
+  /** The curve's name, for captions. */
   name: string
+  /** The exponential family of $y$ (`gaussian` for location–scale noise). */
   family: FamilyName
+  /** The link $g$. */
   link: LinkName
-  /** η(x) on [0, 1]; μ = g⁻¹(η). */
+  /** $\eta(x)$ on $[0, 1]$; $\mu = g^{-1}(\eta)$. */
   eta: (x: number) => number
+  /** How $y$ varies around $\mu(x)$. */
   law: Curve1dLaw
 }
 
+/** The number of equally weighted quantiles that stand for a continuous law. */
 const ATOMS = 4000
+/** The quantile levels $(i + \tfrac12) / 4000$, $i = 0, \dots, 3999$, made on first use. */
 const levels = lazy(() =>
   fromData(
     Float64Array.from({ length: ATOMS }, (_, i) => (i + 0.5) / ATOMS),
@@ -379,7 +494,27 @@ const levels = lazy(() =>
   ),
 )
 
-/** Build a one-dimensional smooth regression truth (see `Curve1dTruth`). */
+/**
+ * Build a one-dimensional smooth regression truth (see `Curve1dTruth`). Its Bayes risk is the variance of $y$
+ * averaged over 200 midpoints of $[0, 1]$. A family law must be Poisson, binomial (Bernoulli) or gamma: the
+ * standard deviation of any other throws `DomainError`, when the truth is built.
+ *
+ * @param model The name, family, link, linear predictor and law of $y$.
+ * @returns The truth.
+ *
+ * @example A sine with normal noise: expectiles above and below the mean
+ * const truth = curve1dTruth({
+ *   name: 'sine',
+ *   family: 'gaussian',
+ *   link: 'identity',
+ *   eta: (x) => Math.sin(2 * Math.PI * x),
+ *   law: { kind: 'location-scale', noise: 'normal', sd: () => 0.5 },
+ * })
+ * const x = tensor([0.25, 0.75])
+ * print('mean at 0.25 and 0.75:', truth.mean(x))
+ * print('0.9-expectile there:', truth.expectile(x, 0.9))
+ * print('share below the 0.9-expectile:', truth.shareBelow(0.9))
+ */
 export function curve1dTruth(model: Curve1dModel): Curve1dTruth {
   const { law } = model
   const g = linkByName(model.link)
@@ -533,75 +668,115 @@ export function curve1dTruth(model: Curve1dModel): Curve1dTruth {
 
 // ── Spectra: sinusoids plus a stationary ARMA process, with a known power spectrum ───────────────────────────────────
 
-/** One deterministic sinusoid A sin(2πft + φ) of a spectral model; its power in a one-sided spectrum is A²/2. */
+/**
+ * One deterministic sinusoid $A \sin(2\pi f t + \varphi)$ of a spectral model; its power in a one-sided spectrum is
+ * $A^2 / 2$.
+ */
 export interface SpectralLine {
-  /** Frequency, in Hz (or cycles per unit of time). */
+  /** Frequency $f$, in Hz (or cycles per unit of time). */
   readonly frequency: number
+  /** Amplitude $A$. */
   readonly amplitude: number
-  /** Phase φ, in radians. */
+  /** Phase $\varphi$, in radians. */
   readonly phase: number
 }
 
-/** An ARMA(p, q) process x_t = Σ φᵢ x_{t−i} + ε_t + Σ θⱼ ε_{t−j}, ε_t ~ N(0, σ²); white noise has no coefficients. */
+/**
+ * An ARMA($p$, $q$) process $x_t = \sum_i \phi_i x_{t-i} + \varepsilon_t + \sum_j \theta_j \varepsilon_{t-j}$,
+ * $\varepsilon_t \sim \Gauss(0, \sigma^2)$; white noise has no coefficients.
+ */
 export interface ArmaParts {
+  /** The AR coefficients $\phi_1, \dots, \phi_p$. */
   readonly ar: readonly number[]
+  /** The MA coefficients $\theta_1, \dots, \theta_q$. */
   readonly ma: readonly number[]
+  /** The innovation variance $\sigma^2$. */
   readonly sigma2: number
 }
 
 /**
- * The parts of a `SpectralTruth`: sinusoids plus a stationary ARMA process, sampled at rate fs; optionally a second
- * series y = h ∗ x + v coupled to the first through a rational filter H = B/A and independent ARMA noise v.
+ * The parts of a `SpectralTruth`: sinusoids plus a stationary ARMA process, sampled at rate $f_s$; optionally a second
+ * series $y = h * x + v$ coupled to the first through a rational filter $H = B / A$ and independent ARMA noise $v$.
  */
 export interface SpectralModel {
+  /** What the series is, for captions. */
   readonly name: string
-  /** Sample rate (for uneven sampling, the mean rate n/T, which only scales the noise density). */
+  /** Sample rate (for uneven sampling, the mean rate $n / T$, which only scales the noise density). */
   readonly fs: number
+  /** The sinusoids. */
   readonly lines: readonly SpectralLine[]
+  /** The stationary process added to them. */
   readonly noise: ArmaParts
+  /** The second series of a coupled pair: the filter's numerator `b` and denominator `a`, and its noise $v$. */
   readonly coupling?: { readonly b: readonly number[]; readonly a: readonly number[]; readonly noise: ArmaParts }
 }
 
-/** The true spectra of a coupled pair (x, y), with y = h ∗ x + v. */
+/** The true spectra of a coupled pair $(x, y)$, with $y = h * x + v$, at the frequencies $f$ asked for. */
 export interface CoupledSpectra {
-  /** The one-sided PSD of y, |H|² S_xx + S_vv. */
+  /** The one-sided PSD of $y$, $\lvert H \rvert^2 S_{xx} + S_{vv}$. */
   psd(f: Tensor | ArrayLike<number>): Tensor
-  /** The cross-spectral density S_xy = H S_xx (scipy's conj(X)·Y convention), complex128. */
+  /** The cross-spectral density $S_{xy} = H S_{xx}$ (scipy's `conj(X) * Y` convention), complex128. */
   crossSpectrum(f: Tensor | ArrayLike<number>): Tensor
-  /** The magnitude-squared coherence |H|² S_xx / (|H|² S_xx + S_vv). */
+  /**
+   * The magnitude-squared coherence $\lvert H \rvert^2 S_{xx} / (\lvert H \rvert^2 S_{xx} + S_{vv})$ (0 where both
+   * vanish).
+   */
   coherence(f: Tensor | ArrayLike<number>): Tensor
-  /** The phase of S_xy, arg H(f), in radians (unwrapped along f). */
+  /** The phase of $S_{xy}$, $\arg H(f)$, in radians (unwrapped along $f$, in the order given). */
   phase(f: Tensor | ArrayLike<number>): Tensor
 }
 
 /**
  * The truth of a series with a known power spectrum (task `spectrum`): a line spectrum (sinusoids of known frequency,
  * amplitude and phase) on top of the continuous spectrum of a stationary ARMA process, which is white noise when the
- * process has no coefficients. Methods over times (an [n, 1] or [n] tensor): `expect` is the sum of the sinusoids,
- * `predictive` the marginal normal law around it, `bayesRisk` the variance of the stochastic part. `psd(f)` is the
- * continuous part as a one-sided density (`aifn-compute/signal/statistical`'s `armaSpectrum`), and `lines` the line part,
- * each line of power A²/2: a periodogram of n samples shows a line as a peak of height ≈ (A²/2)·n/fs in density units
- * on top of `psd`.
+ * process has no coefficients. Methods over times (an $n \times 1$ or length-$n$ tensor): `expect` is the sum of the
+ * sinusoids, `predictive` the marginal normal law around it, `bayesRisk` the variance of the stochastic part. `psd(f)`
+ * is the continuous part as a one-sided density (`aifn-compute/signal/statistical`'s `armaSpectrum`), and `lines` the
+ * line part, each line of power $A^2 / 2$: a periodogram of $n$ samples shows a line as a peak of height about
+ * $(A^2 / 2) \cdot n / f_s$ in density units on top of `psd`.
  */
 export interface SpectralTruth extends TruthContract {
+  /** The task, always spectral estimation. */
   readonly task: 'spectrum'
+  /** What the series is, for captions. */
   readonly name: string
+  /** The sample rate $f_s$. */
   readonly fs: number
+  /** The line part: the sinusoids. */
   readonly lines: readonly SpectralLine[]
-  /** The continuous part's one-sided power spectral density at frequencies f. */
+  /** The continuous part's one-sided power spectral density at frequencies $f$. */
   psd(f: Tensor | ArrayLike<number>): Tensor
-  /** The variance of the stochastic part (the integral of `psd` over [0, fs/2]). */
+  /** The variance of the stochastic part (the integral of `psd` over $[0, f_s / 2]$). */
   readonly noiseVariance: number
-  /** The total variance: `noiseVariance` + Σ A²/2. */
+  /** The total variance: `noiseVariance` $+ \sum A^2 / 2$. */
   readonly variance: number
   /** For a coupled pair, the second series' spectra and the cross-spectra. */
   readonly coupled?: CoupledSpectra
+  /** The model the truth is built from. */
   readonly model: SpectralModel
 }
 
+/**
+ * Frequencies as a fresh Float64Array.
+ *
+ * @param f The frequencies: a tensor (read flat) or an array.
+ * @returns A copy of them.
+ */
 const freqArray = (f: Tensor | ArrayLike<number>): Float64Array => Float64Array.from(isTensor(f) ? toFlat(f) : f)
 
-/** The variance of an ARMA process from its impulse response, σ² Σ ψⱼ² (ψ₀ = 1, ψⱼ = θⱼ + Σ φᵢ ψ_{j−i}). */
+/**
+ * The variance of a stationary ARMA process from its impulse response, $\sigma^2 \sum_j \psi_j^2$ with $\psi_0 = 1$
+ * and $\psi_j = \theta_j + \sum_i \phi_i \psi_{j-i}$ ($\theta_j = 0$ past $q$). The sum stops once two successive
+ * $\psi_j$ past the first $p + q$ are below $10^{-12}$ in size, or after 200000 terms: a process that is not
+ * stationary gets a meaningless (large, infinite or NaN) value, not an error.
+ *
+ * @param p The process: AR coefficients $\phi$, MA coefficients $\theta$ and innovation variance $\sigma^2$.
+ * @returns The variance of $x_t$ ($\sigma^2$ itself for white noise).
+ *
+ * @example AR(1) and MA(1) against their closed forms
+ * print('AR(1), phi = 0.5 (1 / (1 - 0.25)):', armaVariance({ ar: [0.5], ma: [], sigma2: 1 }))
+ * print('MA(1), theta = 0.5 (1 + 0.25):', armaVariance({ ar: [], ma: [0.5], sigma2: 1 }))
+ */
 export function armaVariance(p: ArmaParts): number {
   if (!p.ar.length && !p.ma.length) return p.sigma2
   const psi: number[] = [1]
@@ -616,7 +791,15 @@ export function armaVariance(p: ArmaParts): number {
   return p.sigma2 * total
 }
 
-/** A filter's frequency response H(e^{iω}) = B(e^{−iω}) / A(e^{−iω}) at ω = 2πf/fs, as [re, im]. */
+/**
+ * A filter's frequency response $H(e^{i\omega}) = B(e^{-i\omega}) / A(e^{-i\omega})$, with
+ * $B(z) = \sum_k b_k z^k$ and $A(z) = \sum_k a_k z^k$.
+ *
+ * @param b The numerator coefficients $b_0, b_1, \dots$.
+ * @param a The denominator coefficients $a_0, a_1, \dots$.
+ * @param omega The angular frequency $\omega = 2\pi f / f_s$, in radians per sample.
+ * @returns The response as `[re, im]`.
+ */
 function response(b: readonly number[], a: readonly number[], omega: number): [number, number] {
   const poly = (c: readonly number[]) => {
     let re = 0
@@ -633,7 +816,23 @@ function response(b: readonly number[], a: readonly number[], omega: number): [n
   return [(br * ar + bi * ai) / d, (bi * ar - br * ai) / d]
 }
 
-/** Build a spectral truth (see `SpectralTruth`). */
+/**
+ * Build a spectral truth (see `SpectralTruth`). With `model.coupling`, it has the coupled pair's spectra in `coupled`.
+ *
+ * @param model The sample rate, the lines, the stationary process and any coupling.
+ * @returns The truth.
+ *
+ * @example A tone on white noise
+ * const truth = spectralTruth({
+ *   name: 'tone in noise',
+ *   fs: 1,
+ *   lines: [{ frequency: 0.1, amplitude: 2, phase: 0 }],
+ *   noise: { ar: [], ma: [], sigma2: 1 },
+ * })
+ * print('PSD at 0.1 and 0.3 (2 sigma^2 / fs):', truth.psd([0.1, 0.3]))
+ * print('noise variance:', truth.noiseVariance, ' total (1 + A^2 / 2):', truth.variance)
+ * print('mean at t = 0, 2.5:', truth.expect(tensor([0, 2.5])))
+ */
 export function spectralTruth(model: SpectralModel): SpectralTruth {
   const { fs, lines, noise } = model
   const psdOf = (p: ArmaParts, f: Float64Array) =>
@@ -742,6 +941,7 @@ export function spectralTruth(model: SpectralModel): SpectralTruth {
   }
 }
 
+/** The truth a dataset can carry in `meta.truth`, one kind per task and generating process. */
 export type Truth =
   | ClassificationTruth
   | RegressionTruth
@@ -757,7 +957,13 @@ export const REFERENCE_SIZE = 6000
 
 // ── Batches ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The rows of an [n, d] matrix as a fresh row-major Float64Array, with n and d. */
+/**
+ * The rows of an $n \times d$ matrix as a fresh row-major Float64Array, with $n$ and $d$ (any strides are read).
+ * Throws `ShapeError` unless the tensor has rank 2.
+ *
+ * @param x The points, an $n \times d$ matrix.
+ * @returns `data`, the $nd$ values row by row, and the shape `n`, `d`.
+ */
 export function points(x: Tensor): { data: Float64Array; n: Size; d: Size } {
   if (x.shape.length !== 2)
     throw new ShapeError('truth', `truth: points must be an [n, d] matrix, got rank ${x.shape.length}`)
@@ -769,12 +975,25 @@ export function points(x: Tensor): { data: Float64Array; n: Size; d: Size } {
   return { data, n, d }
 }
 
-/** An [n, d] float64 matrix from row-major data. */
+/**
+ * An $n \times d$ float64 matrix from row-major data.
+ *
+ * @param data The $nd$ values, row by row (used as they are, not copied).
+ * @param n The number of rows.
+ * @param d The number of columns.
+ * @returns The matrix.
+ */
 export function pointsFrom(data: Float64Array, n: Size, d: Size): Tensor {
   return fromData(data, [n, d])
 }
 
-/** Row-major values of a tensor (any shape) as a fresh Float64Array. */
+/**
+ * Row-major values of a tensor as a fresh Float64Array: a matrix through `points`, a vector through its stride, and
+ * anything else as its first value only (a scalar).
+ *
+ * @param t A tensor of rank 0, 1 or 2.
+ * @returns A copy of its values.
+ */
 function flat(t: Tensor): Float64Array {
   if (t.shape.length === 2) return points(t).data
   if (t.shape.length === 1)
@@ -782,17 +1001,35 @@ function flat(t: Tensor): Float64Array {
   return Float64Array.of(Number(t.data[t.offset]))
 }
 
-/** Per-row log densities of k classes (each [n]) as one [n, k] matrix. */
+/**
+ * Per-row log densities of $k$ classes as one $n \times k$ matrix, as a `ClassModel`'s `logDensity` returns it.
+ *
+ * @param columns One vector of $n$ log densities per class, in class order.
+ * @returns The $n \times k$ matrix.
+ */
 export function classColumns(columns: readonly Tensor[]): Tensor {
   return stack(columns, 1)
 }
 
+/**
+ * A value computed on first use and cached.
+ *
+ * @param f Computes the value; called at most once.
+ * @returns A function returning the value.
+ */
 function lazy<T>(f: () => T): () => T {
   let cached: { value: T } | undefined
   return () => (cached ??= { value: f() }).value
 }
 
-/** Apply the label operations to an unnormalised vector over clean classes. */
+/**
+ * Apply the label operations, in order, to an unnormalised vector over clean classes: a reweighting multiplies class
+ * $j$ by its weight, a noise matrix maps the vector $\pvec$ to $\pvec^\top \Tmat$ (over observed classes).
+ *
+ * @param p The unnormalised probabilities (or prior-weighted densities) of the clean classes (not modified).
+ * @param ops The label operations.
+ * @returns The unnormalised vector over observed classes.
+ */
 function applyOps(p: number[], ops: readonly LabelOp[]): number[] {
   let v = p
   for (const op of ops) {
@@ -807,12 +1044,24 @@ function applyOps(p: number[], ops: readonly LabelOp[]): number[] {
   return v
 }
 
+/**
+ * A vector scaled to sum to one.
+ *
+ * @param v Non-negative values with a positive sum (a zero sum gives NaN).
+ * @returns The values divided by their sum.
+ */
 function normalise(v: number[]): number[] {
   const s = v.reduce((a, b) => a + b, 0)
   return v.map((a) => a / s)
 }
 
-/** The clean log joint log πⱼ + log p(x | j), [n × k] row-major. */
+/**
+ * The clean log joint $\log \pi_j + \log p(\xvec \mid j)$, up to a term per row.
+ *
+ * @param model The class model.
+ * @param x The points, $n \times d$.
+ * @returns `a`, the $n \times k$ values row-major, with `n` and `k`.
+ */
 function logJoint(model: ClassModel, x: Tensor): { a: Float64Array; n: Size; k: Size } {
   const ld = model.logDensity(x)
   const k = model.classes
@@ -823,7 +1072,15 @@ function logJoint(model: ClassModel, x: Tensor): { a: Float64Array; n: Size; k: 
   return { a, n, k }
 }
 
-/** The observed-label posterior, [n × k] row-major (NaN rows where every class has zero density). */
+/**
+ * The observed-label posterior: the clean joint at each point, scaled, passed through the label operations and
+ * normalised.
+ *
+ * @param model The class model.
+ * @param x The points, $n \times d$.
+ * @returns `p`, the $n \times k$ posterior row-major ($k$ the number of observed classes; NaN rows where every class
+ *   has zero density), with `n` and `k`.
+ */
 function posteriorData(model: ClassModel, x: Tensor): { p: Float64Array; n: Size; k: Size } {
   const { a, n, k } = logJoint(model, x)
   const kOut = model.ops.reduce((c, op) => (op.kind === 'noise' ? op.matrix[0].length : c), k)
@@ -850,8 +1107,11 @@ function posteriorData(model: ClassModel, x: Tensor): { p: Float64Array; n: Size
 
 /**
  * The closed-form Bayes error, when the model has one and its label operations allow it: any class reweightings
- * (which change the effective priors), optionally followed by one symmetric binary flip at rate ρ ≤ 1/2, which maps an
- * error e to ρ + (1 − 2ρ) e.
+ * (which change the effective priors), optionally followed by one symmetric binary flip at rate $\rho \le 1/2$, which
+ * maps an error $e$ to $\rho + (1 - 2\rho) e$. None after covariate shift.
+ *
+ * @param model The class model, with its `closedForm` when it has one.
+ * @returns The Bayes error, or undefined when there is no closed form for this model and these operations.
  */
 function closedFormError(model: ClassModel): number | undefined {
   if (!model.closedForm || model.shifted) return undefined
@@ -870,7 +1130,32 @@ function closedFormError(model: ClassModel): number | undefined {
   return flip === undefined ? e : flip + (1 - 2 * flip) * e
 }
 
-/** Build the truth model from a class model. */
+/**
+ * Build the truth model from a class model (see `ClassificationTruth`). The Bayes error is in closed form when
+ * `closedFormError` allows it, else a weighted Monte Carlo mean of $1 - \max_j \Pr(\tilde y = j \mid \xvec)$ over
+ * `model.reference()`, with its standard error; both, and the observed class proportions, are computed on first
+ * access. `score` is the log odds of class 1, so it needs at least two classes.
+ *
+ * @param model The class densities, priors, label operations and reference sample.
+ * @returns The truth.
+ *
+ * @example Two unit Gaussian classes at -1 and 1, then with 20% label noise
+ * const model = {
+ *   classes: 2,
+ *   priors: [0.5, 0.5],
+ *   logDensity: (x) => tensor(toArray(x).map(([v]) => [-((v + 1) ** 2) / 2, -((v - 1) ** 2) / 2])),
+ *   ops: [],
+ *   reference: () => ({ x: tensor([[0]]), weights: Float64Array.of(1) }),
+ *   closedForm: (priors) => twoGaussianBayesError(2, priors),
+ *   family: 'two unit Gaussians',
+ * }
+ * const x = tensor([[-1], [0.5], [2]])
+ * const clean = classificationTruth(model)
+ * print('posterior of class 1:', toArray(clean.posterior(x)).map((r) => r[1]))
+ * print('Bayes rule:', clean.decide(x), ' Bayes error:', clean.bayesError, `(${clean.bayesErrorMethod})`)
+ * const noisy = classificationTruth({ ...model, ops: [{ kind: 'noise', matrix: [[0.8, 0.2], [0.2, 0.8]] }] })
+ * print('with 20% label noise (0.2 + 0.6 e):', noisy.bayesError)
+ */
 export function classificationTruth(model: ClassModel): ClassificationTruth {
   const monteCarlo = lazy(() => {
     const { x, weights } = model.reference()
@@ -980,11 +1265,30 @@ export function classificationTruth(model: ClassModel): ClassificationTruth {
 
 // ── Class-conditional densities, from the registered distributions ──────────────────────────────────────────────────
 
+/**
+ * A float64 matrix from its rows.
+ *
+ * @param rows The rows, all of the same length (the first row's length is the column count).
+ * @returns The matrix.
+ */
 const matrixOf = (rows: readonly (readonly number[])[]): Tensor =>
   fromData(Float64Array.from(rows.flat()), [rows.length, rows[0]?.length ?? 0])
+/**
+ * A float64 vector.
+ *
+ * @param v The values (copied).
+ * @returns The vector.
+ */
 const vectorOf = (v: readonly number[]): Tensor => fromData(Float64Array.from(v), [v.length])
 
-/** The Gaussian classes N(meanⱼ, Σⱼ): log p(x | j) for every row, [n, k]. Throws when a covariance is not positive definite. */
+/**
+ * The Gaussian classes $\Gauss(\muvec_j, \Sigmamat_j)$: $\log p(\xvec \mid j)$ for every row, $n \times k$, as a
+ * `ClassModel`'s `logDensity`. Throws when a covariance is not positive definite.
+ *
+ * @param means The class means $\muvec_j$, $k$ rows of $d$ values.
+ * @param covariances The class covariances $\Sigmamat_j$, $k$ matrices of $d \times d$ given as rows.
+ * @returns The log density of each class at each row of an $n \times d$ matrix.
+ */
 export function gaussianClasses(
   means: readonly (readonly number[])[],
   covariances: readonly (readonly (readonly number[])[])[],
@@ -994,9 +1298,20 @@ export function gaussianClasses(
 }
 
 /**
- * The Bayes error of two Gaussian classes with a shared covariance at Mahalanobis distance Δ and priors (π₀, π₁). The
- * log likelihood ratio L is N(±Δ²/2, Δ²) under each class and the Bayes rule says 1 when L > t = log(π₀/π₁), so
- * the error is π₁ Φ((t − Δ²/2)/Δ) + π₀ Φ((−t − Δ²/2)/Δ) (e.g. Duda, Hart and Stork, 2001, §2.8.3).
+ * The Bayes error of two Gaussian classes with a shared covariance at Mahalanobis distance $\Delta$ and priors
+ * $(\pi_0, \pi_1)$. The log likelihood ratio $L$ is $\Gauss(\pm\Delta^2 / 2, \Delta^2)$ under each class and the
+ * Bayes rule says 1 when $L > t = \log(\pi_0 / \pi_1)$, so the error is
+ * $\pi_1 \Phi((t - \Delta^2 / 2) / \Delta) + \pi_0 \Phi((-t - \Delta^2 / 2) / \Delta)$ (e.g. Duda, Hart and Stork,
+ * 2001, §2.8.3). It is 0 when a prior is 0, and $\min(\pi_0, \pi_1)$ when $\Delta = 0$.
+ *
+ * @param delta The Mahalanobis distance $\Delta \ge 0$ between the class means.
+ * @param priors The class priors $(\pi_0, \pi_1)$, summing to one.
+ * @returns The Bayes error.
+ *
+ * @example Equal priors give the error rate Phi(-Delta / 2)
+ * print('Delta = 2, equal priors:', twoGaussianBayesError(2, [0.5, 0.5]))
+ * print('Delta = 2, priors 0.9 and 0.1:', twoGaussianBayesError(2, [0.9, 0.1]))
+ * print('Delta = 0:', twoGaussianBayesError(0, [0.7, 0.3]))
  */
 export function twoGaussianBayesError(delta: number, priors: readonly number[]): number {
   const [p0, p1] = priors
@@ -1006,14 +1321,19 @@ export function twoGaussianBayesError(delta: number, priors: readonly number[]):
   return p1 * normalCdf((t - (delta * delta) / 2) / delta) + p0 * normalCdf((-t - (delta * delta) / 2) / delta)
 }
 
-/** Rows evaluated per block against the nodes of a curve density, so a block holds at most ~2¹⁸ node terms. */
+/** Rows evaluated per block against the nodes of a curve density, so a block holds at most $2^{18}$ node terms. */
 const BLOCK_TERMS = 1 << 18
 
 /**
- * The log density of points uniform along a curve c(u), u uniform on [0, 1], blurred by isotropic Gaussian noise of
- * standard deviation `sd`: log (1/M) Σₘ N(x; c(uₘ), sd² I), a midpoint rule over M nodes, evaluated as a batch of
- * bivariate normals. M is chosen so that nodes are at most sd/2 apart along the curve, which keeps the rule accurate
- * to well under a percent. Returns the density of every row of x ([n]).
+ * The log density of points uniform along a curve $\cvec(u)$, $u$ uniform on $[0, 1]$, blurred by isotropic Gaussian
+ * noise of standard deviation $\sigma$ (`sd`): $\log \frac{1}{M} \sum_m \Gauss(\xvec; \cvec(u_m), \sigma^2 \Imat)$, a
+ * midpoint rule over $M$ nodes, evaluated as a batch of bivariate normals. $M$ is chosen so that nodes are at most
+ * $\sigma / 2$ apart along the curve (from its length measured on 256 chords), between 64 and 2000, which keeps the
+ * rule accurate to well under a percent while $M$ is below its cap.
+ *
+ * @param curve The curve $\cvec(u)$ in the plane, for $u \in [0, 1]$.
+ * @param sd The noise standard deviation $\sigma$.
+ * @returns The log density of every row of an $n \times 2$ matrix of points ($n$ values).
  */
 export function curveLogDensity(curve: (u: number) => [number, number], sd: number): (x: Tensor) => Tensor {
   let length = 0
@@ -1044,7 +1364,12 @@ export function curveLogDensity(curve: (u: number) => [number, number], sd: numb
   }
 }
 
-/** A reference sample with equal weights. */
+/**
+ * A reference sample with equal weights, for points drawn from the population itself.
+ *
+ * @param x The $m$ points, an $m \times d$ matrix.
+ * @returns The points with weights $1 / m$.
+ */
 export function equalReference(x: Tensor): Reference {
   const n = x.shape[0]
   return { x, weights: new Float64Array(n).fill(1 / n) }
@@ -1052,6 +1377,10 @@ export function equalReference(x: Tensor): Reference {
 
 // ── Regression ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The 32-point probabilists' Gauss–Hermite rule, its weights normalised to sum to one, so that
+ * $\sum_q w_q f(z_q) \approx \expect[f(Z)]$ for $Z \sim \Gauss(0, 1)$. Made on first use.
+ */
 const HERMITE = lazy(() => {
   const rule = gaussHermite(32, { probabilists: true })
   const w = flat(rule.weights)
@@ -1059,7 +1388,12 @@ const HERMITE = lazy(() => {
   return { nodes: flat(rule.nodes), weights: w.map((v) => v / total) }
 })
 
-/** Build the truth model from a regression model. */
+/**
+ * Build the truth model from a regression model (see `RegressionTruth`); its name is the model's `family`.
+ *
+ * @param model The regression function, the noise level, the Bayes risk and the outlier fraction.
+ * @returns The truth.
+ */
 export function regressionTruthOf(model: RegressionModel): RegressionTruth {
   const perRow = (x: Tensor, f: (row: Float64Array) => number) => {
     const { data, n, d } = points(x)
@@ -1092,7 +1426,24 @@ export function regressionTruthOf(model: RegressionModel): RegressionTruth {
   }
 }
 
-/** A regression truth with homoscedastic noise unless `sdAt` is given. */
+/**
+ * A regression truth $y = m(\xvec) + \varepsilon$ with homoscedastic noise unless `sdAt` is given, and no outliers.
+ *
+ * @param mean The regression function $m(\xvec)$ at one point.
+ * @param noiseSd The noise standard deviation (with `sdAt`, the value reported as `noiseSd`).
+ * @param options The noise level as a function, the Bayes risk and a name for captions.
+ * @param options.sdAt The noise standard deviation $\sigma(\xvec)$ at one point. Default `noiseSd` everywhere.
+ * @param options.bayesRisk The Bayes risk $\expect[\sigma(\xvec)^2]$. Default $\sigma^2$ = `noiseSd` squared, which is
+ *   only right without `sdAt`.
+ * @param options.family What the regression function is, for captions. Default `'regression function'`.
+ * @returns The truth.
+ *
+ * @example A line with noise of standard deviation 0.5
+ * const truth = regressionTruth((x) => 2 * x[0], 0.5)
+ * const x = tensor([[0], [1]])
+ * print('mean:', truth.mean(x), ' Bayes risk:', truth.bayesRisk)
+ * print('E[y^2 | x] (m^2 + sigma^2):', truth.expect(x, (y) => y * y))
+ */
 export function regressionTruth(
   mean: (x: Row) => number,
   noiseSd: number,
@@ -1108,12 +1459,34 @@ export function regressionTruth(
   })
 }
 
-/** A regression truth with some parts of its model replaced. */
+/**
+ * A regression truth with some parts of its model replaced, as a modifier changes the noise or adds outliers.
+ *
+ * @param t The truth to start from (not modified).
+ * @param edit The parts of its `model` to replace.
+ * @returns A new truth built from the edited model.
+ */
 export function remodelRegression(t: RegressionTruth, edit: Partial<RegressionModel>): RegressionTruth {
   return regressionTruthOf({ ...t.model, ...edit })
 }
 
-/** The truth of a piecewise series from its segments (contiguous, covering 0 … n − 1). */
+/**
+ * The truth of a piecewise series from its segments, which must be contiguous, start at 0 and be non-empty; they cover
+ * $0, \dots, n - 1$ with $n$ the last segment's end. Throws `DomainError` when a segment does not continue the
+ * series. The Bayes risk is the segments' `risk` weighted by their lengths.
+ *
+ * @param name What the series is, for captions.
+ * @param family What changes between segments; `'poisson'` makes the predictive law Poisson.
+ * @param segments The segments in order.
+ * @returns The truth.
+ *
+ * @example A shift in mean at index 5
+ * const segment = (start, end, mean) => ({ start, end, params: { mean, sd: 1 }, mean, variance: 1, risk: 1 })
+ * const truth = changepointTruth('mean shift', 'mean', [segment(0, 5, 0), segment(5, 10, 3)])
+ * print('changepoints:', truth.changepoints, ' length:', truth.n)
+ * print('segment at t = 0, 4, 5, 9:', truth.decide(tensor([0, 4, 5, 9])))
+ * print('mean there:', truth.expect(tensor([0, 4, 5, 9])))
+ */
 export function changepointTruth(
   name: string,
   family: ChangepointFamily,
@@ -1187,62 +1560,108 @@ export function changepointTruth(
 // ── Regimes: a gate over x chooses which of K functions generated y ─────────────────────────────────────────────────
 
 /**
- * The parts of a `RegimeTruth`: K regimes, a gate P(regime k | x), and each regime's function of x (the mean of y for
- * regression, the log-odds of class 1 for classification), on a box of inputs.
+ * The parts of a `RegimeTruth`: $K$ regimes, a gate $\Pr(\text{regime } k \mid \xvec)$, and each regime's function of
+ * $\xvec$ (the mean of $y$ for regression, the log-odds of class 1 for classification), on a box of inputs.
  */
 export interface RegimeModel {
+  /** What the data are, for captions. */
   name: string
+  /** Whether $y$ is a real target or a binary class. */
   task: 'regression' | 'classification'
+  /** The number of regimes $K$. */
   regimes: Size
-  /** P(regime k | x) at one point, length K. */
+  /** $\Pr(\text{regime } k \mid \xvec)$ at one point, length $K$. */
   gate: (x: Row) => number[]
-  /** Regime k's function at one point: the mean of y (regression) or the log-odds of y = 1 (classification). */
+  /** Regime $k$'s function at one point: the mean of $y$ (regression) or the log-odds of $y = 1$ (classification). */
   fn: (x: Row, k: number) => number
-  /** The noise sd of y around a regime's mean (regression; 0 for classification). */
+  /** The noise standard deviation of $y$ around a regime's mean (regression; 0 for classification). */
   noiseSd: number
-  /** The input box the population's x is uniform on. */
+  /** The lower corner of the input box the population's $\xvec$ is uniform on. */
   lower: readonly number[]
+  /** The upper corner of that box. */
   upper: readonly number[]
   /** Each regime's function as text, for captions. */
   formulas: readonly string[]
 }
 
 /**
- * The truth of data in which a gate over x picks one of K regimes and the regime's function generates y: a mixture of
- * regressions or classifiers whose weights depend on x (the generative model of a mixture of experts; Jacobs, Jordan,
- * Nowlan and Hinton, 1991). When the gate is hard, the regimes partition the input space and the truth is a piecewise
- * function.
+ * The truth of data in which a gate over $\xvec$ picks one of $K$ regimes and the regime's function generates $y$: a
+ * mixture of regressions or classifiers whose weights depend on $\xvec$ (the generative model of a mixture of experts;
+ * Jacobs, Jordan, Nowlan and Hinton, 1991). When the gate is hard, the regimes partition the input space and the truth
+ * is a piecewise function.
  */
 export interface RegimeTruth extends TruthContract {
+  /** Whether $y$ is a real target or a binary class. */
   readonly task: 'regression' | 'classification'
+  /** What the data are, for captions. */
   readonly name: string
+  /** The number of regimes $K$. */
   readonly regimes: Size
-  /** P(regime k | x) per row ([n, K]). */
+  /** $\Pr(\text{regime } k \mid \xvec)$ per row ($n \times K$). */
   gate(x: Tensor): Tensor
-  /** The most probable regime per row (int32 [n]). */
+  /** The most probable regime per row (int32, $n$ values). */
   regime(x: Tensor): Tensor
-  /** Each regime's prediction per row ([n, K]): its mean of y (regression) or P(y = 1 | x, regime) (classification). */
+  /**
+   * Each regime's prediction per row ($n \times K$): its mean of $y$ (regression) or
+   * $\Pr(y = 1 \mid \xvec, \text{regime})$ (classification).
+   */
   regimeMean(x: Tensor): Tensor
-  /** E[y | x] per row ([n]): the gate-weighted regime means. */
+  /** $\expect[y \mid \xvec]$ per row ($n$ values): the gate-weighted regime means. */
   mean(x: Tensor): Tensor
-  /** log p(y | x) per row ([n]): the log of the gate-weighted mixture of the regimes' laws. */
+  /** $\log p(y \mid \xvec)$ per row ($n$ values): the log of the gate-weighted mixture of the regimes' laws. */
   logLikelihood(x: Tensor, y: Tensor): Tensor
   /**
-   * Regression: the normal with y's conditional mean and variance (exact where the gate is hard, moment-matched where
+   * Regression: the normal with $y$'s conditional mean and variance (exact where the gate is hard, moment-matched where
    * regimes overlap; `logLikelihood` is exact everywhere). Classification: the Bernoulli of class 1.
    */
   predictive(x: Tensor): Distribution
   /** The mean (regression) or the Bayes class (classification, int32). */
   decide(x: Tensor): Tensor
+  /**
+   * $\expect[f(y) \mid \xvec]$ per row: the mean without `f`; with `f`, the gate-weighted Gauss–Hermite expectations
+   * of the regimes (regression) or $(1 - p) f(0) + p f(1)$ (classification).
+   */
   expect(x: Tensor, f?: (y: number) => number): Tensor
-  /** E[Var(y | x)] (regression) or the Bayes error E[min(p, 1 − p)] (classification), over a grid of the box. */
+  /**
+   * $\expect[\var(y \mid \xvec)]$ (regression) or the Bayes error $\expect[\min(p, 1 - p)]$ (classification), over a
+   * grid of the box (computed on first access).
+   */
   readonly bayesRisk: number
+  /** The model the truth is built from. */
   readonly model: RegimeModel
 }
 
+/**
+ * The logistic function $1 / (1 + e^{-v})$.
+ *
+ * @param v A log-odds.
+ * @returns The probability.
+ */
 const sigmoidOf = (v: number) => 1 / (1 + Math.exp(-v))
 
-/** Build a regime truth (see `RegimeTruth`). */
+/**
+ * Build a regime truth (see `RegimeTruth`). The Bayes risk is averaged over a regular midpoint grid of the input box:
+ * 2000 points in one dimension, about 10000 in more (100 by 100 in two).
+ *
+ * @param model The regimes, the gate, each regime's function, the noise and the input box.
+ * @returns The truth.
+ *
+ * @example A hard gate between two constant regimes
+ * const truth = regimeTruth({
+ *   name: 'step',
+ *   task: 'regression',
+ *   regimes: 2,
+ *   gate: (x) => (x[0] < 0.5 ? [1, 0] : [0, 1]),
+ *   fn: (x, k) => (k === 0 ? 0 : 1),
+ *   noiseSd: 0.1,
+ *   lower: [0],
+ *   upper: [1],
+ *   formulas: ['0', '1'],
+ * })
+ * const x = tensor([[0.2], [0.8]])
+ * print('regime:', truth.regime(x), ' mean:', truth.mean(x))
+ * print('Bayes risk (the noise variance):', truth.bayesRisk)
+ */
 export function regimeTruth(model: RegimeModel): RegimeTruth {
   const K = model.regimes
   const perRow = (x: Tensor, f: (row: Float64Array) => number[]) => {
@@ -1376,71 +1795,126 @@ export function regimeTruth(model: RegimeModel): RegimeTruth {
 
 // ── Inverse problems: y given x where x = f(y) + ε and f is many-to-one ─────────────────────────────────────────────
 
-/** One exact solution of an inverse problem: a target y with f(y) = x, and its share of p(y | x). */
+/**
+ * One exact solution of an inverse problem: a target $\yvec$ with $f(\yvec) = \xvec$, and its share of
+ * $p(\yvec \mid \xvec)$.
+ */
 export interface InverseSolution {
+  /** The solution $\yvec^*$, $D$ values. */
   readonly value: number[]
-  /** The solution's probability in the small-noise limit, p(y*)/|det f′(y*)| normalised over the solutions. */
+  /**
+   * The solution's probability in the small-noise limit, $p(\yvec^*) / \lvert \det f'(\yvec^*) \rvert$ normalised over
+   * the solutions.
+   */
   readonly weight: number
 }
 
 /**
- * The parts of an `InverseTruth`: targets y drawn from a uniform prior on a box, inputs x = f(y) + ε with
- * ε ~ N(0, σ²I), and the inverse of f, which is multi-valued.
+ * The parts of an `InverseTruth`: targets $\yvec$ drawn from a uniform prior on a box, inputs
+ * $\xvec = f(\yvec) + \varepsilonvec$ with $\varepsilonvec \sim \Gauss(\zeros, \sigma^2 \Imat)$, and the inverse of
+ * $f$, which is multi-valued.
  */
 export interface InverseModel {
+  /** What the problem is, for captions. */
   name: string
-  /** The dimension D of the target y. */
+  /** The dimension $D$ of the target $\yvec$. */
   outputs: Size
-  /** The forward map f(y), noise-free. */
+  /** The forward map $f(\yvec)$, noise-free. */
   forward: (y: Row) => number[]
-  /** Every y in the prior's box with f(y) = x, with its weight (empty where x is outside f's image). */
+  /**
+   * Every $\yvec$ in the prior's box with $f(\yvec) = \xvec$, with its weight (empty where $\xvec$ is outside $f$'s
+   * image).
+   */
   solutions: (x: Row) => InverseSolution[]
-  /** The law of y given x as weighted atoms: a quadrature rule of the exact posterior, or the solutions. */
+  /**
+   * The law of $\yvec$ given $\xvec$ as weighted atoms: a quadrature rule of the exact posterior, or the solutions. The
+   * weights need not be normalised; all zero (or none) where $\xvec$ has no posterior.
+   */
   atoms: (x: Row) => { values: number[][]; weights: number[] }
-  /** log p(y | x), where the posterior has a closed form up to quadrature (1-d targets). */
+  /** $\log p(\yvec \mid \xvec)$, where the posterior has a closed form up to quadrature (one-dimensional targets). */
   logLikelihood?: (x: Row, y: Row) => number
-  /** The noise sd σ of the inputs. */
+  /** The noise standard deviation $\sigma$ of the inputs. */
   noise: number
-  /** The prior's box of targets. */
+  /** The lower corner of the prior's box of targets. */
   lower: readonly number[]
+  /** The upper corner of that box. */
   upper: readonly number[]
-  /** f as text, for captions. */
+  /** $f$ as text, for captions. */
   formula: string
 }
 
 /**
- * The truth of an inverse problem (Bishop, 1994, "Mixture density networks"): y is drawn uniformly on a box and
- * observed through x = f(y) + ε, and the task is to predict y from x. Where f folds over, y given x has a mode at every
- * solution of f(y) = x, and the conditional mean E[y | x], the minimiser of the squared error, can fall between them on
- * no solution at all.
+ * The truth of an inverse problem (Bishop, 1994, "Mixture density networks"): $\yvec$ is drawn uniformly on a box and
+ * observed through $\xvec = f(\yvec) + \varepsilonvec$, and the task is to predict $\yvec$ from $\xvec$. Where $f$
+ * folds over, $\yvec$ given $\xvec$ has a mode at every solution of $f(\yvec) = \xvec$, and the conditional mean
+ * $\expect[\yvec \mid \xvec]$, the minimiser of the squared error, can fall between them on no solution at all.
  */
 export interface InverseTruth extends TruthContract {
+  /** The task, always regression. */
   readonly task: 'regression'
+  /** What the problem is, for captions. */
   readonly name: string
-  /** The dimension D of y. */
+  /** The dimension $D$ of $\yvec$. */
   readonly outputs: Size
-  /** The noise-free solutions of f(y) = x at one input, most probable first. */
+  /** The noise-free solutions of $f(\yvec) = \xvec$ at one input, most probable first. */
   solutions(x: Row): InverseSolution[]
-  /** f(y) at one target. */
+  /** $f(\yvec)$ at one target. */
   forward(y: Row): number[]
-  /** E[y | x] per row: [n] for D = 1, else [n, D]. */
+  /**
+   * $\expect[\yvec \mid \xvec]$ per row: $n$ values for $D = 1$, else $n \times D$. NaN where $\xvec$ has no
+   * posterior.
+   */
   mean(x: Tensor): Tensor
-  /** Var(yⱼ | x) per row, the shape of `mean`. */
+  /** $\var(y_j \mid \xvec)$ per row, the shape of `mean`. */
   variance(x: Tensor): Tensor
-  /** log p(y | x) per row ([n]); NaN where the model has no density (a law concentrated on the solutions). */
+  /**
+   * $\log p(\yvec \mid \xvec)$ per row ($n$ values); NaN where the model has no density (a law concentrated on the
+   * solutions).
+   */
   logLikelihood(x: Tensor, y: Tensor): Tensor
-  /** The normal with y's conditional mean and variance per row (moment-matched: the true law is multimodal). */
+  /** The normal with $\yvec$'s conditional mean and variance per row (moment-matched: the true law is multimodal). */
   predictive(x: Tensor): AnyUnivariate
-  /** E[y | x], the Bayes decision under squared loss. */
+  /** $\expect[\yvec \mid \xvec]$, the Bayes decision under squared loss. */
   decide(x: Tensor): Tensor
-  /** E[f(y) | x] ([n]; D = 1 only with `f`). */
+  /**
+   * $\expect[f(y) \mid \xvec]$ ($n$ values) over the atoms; with `f`, $D = 1$ only (else `DomainError`). Without `f`,
+   * the mean.
+   */
   expect(x: Tensor, f?: (y: number) => number): Tensor
-  /** E[Σⱼ Var(yⱼ | x)] over the prior (on noise-free inputs, a 2000-point grid in 1-d, 60 × 60 in 2-d). */
+  /**
+   * $\expect[\sum_j \var(y_j \mid \xvec)]$ over the prior (on noise-free inputs, a 2000-point grid in one dimension,
+   * $60 \times 60$ in two), computed on first access.
+   */
   readonly bayesRisk: number
+  /** The model the truth is built from. */
   readonly model: InverseModel
 }
 
-/** Build an inverse-problem truth (see `InverseTruth`). */
+/**
+ * Build an inverse-problem truth (see `InverseTruth`): the moments come from the model's atoms, and the Bayes risk
+ * skips grid points whose posterior is undefined.
+ *
+ * @param model The forward map, its solutions and atoms, the noise and the prior's box.
+ * @returns The truth.
+ *
+ * @example y squared: the mean falls between the two solutions
+ * // y = ±√x, equally likely, for x in [0, 1]; nothing outside f's image.
+ * const roots = (x) => (x >= 0 && x <= 1 ? [Math.sqrt(x), -Math.sqrt(x)] : [])
+ * const truth = inverseTruth({
+ *   name: 'square',
+ *   outputs: 1,
+ *   forward: ([y]) => [y * y],
+ *   solutions: ([x]) => roots(x).map((r) => ({ value: [r], weight: 0.5 })),
+ *   atoms: ([x]) => ({ values: roots(x).map((r) => [r]), weights: roots(x).map(() => 0.5) }),
+ *   noise: 0.01,
+ *   lower: [-1],
+ *   upper: [1],
+ *   formula: 'y^2',
+ * })
+ * print('solutions at x = 0.25:', truth.solutions([0.25]).map((s) => s.value[0]))
+ * print('mean and variance there:', truth.mean(tensor([[0.25]])), truth.variance(tensor([[0.25]])))
+ * print('Bayes risk (E[y^2] = 1/3):', truth.bayesRisk)
+ */
 export function inverseTruth(model: InverseModel): InverseTruth {
   const D = model.outputs
   const moments = (r: Row) => {

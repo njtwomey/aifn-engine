@@ -1,8 +1,11 @@
 /**
  * Seeded decision data: logged contextual-bandit feedback (with the true policy value beside it), logged slates under
  * an additive reward, and loss sequences for prediction with expert advice (stochastic, switching, and the
- * oscillating sequence that defeats follow-the-leader). The estimators these feed are in `aifn-compute/learning/off-policy`
- * and `aifn-compute/optim/online`.
+ * oscillating sequence that defeats follow-the-leader). The estimators these feed are in
+ * `aifn-compute/learning/off-policy` and `aifn-compute/optim/online`.
+ *
+ * Every quantity is drawn from its own child stream of `s`, so a problem or a log is fixed by its key and knobs, and
+ * the truth an estimator aims at (`trueValue`, the best expert) is returned beside the data.
  */
 
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
@@ -28,22 +31,32 @@ type F64 = dense.F64
 
 /** Options of `banditProblem` and `loggedBandit`. */
 export interface BanditOptions {
-  /** Rounds n (default 1000). */
+  /** Rounds $n$ (default 1000). */
   n?: number
-  /** Actions K (default 5). */
+  /** Actions $K$ (default 5). */
   actions?: number
-  /** Context features d (default 3). */
+  /** Context features $d$ (default 3). */
   features?: number
   /**
-   * How sharply the logging policy prefers its favourite actions: π₀ = softmax(β₀ s₀(x, ·)), with s₀ a linear score
-   * unrelated to the reward. 0 is uniform logging; large values make propensities extreme (default 1).
+   * How sharply the logging policy prefers its favourite actions:
+   * $\pi_0 = \operatorname{softmax}(\beta_0 s_0(\xvec, \cdot))$, with $s_0(\xvec, a) = \xvec^\top \phivec_a$ a linear
+   * score unrelated to the reward. 0 is uniform logging; large values make propensities extreme (default 1).
    */
   loggingSharpness?: number
-  /** The share ε of uniform exploration mixed into the logging policy, π₀ ← (1 − ε)π₀ + ε/K (default 0.05). */
+  /**
+   * The share $\varepsilon$ of uniform exploration mixed into the logging policy,
+   * $\pi_0 \leftarrow (1 - \varepsilon)\pi_0 + \varepsilon/K$ (default 0.05).
+   */
   exploration?: number
-  /** How sharply the target policy follows the true mean reward: π = softmax(β μ(x, ·)) (default 8). */
+  /**
+   * How sharply the target policy follows the true mean reward: $\pi = \operatorname{softmax}(\beta \mu(\xvec, \cdot))$
+   * (default 8).
+   */
   targetSharpness?: number
-  /** The standard deviation of the error added to the reward model's logits, q̂ = σ(logit μ + e) (default 0.5). */
+  /**
+   * The standard deviation of the error $e$ added to the reward model's logits,
+   * $\hat{q} = \sigma(\operatorname{logit} \mu + e + \text{bias})$ (default 0.5).
+   */
   modelError?: number
   /** A constant shift of the reward model's logits, a systematic bias (default 0). */
   modelBias?: number
@@ -51,29 +64,46 @@ export interface BanditOptions {
 
 /** A contextual bandit with known truth: contexts, mean rewards, the logging and target policies and a reward model. */
 export interface BanditProblem {
-  /** Contexts xᵢ [n, d]. */
+  /** Contexts $\xvec_i$, $n \times d$. */
   contexts: Tensor
-  /** The mean reward μ(xᵢ, a) ∈ (0, 1) of every action [n, K] (rewards are Bernoulli). */
+  /** The mean reward $\mu(\xvec_i, a) \in (0, 1)$ of every action, $n \times K$ (rewards are Bernoulli). */
   meanRewards: Tensor
-  /** The logging policy π₀(a | xᵢ) [n, K]. */
+  /** The logging policy $\pi_0(a \mid \xvec_i)$, $n \times K$. */
   logging: Tensor
-  /** The target policy π(a | xᵢ) [n, K]. */
+  /** The target policy $\pi(a \mid \xvec_i)$, $n \times K$. */
   target: Tensor
-  /** An imperfect reward model q̂(xᵢ, a) [n, K], for the direct method and doubly robust estimators. */
+  /**
+   * An imperfect reward model $\hat{q}(\xvec_i, a)$, $n \times K$, for the direct method and doubly robust
+   * estimators.
+   */
   rewardModel: Tensor
-  /** The target's value on these contexts, (1/n) Σᵢ Σₐ π(a | xᵢ) μ(xᵢ, a): what every estimator aims at. */
+  /**
+   * The target's value on these contexts, $\frac{1}{n} \sum_i \sum_a \pi(a \mid \xvec_i) \mu(\xvec_i, a)$: what every
+   * estimator aims at.
+   */
   trueValue: number
-  /** The logging policy's own value on these contexts. */
+  /** The logging policy's own value on these contexts, the same average under $\pi_0$. */
   loggingValue: number
 }
 
 /** Logged feedback: the logging policy's actions, their propensities and the Bernoulli rewards. */
 export interface BanditLogDraw {
+  /** The logged action $a_i$ of every round (int32, length $n$). */
   actions: Tensor
+  /** The logging policy's probability $\pi_0(a_i \mid \xvec_i)$ of the logged action (length $n$). */
   propensities: Tensor
+  /** The observed reward $r_i$, 0 or 1 (float64, length $n$). */
   rewards: Tensor
 }
 
+/**
+ * The softmax of a row of scores at inverse temperature $\beta$, $e^{\beta z_k} / \sum_j e^{\beta z_j}$, computed
+ * after subtracting the largest $\beta z_k$ so that it cannot overflow.
+ *
+ * @param z The scores, one per action; not modified.
+ * @param beta The inverse temperature $\beta$: 0 gives the uniform distribution.
+ * @returns The probabilities, one per action.
+ */
 const softmaxRow = (z: ArrayLike<number>, beta: number): F64 => {
   let hi = -Infinity
   for (let k = 0; k < z.length; k++) hi = Math.max(hi, beta * z[k])
@@ -83,10 +113,24 @@ const softmaxRow = (z: ArrayLike<number>, beta: number): F64 => {
 }
 
 /**
- * A contextual bandit with known truth. Contexts are standard normal; μ(x, a) = σ(xᵀθₐ + bₐ) with θ, b normal; the
- * logging policy is a softmax of a second, unrelated linear score (plus ε exploration), so its preferences disagree
- * with the reward; the target is a softmax of μ; the reward model perturbs μ's logits by noise and a bias. Every
- * quantity is drawn from child streams of `s`, so a problem is fixed by its key and knobs.
+ * A contextual bandit with known truth. Contexts are standard normal;
+ * $\mu(\xvec, a) = \sigma(\xvec^\top \thetavec_a + b_a)$ with $\thetavec_a \sim \Gauss(\zeros, \Imat)$ and
+ * $b_a \sim \Gauss(0, 0.5^2)$; the logging policy is a softmax of a second, unrelated linear score (plus $\varepsilon$
+ * exploration), so its preferences disagree with the reward; the target is a softmax of $\mu$; the reward model
+ * perturbs $\mu$'s logits by Gaussian noise and a bias. Every quantity is drawn from child streams of `s`, so a problem
+ * is fixed by its key and knobs. Throws `DomainError` when `n` is not a non-negative integer.
+ *
+ * @param s The stream the contexts, the weights of the reward and the logging score, and the model's errors are drawn
+ *   from.
+ * @param options The size of the problem and the shape of the two policies and the reward model (`BanditOptions`).
+ * @returns The contexts, the mean rewards, both policies and the reward model as $n \times d$ and $n \times K$
+ *   matrices, with the target's and the logging policy's true values.
+ *
+ * @example The target policy is worth more than the logging one
+ * const p = banditProblem(stream(1), { n: 200, actions: 3 })
+ * print('contexts:', p.contexts.shape, ' mean rewards:', p.meanRewards.shape)
+ * print('first row: mu', toArray(p.meanRewards)[0], ' logging', toArray(p.logging)[0], ' target', toArray(p.target)[0])
+ * print('true value:', p.trueValue, ' logging value:', p.loggingValue)
  */
 export function banditProblem(s: Stream, options: BanditOptions = {}): BanditProblem {
   const {
@@ -153,7 +197,24 @@ export function banditProblem(s: Stream, options: BanditOptions = {}): BanditPro
   }
 }
 
-/** Draw one log from a problem: aᵢ ~ π₀(· | xᵢ), rᵢ ~ Bernoulli(μ(xᵢ, aᵢ)), with the propensity π₀(aᵢ | xᵢ). */
+/**
+ * Draw one log from a problem: $a_i \sim \pi_0(\cdot \mid \xvec_i)$, $r_i \sim \Bern(\mu(\xvec_i, a_i))$, with
+ * the propensity $\pi_0(a_i \mid \xvec_i)$. The actions come from `child(s, 'actions')`, the rewards from
+ * `child(s, 'rewards')`.
+ *
+ * @param s The stream the log is drawn from.
+ * @param problem The problem, as `banditProblem` returns it; only its `logging` and `meanRewards` are read.
+ * @returns The logged actions, their propensities and the rewards, one per round.
+ *
+ * @example An importance-weighted estimate of the target's value
+ * const p = banditProblem(stream(1), { n: 2000, actions: 3 })
+ * const log = logBandit(stream(2), p)
+ * const [a, w, r] = [toArray(log.actions), toArray(log.propensities), toArray(log.rewards)]
+ * print('first actions:', a.slice(0, 5), ' propensities:', w.slice(0, 5))
+ * const pi = toArray(p.target)
+ * print('IPS estimate:', r.reduce((acc, v, i) => acc + (v * pi[i][a[i]]) / w[i], 0) / r.length)
+ * print('true value:', p.trueValue)
+ */
 export function logBandit(s: Stream, problem: BanditProblem): BanditLogDraw {
   const [n, K] = problem.logging.shape
   const p0 = dense.data(problem.logging)
@@ -173,10 +234,25 @@ export function logBandit(s: Stream, problem: BanditProblem): BanditLogDraw {
 
 /** A logged contextual bandit: the problem's truth and one log drawn from it. */
 export interface LoggedBandit extends BanditProblem, BanditLogDraw {
+  /** The dataset's name, description, task (`'decision'`), feature names and stream key. */
   meta: DatasetMeta
 }
 
-/** A contextual bandit with known truth and one log drawn from its logging policy (`banditProblem`, `logBandit`). */
+/**
+ * A contextual bandit with known truth and one log drawn from its logging policy (`banditProblem` on
+ * `child(s, 'problem')`, then `logBandit` on `child(s, 'log')`). Throws `DomainError` when `n` is not a non-negative
+ * integer.
+ *
+ * @param s The stream the problem and the log are drawn from.
+ * @param options The size of the problem and the shape of the two policies and the reward model (`BanditOptions`).
+ * @returns The problem's truth and the log in one record, with dataset metadata.
+ *
+ * @example The logged rewards average to the logging policy's value
+ * const b = loggedBandit(stream(1), { n: 2000, actions: 4 })
+ * const r = toArray(b.rewards)
+ * print('contexts:', b.contexts.shape, ' actions:', b.actions.shape)
+ * print('mean logged reward:', r.reduce((a, v) => a + v, 0) / r.length, ' logging value:', b.loggingValue)
+ */
 export function loggedBandit(s: Stream, options: BanditOptions = {}): LoggedBandit {
   const problem = banditProblem(child(s, 'problem'), options)
   const log = logBandit(child(s, 'log'), problem)
@@ -198,11 +274,11 @@ export function loggedBandit(s: Stream, options: BanditOptions = {}): LoggedBand
 
 /** Options of `slateBandit`. */
 export interface SlateBanditOptions {
-  /** Rounds n (default 2000). */
+  /** Rounds $n$ (default 2000). */
   n?: number
-  /** Items m (default 6). */
+  /** Items $m$ (default 6). */
   items?: number
-  /** Slots l (default 3). */
+  /** Slots $l$, at most $m$ (default 3). */
   slots?: number
   /** Reward noise standard deviation (default 0.1). */
   noise?: number
@@ -210,25 +286,44 @@ export interface SlateBanditOptions {
 
 /** Logged slates with an additive reward and a uniform logging policy. */
 export interface SlateBandit {
-  /** The logged slates [n, l]: distinct items, uniformly ordered. */
+  /** The logged slates, $n \times l$ (item indices as float64): distinct items, uniformly ordered. */
   slates: Tensor
-  /** rᵢ = Σⱼ φ(j, sᵢⱼ) + noise [n]. */
+  /** The rewards $r_i = \sum_j \phi(j, s_{ij}) + \varepsilon_i$, length $n$. */
   rewards: Tensor
-  /** The target slate, the same each round [n, l]: the best assignment of items to slots by φ, greedily. */
+  /**
+   * The target slate, the same each round, $n \times l$: the best items in quality order, which is the best assignment
+   * of items to slots under $\phi$.
+   */
   target: Tensor
-  /** φ(j, a), the additive reward of item a in slot j [l, m]. */
+  /** $\phi(j, a)$, the additive reward of item $a$ in slot $j$, $l \times m$. */
   slotValues: Tensor
-  /** The target's true value Σⱼ φ(j, tⱼ). */
+  /** The target's true value $\sum_j \phi(j, t_j)$. */
   trueValue: number
+  /** The number of items $m$. */
   items: number
+  /** The dataset's name, description, task (`'decision'`), slot names and stream key. */
   meta: DatasetMeta
 }
 
 /**
- * Slates of l distinct items from m, logged uniformly at random; the reward is additive over (slot, item) pairs,
- * φ(j, a) = u_a / (j + 1) with item qualities u ~ U(0, 1) (higher slots matter more), plus Gaussian noise. The target
- * shows the best items in quality order. The pseudo-inverse estimator is unbiased here; slate IPS is too, but almost
- * never sees the target slate.
+ * Slates of $l$ distinct items from $m$, logged uniformly at random (the first $l$ of a random permutation); the reward
+ * is additive over (slot, item) pairs, $\phi(j, a) = u_a / (j + 1)$ for slot $j = 0, \dots, l - 1$, with item
+ * qualities $u_a \sim \Unif(0, 1)$ (earlier slots matter more), plus Gaussian noise. The target shows the best items
+ * in quality order. The pseudo-inverse estimator is unbiased here; slate IPS is too, but sees the target slate in only
+ * one round in $m! / (m - l)!$. Throws `DomainError` when $l > m$ or `n` is not a non-negative integer.
+ *
+ * @param s The stream the qualities (`child(s, 'quality')`), the slates and the noise are drawn from.
+ * @param options The rounds, items and slots, and the noise's standard deviation (`SlateBanditOptions`).
+ * @returns The logged slates and rewards, the target slate, the slot values $\phi$ and the target's true value.
+ *
+ * @example The mean logged reward is the uniform policy's value
+ * const b = slateBandit(stream(1), { n: 2000, items: 5, slots: 2 })
+ * const phi = toArray(b.slotValues)
+ * const r = toArray(b.rewards)
+ * print('slates:', b.slates.shape, ' first slates:', toArray(b.slates).slice(0, 3), ' target:', toArray(b.target)[0])
+ * print('mean reward:', r.reduce((a, v) => a + v, 0) / r.length)
+ * print('uniform value:', phi.reduce((a, row) => a + row.reduce((c, v) => c + v, 0) / row.length, 0))
+ * print('target value:', b.trueValue)
  */
 export function slateBandit(s: Stream, options: SlateBanditOptions = {}): SlateBandit {
   const { n = 2000, items: m = 6, slots: l = 3, noise = 0.1 } = options
@@ -277,17 +372,19 @@ export function slateBandit(s: Stream, options: SlateBanditOptions = {}): SlateB
 
 /** Options of `expertGame`. */
 export interface ExpertGameOptions {
-  /** Rounds T (default 1000). */
+  /** Rounds $T$ (default 1000). */
   rounds?: number
-  /** Experts N (default 10). */
+  /** Experts $N$ (default 10). */
   experts?: number
   /**
-   * `stochastic`: losses Bernoulli with means spread by `gap`, expert 0 best; `switching`: the best expert changes
-   * every T/(switches + 1) rounds; `follow-the-leader trap`: two experts with losses (½, 0), then (0, 1), (1, 0), …
-   * alternating, so the leader always loses next (the rest copy expert 0 or 1); `random`: uniform losses in [0, 1].
+   * `stochastic`: Bernoulli losses of mean $0.5 - \text{gap}$ for one expert drawn at random and 0.5 for the rest;
+   * `switching`: the same, with the best expert changing every $\lceil T/(\text{switches} + 1) \rceil$ rounds, in a
+   * random order of the experts; `follow-the-leader trap`: two experts with losses $(\tfrac{1}{2}, 0)$, then $(0, 1)$,
+   * $(1, 0), \dots$ alternating, so the leader always loses next (the even-numbered experts copy expert 0 and the odd
+   * ones expert 1); `random`: uniform losses in $[0, 1]$. Default `stochastic`.
    */
   kind?: 'stochastic' | 'switching' | 'follow-the-leader trap' | 'random'
-  /** The gap between the best expert's mean loss and the others' (default 0.1). */
+  /** The gap between the best expert's mean loss and the others' (`stochastic` and `switching`, default 0.1). */
   gap?: number
   /** Switches of the best expert (`switching`, default 3). */
   switches?: number
@@ -295,14 +392,33 @@ export interface ExpertGameOptions {
 
 /** A loss sequence for prediction with expert advice. */
 export interface ExpertGame {
-  /** Losses ℓ_{t,i} ∈ [0, 1] [T, N]. */
+  /** Losses $\ell_{t,i} \in [0, 1]$, $T \times N$. */
   losses: Tensor
-  /** The best expert of each round's regime [T] (the stochastic and switching kinds; −1 otherwise). */
+  /** The best expert of each round's regime, length $T$ (int32; the stochastic and switching kinds, $-1$ otherwise). */
   best: Tensor
+  /** The dataset's name, description, task (`'decision'`), expert names and stream key. */
   meta: DatasetMeta
 }
 
-/** A sequence of expert losses in [0, 1] of a named kind (see `ExpertGameOptions.kind`). */
+/**
+ * A sequence of expert losses in $[0, 1]$ of a named kind (see `ExpertGameOptions.kind`). The losses come from
+ * `child(s, 'losses')` and the order of the best experts from `child(s, 'order')`; the follow-the-leader trap draws
+ * nothing. Throws `DomainError` when the number of rounds is not a non-negative integer.
+ *
+ * @param s The stream the losses and the best experts are drawn from.
+ * @param options The rounds, the experts, the kind and its gap and switches (`ExpertGameOptions`).
+ * @returns The losses ($T \times N$) and the best expert of every round.
+ *
+ * @example The trap: each expert loses right after it leads
+ * const g = expertGame(stream(1), { rounds: 6, experts: 2, kind: 'follow-the-leader trap' })
+ * print('losses:', toArray(g.losses))
+ *
+ * @example The stochastic game: one expert loses gap less on average
+ * const g = expertGame(stream(1), { rounds: 2000, experts: 4, gap: 0.1 })
+ * const L = toArray(g.losses)
+ * print('best expert:', toArray(g.best)[0])
+ * print('mean losses:', [0, 1, 2, 3].map((i) => L.reduce((a, row) => a + row[i], 0) / L.length))
+ */
 export function expertGame(s: Stream, options: ExpertGameOptions = {}): ExpertGame {
   const { rounds: T = 1000, experts: N = 10, kind = 'stochastic', gap = 0.1, switches = 3 } = options
   checkCount(T, 'expertGame')

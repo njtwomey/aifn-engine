@@ -1,6 +1,8 @@
 /**
- * Test images (greyscale, row-major [height, width] tensors with values in [0, 1], row 0 at the top) and small binary
- * pattern sets: a checkerboard, gradients, a shapes image, a 5 × 7 digit font with noisy copies, and bars and stripes.
+ * Test images (greyscale, row-major height by width tensors with values in $[0, 1]$ before any noise, row 0 at the
+ * top) and small binary pattern sets: a checkerboard, gradients, a shapes image, a geometric scene with its true
+ * edges, corners, lines and disc, a $5 \times 7$ digit font with noisy copies, and bars and stripes. Noise is
+ * Gaussian, drawn from a stream, and never clipped.
  */
 
 import { normal, type Stream, child, uniform } from 'aifn-compute/foundation/random'
@@ -11,7 +13,19 @@ import { definer } from 'aifn-compute/foundation/registry'
 import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** A `size`-pixel checkerboard of `tile`-pixel squares, `low` and `high` valued, starting with `high` at the top left. */
+/**
+ * A `size`-pixel checkerboard of `tile`-pixel squares, `low` and `high` valued, starting with `high` at the top left.
+ *
+ * @param options The image's size, the tiles' size and the two values.
+ * @param options.size The image's width and height in pixels.
+ * @param options.tile The side of a square in pixels; squares at the right and bottom edges are cut short.
+ * @param options.low The value of the squares off the top-left one's colour.
+ * @param options.high The value of the top-left square and those of its colour.
+ * @returns The image, $\text{size} \times \text{size}$.
+ *
+ * @example Two-pixel squares on a four-pixel image
+ * print('image:', checkerboardImage({ size: 4, tile: 2 }))
+ */
 export function checkerboardImage({
   size = 64,
   tile = 8,
@@ -25,8 +39,20 @@ export function checkerboardImage({
 }
 
 /**
- * A linear ramp from 0 to 1 across the image in the direction `angle` (radians, 0 = left to right, π/2 = bottom to
- * top); `kind: 'radial'` ramps from 0 at the centre to 1 at the corners.
+ * A linear ramp from 0 to 1 across the image in the direction `angle` (radians, 0 = left to right, $\pi/2$ = bottom
+ * to top), scaled so the corners span exactly $[0, 1]$; `kind: 'radial'` ramps from 0 at the centre to 1 at the
+ * corners.
+ *
+ * @param options The image's size, and the ramp's direction and kind.
+ * @param options.size The image's width and height in pixels.
+ * @param options.angle The direction the linear ramp rises in, in radians anticlockwise from the right; unused by a
+ *   radial ramp.
+ * @param options.kind `linear`, a ramp in one direction, or `radial`, the distance from the centre.
+ * @returns The image, $\text{size} \times \text{size}$.
+ *
+ * @example A left-to-right ramp, and a radial one
+ * print('linear:', gradientImage({ size: 3 }))
+ * print('radial:', gradientImage({ size: 3, kind: 'radial' }))
  */
 export function gradientImage({
   size = 64,
@@ -49,9 +75,20 @@ export function gradientImage({
 }
 
 /**
- * A shapes test image (the site's image-processing notes): on a dark background (0.15), a bright rectangle, a grey
- * disk, a triangle and a checkerboard patch, so straight edges, curved edges, corners and texture all appear. With a
- * stream and `noise`, Gaussian noise of that standard deviation is added.
+ * A shapes test image (the site's image-processing notes): on a dark background (0.15), a bright rectangle (0.9,
+ * bottom left), a grey disk (0.6, top left), a triangle (0.7, bottom right, apex up) and a checkerboard patch of 0.9
+ * and 0.1 (top right), so straight edges, curved edges, corners and texture all appear. The layout is drawn on a
+ * 64-pixel grid and scaled to `size`. With a stream and `noise`, Gaussian noise of that standard deviation is added;
+ * `noise` without a stream throws `DomainError`.
+ *
+ * @param options `size`, the width and height in pixels (default 64); `noise`, the noise's standard deviation
+ *   (default 0); and `stream`, the stream the noise is drawn from (needed when `noise` is positive).
+ * @returns The image, $\text{size} \times \text{size}$.
+ *
+ * @example The value inside each shape
+ * const img = toArray(shapesImage())
+ * print('background:', img[0][0], ' rectangle:', img[46][15], ' disk:', img[17][16])
+ * print('triangle:', img[48][48], ' checker squares:', img[26][37], img[26][43])
  */
 export function shapesImage(options: { size?: number; noise?: number; stream?: Stream } = {}): Tensor {
   const { size = 64, noise = 0, stream } = options
@@ -76,23 +113,44 @@ export function shapesImage(options: { size?: number; noise?: number; stream?: S
 
 /** A geometric test scene and the ground truth it was drawn from. */
 export interface GeometricScene {
-  /** The greyscale image [size, size] (row 0 at the top). */
+  /** The greyscale image, $\text{size} \times \text{size}$ (row 0 at the top), with any noise. */
   image: Tensor
   /** 1 on pixels whose 4-neighbourhood holds a different clean value (the true edges), else 0. */
   edges: Tensor
   /** The square's four corners (row, column; sub-pixel). */
   corners: { row: number; col: number }[]
-  /** The two drawn lines, x cos θ + y sin θ = ρ with x the column and y the row. */
+  /**
+   * The two drawn lines, $x \cos\theta + y \sin\theta = \rho$ with $x$ the column and $y$ the row: `angle` is
+   * $\theta$ (radians), `distance` is $\rho$ (pixels).
+   */
   lines: { angle: number; distance: number }[]
-  /** The disc. */
+  /** The disc, as a list of one: its centre (row, column) and radius, in pixels. */
   circles: { row: number; col: number; radius: number }[]
 }
 
 /**
  * A scene with known geometry for testing edge, corner, line and circle detectors: on a background of 0.2, a square
- * of 0.85 rotated by `rotation` radians, a disc of 0.55 and two bright one-pixel lines; with a stream and `noise`,
- * Gaussian noise of that standard deviation is added. The clean image's edges, the square's corners, the lines'
- * normal-form parameters and the disc are returned with it. The noise is drawn from `stream`.
+ * of 0.85 rotated by `rotation` radians, a disc of 0.55 and two bright one-pixel lines (1); with `noise`, Gaussian
+ * noise of that standard deviation is added. The clean image's edges, the square's corners, the lines' normal-form
+ * parameters and the disc are returned with it. The layout is drawn on a 96-pixel grid and scaled to `size`.
+ *
+ * @param stream The stream the noise is drawn from (unused without noise).
+ * @param options `size`, the width and height in pixels (default 96); `noise`, the noise's standard deviation
+ *   (default 0); and `rotation`, the square's rotation in radians (default 0.3).
+ * @returns The image with its true edges, corners, lines and disc.
+ *
+ * @example The geometry, and the values at the centres
+ * const g = geometricScene(stream(1), { size: 48 })
+ * const img = toArray(g.image)
+ * print('image:', g.image.shape, ' edge pixels:', toArray(g.edges).flat().filter((v) => v === 1).length)
+ * print('corners:', g.corners)
+ * print('lines:', g.lines, ' disc:', g.circles)
+ * print('square centre:', img[16][15], ' disc centre:', img[33][32])
+ *
+ * @example Noise of the given standard deviation
+ * const clean = toArray(geometricScene(stream(1), { size: 48 }).image).flat()
+ * const noisy = toArray(geometricScene(stream(1), { size: 48, noise: 0.1 }).image).flat()
+ * print('sd of the noise (0.1):', Math.sqrt(noisy.reduce((a, v, i) => a + (v - clean[i]) ** 2, 0) / clean.length))
  */
 export function geometricScene(
   stream: Stream,
@@ -149,7 +207,7 @@ export function geometricScene(
   return { image: matrix(image, size, size), edges: matrix(edges, size, size), corners, lines, circles: [disc] }
 }
 
-// A 5 × 7 bitmap font for the digits, row by row from the top (the classic HD44780 LCD glyphs).
+/** A $5 \times 7$ bitmap font for the digits, row by row from the top (the classic HD44780 LCD glyphs). */
 const FONT: readonly string[][] = [
   ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
   ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
@@ -163,7 +221,16 @@ const FONT: readonly string[][] = [
   ['01110', '10001', '10001', '01111', '00001', '00010', '01100'],
 ]
 
-/** The ten digit glyphs as a [10, 7, 5] tensor of 0s and 1s (row 0 at the top). */
+/**
+ * The ten digit glyphs as a $10 \times 7 \times 5$ tensor of 0s and 1s: digit, row (row 0 at the top), column.
+ *
+ * @returns The glyphs.
+ *
+ * @example The glyph of 4
+ * const g = digitGlyphs()
+ * print('shape:', g.shape)
+ * print(toArray(g)[4].map((row) => row.join('')))
+ */
 export function digitGlyphs(): Tensor {
   const out = new Float64Array(10 * 35)
   FONT.forEach((glyph, d) => glyph.forEach((row, r) => [...row].forEach((ch, c) => (out[d * 35 + r * 5 + c] = +ch))))
@@ -171,8 +238,23 @@ export function digitGlyphs(): Tensor {
 }
 
 /**
- * Noisy digits: `perClass` copies of each 5 × 7 glyph, each pixel flipped with probability `flip` and then blurred by
- * Gaussian noise of standard deviation `noise`. x is n × 35 (rows of the image concatenated), y the digit.
+ * Noisy digits: `perClass` copies of each $5 \times 7$ glyph, each pixel flipped with probability `flip` and then
+ * perturbed by Gaussian noise of standard deviation `noise`. `x` is $n \times 35$ (rows of the image concatenated),
+ * `y` the digit; the rows run through the digits in order, `perClass` of each. Copy $k$ of digit $d$ draws from
+ * `child(s, 'digit', d, k)`. Throws `DomainError` when `perClass` is not a non-negative integer.
+ *
+ * @param s The stream the flips and the noise are drawn from.
+ * @param options `perClass`, the copies of each digit (default 20); `flip`, the probability of flipping a pixel
+ *   (default 0.05); and `noise`, the noise's standard deviation (default 0.1).
+ * @returns The images in `x` ($10 \cdot \text{perClass} \times 35$) and the digits in `y` (int32).
+ *
+ * @example The share of flipped pixels is about `flip`
+ * const d = digits(stream(1), { perClass: 40, flip: 0.1, noise: 0 })
+ * const glyphs = toArray(digitGlyphs()).map((g) => g.flat())
+ * const [x, y] = [toArray(d.x), toArray(d.y)]
+ * print('x:', d.x.shape, ' labels:', y.slice(0, 3), '...', y.slice(-3))
+ * const flipped = x.flat().filter((v, i) => v !== glyphs[y[Math.floor(i / 35)]][i % 35]).length
+ * print('share flipped (0.1):', flipped / (x.length * 35))
  */
 export function digits(s: Stream, options: { perClass?: number; flip?: number; noise?: number } = {}): Dataset {
   const { perClass = 20, flip = 0.05, noise = 0.1 } = options
@@ -208,9 +290,19 @@ export function digits(s: Stream, options: { perClass?: number; flip?: number; n
 }
 
 /**
- * Every bars-and-stripes pattern on a size × size grid (MacKay, 2003, "Information Theory, Inference, and Learning
- * Algorithms", §43): each subset of columns switched on (bars) or of rows (stripes), with the all-off and all-on
- * patterns counted once. Returns a [2^{size+1} − 2, size·size] tensor of 0s and 1s.
+ * Every bars-and-stripes pattern on a $\text{size} \times \text{size}$ grid (MacKay, 2003, "Information Theory,
+ * Inference, and Learning Algorithms", §43): each subset of columns switched on (bars) or of rows (stripes), with the
+ * all-off and all-on patterns counted once. Returns a $(2^{\text{size}+1} - 2) \times \text{size}^2$ tensor of 0s and
+ * 1s, the bars first.
+ *
+ * @param options The grid's size.
+ * @param options.size The grid's width and height.
+ * @returns One pattern per row, row-major.
+ *
+ * @example The 14 patterns on a 3 by 3 grid
+ * const p = barsAndStripes({ size: 3 })
+ * print('shape:', p.shape)
+ * print('a bar pattern:', toArray(p)[1], ' a stripe pattern:', toArray(p)[9])
  */
 export function barsAndStripes({ size = 4 }: { size?: number } = {}): Tensor {
   const patterns: number[][] = []

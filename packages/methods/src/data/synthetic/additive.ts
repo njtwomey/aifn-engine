@@ -1,7 +1,8 @@
 /**
- * Seeded data from a generalised additive model: features uniform on [0, 1], η = α + s·Σⱼ fⱼ(xⱼ) with one named shape
- * per feature, μ = g⁻¹(η), and y drawn from the family at μ. The truth carries each centred partial effect, so a figure
- * draws a fitted GAM's terms against the true ones on the same (link) scale.
+ * Seeded data from a generalised additive model: features uniform on $[0, 1]$, $\eta = \alpha + c\sum_j f_j(x_j)$ with
+ * one named shape $f_j$ per feature and an effect scale $c$, $\mu = g^{-1}(\eta)$, and $y$ drawn from the family at
+ * $\mu$. The truth carries each centred partial effect, so a figure draws a fitted GAM's terms against the true ones on
+ * the same (link) scale.
  */
 
 import { child, uniform, type Stream } from 'aifn-compute/foundation/random'
@@ -14,21 +15,26 @@ import { additiveTruth } from '../truth'
 import { checkCount, generatorRecipe, matrix, vector, type Dataset } from '../types'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** The named effect shapes of `additiveData`, each on [0, 1] with mean zero there. */
+/** The named effect shapes of `additiveData`, each on $[0, 1]$ with mean zero there. */
 export type AdditiveShape = 'periodic' | 'monotone' | 'wiggly' | 'smooth' | 'linear' | 'none'
 
 /** The families `additiveData` draws from. */
 export type AdditiveFamily = 'gaussian' | 'binomial' | 'poisson' | 'gamma'
 
 const MIDPOINTS = 2000
-/** f minus its mean over U(0, 1) (midpoint rule, 2000 points; exact to about 1e-7 for these shapes). */
+/**
+ * $f$ minus its mean over $\Unif(0, 1)$ (midpoint rule, 2000 points; exact to about $10^{-7}$ for these shapes).
+ *
+ * @param f The shape to centre, a function on $[0, 1]$.
+ * @returns The centred function $x \mapsto f(x) - \bar{f}$.
+ */
 const centred = (f: (x: number) => number) => {
   let m = 0
   for (let i = 0; i < MIDPOINTS; i++) m += f((i + 0.5) / MIDPOINTS) / MIDPOINTS
   return (x: number) => f(x) - m
 }
 
-/** Each shape on [0, 1], centred, with a formula for captions. Peak sizes are about 1. */
+/** Each shape on $[0, 1]$, centred, with a formula for captions. Peak sizes are about 1. */
 export const ADDITIVE_SHAPES: Readonly<Record<AdditiveShape, { f: (x: number) => number; formula: string }>> = {
   // Its value and slope agree at 0 and 1, so a cyclic smooth fits it exactly at the ends.
   periodic: {
@@ -44,8 +50,9 @@ export const ADDITIVE_SHAPES: Readonly<Record<AdditiveShape, { f: (x: number) =>
 }
 
 /**
- * The intercept α and effect scale s for each family and link: chosen so that μ stays inside the family's mean space
- * for any x (the shapes sum to at most about 3.2 in size) and the effects are clearly visible against the noise.
+ * The intercept $\alpha$ and effect scale $c$ for each family and link: chosen so that $\mu$ stays inside the family's
+ * mean space for any $\xvec$ (the shapes sum to at most about 3.2 in size) and the effects are clearly visible against
+ * the noise.
  */
 const SCALES: Readonly<Record<AdditiveFamily, Partial<Record<LinkName, { intercept: number; scale: number }>>>> = {
   gaussian: {
@@ -75,19 +82,45 @@ const SCALES: Readonly<Record<AdditiveFamily, Partial<Record<LinkName, { interce
 export interface AdditiveOptions {
   /** Rows. Default 300. */
   n?: number
-  /** Default `gaussian`. */
+  /** The family $y$ is drawn from (default `'gaussian'`). */
   family?: AdditiveFamily
-  /** Default the family's default link; one the family does not take is rejected. */
+  /**
+   * The link $g$ (default the family's default link). One the family does not take, or one without a setting of
+   * $\alpha$ and $c$ here, is rejected.
+   */
   link?: LinkName
-  /** One shape per feature. Default periodic, monotone, wiggly. */
+  /** One shape per feature, so their number is $d$. Default `'periodic'`, `'monotone'`, `'wiggly'`. */
   shapes?: readonly AdditiveShape[]
-  /** Gaussian: the noise sd (default 0.4); gamma: the coefficient of variation (default 0.3); ignored otherwise. */
+  /**
+   * Gaussian: the noise standard deviation (default 0.4); gamma: the coefficient of variation (default 0.3); ignored
+   * otherwise.
+   */
   noise?: number
 }
 
 /**
- * A GAM dataset: x [n, d] uniform on [0, 1], y from the family at μ = g⁻¹(α + s Σⱼ fⱼ(xⱼ)); `f` holds μ. The truth
- * (`meta.truth`, an `AdditiveTruth`) gives each effect s·fⱼ centred over U(0, 1), the mean and the law of y.
+ * A GAM dataset: $\Xmat$ ($n \times d$) uniform on $[0, 1]$, and $y$ from the family at
+ * $\mu = g^{-1}(\alpha + c\sum_j f_j(x_j))$, with $\alpha$ and $c$ set per family and link. The truth (`meta.truth`, an
+ * `AdditiveTruth`) gives each effect $c f_j$ centred over $\Unif(0, 1)$, the mean and the law of $y$. Throws
+ * `DomainError` when $n$ is not a non-negative integer, the link does not suit the family or has no setting, a shape is
+ * unknown, or the noise of a Gaussian or gamma family is not positive.
+ *
+ * @param s The stream the features (child `'x'`) and the responses (child `'y'`) are drawn from.
+ * @param options The size, the family and link, the shapes and the noise.
+ * @returns A regression dataset: `x` ($n \times d$), `y`, `f` the true mean $\mu$, and `meta.truth`.
+ *
+ * @example The residuals have the noise's standard deviation
+ * const d = additiveData(stream(1), { n: 500, noise: 0.4 })
+ * const [y, f] = [toArray(d.y), toArray(d.f)]
+ * print('x:', d.x.shape, ' y:', d.y.shape, ' features:', d.meta.featureNames)
+ * print('first row:', toArray(d.x)[0], ' y:', y[0], ' mu:', f[0])
+ * print('sd of y - mu:', Math.sqrt(y.reduce((a, v, i) => a + (v - f[i]) ** 2, 0) / y.length))
+ *
+ * @example Poisson counts through a log link
+ * const d = additiveData(stream(1), { n: 300, family: 'poisson', shapes: ['monotone', 'none'] })
+ * print('first counts:', toArray(d.y).slice(0, 8))
+ * const { link, intercept } = d.meta.truth
+ * print('link:', link, ' intercept:', intercept, ' exp(intercept), the typical count:', Math.exp(intercept))
  */
 export function additiveData(s: Stream, options: AdditiveOptions = {}): Dataset {
   const { n = 300, family = 'gaussian', shapes = ['periodic', 'monotone', 'wiggly'] } = options

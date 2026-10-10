@@ -1,7 +1,7 @@
 /**
- * A tabular classification task with known feature roles, for explanation methods: x ~ N(0, I₆) and
- * y = 1 when 2x₁ − 1.5x₂ + 1.5x₃x₄ + noise > 0. Features 1 and 2 have main effects, 3 and 4 act only through their
- * product (an interaction), and 5 and 6 are irrelevant.
+ * A tabular classification task with known feature roles, for explanation methods: $\xvec \sim \Gauss(\zeros, \Imat_6)$
+ * and $y = 1$ when $2x_1 - 1.5x_2 + 1.5x_3x_4 + \sigma\varepsilon > 0$, $\varepsilon \sim \Gauss(0, 1)$. Features 1
+ * and 2 have main effects, 3 and 4 act only through their product (an interaction), and 5 and 6 are irrelevant.
  */
 
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
@@ -11,10 +11,40 @@ import { int, real, space } from 'aifn-compute/foundation/space'
 import { fromData } from 'aifn-compute/foundation/tensor'
 import { checkCount, matrix, type Dataset } from '../types'
 
-/** The noise-free score 2x₁ − 1.5x₂ + 1.5x₃x₄ of a row (zero-based x[0] … x[5]). */
+/**
+ * The noise-free score $2x_1 - 1.5x_2 + 1.5x_3x_4$ of a row of `attributionTask`; its sign is the label without noise.
+ *
+ * @param x A row of six features, zero-based: `x[0]` is $x_1$. Only the first four are read.
+ * @returns The score.
+ *
+ * @example The interaction pair counts only together
+ * print('x1 = 1:', attributionScore([1, 0, 0, 0, 0, 0]))
+ * print('x3 = 1 alone:', attributionScore([0, 0, 1, 0, 0, 0]))
+ * print('x3 = x4 = 1:', attributionScore([0, 0, 1, 1, 0, 0]))
+ * print('x5, x6 ignored:', attributionScore([0, 0, 0, 0, 5, -5]))
+ */
 export const attributionScore = (x: ArrayLike<number>): number => 2 * x[0] - 1.5 * x[1] + 1.5 * x[2] * x[3]
 
-/** n rows of the attribution task with logistic-scale label noise of standard deviation `noise`. */
+/**
+ * $n$ rows of the attribution task: six standard normal features, and $y = 1$ when the score $f(\xvec)$ of
+ * `attributionScore` plus Gaussian noise $\sigma\varepsilon$, $\varepsilon \sim \Gauss(0, 1)$, is positive. Throws
+ * `DomainError` when $n$ is not a non-negative integer.
+ *
+ * @param s The stream the rows (child `'rows'`) and the label noise (child `'noise'`) are drawn from.
+ * @param options `n` (default 400), the number of rows, and `noise` (default 0.5), the standard deviation $\sigma$ of
+ *   the Gaussian noise added to the score before thresholding.
+ * @returns A classification dataset: `x` ($n \times 6$), `y` (labels 0 or 1), and feature names that give each one's
+ *   role.
+ *
+ * @example Labels follow the score, up to noise
+ * const d = attributionTask(stream(1), { n: 400 })
+ * const x = toArray(d.x)
+ * const y = toArray(d.y)
+ * print('x:', d.x.shape, ' y:', d.y.shape)
+ * print('first row:', x[0], ' label:', y[0])
+ * print('share of labels that match the sign of the score:',
+ *   x.filter((r, i) => (attributionScore(r) > 0 ? 1 : 0) === y[i]).length / x.length)
+ */
 export function attributionTask(s: Stream, options: { n?: number; noise?: number } = {}): Dataset {
   const { n = 400, noise = 0.5 } = options
   checkCount(n, 'attributionTask')

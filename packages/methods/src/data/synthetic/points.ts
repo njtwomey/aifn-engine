@@ -42,7 +42,14 @@ type Sizes = ClassSizes
 // is not attached, so references do not recurse.
 let referenceDepth = 0
 
-/** A lazily drawn reference sample of the population, from a generator call on a child stream. */
+/**
+ * A lazily drawn reference sample of the population, from a generator call on a child stream, for the Monte Carlo
+ * Bayes error. It is drawn once, on first use, with the truth switched off for the inner call.
+ *
+ * @param make Draws the reference dataset: the generator called again on a child stream, with `REFERENCE_SIZE` points
+ *   in the population's class proportions. Called at most once.
+ * @returns A function returning the reference sample: the points of `make()` with equal weights, cached.
+ */
 function referenceFrom(make: () => Dataset): () => Reference {
   let cached: Reference | undefined
   return () => {
@@ -57,20 +64,46 @@ function referenceFrom(make: () => Dataset): () => Reference {
   }
 }
 
+/**
+ * Whether a generator should attach its truth: false inside a reference draw, so that references do not recurse.
+ *
+ * @returns True outside every reference draw.
+ */
 const wantTruth = () => referenceDepth === 0
 
-/** Plain parameters for the recipe step (functions and undefined dropped). */
+/**
+ * Plain parameters for the recipe step (functions and undefined dropped).
+ *
+ * @param options A generator's options object; not modified.
+ * @returns A copy of its fields without those that are `undefined` or functions.
+ */
 function params(options: object): Record<string, unknown> {
   return Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined && typeof v !== 'function'))
 }
 
+/**
+ * Whether two matrices, given as rows, are equal entry by entry. Only the entries of `a` are compared, so `b` must be
+ * at least as large.
+ *
+ * @param a The first matrix, as rows.
+ * @param b The second matrix, as rows.
+ * @returns True when every entry of `a` equals the same entry of `b`.
+ */
 function equalMatrices(a: readonly (readonly number[])[], b: readonly (readonly number[])[]): boolean {
   return a.every((row, i) => row.every((v, j) => v === b[i][j]))
 }
 
 /**
- * The model of Gaussian classes: closed-form Bayes error for two classes with a shared covariance, Monte Carlo
- * otherwise.
+ * The model of Gaussian classes $\Gauss(\muvec_j, \Sigmamat_j)$: closed-form Bayes error for two classes with a
+ * shared covariance (from their Mahalanobis distance), Monte Carlo otherwise.
+ *
+ * @param means The class means $\muvec_j$, $k$ rows of $d$ values.
+ * @param covariances The class covariances $\Sigmamat_j$, $k$ matrices of $d \times d$ as rows; each must be positive
+ *   definite.
+ * @param priors The population class proportions $\pi_j$, $k$ values summing to one.
+ * @param reference The lazy reference sample used for the Monte Carlo Bayes error.
+ * @param family The name of the model, as the truth reports it.
+ * @returns The class model: priors, the class log densities $\log p(\xvec \mid j)$ and the Bayes error's route.
  */
 function gaussianModel(
   means: readonly (readonly number[])[],
@@ -92,13 +125,27 @@ function gaussianModel(
   }
 }
 
+/**
+ * The isotropic covariance $\sigma^2\Imat$ as rows.
+ *
+ * @param d The dimension $d$: the matrix is $d \times d$.
+ * @param sd The standard deviation $\sigma$ of every coordinate.
+ * @returns The $d \times d$ matrix $\sigma^2\Imat$, as rows.
+ */
 function isotropic(d: number, sd: number): number[][] {
   return Array.from({ length: d }, (_, i) => Array.from({ length: d }, (_, j) => (i === j ? sd * sd : 0)))
 }
 
 /**
- * Concentric rings in polar coordinates: p(ρ, θ | k) = N(ρ; rₖ, σ²)/(2π), so p(x | k) = N(|x|; rₖ, σ²)/(2π|x|). The
- * −log(2π|x|) term is shared by every class and cancels in the posterior; it is kept so the densities are true ones.
+ * Concentric rings in polar coordinates: $p(\rho, \theta \mid k) = \Gauss(\rho; r_k, \sigma^2)/(2\pi)$, so
+ * $p(\xvec \mid k) = \Gauss(\lVert\xvec\rVert; r_k, \sigma^2)/(2\pi\lVert\xvec\rVert)$. The
+ * $-\log(2\pi\lVert\xvec\rVert)$ term is shared by every class and cancels in the posterior; it is kept so the
+ * densities are true ones.
+ *
+ * @param radii The ring radii $r_k$, one per class.
+ * @param noise The standard deviation $\sigma$ of the radial noise; positive.
+ * @returns A function mapping $n$ points ($n \times 2$) to their class log densities $\log p(\xvec_i \mid k)$
+ *   ($n \times k$).
  */
 function ringDensities(radii: readonly number[], noise: number): (x: Tensor) => Tensor {
   const k = radii.length
@@ -113,8 +160,13 @@ function ringDensities(radii: readonly number[], noise: number): (x: Tensor) => 
 }
 
 /**
- * Classes uniform on disjoint tiles of the plane: `tile(p)` names the class whose tiles contain p (−1 outside every
- * tile) and class j's tiles have total area `area[j]`, so p(x | j) = 1/area[j] on them.
+ * Classes uniform on disjoint tiles of the plane: `tile(p)` names the class whose tiles contain the point ($-1$ outside
+ * every tile) and class $j$'s tiles have total area $a_j$ = `area[j]`, so $p(\xvec \mid j) = 1/a_j$ on them.
+ *
+ * @param tile Maps a point (its two coordinates) to the class whose tiles contain it, or $-1$ outside every tile.
+ * @param area The total area $a_j$ of each class's tiles, one per class.
+ * @returns A function mapping $n$ points ($n \times 2$) to their class log densities ($n \times k$): $-\log a_j$ in
+ *   class $j$'s tiles and $-\infty$ elsewhere.
  */
 function tileDensities(tile: (p: Float64Array) => number, area: readonly number[]): (x: Tensor) => Tensor {
   const k = area.length
@@ -129,7 +181,13 @@ function tileDensities(tile: (p: Float64Array) => number, area: readonly number[
   }
 }
 
-/** Gaussian XOR: each class is an equal mixture of the two blobs N(c, sd² I) at its quadrants' corners. */
+/**
+ * Gaussian XOR: each class is an equal mixture of the two blobs $\Gauss(\cvec, \sigma^2\Imat)$ at its quadrants'
+ * corners $\cvec$: $(1, 1)$ and $(-1, -1)$ for class 0, $(-1, 1)$ and $(1, -1)$ for class 1.
+ *
+ * @param sd The standard deviation $\sigma$ of every blob.
+ * @returns A function mapping $n$ points ($n \times 2$) to their class log densities ($n \times 2$).
+ */
 function cornerDensities(sd: number): (x: Tensor) => Tensor {
   const law = MultivariateNormal(fromData(Float64Array.from(CORNERS.flat()), [4, 2]), {
     covariance: fromData(Float64Array.of(sd * sd, 0, 0, sd * sd), [2, 2]),
@@ -154,13 +212,13 @@ function cornerDensities(sd: number): (x: Tensor) => Tensor {
 export interface BlobsOptions extends ClassSizeOptions {
   /** Total points (split over the centres by `classWeights`, evenly by default) or one count per centre. Default 300. */
   n?: Sizes
-  /** Centres (k × d), or a number of centres drawn uniformly in `box` (or placed by `separation`). Default 3. */
+  /** Centres ($k \times d$), or a number of centres drawn uniformly in `box` (or placed by `separation`). Default 3. */
   centers?: number | readonly (readonly number[])[]
   /** Standard deviation of every blob, or one per blob. Default 1. */
   sd?: number | readonly number[]
   /** Dimension when centres are drawn. Default 2. */
   dim?: number
-  /** The box centres are drawn in, per coordinate. Default [−10, 10] (scikit-learn's `center_box`). */
+  /** The box centres are drawn in, per coordinate. Default $[-10, 10]$ (scikit-learn's `center_box`). */
   box?: readonly [number, number]
   /**
    * With a number of centres: `random` draws them uniformly in `box` (scikit-learn); `polygon` places them by
@@ -169,17 +227,37 @@ export interface BlobsOptions extends ClassSizeOptions {
   layout?: 'random' | 'polygon'
   /**
    * The overlap knob of the `polygon` layout (default 4): place the centres on a regular polygon in the first two
-   * coordinates so that neighbouring centres are `separation` blob standard deviations apart (two centres at
-   * ±separation·sd/2 on x₁). For two blobs this is the Mahalanobis distance d′, and the Bayes error with equal classes
-   * is Φ(−d′/2).
+   * coordinates so that neighbouring centres are $d'$ = `separation` blob standard deviations apart (two centres at
+   * $\pm d'\sigma/2$ on $x_1$; with one sd per blob, $\sigma$ is their mean). For two blobs this is the Mahalanobis
+   * distance $d'$, and the Bayes error with equal classes is $\Phi(-d'/2)$.
    */
   separation?: number
 }
 
 /**
- * Isotropic Gaussian blobs, as `sklearn.datasets.make_blobs`: blob j has `n[j]` points around centre j with standard
- * deviation `sd[j]`. Centres drawn at random come from the substream `centers`, points from `points`. The truth is the
- * Gaussian mixture: exact Bayes error for two blobs of equal sd, Monte Carlo otherwise.
+ * Isotropic Gaussian blobs, as `sklearn.datasets.make_blobs`: blob $j$ has `n[j]` points around centre $j$ with
+ * standard deviation `sd[j]`, in blob order. Centres drawn at random come from the substream `centers`, points from
+ * `points`. The truth is the Gaussian mixture: exact Bayes error for two blobs of equal sd, Monte Carlo otherwise.
+ * Throws `ShapeError` when `sd` has a length other than the number of centres.
+ *
+ * @param s The random stream; its children `centers`, `points` and `truth` (the reference sample) are used.
+ * @param options The centres, spreads and class sizes; see `BlobsOptions`.
+ * @returns The dataset: `x` ($n \times d$), `y` the blob of each point, and the mixture in `meta.truth`. The recipe
+ *   records the centres actually used.
+ *
+ * @example Three blobs around given centres
+ * const d = blobs(stream(0), { n: 150, centers: [[0, 0], [6, 0], [0, 6]] })
+ * print('x:', d.x.shape, ' y:', d.y.shape)
+ * print('first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', [0, 1, 2].map((j) => y.filter((v) => v === j).length))
+ * const rows = toArray(d.x).filter((_, i) => y[i] === 1)
+ * print('mean of blob 2:', [0, 1].map((c) => rows.reduce((a, r) => a + r[c], 0) / rows.length))
+ *
+ * @example Two blobs placed by their separation
+ * const d = blobs(stream(1), { centers: 2, separation: 2 })
+ * print('centres on x1:', d.meta.recipe.knobs.centers.map((c) => c[0]))
+ * print('Bayes error:', d.meta.truth.bayesError, ' Phi(-1) = 0.158655')
  */
 export function blobs(s: Stream, options: BlobsOptions = {}): Dataset {
   const { centers = 3, dim = 2, box = [-10, 10] } = options
@@ -260,7 +338,18 @@ export function blobs(s: Stream, options: BlobsOptions = {}): Dataset {
 
 // ── Curves: moons, circles, rings, spirals ───────────────────────────────────────────────────────────────────────────
 
-/** The truth of classes spread uniformly along curves and blurred by isotropic Gaussian noise. */
+/**
+ * The truth of classes spread uniformly along curves and blurred by isotropic Gaussian noise, or `undefined` when the
+ * noise is not positive (the densities would be singular) or inside a reference draw.
+ *
+ * @param curves One curve per class, mapping a position $u \in [0, 1]$ to a point of the plane; class $j$ is uniform
+ *   in $u$ along curve $j$.
+ * @param noise The standard deviation of the isotropic Gaussian noise.
+ * @param priors The population class proportions, one per curve.
+ * @param reference The lazy reference sample used for the Monte Carlo Bayes error.
+ * @param family The name of the model, as the truth reports it.
+ * @returns The classification truth, whose class densities are integrals along the curves, or `undefined`.
+ */
 function curveTruth(
   curves: ((u: number) => [number, number])[],
   noise: number,
@@ -282,21 +371,41 @@ function curveTruth(
 
 /** Options for `moons`. */
 export interface MoonsOptions extends ClassSizeOptions {
-  /** Total points, or [outer, inner]. Default 200. */
+  /** Total points, or `[outer, inner]`. Default 200. */
   n?: Sizes
   /**
    * Standard deviation of Gaussian noise added to each coordinate. Default 0.1. The overlap knob: the moons are 1 apart
    * at their closest, so the classes start to overlap near noise 0.25 and are mixed by 0.5.
    */
   noise?: number
-  /** `even`: angles evenly spaced on [0, π] (scikit-learn); `random`: uniform angles. Default `even`. */
+  /** `even`: angles evenly spaced on $[0, \pi]$ (scikit-learn); `random`: uniform angles. Default `even`. */
   spacing?: 'even' | 'random'
 }
 
 /**
- * Two interleaving half circles, as `sklearn.datasets.make_moons`: the outer moon (cos t, sin t) and the inner moon
- * (1 − cos t, 1/2 − sin t) for t ∈ [0, π], plus Gaussian noise. The usual test that linear and centroid methods fail.
- * The truth (noise > 0) takes t uniform on [0, π], the limit of even spacing, and integrates over t numerically.
+ * Two interleaving half circles, as `sklearn.datasets.make_moons`: the outer moon $(\cos t, \sin t)$ (label 0) and
+ * the inner moon $(1 - \cos t, \tfrac12 - \sin t)$ (label 1) for $t \in [0, \pi]$, plus Gaussian noise. The usual
+ * test that linear and centroid methods fail. The truth (attached when the noise is positive) takes $t$ uniform on
+ * $[0, \pi]$, the limit of even spacing, and integrates over $t$ numerically.
+ *
+ * @param s The random stream: random angles come from its child `angles`, the noise from `noise`, the truth's
+ *   reference sample from `truth`.
+ * @param options The class sizes, noise and spacing; see `MoonsOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` 0 for the outer moon and 1 for the inner, and the truth.
+ *
+ * @example Two moons
+ * const d = moons(stream(0), { n: 100 })
+ * print('x:', d.x.shape, ' labels:', d.meta.labelNames)
+ * print('first rows:', toArray(d.x).slice(0, 3))
+ * const y = toArray(d.y)
+ * print('class counts:', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
+ * // The mean height of the outer moon is about 2 / pi = 0.637.
+ * const top = toArray(d.x).filter((_, i) => y[i] === 0)
+ * print('outer moon mean x2:', top.reduce((a, r) => a + r[1], 0) / top.length)
+ *
+ * @example Exact class sizes from a prevalence
+ * const y = toArray(moons(stream(0), { n: 100, prevalence: 0.2 }).y)
+ * print('inner moon points:', y.filter((v) => v === 1).length, 'of', y.length)
  */
 export function moons(s: Stream, options: MoonsOptions = {}): Dataset {
   const { noise = 0.1, spacing = 'even' } = options
@@ -350,20 +459,34 @@ export function moons(s: Stream, options: MoonsOptions = {}): Dataset {
 
 /** Options for `circles`. */
 export interface CirclesOptions extends ClassSizeOptions {
-  /** Total points, or [outer, inner]. Default 200. */
+  /** Total points, or `[outer, inner]`. Default 200. */
   n?: Sizes
   /** Radius of the inner circle relative to the outer (radius 1). Default 0.5. */
   factor?: number
   /**
-   * Gaussian noise standard deviation. Default 0.05. The overlap knob: the circles are 1 − factor apart, so the classes
-   * overlap once the noise nears (1 − factor)/2.
+   * Gaussian noise standard deviation. Default 0.05. The overlap knob: the circles are $1 - f$ apart ($f$ the
+   * `factor`), so the classes overlap once the noise nears $(1 - f)/2$.
    */
   noise?: number
 }
 
 /**
- * Two concentric circles, as `sklearn.datasets.make_circles`: n points evenly spaced on the unit circle (label 0) and on
- * a circle of radius `factor` (label 1), plus Gaussian noise. The truth takes the angle uniform.
+ * Two concentric circles, as `sklearn.datasets.make_circles`: points evenly spaced in angle on the unit circle
+ * (label 0) and on a circle of radius `factor` (label 1), plus Gaussian noise. The truth (attached when the noise is positive)
+ * takes the angle uniform. Throws `DomainError` unless `factor` is in $[0, 1)$.
+ *
+ * @param s The random stream: the noise comes from its child `noise`, the truth's reference sample from `truth`.
+ * @param options The class sizes, inner radius and noise; see `CirclesOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` 0 for the outer circle and 1 for the inner, and the truth.
+ *
+ * @example Two circles
+ * const d = circles(stream(0), { n: 100, factor: 0.4 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
+ * // The inner circle's mean radius is close to the factor.
+ * const inner = toArray(d.x).filter((_, i) => y[i] === 1)
+ * print('inner mean radius:', inner.reduce((a, [u, v]) => a + Math.hypot(u, v), 0) / inner.length)
  */
 export function circles(s: Stream, options: CirclesOptions = {}): Dataset {
   const { factor = 0.5, noise = 0.05 } = options
@@ -425,15 +548,31 @@ export function circles(s: Stream, options: CirclesOptions = {}): Dataset {
 export interface RingsOptions extends ClassSizeOptions {
   /** Total points, or one count per ring. Default 300. */
   n?: Sizes
-  /** Ring radii. Default [1, 2, 3]. */
+  /** Ring radii. Default `[1, 2, 3]`. */
   radii?: readonly number[]
   /** Radial Gaussian noise standard deviation. Default 0.1. The overlap knob, against the gap between radii. */
   noise?: number
 }
 
 /**
- * Concentric rings with uniformly random angles and Gaussian noise on the radius; label k is ring k. The truth is in
- * closed form: in polar coordinates p(ρ, θ | k) = N(ρ; rₖ, σ²)/(2π), so p(x | k) = N(|x|; rₖ, σ²)/(2π|x|).
+ * Concentric rings with uniformly random angles and Gaussian noise on the radius; label $k$ is ring $k$. The truth
+ * (attached when the noise is positive) is in closed form: in polar coordinates
+ * $p(\rho, \theta \mid k) = \Gauss(\rho; r_k, \sigma^2)/(2\pi)$, so
+ * $p(\xvec \mid k) = \Gauss(\lVert\xvec\rVert; r_k, \sigma^2)/(2\pi\lVert\xvec\rVert)$.
+ *
+ * @param s The random stream: ring $k$ is drawn from its child `ring` $k$, the truth's reference sample from `truth`.
+ * @param options The class sizes, radii and noise; see `RingsOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` the ring of each point, and the truth.
+ *
+ * @example Three rings
+ * const d = rings(stream(0), { n: 90 })
+ * print('x:', d.x.shape, ' labels:', d.meta.labelNames)
+ * const y = toArray(d.y)
+ * const r = toArray(d.x).map(([u, v]) => Math.hypot(u, v))
+ * print('class counts:', [0, 1, 2].map((k) => y.filter((v) => v === k).length))
+ * // Each ring's mean radius is close to its radius 1, 2 or 3.
+ * const ring = (k) => r.filter((_, i) => y[i] === k)
+ * print('mean radius per ring:', [0, 1, 2].map((k) => ring(k).reduce((a, v) => a + v, 0) / ring(k).length))
  */
 export function rings(s: Stream, options: RingsOptions = {}): Dataset {
   const { radii = [1, 2, 3], noise = 0.1 } = options
@@ -491,15 +630,31 @@ export interface SpiralsOptions extends ClassSizeOptions {
   /** Turns of each arm. Default 1.5. */
   turns?: number
   /**
-   * Gaussian noise standard deviation. Default 0.05. The overlap knob: neighbouring arms are 1/(arms · turns) apart
-   * along a radius, so the arms blur together once the noise nears a quarter of that.
+   * Gaussian noise standard deviation. Default 0.05. The overlap knob: neighbouring arms are $1/(a\tau)$ apart along
+   * a radius ($a$ the `arms`, $\tau$ the `turns`), so the arms blur together once the noise nears a quarter of that.
    */
   noise?: number
 }
 
 /**
- * Interleaved Archimedean spirals: arm j holds points at radius u and angle 2π(turns · u + j / arms) for u uniform on
- * (0.05, 1], plus Gaussian noise. `t` is the position u along the arm. The truth integrates over u numerically.
+ * Interleaved Archimedean spirals: arm $j$ holds points at radius $u$ and angle $2\pi(\tau u + j/a)$ ($\tau$ the
+ * `turns`, $a$ the `arms`) for $u$ uniform on $[0.05, 1)$, plus Gaussian noise. `t` is the position $u$ along the arm.
+ * The truth (attached when the noise is positive) integrates over $u$ numerically.
+ *
+ * @param s The random stream: arm $j$ is drawn from its child `arm` $j$, the truth's reference sample from `truth`.
+ * @param options The class sizes, arms, turns and noise; see `SpiralsOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` the arm of each point, `t` its position $u$ along the arm, and the
+ *   truth.
+ *
+ * @example Two spirals
+ * const d = spirals(stream(0), { n: 100, noise: 0 })
+ * print('x:', d.x.shape, ' t:', d.t.shape)
+ * print('first rows:', toArray(d.x).slice(0, 2), ' their t:', toArray(d.t).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts:', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
+ * // Without noise the radius of a point is its position t along the arm.
+ * const t = toArray(d.t)
+ * print('largest |radius - t|:', Math.max(...toArray(d.x).map(([u, v], i) => Math.abs(Math.hypot(u, v) - t[i]))))
  */
 export function spirals(s: Stream, options: SpiralsOptions = {}): Dataset {
   const { arms = 2, turns = 1.5, noise = 0.05 } = options
@@ -557,12 +712,12 @@ export function spirals(s: Stream, options: SpiralsOptions = {}): Dataset {
 /** Options for `xor`. */
 export interface XorOptions extends ClassSizeOptions {
   /**
-   * Total points (default 200), or [same sign, opposite signs]. With a total alone, `uniform` points are iid on the
+   * Total points (default 200), or `[same sign, opposite signs]`. With a total alone, `uniform` points are iid on the
    * square, so the class counts are random; pass `prevalence`, `classWeights` or counts for exact class sizes (points
    * are then drawn within each class's quadrants).
    */
   n?: Sizes
-  /** `uniform`: points uniform on [−1, 1]²; `gaussian`: blobs at (±1, ±1) with standard deviation `sd`. */
+  /** `uniform`: points uniform on $[-1, 1]^2$; `gaussian`: blobs at $(\pm 1, \pm 1)$ with standard deviation `sd`. */
   kind?: 'uniform' | 'gaussian'
   /**
    * Blob standard deviation for `gaussian`. Default 0.4. The overlap knob: blobs are 2 apart, so neighbouring
@@ -579,9 +734,29 @@ const CORNERS = [
 ]
 
 /**
- * The XOR problem: label 1 when x₁ and x₂ have opposite signs (the second and fourth quadrants), 0 otherwise. No
+ * The XOR problem: label 1 when $x_1$ and $x_2$ have opposite signs (the second and fourth quadrants), 0 otherwise. No
  * linear classifier separates it. For `gaussian`, the label is that of the blob's quadrant, so blobs overlap; each
- * class is an equal mixture of its two blobs.
+ * class is an equal mixture of its two blobs. With a total `n` alone the original recipe runs on `s` itself: iid
+ * uniform points (random class counts), or the four blobs in turn. Exact class sizes draw class $j$ on the child
+ * `class` $j$, alternating between its two quadrants.
+ *
+ * @param s The random stream; also its children `class` $j$ (exact sizes) and `truth` (the reference sample).
+ * @param options The class sizes, kind and blob spread; see `XorOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` 1 for opposite signs and 0 for the same sign, and the truth (Bayes
+ *   error 0 for `uniform`).
+ *
+ * @example Uniform XOR
+ * const d = xor(stream(0), { n: 100 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 3), ' their labels:', toArray(d.y).slice(0, 3))
+ * const y = toArray(d.y)
+ * print('class counts (random):', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
+ * print('labels match the signs:', toArray(d.x).every(([u, v], i) => (u * v < 0 ? 1 : 0) === y[i]))
+ *
+ * @example Gaussian XOR with exact class sizes
+ * const d = xor(stream(0), { n: 100, kind: 'gaussian', prevalence: 0.3 })
+ * const y = toArray(d.y)
+ * print('class counts:', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
+ * print('Bayes error:', d.meta.truth.bayesError, '(' + d.meta.truth.bayesErrorMethod + ')')
  */
 export function xor(s: Stream, options: XorOptions = {}): Dataset {
   const { kind = 'uniform', sd = 0.4 } = options
@@ -669,7 +844,7 @@ export function xor(s: Stream, options: XorOptions = {}): Dataset {
 /** Options for `checkerboard`. */
 export interface CheckerboardOptions extends ClassSizeOptions {
   /**
-   * Total points (default 400), or [even, odd]. A total alone draws iid points on the board (random class counts);
+   * Total points (default 400), or `[even, odd]`. A total alone draws iid points on the board (random class counts);
    * `prevalence`, `classWeights` or counts draw within each class's tiles for exact sizes.
    */
   n?: Sizes
@@ -678,8 +853,22 @@ export interface CheckerboardOptions extends ClassSizeOptions {
 }
 
 /**
- * Points uniform on the square [0, tiles]², labelled by the parity of their tile (⌊x₁⌋ + ⌊x₂⌋ mod 2). The Bayes error
- * is 0; there is no overlap knob, so blur it with label noise.
+ * Points uniform on the square $[0, T]^2$ ($T$ the `tiles`), labelled by the parity of their tile,
+ * $(\lfloor x_1 \rfloor + \lfloor x_2 \rfloor) \bmod 2$. The Bayes error is 0; there is no overlap knob, so blur it
+ * with label noise. With a total `n` alone the points are iid on the board, drawn from `s` itself, so the class counts
+ * are random and the class proportions are the tiles' areas. Exact class sizes draw class $j$ on the child `class` $j$,
+ * each point in a random tile of its colour. Throws `DomainError` unless `tiles` is an integer of at least 2.
+ *
+ * @param s The random stream; also its children `class` $j$ (exact sizes) and `truth` (the reference sample).
+ * @param options The class sizes and tiles per side; see `CheckerboardOptions`.
+ * @returns The dataset: `x` ($n \times 2$), `y` 0 for an even tile and 1 for an odd one, and the truth.
+ *
+ * @example A 4 by 4 board
+ * const d = checkerboard(stream(0), { n: 200 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2), ' their labels:', toArray(d.y).slice(0, 2))
+ * const y = toArray(d.y)
+ * print('class counts (random):', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
+ * print('labels match the tiles:', toArray(d.x).every(([u, v], i) => (Math.floor(u) + Math.floor(v)) % 2 === y[i]))
  */
 export function checkerboard(s: Stream, options: CheckerboardOptions = {}): Dataset {
   const { tiles = 4 } = options
@@ -759,25 +948,48 @@ export function checkerboard(s: Stream, options: CheckerboardOptions = {}): Data
 
 /** Options for `gaussians`. */
 export interface GaussiansOptions extends ClassSizeOptions {
-  /** Means, k × d. Default two classes at (−1, 0) and (1, 0). */
+  /** Means, $k \times d$. Default two classes at $(-1, 0)$ and $(1, 0)$. */
   means?: readonly (readonly number[])[]
-  /** Covariances, k matrices d × d. Default sd² I for every class. */
+  /** Covariances, $k$ matrices of $d \times d$. Default $\sigma^2\Imat$ ($\sigma$ the `sd`) for every class. */
   covariances?: readonly (readonly (readonly number[])[])[]
   /** Without `covariances`: the standard deviation of every coordinate of every class. Default 1. */
   sd?: number
   /** Total points or one count per component. Default 300. */
   n?: Sizes
   /**
-   * The overlap knob d′: scale the means about their centroid so that the closest pair is `separation` apart in
+   * The overlap knob $d'$: scale the means about their centroid so that the closest pair is `separation` apart in
    * Mahalanobis distance under the average covariance. For two classes with a shared covariance and equal priors the
-   * Bayes error is Φ(−d′/2).
+   * Bayes error is $\Phi(-d'/2)$.
    */
   separation?: number
 }
 
 /**
- * Samples from k Gaussians with full covariances; label j is component j. The truth is exact: the posterior from the
- * Gaussian densities, and a closed-form Bayes error for two classes with a shared covariance (Monte Carlo otherwise).
+ * Samples from $k$ Gaussians $\Gauss(\muvec_j, \Sigmamat_j)$ with full covariances; label $j$ is component $j$. The
+ * truth is exact: the posterior from the Gaussian densities, and a closed-form Bayes error for two classes with a
+ * shared covariance (Monte Carlo otherwise). Throws `ShapeError` when the number of covariances differs from the number
+ * of means, and `DomainError` when `separation` is asked of coincident means. A covariance that is not positive
+ * definite throws.
+ *
+ * @param s The random stream: component $j$ is drawn from its child `component` $j$, the truth's reference sample
+ *   from `truth`.
+ * @param options The means, covariances, separation and class sizes; see `GaussiansOptions`.
+ * @returns The dataset: `x` ($n \times d$), `y` the component of each point, and the truth. The recipe records the
+ *   means after any rescaling by `separation`.
+ *
+ * @example Two correlated classes
+ * const covariances = [[[1, 0.8], [0.8, 1]], [[1, 0], [0, 0.5]]]
+ * const d = gaussians(stream(0), { n: 400, means: [[0, 0], [3, 1]], covariances })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const y = toArray(d.y)
+ * const second = toArray(d.x).filter((_, i) => y[i] === 1)
+ * print('class counts:', [y.length - second.length, second.length])
+ * print('mean of class 1:', [0, 1].map((c) => second.reduce((a, r) => a + r[c], 0) / second.length))
+ *
+ * @example The separation sets the Bayes error
+ * const d = gaussians(stream(0), { separation: 2 })
+ * print('means:', d.meta.recipe.knobs.means)
+ * print('Bayes error:', d.meta.truth.bayesError, ' Phi(-1) = 0.158655')
  */
 export function gaussians(s: Stream, options: GaussiansOptions = {}): Dataset {
   let means = (
@@ -851,6 +1063,12 @@ export function gaussians(s: Stream, options: GaussiansOptions = {}): Dataset {
   }
 }
 
+/**
+ * A square matrix, given as rows, as a tensor.
+ *
+ * @param rows The $d$ rows of $d$ values each.
+ * @returns The $d \times d$ tensor.
+ */
 function matrixOf(rows: readonly (readonly number[])[]): Tensor {
   const d = rows.length
   const out = new Float64Array(d * d)
@@ -860,14 +1078,31 @@ function matrixOf(rows: readonly (readonly number[])[]): Tensor {
 
 /** Options for `anisotropicBlobs`. */
 export interface AnisotropicOptions extends BlobsOptions {
-  /** A 2 × 2 linear map applied to every point. Default [[0.6, −0.6], [−0.4, 0.8]] (scikit-learn's k-means example). */
+  /**
+   * A $2 \times 2$ linear map $\Amat$, as rows, applied to every point as $\xvec \mapsto \xvec\Amat$. Default
+   * `[[0.6, -0.6], [-0.4, 0.8]]` (scikit-learn's k-means example).
+   */
   transform?: readonly (readonly number[])[]
 }
 
 /**
- * Blobs stretched by a shared linear map x ↦ x A, as in scikit-learn's "demonstration of k-means assumptions": the
- * clusters are elongated and tilted, which breaks k-means' spherical assumption. The truth is Gaussian with means
- * Aᵀμⱼ and covariances sdⱼ² AᵀA.
+ * Blobs stretched by a shared linear map $\xvec \mapsto \xvec\Amat$ (points as rows), as in scikit-learn's
+ * "demonstration of k-means assumptions": the clusters are elongated and tilted, which breaks k-means' spherical
+ * assumption. The blobs are those of `blobs` on the same stream (300 points round 3 centres unless `options` says
+ * otherwise, always in two dimensions). The truth is Gaussian with means $\Amat^\top\muvec_j$ and covariances
+ * $\sigma_j^2\Amat^\top\Amat$.
+ *
+ * @param s The random stream, passed to `blobs`; its child `truth` draws the reference sample.
+ * @param options The options of `blobs` and the map `transform`; see `AnisotropicOptions`.
+ * @returns The dataset: `x` ($n \times 2$) the mapped points, `y` the blob of each point, and the truth.
+ *
+ * @example One blob's covariance under the map
+ * const d = anisotropicBlobs(stream(0), { n: 2000, centers: [[0, 0]] })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * // A^T A for the default map is [[0.52, -0.68], [-0.68, 1]].
+ * const x = toArray(d.x)
+ * const cov = (a, b) => x.reduce((t, r) => t + r[a] * r[b], 0) / x.length
+ * print('sample covariance:', [[cov(0, 0), cov(0, 1)], [cov(1, 0), cov(1, 1)]])
  */
 export function anisotropicBlobs(s: Stream, options: AnisotropicOptions = {}): Dataset {
   const base = blobs(s, { n: 300, centers: 3, ...options, dim: 2 })
@@ -933,14 +1168,32 @@ export function anisotropicBlobs(s: Stream, options: AnisotropicOptions = {}): D
 
 /** Options for `swissRoll` and `sCurve`. */
 export interface ManifoldOptions {
+  /** Points. Default 500. */
   n?: number
   /** Gaussian noise standard deviation in every coordinate. Default 0. */
   noise?: number
 }
 
 /**
- * The Swiss roll, as `sklearn.datasets.make_swiss_roll`: t = 1.5π(1 + 2u) and height h = 21v for u, v uniform, mapped to
- * (t cos t, h, t sin t). `t` is the position along the roll, the coordinate a good embedding recovers.
+ * The Swiss roll, as `sklearn.datasets.make_swiss_roll`: $t = 1.5\pi(1 + 2u)$ and height $h = Hv$ ($H$ the `height`,
+ * 21 by default) for $u$, $v$ uniform on $[0, 1)$, mapped to $(t\cos t, h, t\sin t)$. `t` is the position along the
+ * roll, the coordinate a good embedding recovers. No truth is attached. Throws `DomainError` unless `n` is a
+ * non-negative integer.
+ *
+ * @param s The random stream all draws come from.
+ * @param options `n` the number of points (default 500), `noise` the standard deviation of Gaussian noise added to
+ *   every coordinate (default 0), and `height` the height $H$ of the roll (default 21).
+ * @returns The dataset: `x` ($n \times 3$) and `t`, each point's position along the roll, in
+ *   $[1.5\pi, 4.5\pi)$.
+ *
+ * @example The roll and its coordinate
+ * const d = swissRoll(stream(0), { n: 200 })
+ * print('x:', d.x.shape, ' t:', d.t.shape)
+ * print('first rows:', toArray(d.x).slice(0, 2), ' their t:', toArray(d.t).slice(0, 2))
+ * const t = toArray(d.t)
+ * print('t from', Math.min(...t), 'to', Math.max(...t), ' (1.5 pi = 4.712, 4.5 pi = 14.137)')
+ * // Without noise the first coordinate is t cos t.
+ * print('largest |x1 - t cos t|:', Math.max(...toArray(d.x).map((r, i) => Math.abs(r[0] - t[i] * Math.cos(t[i])))))
  */
 export function swissRoll(s: Stream, options: ManifoldOptions & { height?: number } = {}): Dataset {
   const { n = 500, noise = 0, height = 21 } = options
@@ -970,7 +1223,24 @@ export function swissRoll(s: Stream, options: ManifoldOptions & { height?: numbe
   }
 }
 
-/** The S-curve, as `sklearn.datasets.make_s_curve`: t = 3π(u − 1/2), mapped to (sin t, 2v, sign(t)(cos t − 1)). */
+/**
+ * The S-curve, as `sklearn.datasets.make_s_curve`: $t = 3\pi(u - \tfrac12)$ for $u$, $v$ uniform on $[0, 1)$, mapped
+ * to $(\sin t, 2v, \sgn(t)(\cos t - 1))$. `t` is the position along the S. No truth is attached. Throws
+ * `DomainError` unless `n` is a non-negative integer.
+ *
+ * @param s The random stream all draws come from.
+ * @param options The number of points and the standard deviation of Gaussian noise added to every coordinate; see
+ *   `ManifoldOptions`.
+ * @returns The dataset: `x` ($n \times 3$) and `t`, each point's position along the S, in $[-1.5\pi, 1.5\pi)$.
+ *
+ * @example The S and its coordinate
+ * const d = sCurve(stream(0), { n: 200 })
+ * print('x:', d.x.shape, ' first rows:', toArray(d.x).slice(0, 2))
+ * const t = toArray(d.t)
+ * print('t from', Math.min(...t), 'to', Math.max(...t), ' (1.5 pi = 4.712)')
+ * // Without noise the first coordinate is sin t.
+ * print('largest |x1 - sin t|:', Math.max(...toArray(d.x).map((r, i) => Math.abs(r[0] - Math.sin(t[i])))))
+ */
 export function sCurve(s: Stream, options: ManifoldOptions = {}): Dataset {
   const { n = 500, noise = 0 } = options
   checkCount(n, 'sCurve')
@@ -1001,7 +1271,18 @@ export function sCurve(s: Stream, options: ManifoldOptions = {}): Dataset {
 
 /**
  * The same dataset with its rows in a random order drawn from `s` (x, y, t, f and the per-row metadata permuted
- * together).
+ * together), and a `shuffleDataset` step appended to its recipe.
+ *
+ * @param s The random stream the permutation is drawn from.
+ * @param data The dataset to shuffle; not modified.
+ * @returns A new dataset with the same rows in a random order.
+ *
+ * @example Generators group points by class; shuffling mixes them
+ * const d = blobs(stream(0), { n: 12, centers: 3 })
+ * print('labels before:', toArray(d.y))
+ * const shuffled = shuffleDataset(stream(1), d)
+ * print('labels after: ', toArray(shuffled.y))
+ * print('recipe modifiers:', shuffled.meta.recipe.modifiers.map((m) => m.op))
  */
 export function shuffleDataset(s: Stream, data: Dataset): Dataset {
   const n = data.x.shape[0]

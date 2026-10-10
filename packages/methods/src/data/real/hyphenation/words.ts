@@ -12,8 +12,10 @@
  * One word per line, in rank order, with '-' at each hyphenation point.
  */
 
+/** The SHA-256 hash of the Moby source file `mhyph.txt` the list was made from. */
 export const SOURCE_SHA256 = 'eeb30474c86b8af3469035ec1a0913e35905325ca885290db9dfed9881e230ac'
 
+/** The 8000 words, one per line in rank order (most frequent first), with `-` at each hyphenation point. */
 export const WORDS = `that
 with
 this

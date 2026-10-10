@@ -1,8 +1,12 @@
-/** The signal generators of `aifn-methods/data/signals`. */
+/**
+ * The registry entries of the deterministic signals of `signals.ts` (kind `function`, area `data/signals`): each
+ * function with its display name, its role and the notes that use it, collected in `signalGeneratorFunctions`.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as signals from './signals'
 
+/** Registers a function of `signals.ts` (kind `function`, area `data/signals`). */
 const fn = definer<FunctionInfo>('function', 'data/signals')
 
 fn(
@@ -29,7 +33,7 @@ fn(
   signals.tones,
 )
 
-/** The functions of the module, keyed by name. */
+/** The registered functions of `signals.ts` (`uniformTimes`, `chirp`, `tones`), keyed by name. */
 export const signalGeneratorFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
   entries<FunctionInfo>('function', signals) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>

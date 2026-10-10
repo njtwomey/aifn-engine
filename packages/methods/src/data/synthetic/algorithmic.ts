@@ -7,12 +7,12 @@
  * and test examples are drawn at different lengths when asked, for length generalisation (Anil et al., 2022, "Exploring
  * length generalization in large language models"). The truth answers any prompt and scores any output exactly.
  *
- * `modularArithmetic` is the full table of a ∘ b mod p for ∘ ∈ {+, −, ×, ÷}, split into train and test pairs by
- * fraction (Power, Burda, Edwards, Babuschkin and Misra, 2022, "Grokking: generalization beyond overfitting on small
- * algorithmic datasets"). Its truth carries the operation and the real Fourier basis of ℤ_p, against which a learned
- * embedding's spectrum is measured: networks that generalise on modular addition represent a and b by a few
- * frequencies (Nanda, Chan, Lieberum, Smith and Steinhardt, 2023, "Progress measures for grokking via mechanistic
- * interpretability").
+ * `modularArithmetic` is the full table of $a \circ b \bmod p$ for $\circ \in \{+, -, \times, \div\}$, split into
+ * train and test pairs by fraction (Power, Burda, Edwards, Babuschkin and Misra, 2022, "Grokking: generalization beyond
+ * overfitting on small algorithmic datasets"). Its truth carries the operation and the real Fourier basis of
+ * $\integers_p$, against which a learned embedding's spectrum is measured: networks that generalise on modular addition
+ * represent $a$ and $b$ by a few frequencies (Nanda, Chan, Lieberum, Smith and Steinhardt, 2023, "Progress measures for
+ * grokking via mechanistic interpretability").
  */
 
 import type { DatasetInfo, Size, Truth as TruthContract } from 'aifn-compute/foundation/contracts'
@@ -53,9 +53,21 @@ const LETTERS = SEQUENCE_VOCABULARY.slice(-8)
 
 /** The sequence tasks. */
 export const SEQUENCE_TASKS = ['copy', 'reverse', 'sort', 'dyck1', 'dyck2', 'addition', 'induction'] as const
+/** The name of a sequence task, one of `SEQUENCE_TASKS`. */
 export type SequenceTaskName = (typeof SEQUENCE_TASKS)[number]
 
-/** Token ids of a string over `SEQUENCE_VOCABULARY` (one character per token). */
+/**
+ * Token ids of a string over `SEQUENCE_VOCABULARY` (one character per token). Throws `DomainError` for a character
+ * outside the vocabulary.
+ *
+ * @param text The string, one token per character.
+ * @returns The token ids, indices into `SEQUENCE_VOCABULARY`.
+ *
+ * @example A reverse example, encoded and decoded
+ * const ids = encodeSequence('^abc=cba.')
+ * print('ids:', ids)
+ * print('back:', decodeSequence(ids))
+ */
 export function encodeSequence(text: string): number[] {
   return [...text].map((c) => {
     const id = ID.get(c)
@@ -64,7 +76,16 @@ export function encodeSequence(text: string): number[] {
   })
 }
 
-/** The string of token ids (padding dropped). */
+/**
+ * The string of token ids (padding dropped); an id outside the vocabulary shows as `?`.
+ *
+ * @param ids Token ids, indices into `SEQUENCE_VOCABULARY`.
+ * @returns The string, one character per token that is not padding.
+ *
+ * @example A padded row
+ * print(decodeSequence([1, 19, 20, 3, 20, 19, 2, 0, 0]))
+ * print(decodeSequence(encodeSequence('^12+34=46.')))
+ */
 export function decodeSequence(ids: readonly number[]): string {
   return ids
     .filter((i) => i !== PAD)
@@ -72,7 +93,15 @@ export function decodeSequence(ids: readonly number[]): string {
     .join('')
 }
 
-/** The answer to a prompt, as a string (without the end mark). */
+/**
+ * The answer to a prompt, as a string (without the end mark): the prompt itself, reversed or sorted; the closing
+ * brackets that complete a Dyck prefix; the sum; or, for induction, the symbol after the query's first use. Throws
+ * `DomainError` for a Dyck prompt that is not a balanced prefix, or an induction prompt with no answer.
+ *
+ * @param task The task.
+ * @param prompt The prompt, a string over the vocabulary.
+ * @returns The answer.
+ */
 function answerOf(task: SequenceTaskName, prompt: string): string {
   switch (task) {
     case 'copy':
@@ -106,7 +135,18 @@ function answerOf(task: SequenceTaskName, prompt: string): string {
   }
 }
 
-/** One prompt of `length` (symbols, or digits per operand for addition) drawn from `s`. */
+/**
+ * One prompt of `length` (symbols, or digits per operand for addition) drawn from `s`: random letters (copy, reverse,
+ * sort); a random walk on the bracket depth (Dyck), which may end at any depth; two operands without leading zeros
+ * (addition); or $\min(\text{length}, 8)$ distinct letters followed by a query among all but the last (induction).
+ *
+ * @param s The random stream; induction also uses its child `symbols`.
+ * @param task The task.
+ * @param length The prompt's length: symbols, digits per operand (addition) or distinct letters before the query
+ *   (induction).
+ * @param symbols How many letters copy, reverse and sort draw from, the first of `abcdefgh`.
+ * @returns The prompt.
+ */
 function drawPrompt(s: Stream, task: SequenceTaskName, length: Size, symbols: Size): string {
   const pick = (k: Size, n: Size) => Array.from(toFlat(integers(s, n, { shape: [k] })))
   switch (task) {
@@ -152,26 +192,35 @@ function drawPrompt(s: Stream, task: SequenceTaskName, length: Size, symbols: Si
 }
 
 /**
- * Examples of a sequence task as padded token rows: `tokens` [n, L] (`^ prompt = answer .`, then padding), the
- * next-token `targets` [n, L] (tokens shifted left by one, padding at the end), and `weights` [n, L], 1 where the
- * target is an answer token or the end mark and 0 elsewhere, so a loss weighted by them scores only the answer.
+ * Examples of a sequence task as padded token rows: `tokens` ($n \times L$, `^ prompt = answer .`, then padding), the
+ * next-token `targets` ($n \times L$, tokens shifted left by one, padding at the end), and `weights` ($n \times L$), 1
+ * where the target is an answer token or the end mark and 0 elsewhere, so a loss weighted by them scores only the
+ * answer.
  */
 export type SequenceExamples = {
+  /** The token rows (int32), $n \times L$. */
   readonly tokens: Tensor
+  /** The next token at each position (int32), $n \times L$. */
   readonly targets: Tensor
+  /** 1 where the target is an answer token or the end mark, else 0 (float64), $n \times L$. */
   readonly weights: Tensor
-  /** Each example's prompt and answer, as strings. */
+  /** Each example's prompt, as a string. */
   readonly prompts: readonly string[]
+  /** Each example's answer, as a string without the end mark. */
   readonly answers: readonly string[]
   /** Each example's length knob (symbols, or digits per operand). */
   readonly lengths: readonly number[]
 }
 
-/** What a sequence-task output scores: whether it is exactly the answer, and the share of answer positions right. */
+/**
+ * What a sequence-task output scores: `exact`, whether it is exactly the answer, and `tokenAccuracy`, the share of
+ * answer positions (the end mark included) that are right.
+ */
 export type SequenceScore = { readonly exact: boolean; readonly tokenAccuracy: number }
 
 /** The truth of a sequence task: the answer to any prompt, and the exact score of any output. */
 export interface SequenceTaskTruth {
+  /** The task. */
   readonly task: SequenceTaskName
   /** The answer (without the end mark) to a prompt. */
   answer(prompt: string): string
@@ -181,13 +230,19 @@ export interface SequenceTaskTruth {
 
 /** Train and test examples of a sequence task, with its vocabulary and truth. */
 export interface SequenceTaskData {
+  /** The task. */
   readonly task: SequenceTaskName
+  /** The vocabulary, `SEQUENCE_VOCABULARY`. */
   readonly vocabulary: readonly string[]
-  /** Row length L of `tokens`, shared by both splits (the longest example of either). */
+  /** Row length $L$ of `tokens`, shared by both splits (the longest example of either). */
   readonly width: Size
+  /** The training examples. */
   readonly train: SequenceExamples
+  /** The test examples. */
   readonly test: SequenceExamples
+  /** The task's truth, as `sequenceTaskTruth` gives it. */
   readonly truth: SequenceTaskTruth
+  /** The description and the stream key. */
   readonly meta: DatasetMeta
 }
 
@@ -195,22 +250,38 @@ export interface SequenceTaskData {
 export interface SequenceTaskOptions {
   /** Default `reverse`. */
   task?: SequenceTaskName
-  /** Training examples (default 2000) and test examples (default 200). */
+  /** Training examples (default 2000). */
   n?: Size
+  /** Test examples (default 200). */
   testN?: Size
-  /** Training lengths (symbols, or digits per operand for addition), inclusive (defaults 2 and 6). */
+  /**
+   * The shortest training length (symbols, or digits per operand for addition), at least 1, and at least 3 for
+   * induction (default 2).
+   */
   minLength?: Size
+  /** The longest training length, inclusive (default 6). */
   maxLength?: Size
   /**
    * The longest test length. Above `maxLength`, test lengths run from `maxLength + 1` to it (length generalisation);
    * otherwise the test set has the training lengths. Default `maxLength`.
    */
   testLength?: Size
-  /** Distinct letters for copy, reverse and sort (2–8; default 8). */
+  /** Distinct letters for copy, reverse and sort, from 2 to 8 (default 8). */
   symbols?: Size
 }
 
-/** The truth of a sequence task. */
+/**
+ * The truth of a sequence task: the answer to any prompt, and the score of any output against it.
+ *
+ * @param task The task.
+ * @returns The truth: `answer(prompt)` and `score(prompt, output)`.
+ *
+ * @example Answers and scores
+ * const t = sequenceTaskTruth('dyck2')
+ * print('answer to ([(:', t.answer('([('))
+ * print('score of )]).:', t.score('([(', ')]).'))
+ * print('score of ))):', t.score('([(', ')))'))
+ */
 export function sequenceTaskTruth(task: SequenceTaskName): SequenceTaskTruth {
   return {
     task,
@@ -226,6 +297,17 @@ export function sequenceTaskTruth(task: SequenceTaskName): SequenceTaskTruth {
   }
 }
 
+/**
+ * Draw $n$ prompts of a task, each with a length uniform on the given range, and their answers. Example $i$ is drawn
+ * from the child $i$ of `s`, its length from that stream's child `length`.
+ *
+ * @param s The random stream.
+ * @param task The task.
+ * @param n The number of examples.
+ * @param lengths The shortest and longest length, inclusive.
+ * @param symbols How many letters copy, reverse and sort draw from.
+ * @returns The prompts, answers and lengths, in order.
+ */
 function examples(
   s: Stream,
   task: SequenceTaskName,
@@ -247,6 +329,13 @@ function examples(
   return { prompts, answers, lengths: lens }
 }
 
+/**
+ * The drawn examples as padded token rows, next-token targets and answer weights.
+ *
+ * @param drawn The prompts, answers and lengths, as `examples` returns them.
+ * @param width The row length $L$; at least the longest example plus 3 (the start, separator and end marks).
+ * @returns The examples as `SequenceExamples`.
+ */
 function rows(drawn: { prompts: string[]; answers: string[]; lengths: number[] }, width: Size): SequenceExamples {
   const n = drawn.prompts.length
   const tokens = new Int32Array(n * width)
@@ -272,7 +361,29 @@ function rows(drawn: { prompts: string[]; answers: string[]; lengths: number[] }
 
 /**
  * Seeded examples of an algorithmic sequence task (see the module comment): `^ prompt = answer .` over
- * `SEQUENCE_VOCABULARY`, with train and test sets drawn from `child(s, 'train')` and `child(s, 'test')`.
+ * `SEQUENCE_VOCABULARY`, with train and test sets drawn from `child(s, 'train')` and `child(s, 'test')`. Each example's
+ * length is uniform on its range. Throws `DomainError` for an unknown task, lengths out of order, induction lengths
+ * below 3 or test lengths above 8, or `symbols` outside 2 to 8.
+ *
+ * @param s The random stream.
+ * @param options The task, the numbers of examples, the training and test lengths and the letters; see
+ *   `SequenceTaskOptions`.
+ * @returns The train and test examples, their shared row width, the vocabulary and the truth.
+ *
+ * @example Reversing strings
+ * const data = sequenceTasks(stream(0), { task: 'reverse', n: 100, testN: 20 })
+ * print('tokens:', data.train.tokens.shape, ' width:', data.width)
+ * print('first prompts:', data.train.prompts.slice(0, 3), ' answers:', data.train.answers.slice(0, 3))
+ * print('first row:', decodeSequence(toArray(data.train.tokens)[0]))
+ * // The weights pick the answer tokens and the end mark.
+ * const weighted = toArray(data.train.weights)[0].reduce((a, v) => a + v, 0)
+ * print('weighted positions in row 0:', weighted, 'for the answer', data.train.answers[0], 'and the end mark')
+ *
+ * @example Longer strings in the test set
+ * const data = sequenceTasks(stream(0), { task: 'addition', n: 100, testN: 20, maxLength: 3, testLength: 5 })
+ * print('train lengths:', Math.min(...data.train.lengths), 'to', Math.max(...data.train.lengths))
+ * print('test lengths:', Math.min(...data.test.lengths), 'to', Math.max(...data.test.lengths))
+ * print('a test example:', data.test.prompts[0], '=', data.test.answers[0])
  */
 export function sequenceTasks(s: Stream, options: SequenceTaskOptions = {}): SequenceTaskData {
   const { task = 'reverse', n = 2000, testN = 200, minLength = 2, maxLength = 6, symbols = 8 } = options
@@ -316,15 +427,28 @@ export function sequenceTasks(s: Stream, options: SequenceTaskOptions = {}): Seq
 
 /** The operations of `modularArithmetic`. */
 export const MODULAR_OPERATIONS = ['+', '-', '*', '/'] as const
+/** An operation of `modularArithmetic`, one of `MODULAR_OPERATIONS`. */
 export type ModularOperation = (typeof MODULAR_OPERATIONS)[number]
 
+/**
+ * Whether a number is prime, by trial division.
+ *
+ * @param p The number.
+ * @returns True when $p$ is a prime.
+ */
 const isPrime = (p: number) => {
   if (p < 2) return false
   for (let k = 2; k * k <= p; k++) if (p % k === 0) return false
   return true
 }
 
-/** b⁻¹ mod p for prime p, by Fermat's little theorem (b^(p−2)). */
+/**
+ * $b^{-1} \bmod p$ for prime $p$, by Fermat's little theorem ($b^{p-2}$), with square-and-multiply.
+ *
+ * @param b The residue to invert; not a multiple of $p$.
+ * @param p The modulus, a prime small enough that $p^2$ is exact in floating point.
+ * @returns The inverse, in $0, \dots, p - 1$.
+ */
 function inverse(b: number, p: number): number {
   let result = 1
   let base = b % p
@@ -335,7 +459,21 @@ function inverse(b: number, p: number): number {
   return result
 }
 
-/** a ∘ b mod p (division by the inverse; b ≠ 0). */
+/**
+ * $a \circ b \bmod p$, in $0, \dots, p - 1$; division multiplies by the inverse of $b$, so it needs a prime $p$ and
+ * $b \ne 0$ (for $b = 0$ it returns 0).
+ *
+ * @param op The operation: `+`, `-`, `*` or `/`.
+ * @param a The first residue, in $0, \dots, p - 1$.
+ * @param b The second residue, in $0, \dots, p - 1$.
+ * @param p The modulus.
+ * @returns The residue $a \circ b \bmod p$.
+ *
+ * @example Division mod 7
+ * print('3 / 5 mod 7 =', modularValue('/', 3, 5, 7))
+ * print('check, 2 * 5 mod 7 =', modularValue('*', 2, 5, 7))
+ * print('2 - 5 mod 7 =', modularValue('-', 2, 5, 7))
+ */
 export function modularValue(op: ModularOperation, a: number, b: number, p: number): number {
   switch (op) {
     case '+':
@@ -351,26 +489,53 @@ export function modularValue(op: ModularOperation, a: number, b: number, p: numb
 
 /**
  * The truth of a modular-arithmetic table, a classification truth whose Bayes rule is the operation itself (Bayes
- * risk 0), plus the real Fourier basis of ℤ_p: the functions 1, cos(2πka/p) and sin(2πka/p) for k = 1, …, ⌊p/2⌋.
+ * risk 0), plus the real Fourier basis of $\integers_p$: the functions 1, $\cos(2\pi k a/p)$ and $\sin(2\pi k a/p)$
+ * for $k = 1, \dots, \lfloor p/2 \rfloor$.
  */
 export interface ModularTruth extends TruthContract {
+  /** Always `'classification'`. */
   readonly task: 'classification'
+  /** The operation. */
   readonly op: ModularOperation
+  /** The modulus $p$. */
   readonly p: Size
-  /** a ∘ b mod p for pairs x [n, 2] (columns a and b): int32 [n]. */
+  /** $a \circ b \bmod p$ for pairs `x` ($n \times 2$, columns $a$ and $b$): int32, $n$ values. */
   decide(x: Tensor): Tensor
-  /** The frequencies k = 0, …, ⌊p/2⌋ of the basis. */
+  /** The frequencies $k = 0, \dots, \lfloor p/2 \rfloor$ of the basis. */
   readonly frequencies: readonly number[]
-  /** The orthonormal real Fourier basis [p, p]: column 0 constant, then cos and sin of each frequency in turn. */
+  /**
+   * The orthonormal real Fourier basis, $p \times p$, one row per residue $a$: column 0 constant, then the cosine and
+   * sine of each frequency in turn (for even $p$, the frequency $p/2$ has its cosine only).
+   */
   readonly fourierBasis: Tensor
   /**
-   * The share of a table's power [p, d] (one row per residue, e.g. an embedding) at each frequency k = 0, …, ⌊p/2⌋,
-   * summed over its columns: |DFT|² along the residues, folded over ±k, normalised to sum to one.
+   * The share of a table's power at each frequency $k = 0, \dots, \lfloor p/2 \rfloor$, for a $p \times d$ table (one
+   * row per residue, e.g. an embedding), summed over its columns: $\lvert \hat t_k \rvert^2$ of the one-sided DFT
+   * along the residues, normalised to sum to one. Bins $k \ge 1$ are not doubled for $-k$. Throws `ShapeError` unless
+   * the table has $p$ rows.
    */
   spectrum(table: Tensor): Float64Array
 }
 
-/** The truth of a ∘ b mod p. */
+/**
+ * The truth of $a \circ b \bmod p$: the operation as its decision, a predictive with all its mass on the answer, the
+ * real Fourier basis of $\integers_p$ and the spectrum of a table against it.
+ *
+ * @param op The operation.
+ * @param p The modulus.
+ * @returns The truth.
+ *
+ * @example The answer, the basis, and the spectrum of a pure frequency
+ * const t = modularTruth('+', 7)
+ * print('3 + 5 mod 7 =', t.decide(tensor([[3, 5]])))
+ * const b = toArray(t.fourierBasis)
+ * const dot = (i, j) => b.reduce((a, row) => a + row[i] * row[j], 0)
+ * print('columns 1 and 1, 1 and 2:', dot(1, 1), dot(1, 2))
+ * // An embedding of the residues by cos and sin of frequency 2 has all its power there.
+ * const angle = (a) => (2 * Math.PI * 2 * a) / 7
+ * const table = tensor(Array.from({ length: 7 }, (_, a) => [Math.cos(angle(a)), Math.sin(angle(a))]))
+ * print('frequencies:', t.frequencies, ' spectrum:', t.spectrum(table))
+ */
 export function modularTruth(op: ModularOperation, p: Size): ModularTruth {
   const half = Math.floor(p / 2)
   const basis = new Float64Array(p * p)
@@ -420,16 +585,25 @@ export function modularTruth(op: ModularOperation, p: Size): ModularTruth {
   }
 }
 
-/** Pairs of residues: x [n, 2] (a and b as float64), labels y int32 [n], and the table rows they are (`rows`). */
+/**
+ * Pairs of residues: `x` ($n \times 2$, $a$ and $b$ as float64), labels `y` (int32, $n$ values), and `rows`, the
+ * index of each pair in the full table (int32).
+ */
 export type ModularPart = Dataset & { readonly y: Tensor; readonly rows: Tensor }
 
 /** The full table and its random train and test parts, with the truth beside them. */
 export interface ModularArithmeticData {
+  /** The operation. */
   readonly op: ModularOperation
+  /** The modulus $p$. */
   readonly p: Size
+  /** Every pair, in order of $a$ then $b$. */
   readonly table: ModularPart
+  /** The training pairs, in table order. */
   readonly train: ModularPart
+  /** The test pairs, the rest of the table, in table order. */
   readonly test: ModularPart
+  /** The truth of the operation. */
   readonly truth: ModularTruth
 }
 
@@ -439,15 +613,28 @@ export interface ModularArithmeticOptions {
   p?: Size
   /** Default `+`. */
   op?: ModularOperation
-  /** The share of the table used for training (default 0.5). */
+  /** The share of the table used for training, in $(0, 1)$ (default 0.5). */
   fraction?: number
 }
 
 /**
- * The table of a ∘ b mod p over every pair (a, b) ∈ ℤ_p² (b ≠ 0 for division), split at random into a training share
- * `fraction` of its rows and the test rest, drawn from `child(s, 'split')`. Features are the pair (a, b), labels
- * a ∘ b; the truth (`ModularTruth`) is beside the parts rather than in their metadata, since dataset modifiers do not
- * apply to a finite table.
+ * The table of $a \circ b \bmod p$ over every pair $(a, b) \in \integers_p^2$ ($b \ne 0$ for division), split at random
+ * into a training share `fraction` of its rows (rounded, and at least one row in each part) and the test rest, drawn
+ * from `child(s, 'split')`. Features are the pair $(a, b)$, labels $a \circ b$; the truth (`ModularTruth`) is beside
+ * the parts rather than in their metadata, since dataset modifiers do not apply to a finite table. Throws `DomainError`
+ * unless $p$ is an integer of at least 2 (a prime for division), the operation is known and the fraction is in
+ * $(0, 1)$.
+ *
+ * @param s The random stream; the split is drawn from its child `split`.
+ * @param options The modulus, the operation and the training share; see `ModularArithmeticOptions`.
+ * @returns The full table, its train and test parts, and the truth.
+ *
+ * @example Addition mod 7
+ * const data = modularArithmetic(stream(0), { p: 7 })
+ * print('table:', data.table.x.shape, ' train:', data.train.x.shape, ' test:', data.test.x.shape)
+ * print('first training pairs:', toArray(data.train.x).slice(0, 3), ' labels:', toArray(data.train.y).slice(0, 3))
+ * const x = toArray(data.table.x)
+ * print('labels are (a + b) mod 7:', toArray(data.table.y).every((v, i) => v === (x[i][0] + x[i][1]) % 7))
  */
 export function modularArithmetic(s: Stream, options: ModularArithmeticOptions = {}): ModularArithmeticData {
   const { p = 31, op = '+', fraction = 0.5 } = options

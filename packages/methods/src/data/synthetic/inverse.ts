@@ -1,10 +1,12 @@
 /**
- * Seeded inverse problems (Bishop, 1994, "Mixture density networks", NCRG/94/004, §4 and §6): a target y is drawn
- * uniformly on a box and observed through a many-to-one map, x = f(y) + ε, and the task is to predict y from x. The
- * inverse of f is multi-valued, so y given x is multimodal, and the least-squares prediction E[y | x] can fall between
- * the solutions. Each generator carries an `InverseTruth` with every solution of f(y) = x.
+ * Seeded inverse problems (Bishop, 1994, "Mixture density networks", NCRG/94/004, §4 and §6): a target $\yvec$ is
+ * drawn uniformly on a box and observed through a many-to-one map, $\xvec = f(\yvec) + \epsilonvec$, and the task is
+ * to predict $\yvec$ from $\xvec$. The inverse of $f$ is multi-valued, so $\yvec$ given $\xvec$ is multimodal, and the
+ * least-squares prediction $\expect[\yvec \mid \xvec]$ can fall between the solutions. Each generator carries an
+ * `InverseTruth` with every solution of $f(\yvec) = \xvec$.
  *
- * - `bishopInverse`: y = t ~ U(0, 1), x = t + a sin(2πt) + ε, an S on its side with three branches in the middle;
+ * - `bishopInverse`: $y = t \sim \Unif(0, 1)$, $x = t + a \sin(2\pi t) + \varepsilon$, an S on its side with three
+ *   branches in the middle;
  * - `twoLinkArm`: joint angles of a planar two-link arm from the position of its hand, with the elbow-up and
  *   elbow-down solutions.
  */
@@ -18,9 +20,18 @@ import { inverseTruth, type InverseModel, type InverseSolution, type Row } from 
 import { checkCount, generatorRecipe, matrix, vector, type Dataset } from '../types'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
+/** $\log\sqrt{2\pi}$, the constant of the Gaussian log-density. */
 const LOG_SQRT_2PI = 0.5 * Math.log(2 * Math.PI)
 
-/** Bisection for the root of a continuous g on [a, b] with g(a), g(b) of opposite signs (or zero). */
+/**
+ * Bisection for the root of a continuous $g$ on $[a, b]$ with $g(a)$, $g(b)$ of opposite signs (or zero): 80 halvings,
+ * so the bracket is below double precision.
+ *
+ * @param g The function whose root is sought.
+ * @param a The left end of the bracket.
+ * @param b The right end of the bracket.
+ * @returns A root of $g$ in $[a, b]$: the midpoint of the final bracket, or a point where $g$ is exactly 0.
+ */
 function bisect(g: (t: number) => number, a: number, b: number): number {
   let lo = a
   let hi = b
@@ -41,17 +52,40 @@ function bisect(g: (t: number) => number, a: number, b: number): number {
 
 /** Options of `bishopInverse`. */
 export interface BishopInverseOptions {
+  /** Points (default 400). */
   n?: Size
-  /** The sd σ of the noise on x (default 0.05; Bishop used uniform noise on (−0.1, 0.1), sd 0.058). */
+  /**
+   * The standard deviation $\sigma$ of the noise on $x$, at least 0 (default 0.05; Bishop used uniform noise on
+   * $(-0.1, 0.1)$, standard deviation 0.058).
+   */
   noise?: number
-  /** The amplitude a of the sine (default 0.3); above 1/(2π) ≈ 0.16 the map folds and the inverse has three branches. */
+  /**
+   * The amplitude $a$ of the sine (default 0.3); above $1/(2\pi) \approx 0.16$ the map folds and the inverse has three
+   * branches.
+   */
   amplitude?: number
 }
 
 /**
- * Bishop's inverse problem (1994, §4): t ~ U(0, 1) and x = t + a sin(2πt) + ε, ε ~ N(0, σ²); the dataset's input is x
- * and its target t (the forward problem with the axes swapped). For x in the fold, t has three solutions; the
- * posterior p(t | x) ∝ N(x; t + a sin 2πt, σ²) on [0, 1] is exact up to a 600-point midpoint rule.
+ * Bishop's inverse problem (1994, §4): $t \sim \Unif(0, 1)$ and $x = t + a \sin(2\pi t) + \varepsilon$,
+ * $\varepsilon \sim \Gauss(0, \sigma^2)$; the dataset's input is $x$ and its target $t$ (the forward problem with the
+ * axes swapped). For $x$ in the fold, $t$ has three solutions, weighted by $1/\abs{f'(t)}$; the posterior
+ * $p(t \mid x) \propto \Gauss(x; t + a \sin 2\pi t, \sigma^2)$ on $[0, 1]$ is exact up to a 600-point midpoint rule
+ * (with $\sigma = 0$ it is the solutions themselves). Throws `DomainError` when $n$ is not a non-negative integer or
+ * the noise is negative.
+ *
+ * @param s The stream the targets (child `'t'`) and the noise (child `'noise'`) are drawn from.
+ * @param options The size, the noise and the amplitude of the sine.
+ * @returns A regression dataset with `x` ($n \times 1$) and the targets `y` ($n$ values of $t$), and the truth
+ *   (`meta.truth`, an `InverseTruth`).
+ *
+ * @example One input, three answers
+ * const d = bishopInverse(stream(1), { n: 400 })
+ * const [x, t] = [toArray(d.x).map((r) => r[0]), toArray(d.y)]
+ * print('x:', d.x.shape, ' first (x, t):', [0, 1, 2].map((i) => [x[i], t[i]]))
+ * const f = (v) => v + 0.3 * Math.sin(2 * Math.PI * v)
+ * print('sd of x - f(t):', Math.sqrt(x.reduce((a, v, i) => a + (v - f(t[i])) ** 2, 0) / x.length))
+ * print('solutions at x = 0.5:', d.meta.truth.solutions([0.5]).map((p) => p.value[0]))
  */
 export function bishopInverse(s: Stream, options: BishopInverseOptions = {}): Dataset {
   const { n = 400, noise = 0.05, amplitude = 0.3 } = options
@@ -136,7 +170,21 @@ export function bishopInverse(s: Stream, options: BishopInverseOptions = {}): Da
 
 // ── Two-link arm ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The joint positions of a planar two-link arm with its shoulder at the origin: the elbow and the hand. */
+/**
+ * The joint positions of a planar two-link arm with its shoulder at the origin: the elbow and the hand. The shoulder
+ * angle $\theta_1$ is measured from the $x_1$ axis and the elbow angle $\theta_2$ relative to the upper arm.
+ *
+ * @param angles The joint angles $(\theta_1, \theta_2)$ in radians; only the first two entries are read.
+ * @param lengths The link lengths $(l_1, l_2)$: the upper arm, then the forearm.
+ * @returns The elbow at $l_1(\cos\theta_1, \sin\theta_1)$ and the hand,
+ *   $l_2(\cos(\theta_1 + \theta_2), \sin(\theta_1 + \theta_2))$ beyond it.
+ *
+ * @example A straight arm along the axis, then the elbow bent a right angle
+ * const straight = twoLinkJoints([0, 0], [0.8, 0.5])
+ * print('straight, elbow:', straight.elbow, ' hand:', straight.hand)
+ * const bent = twoLinkJoints([0, Math.PI / 2], [0.8, 0.5])
+ * print('bent, elbow:', bent.elbow, ' hand:', bent.hand)
+ */
 export function twoLinkJoints(
   angles: Row,
   lengths: readonly [number, number],
@@ -150,9 +198,23 @@ export function twoLinkJoints(
 }
 
 /**
- * Both solutions of a two-link arm's inverse kinematics at hand position p: θ₂ = ±arccos((|p|² − l₁² − l₂²)/(2l₁l₂))
- * (elbow one way, then the other) and θ₁ = atan2(p₂, p₁) − atan2(l₂ sin θ₂, l₁ + l₂ cos θ₂). Empty outside the
- * reachable annulus l₁ − l₂ ≤ |p| ≤ l₁ + l₂; one solution on its boundary.
+ * Both solutions of a two-link arm's inverse kinematics at hand position $\pvec$:
+ * $\theta_2 = \pm\arccos((\norm{\pvec}^2 - l_1^2 - l_2^2)/(2l_1l_2))$ (elbow one way, then the other) and
+ * $\theta_1 = \operatorname{atan2}(p_2, p_1) - \operatorname{atan2}(l_2 \sin\theta_2, l_1 + l_2 \cos\theta_2)$. Empty
+ * outside the reachable annulus $\abs{l_1 - l_2} \le \norm{\pvec} \le l_1 + l_2$; one solution on its boundary. The
+ * angles are not wrapped into any range.
+ *
+ * @param position The hand position $(p_1, p_2)$; only the first two entries are read.
+ * @param lengths The link lengths $(l_1, l_2)$.
+ * @returns The solutions as $(\theta_1, \theta_2)$ pairs: two (positive $\theta_2$ first), one, or none.
+ *
+ * @example Forward then back: both bends reach the same hand
+ * const { hand } = twoLinkJoints([0.6, 1.2], [0.8, 0.5])
+ * print('hand:', hand)
+ * const both = twoLinkInverse(hand, [0.8, 0.5])
+ * print('solutions:', both)
+ * print('their hands:', both.map((a) => twoLinkJoints(a, [0.8, 0.5]).hand))
+ * print('out of reach:', twoLinkInverse([2, 0], [0.8, 0.5]))
  */
 export function twoLinkInverse(position: Row, lengths: readonly [number, number]): [number, number][] {
   const [l1, l2] = lengths
@@ -170,19 +232,28 @@ export function twoLinkInverse(position: Row, lengths: readonly [number, number]
 
 /** Options of `twoLinkArm`. */
 export interface TwoLinkArmOptions {
+  /** Points (default 600). */
   n?: Size
-  /** The upper arm's length l₁ (default 0.8). */
+  /** The upper arm's length $l_1$ (default 0.8). */
   l1?: number
-  /** The forearm's length l₂ (default 0.5). */
+  /** The forearm's length $l_2$ (default 0.5). */
   l2?: number
-  /** The sd of the noise on the hand position (default 0.01). */
+  /** The standard deviation of the noise on each coordinate of the hand position (default 0.01). */
   noise?: number
 }
 
-/** The prior box of the joint angles (radians): the shoulder θ₁ and the elbow θ₂ (both bends). */
+/** The prior range of the shoulder angle $\theta_1$ (radians). */
 const SHOULDER: readonly [number, number] = [0, 1.8]
+/** The prior range of the elbow angle $\theta_2$ (radians), covering both bends. */
 const ELBOW: readonly [number, number] = [-2.4, 2.4]
 
+/**
+ * An angle moved by whole turns into a range, or NaN when no turn of it falls inside.
+ *
+ * @param v The angle, in radians.
+ * @param range The range as its low and high ends, in radians.
+ * @returns $v + 2\pi k$ for the integer $k$ that puts it in the range, or NaN.
+ */
 const wrapInto = (v: number, [lo, hi]: readonly [number, number]) => {
   let w = v
   while (w < lo) w += 2 * Math.PI
@@ -192,10 +263,28 @@ const wrapInto = (v: number, [lo, hi]: readonly [number, number]) => {
 
 /**
  * Inverse kinematics of a planar two-link arm (Bishop, 1994, §6, with both bends of the elbow): joint angles
- * θ₁ ~ U(0, 1.8) at the shoulder and θ₂ ~ U(−2.4, 2.4) at the elbow, the hand at
- * p = (l₁ cos θ₁ + l₂ cos(θ₁ + θ₂), l₁ sin θ₁ + l₂ sin(θ₁ + θ₂)) + ε, and the task is to predict (θ₁, θ₂) from p.
- * Most positions are reached with the elbow bent either way; the truth lists both solutions inside the prior's box,
- * which have equal weight in the small-noise limit (|det J| = l₁l₂|sin θ₂| is the same for both).
+ * $\theta_1 \sim \Unif(0, 1.8)$ at the shoulder and $\theta_2 \sim \Unif(-2.4, 2.4)$ at the elbow, the hand at
+ * $\pvec = (l_1 \cos\theta_1 + l_2 \cos(\theta_1 + \theta_2),\ l_1 \sin\theta_1 + l_2 \sin(\theta_1 + \theta_2))$ plus
+ * noise $\epsilonvec$, and the task is to predict $(\theta_1, \theta_2)$ from $\pvec$. Most positions are reached with
+ * the elbow bent either way; the truth lists both solutions inside the prior's box, which have equal weight in the
+ * small-noise limit ($\abs{\det \Jmat} = l_1l_2\abs{\sin\theta_2}$ is the same for both). Throws `DomainError` when $n$
+ * is not a non-negative integer or a link length is not positive.
+ *
+ * @param s The stream the angles (child `'angles'`) and the noise (child `'noise'`) are drawn from.
+ * @param options The size, the link lengths and the noise.
+ * @returns A regression dataset: `x` the hand positions ($n \times 2$), `y` the angles ($n \times 2$), and the truth
+ *   (`meta.truth`, an `InverseTruth`).
+ *
+ * @example Many hand positions have two answers inside the prior's box
+ * const d = twoLinkArm(stream(1), { n: 600 })
+ * const [x, y] = [toArray(d.x), toArray(d.y)]
+ * print('x:', d.x.shape, ' y:', d.y.shape)
+ * print('first hand:', x[0], ' its angles:', y[0])
+ * const counts = x.map((p) => d.meta.truth.solutions(p).length)
+ * // The noise can move a hand to where no angles in the box reach it.
+ * print('hands with 0, 1 and 2 solutions:', [0, 1, 2].map((k) => counts.filter((c) => c === k).length))
+ * const i = counts.indexOf(2)
+ * print('hand', i, x[i], ' drawn from', y[i], ' solutions:', d.meta.truth.solutions(x[i]).map((p) => p.value))
  */
 export function twoLinkArm(s: Stream, options: TwoLinkArmOptions = {}): Dataset {
   const { n = 600, l1 = 0.8, l2 = 0.5, noise = 0.01 } = options

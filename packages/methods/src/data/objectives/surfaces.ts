@@ -1,7 +1,12 @@
 /**
- * Test surfaces for optimisers (moved from `aifn-compute/optim`: they are data, not methods), each with its value, gradient, Hessian, known minima, a conventional start
- * and a plotting domain. Formulas from Jamil & Yang (2013), "A literature survey of benchmark functions for global
- * optimisation problems", and Surjanovic & Bingham, "Virtual Library of Simulation Experiments" (sfu.ca/~ssurjano).
+ * Test surfaces for optimisers, each with its value, gradient, Hessian, known minima, a conventional start and a
+ * plotting domain (moved from `aifn-compute/optim`: they are data, not methods). Formulas from Jamil and Yang (2013),
+ * "A literature survey of benchmark functions for global optimisation problems", and Surjanovic and Bingham, "Virtual
+ * Library of Simulation Experiments" (sfu.ca/~ssurjano).
+ *
+ * Each factory returns a `TestFunction` whose value, gradient and Hessian are closed forms evaluated in float64; they
+ * check that a point has the surface's dimension and throw `ShapeError` otherwise. The surfaces are registered as
+ * objectives (kind `objective`), with their parameters as a space.
  */
 
 import type { ObjectiveFn } from 'aifn-compute/optim'
@@ -11,32 +16,48 @@ import { definer } from 'aifn-compute/foundation/registry'
 import { int, real, space } from 'aifn-compute/foundation/space'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
+/** A float64 working array. */
 type F64 = dense.F64
 const { mat, toF64, vec } = dense
 
 /** A test function with everything a figure or a test needs. */
 export type TestFunction = {
+  /** The surface's name, also used in error messages. */
   name: string
+  /** The number $n$ of coordinates of a point. */
   dimension: number
-  /** f(x). */
+  /** $f(\xvec)$. */
   value: (x: Vector) => number
-  /** f(x) and ∇f(x), for the gradient-based methods. */
+  /** $f(\xvec)$ and $\nabla f(\xvec)$, for the gradient-based methods. */
   objective: ObjectiveFn
-  /** ∇²f(x) (n×n). */
+  /** $\nabla^2 f(\xvec)$ ($n \times n$). */
   hessian: (x: Vector) => Matrix
   /** The global minimisers (all of them where there are finitely many and they are known). */
   minima: Vector[]
-  /** f at the global minimisers. */
+  /** $f$ at the global minimisers. */
   minimumValue: number
   /** A conventional starting point. */
   start: Vector
-  /** A box that shows the interesting structure, per coordinate: `lo[i] ≤ x_i ≤ hi[i]`. */
+  /** The lower corner of a box that shows the interesting structure: $\mathrm{lo}_i \le x_i \le \mathrm{hi}_i$. */
   lo: Vector
+  /** The upper corner of that box. */
   hi: Vector
 }
 
+/** A surface's closed forms on a working array: the value, the gradient and the Hessian (row-major, $n^2$ values). */
 type Kernel = { value: (x: F64) => number; grad: (x: F64) => F64; hessian: (x: F64) => F64 }
 
+/**
+ * Wrap a surface's closed forms as a `TestFunction`: every method checks that its point has $n$ coordinates (throwing
+ * `ShapeError` otherwise) and converts the gradient and Hessian to a vector and an $n \times n$ matrix.
+ *
+ * @param name The surface's name, used as its `name` and in error messages.
+ * @param n The dimension of a point.
+ * @param kernel The value, gradient and Hessian on a float64 array of $n$ values.
+ * @param extra The known minimisers (each $n$ values), the value there, the conventional start, and the lower and
+ *   upper corners of the plotting box.
+ * @returns The test function.
+ */
 function build(
   name: string,
   n: number,
@@ -66,9 +87,22 @@ function build(
 }
 
 /**
- * The Rosenbrock function (Rosenbrock, 1960), generalised to n ≥ 2 dimensions as
- * f(x) = Σᵢ b(x_{i+1} − x_i²)² + (a − x_i)², with a curved, flat-bottomed valley. Minimum 0 at (a, a², …) for a = 1
- * (all ones); defaults a = 1, b = 100, n = 2, start (−1.2, 1, −1.2, 1, …).
+ * The Rosenbrock function (Rosenbrock, 1960), generalised to $n \ge 2$ dimensions as
+ * $f(\xvec) = \sum_{i=1}^{n-1} b(x_{i+1} - x_i^2)^2 + (a - x_i)^2$, with a curved, flat-bottomed valley. In two
+ * dimensions the minimum is 0 at $(a, a^2)$; in more, with $a = 1$, it is 0 at $(1, \dots, 1)$, and for other $a$ no
+ * minimiser is listed. The start is $(-1.2, 1, -1.2, 1, \dots)$ and the plotting box $[-2, 3]^n$. Throws
+ * `DomainError` when $n < 2$.
+ *
+ * @param options The shape parameters and the dimension.
+ * @param options.a The valley's offset $a$: the minimiser's first coordinate.
+ * @param options.b The weight $b$ of the curved-valley term: the larger, the steeper the valley's walls.
+ * @param options.n The dimension $n$, at least 2.
+ * @returns The test function.
+ *
+ * @example The value at the minimum and at the conventional start
+ * const f = rosenbrock()
+ * print('f at the minimum', f.minima[0], ':', f.value(f.minima[0]))
+ * print('f at the start', f.start, ':', f.value(f.start))
  */
 export function rosenbrock({ a = 1, b = 100, n = 2 }: { a?: number; b?: number; n?: number } = {}): TestFunction {
   if (n < 2) throw new DomainError('rosenbrock', 'rosenbrock: needs n ≥ 2')
@@ -109,7 +143,17 @@ export function rosenbrock({ a = 1, b = 100, n = 2 }: { a?: number; b?: number; 
   })
 }
 
-/** Himmelblau's function (Himmelblau, 1972), f = (x² + y − 11)² + (x + y² − 7)²: four minima with value 0. */
+/**
+ * Himmelblau's function (Himmelblau, 1972), $f(x, y) = (x^2 + y - 11)^2 + (x + y^2 - 7)^2$: four global minima of value
+ * 0, one at $(3, 2)$ and three irrational. The start is the origin and the plotting box $[-5, 5]^2$.
+ *
+ * @returns The two-dimensional test function.
+ *
+ * @example The value at each of the four minima
+ * const f = himmelblau()
+ * print('minima:', f.minima)
+ * print('f there:', f.minima.map((m) => f.value(m)))
+ */
 export function himmelblau(): TestFunction {
   const kernel: Kernel = {
     value: ([x, y]) => (x * x + y - 11) ** 2 + (x + y * y - 7) ** 2,
@@ -140,8 +184,16 @@ export function himmelblau(): TestFunction {
 }
 
 /**
- * Beale's function, f = (1.5 − x + xy)² + (2.25 − x + xy²)² + (2.625 − x + xy³)²: minimum 0 at (3, 0.5) in a narrow
- * curved valley, with flat plateaus near the axes. Start (1, 1).
+ * Beale's function, $f(x, y) = (1.5 - x + xy)^2 + (2.25 - x + xy^2)^2 + (2.625 - x + xy^3)^2$: minimum 0 at
+ * $(3, 0.5)$ in a narrow curved valley, with flat plateaus near the axes. The start is $(1, 1)$ and the plotting box
+ * $[-4.5, 4.5]^2$.
+ *
+ * @returns The two-dimensional test function.
+ *
+ * @example The value and gradient at the minimum
+ * const f = beale()
+ * const { value, grad } = f.objective(f.minima[0])
+ * print('f(3, 0.5) =', value, ' gradient:', grad)
  */
 export function beale(): TestFunction {
   const c = [1.5, 2.25, 2.625]
@@ -186,9 +238,25 @@ export function beale(): TestFunction {
 }
 
 /**
- * A quadratic bowl f(x) = ½(x − c)ᵀA(x − c) with condition number κ = `condition`. In n dimensions A is diagonal with
- * eigenvalues spaced geometrically from 1 to κ; in 2-D it is rotated by `angle` radians, A = R diag(1, κ) Rᵀ.
- * Minimum 0 at c (default 0). Start (−2, 1.5, …) + c.
+ * A quadratic bowl $f(\xvec) = \tfrac12 (\xvec - \cvec)^\top \Amat (\xvec - \cvec)$ with condition number
+ * $\kappa$ = `condition`. In $n$ dimensions $\Amat$ is diagonal with eigenvalues spaced geometrically from 1 to
+ * $\kappa$ (just 1 when $n = 1$); in two it is rotated by `angle` radians, $\Amat = \Rmat \diag(1, \kappa) \Rmat^\top$.
+ * Minimum 0 at $\cvec$. The start is $(-2, 1.5, -2, \dots) + \cvec$ and the plotting box $\cvec \pm 3$ in each
+ * coordinate.
+ *
+ * @param options The conditioning, the dimension, the rotation and the centre.
+ * @param options.condition The condition number $\kappa$ of $\Amat$, the ratio of its largest eigenvalue to its
+ *   smallest.
+ * @param options.n The dimension $n$.
+ * @param options.angle The rotation of the eigenvectors, in radians (two dimensions only; ignored otherwise).
+ * @param options.center The minimiser $\cvec$, $n$ values (default the origin). Its length is not checked against
+ *   `n`.
+ * @returns The test function.
+ *
+ * @example The Hessian holds the eigenvalues 1 and the condition number
+ * const f = quadraticBowl({ condition: 100 })
+ * print('Hessian:', f.hessian(f.start))
+ * print('f at the minimum:', f.value(f.minima[0]), ' at the start:', f.value(f.start))
  */
 export function quadraticBowl({
   condition = 10,
@@ -226,8 +294,19 @@ export function quadraticBowl({
 }
 
 /**
- * The Rastrigin function (Rastrigin, 1974), f(x) = An + Σ(x_i² − A cos 2πx_i): a bowl covered in a regular grid of
- * local minima; the global minimum is 0 at the origin. Defaults A = 10, n = 2, start (2.3, −1.7, …).
+ * The Rastrigin function (Rastrigin, 1974), $f(\xvec) = An + \sum_i \left(x_i^2 - A \cos 2\pi x_i\right)$: a bowl
+ * covered in a regular grid of local minima near the integer points; the global minimum is 0 at the origin. The start
+ * is $(2.3, -1.7, 2.3, \dots)$ and the plotting box $[-5.12, 5.12]^n$.
+ *
+ * @param options The ripple amplitude and the dimension.
+ * @param options.A The amplitude $A$ of the cosine ripple: 0 leaves the bowl $\lVert \xvec \rVert^2$.
+ * @param options.n The dimension $n$.
+ * @returns The test function.
+ *
+ * @example The global minimum, and a local one next to it
+ * const f = rastrigin()
+ * print('f at the origin:', f.value([0, 0]))
+ * print('f near (1, 0):', f.value([0.995, 0]), ' gradient there:', f.objective([0.995, 0]).grad)
  */
 export function rastrigin({ A = 10, n = 2 }: { A?: number; n?: number } = {}): TestFunction {
   const w = 2 * Math.PI
@@ -251,6 +330,7 @@ export function rastrigin({ A = 10, n = 2 }: { A?: number; n?: number } = {}): T
 
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/** Registers a surface of this file (kind `objective`, area `data/objectives`). */
 const objective = definer<ObjectiveInfo>('objective', 'data/objectives')
 
 objective(

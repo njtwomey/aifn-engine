@@ -59,6 +59,7 @@ export interface EcgRecord {
   readonly signal: Signal
   /** Every annotated beat, in time order. */
   readonly beats: readonly EcgBeat[]
+  /** Name, description, source, URL and class names, and `sha256`, the hash of SciPy's source file. */
   readonly meta: DatasetMeta & { readonly sha256: string }
 }
 
@@ -72,12 +73,15 @@ export interface EcgBeatsOptions {
   centre?: boolean
 }
 
+/** The citation recorded in each dataset's `meta.source`. */
 const SOURCE =
   'Moody and Mark (2001), "The impact of the MIT-BIH Arrhythmia Database", IEEE Eng. in Medicine and Biology 20(3); ' +
   'Goldberger et al. (2000), "PhysioBank, PhysioToolkit, and PhysioNet", Circulation 101(23); via scipy.datasets ' +
   '(Open Data Commons Attribution License v1.0)'
+/** The database's page on PhysioNet. */
 const URL = 'https://physionet.org/content/mitdb/1.0.0/'
 
+/** The decoded samples, filled on first use by `millivolts`. */
 let samples: Float64Array | null = null
 
 /**

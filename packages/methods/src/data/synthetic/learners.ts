@@ -1,21 +1,23 @@
 /**
- * Simulated learners for equitable ability estimation (Twomey, McMullan, Elhalal, Poyiadzi and Vaquero, 2022, "Equitable
- * Ability Estimation in Neurodivergent Student Populations with Zero-Inflated Learner Models", Table 1). Students have
- * an ability θ ~ N(0, 1) drawn independently of their neurodivergent conditions (NDCs: dyslexia, dyscalculia and sensory
- * processing disorder, SPD, each an independent Bernoulli draw). Items have a difficulty, discrimination and guessing
- * floor, a subject, a content type, an information density and a delivery and response type (DRT).
+ * Simulated learners for equitable ability estimation (Twomey, McMullan, Elhalal, Poyiadzi and Vaquero, 2022,
+ * "Equitable Ability Estimation in Neurodivergent Student Populations with Zero-Inflated Learner Models", Table 1).
+ * Students have an ability $\theta \sim \Gauss(0, 1)$ drawn independently of their neurodivergent conditions (NDCs:
+ * dyslexia, dyscalculia and sensory processing disorder, SPD, each an independent Bernoulli draw). Items have a
+ * difficulty, discrimination and guessing floor, a subject, a content type, an information density and a delivery and
+ * response type (DRT).
  *
- * A response is a structural zero with probability π, the zero-inflation probability (one minus the learning quality
- * factor, LQF); otherwise it follows the three-parameter IRT model p = c + (1 − c) σ(a(θ − b)). So
- * Pr(Y = 0) = π + (1 − π)(1 − p) and Pr(Y = 1) = (1 − π)p, the paper's Eqn (1). π depends on the student's conditions and
- * the item's DRT: condition k has an unsuitability u_k(item) ∈ [0, 1], linear in the item's features, and
+ * A response is a structural zero with probability $\pi$, the zero-inflation probability (one minus the learning
+ * quality factor, LQF); otherwise it follows the three-parameter IRT model $p = c + (1 - c)\,\sigma(a(\theta - b))$. So
+ * $\pr(Y = 0) = \pi + (1 - \pi)(1 - p)$ and $\pr(Y = 1) = (1 - \pi)p$, the paper's Eqn (1). $\pi$ depends on the
+ * student's conditions and the item's DRT: condition $k$ has an unsuitability $u_k \in [0, 1]$ for each item, linear in
+ * the item's features, and, with $g$ the logit,
  *
- *   logit π = logit π₀ + Σ_k z_k u_k(item) (logit r_k − logit π₀),
+ * $g(\pi) = g(\pi_0) + \sum_k z_k u_k (g(r_k) - g(\pi_0))$,
  *
- * with z_k ∈ {0, 1} the student's conditions, π₀ the rate for any student on a suitable item and r_k the rate of a
- * student with condition k on a fully unsuitable item. The paper's own weight vectors are in its implementation; the
- * unsuitabilities here follow its descriptions: dyslexia is affected by reading (delivery and response) and letters,
- * dyscalculia by digits, SPD by combined reading and listening and by dense, mixed content.
+ * with $z_k \in \{0, 1\}$ the student's conditions, $\pi_0$ the rate for any student on a suitable item and $r_k$ the
+ * rate of a student with condition $k$ on a fully unsuitable item. The paper's own weight vectors are in its
+ * implementation; the unsuitabilities here follow its descriptions: dyslexia is affected by reading (delivery and
+ * response) and letters, dyscalculia by digits, SPD by combined reading and listening and by dense, mixed content.
  */
 
 import type { FunctionInfo } from 'aifn-compute/foundation/contracts'
@@ -26,6 +28,7 @@ import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 
 /** The neurodivergent conditions, in column order of `conditions`. */
 export const LEARNER_CONDITIONS = ['dyslexia', 'dyscalculia', 'spd'] as const
+/** One of the neurodivergent conditions in `LEARNER_CONDITIONS`. */
 export type LearnerCondition = (typeof LEARNER_CONDITIONS)[number]
 
 /** The item features, in column order of `itemFeatures`: one-hot delivery, response and content type, then density. */
@@ -48,8 +51,9 @@ const F = LEARNER_ITEM_FEATURES.length
 const K = LEARNER_CONDITIONS.length
 
 /**
- * Unsuitability weights w_k (one row per condition, one column per item feature): u_k(item) = w_k · x(item). Each row's
- * largest attainable sum is 1 (an item that is unsuitable in every respect).
+ * Unsuitability weights $\wvec_k$ (one row per condition, one column per item feature): $u_k = \wvec_k^\top \xvec$
+ * for an item with features $\xvec$. Each row's largest attainable sum is 1 (an item that is unsuitable in every
+ * respect).
  */
 export const LEARNER_UNSUITABILITY: readonly (readonly number[])[] = [
   // read, listen, both | written, speak, picture, click-read | letters, digits, both | density | maths
@@ -68,48 +72,75 @@ export interface LearnerResponsesOptions {
   attempts?: number
   /** Prevalence of each condition (dyslexia 0.1, dyscalculia 0.06, SPD 0.11). */
   prevalence?: Partial<Record<LearnerCondition, number>>
-  /** r_k: the zero-inflation rate of a student with condition k on a fully unsuitable item (default 0.6 each). */
+  /** $r_k$: the zero-inflation rate of a student with condition $k$ on a fully unsuitable item (default 0.6 each). */
   inflation?: Partial<Record<LearnerCondition, number>>
-  /** π₀: the zero-inflation rate on a suitable item, for every student (default 0.02). */
+  /** $\pi_0$: the zero-inflation rate on a suitable item, for every student (default 0.02). */
   baseRate?: number
-  /** Difficulties are uniform on [−spread, spread] (default 2). */
+  /** $v$: difficulties are uniform on $[-v, v]$ (default 2). */
   difficultySpread?: number
-  /** Discriminations are uniform on [low, high] (default [0.5, 4]). */
+  /** Discriminations are uniform between the two values `[low, high]` (default `[0.5, 4]`). */
   discrimination?: readonly [number, number]
-  /** Guessing floors are uniform on [0, guessing] (default 0.15; 0 gives the 2PL model). */
+  /** Guessing floors are uniform from 0 to this value (default 0.15; 0 gives the 2PL model). */
   guessing?: number
 }
 
 /** Simulated learners, items and responses, with every generating quantity as truth. */
 export interface LearnerResponses {
-  /** Responses [students, items]: 1 correct, 0 a zero (incorrect or not answered), NaN not attempted. */
+  /** Responses, students $\times$ items: 1 correct, 0 a zero (incorrect or not answered), NaN not attempted. */
   responses: Tensor
-  /** Conditions [students, K] of 0 and 1 (columns `LEARNER_CONDITIONS`). */
+  /** Conditions, students $\times K$, of 0 and 1 (columns `LEARNER_CONDITIONS`). */
   conditions: Tensor
-  /** Item features [items, F] (columns `LEARNER_ITEM_FEATURES`). */
+  /** Item features, items $\times F$ (columns `LEARNER_ITEM_FEATURES`). */
   itemFeatures: Tensor
-  /** True abilities θ, one per student. */
+  /** True abilities $\theta$, one per student. */
   ability: Float64Array
-  /** True difficulty b, discrimination a and guessing floor c, one per item. */
+  /** True difficulty $b$, one per item. */
   difficulty: Float64Array
+  /** True discrimination $a$, one per item. */
   discrimination: Float64Array
+  /** True guessing floor $c$, one per item. */
   guessing: Float64Array
-  /** True zero-inflation probabilities π [students × items] (row-major) and which zeros were structural (1). */
+  /**
+   * True zero-inflation probabilities $\pi$, students $\times$ items, row-major (for every pair, attempted or not).
+   */
   pi: Float64Array
+  /** Which responses were structural zeros (1), students $\times$ items, row-major. */
   structural: Uint8Array
-  /** Unsuitability u_k(item) [items × K]. */
+  /** Unsuitability $u_k$ of each item for each condition, items $\times K$, row-major. */
   unsuitability: Float64Array
-  /** Each student's number of conditions, and their group: 0 none, 1 + k for condition k alone, 4 for two or more. */
+  /** Each student's number of conditions. */
   conditionCount: Int32Array
+  /** Each student's group: 0 none, $1 + k$ for condition $k$ alone, 4 for two or more (names in `groupNames`). */
   group: Int32Array
+  /** The condition names, `LEARNER_CONDITIONS`. */
   conditionNames: readonly string[]
+  /** The item feature names, `LEARNER_ITEM_FEATURES`. */
   featureNames: readonly string[]
+  /** The names of the five groups of `group`. */
   groupNames: readonly string[]
 }
 
+/**
+ * The log-odds $\log(p/(1 - p))$.
+ *
+ * @param p A probability in $(0, 1)$.
+ * @returns Its log-odds.
+ */
 const logit = (p: number) => Math.log(p / (1 - p))
+/**
+ * A rate clamped into $[10^{-6}, 1 - 10^{-6}]$, so that its log-odds is finite.
+ *
+ * @param p The rate.
+ * @returns The clamped rate.
+ */
 const clampRate = (p: number) => Math.min(1 - 1e-6, Math.max(1e-6, p))
-/** An index drawn from unnormalised weights by one uniform. */
+/**
+ * An index drawn from unnormalised weights by one uniform.
+ *
+ * @param u A uniform draw in $[0, 1)$.
+ * @param weights Non-negative weights, one per index, not necessarily summing to 1.
+ * @returns The index whose share of the cumulative weight contains `u`.
+ */
 const pick = (u: number, weights: readonly number[]) => {
   const total = weights.reduce((a, b) => a + b, 0)
   let v = u * total
@@ -122,7 +153,30 @@ const pick = (u: number, weights: readonly number[]) => {
 
 /**
  * Students answering items under the paper's simulation (Table 1), with zero inflation driven by the fit between each
- * student's conditions and each item's delivery and response type. Deterministic in the stream.
+ * student's conditions and each item's delivery and response type (see the file comment). Deterministic in the stream.
+ * Half the items are maths; delivery is read, listen or both with weights 0.3, 0.3, 0.4; response is written, spoken,
+ * click-picture or click-read with weights 0.4, 0.2, 0.2, 0.2; English items are letters and maths items letters,
+ * digits or both with weights 0.1, 0.5, 0.6; density is $0.35 + 0.15z$, $z \sim \Gauss(0, 1)$, clamped to $[0.1, 1]$.
+ * Each student attempts `attempts` items (at most the bank) chosen uniformly without replacement. Throws `DomainError`
+ * unless the numbers of students, items and attempts are positive.
+ *
+ * @param s The stream everything is drawn from: children `'ability'`, `'conditions'`, `'items'`, `'density'`,
+ *   `'attempts'` and `'responses'`.
+ * @param options The sizes and the paper's simulation settings (defaults its Table 1).
+ * @returns The responses with every generating quantity: the students' abilities and conditions, the items' parameters
+ *   and features, the zero-inflation probabilities and which zeros were structural.
+ *
+ * @example Students with a condition get more structural zeros
+ * const r = learnerResponses(stream(1), { students: 300, items: 60, attempts: 20 })
+ * print('responses:', r.responses.shape, ' conditions:', r.conditions.shape, ' items:', r.itemFeatures.shape)
+ * print('first student, first 8 items:', toArray(r.responses)[0].slice(0, 8))
+ * const y = toArray(r.responses).flat()
+ * const shareStructural = (g) => {
+ *   const at = y.map((_, k) => k).filter((k) => !Number.isNaN(y[k]) && r.group[Math.floor(k / 60)] === g)
+ *   return at.filter((k) => r.structural[k] === 1).length / at.length
+ * }
+ * print('students per group:', r.groupNames.map((_, g) => r.group.filter((v) => v === g).length))
+ * print('structural zero rate, no condition (base 0.02):', shareStructural(0), ' dyslexia:', shareStructural(1))
  */
 export function learnerResponses(s: Stream, options: LearnerResponsesOptions = {}): LearnerResponses {
   const { students = 300, items = 60, baseRate = 0.02, difficultySpread = 2, guessing = 0.15 } = options

@@ -12,11 +12,21 @@ import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 
 /** Two labelled point sets. */
 export interface DomainPair {
+  /** The source domain: points `x` ($n \times 2$) and their labels `y` ($n$). */
   readonly source: { x: Tensor; y: Tensor }
+  /** The target domain, in the same form. */
   readonly target: { x: Tensor; y: Tensor }
 }
 
-/** n two-moons points (labels 0 and 1) with Gaussian noise. */
+/**
+ * $n$ two-moons points with Gaussian noise, centred on the origin: labels alternate 0, 1, 0, ..., class 0 on the upper
+ * moon and class 1 on the lower one.
+ *
+ * @param s The stream the angles (child `'angle'`) and the noise (child `'noise'`) are drawn from.
+ * @param n The number of points.
+ * @param noise The standard deviation of the noise added to each coordinate.
+ * @returns The points, row-major ($2n$ values), and their labels.
+ */
 function moonPoints(s: Stream, n: number, noise: number): { x: Float64Array; y: Int32Array } {
   const u = units(child(s, 'angle'), n)
   const e = standardNormals(child(s, 'noise'), 2 * n)
@@ -39,13 +49,32 @@ function moonPoints(s: Stream, n: number, noise: number): { x: Float64Array; y: 
 export interface ShiftedMoonsOptions {
   /** Points per domain (default 400). */
   n?: number
-  /** The shift: `rotation` by `amount` radians, `translation` by `amount` along (1, 1)/√2, or `scale` by 1 + amount. */
+  /**
+   * The shift of the target: `'rotation'` about the origin by `amount` radians, `'translation'` by `amount` along
+   * $(1, 1)/\sqrt{2}$, or `'scale'` by $1 + a$, $a$ the `amount` (default `'rotation'`).
+   */
   shift?: 'rotation' | 'translation' | 'scale'
+  /** How far to shift: an angle, a distance or a relative change of scale (default 0.6). */
   amount?: number
+  /** The standard deviation of the Gaussian noise on each coordinate, before the shift (default 0.1). */
   noise?: number
 }
 
-/** Two moons in a source domain and transformed in a target domain: covariate shift with the same labelling rule. */
+/**
+ * Two moons in a source domain and transformed in a target domain: covariate shift with the same labelling rule. The
+ * target points are drawn afresh, not the source points moved, and then shifted.
+ *
+ * @param s The stream the source (child `'source'`) and target (child `'target'`) points are drawn from.
+ * @param options The size of each domain, the kind and amount of shift, and the noise.
+ * @returns The source and target domains, $n$ points each.
+ *
+ * @example A translation moves the target's mean along the diagonal
+ * const { source, target } = shiftedMoons(stream(1), { n: 400, shift: 'translation', amount: 1 })
+ * print('source x:', source.x.shape, ' target x:', target.x.shape)
+ * print('first source rows:', toArray(source.x).slice(0, 2), ' labels:', toArray(source.y).slice(0, 2))
+ * const mean = (x) => [0, 1].map((c) => x.reduce((a, r) => a + r[c], 0) / x.length)
+ * print('source mean:', mean(toArray(source.x)), ' target mean:', mean(toArray(target.x)))
+ */
 export function shiftedMoons(s: Stream, options: ShiftedMoonsOptions = {}): DomainPair {
   const { n = 400, shift = 'rotation', amount = 0.6, noise = 0.1 } = options
   const src = moonPoints(child(s, 'source'), n, noise)
@@ -65,15 +94,37 @@ export function shiftedMoons(s: Stream, options: ShiftedMoonsOptions = {}): Doma
 
 /** Options of `labelShiftDomains`. */
 export interface LabelShiftOptions {
+  /** Points per domain (default 1000). */
   n?: number
-  /** Class priors in the source and target domains (default [1/3, 1/3, 1/3] and [0.6, 0.3, 0.1]). */
+  /**
+   * Class priors in the source domain (default $[1/3, 1/3, 1/3]$); their number is the number of classes $k$. They
+   * should sum to 1: the last class takes whatever the others leave.
+   */
   sourcePriors?: readonly number[]
+  /** Class priors in the target domain, $k$ of them like `sourcePriors` (default $[0.6, 0.3, 0.1]$). */
   targetPriors?: readonly number[]
-  /** Distance between the class means, which sit on a regular polygon (default 2.5). */
+  /**
+   * Distance between neighbouring class means, which sit on a regular $k$-gon centred on the origin (default 2.5).
+   */
   separation?: number
 }
 
-/** Gaussian classes in 2-d with the same p(x | y) in both domains and different priors p(y): label shift. */
+/**
+ * Gaussian classes in 2-d with the same $p(\xvec \mid y)$ in both domains and different priors $p(y)$: label shift.
+ * Class $c$ is $\Gauss(\muvec_c, \Imat)$, with $\muvec_c$ the $c$th vertex of the polygon (class 0 on the positive
+ * $x_1$ axis).
+ *
+ * @param s The stream the source (child `'source'`) and target (child `'target'`) points are drawn from.
+ * @param options The size of each domain, the two sets of priors and the separation of the classes.
+ * @returns The source and target domains, $n$ points each, and the number of classes $k$.
+ *
+ * @example The class shares follow each domain's priors
+ * const d = labelShiftDomains(stream(1), { n: 2000 })
+ * print('classes:', d.classes, ' source x:', d.source.x.shape, ' first rows:', toArray(d.source.x).slice(0, 2))
+ * const shares = (y) => [0, 1, 2].map((c) => y.filter((v) => v === c).length / y.length)
+ * print('source shares:', shares(toArray(d.source.y)))
+ * print('target shares:', shares(toArray(d.target.y)))
+ */
 export function labelShiftDomains(s: Stream, options: LabelShiftOptions = {}): DomainPair & { classes: number } {
   const { n = 1000, sourcePriors = [1 / 3, 1 / 3, 1 / 3], targetPriors = [0.6, 0.3, 0.1], separation = 2.5 } = options
   const k = sourcePriors.length
@@ -99,7 +150,26 @@ export function labelShiftDomains(s: Stream, options: LabelShiftOptions = {}): D
 /**
  * A sequence of binary tasks on 2-d inputs: two Gaussian blobs per task, in a region of its own, whose axis turns by
  * `turn` radians from task to task. A network can solve all of them together, but training on one at a time moves the
- * boundaries of the others.
+ * boundaries of the others. In task $t$ the classes are blobs of standard deviation 0.4 at
+ * $\cvec_t \pm (d/2)(\cos t\phi, \sin t\phi)$, $d$ the `separation` and $\phi$ the `turn` (class 1 at $+$), and the
+ * centres $\cvec_t$ are spaced evenly on a circle of radius `spread` (at the origin when there is one task). Labels
+ * alternate 0, 1, 0, ... within a task.
+ *
+ * @param s The stream the tasks are drawn from (task $t$ from `child(s, 'task', t)`).
+ * @param options `tasks` (default 3), the number of tasks; `n` (default 300), the points per task; `turn` (default
+ *   $\pi/2$), the angle between successive tasks' axes; `separation` (default 1.5), the distance between a task's two
+ *   class means; `spread` (default 2.5), the radius of the circle of task centres.
+ * @returns One labelled point set per task: `x` ($n \times 2$) and `y` ($n$).
+ *
+ * @example Each task's class axis turns by a quarter turn
+ * const tasks = rotatingTasks(stream(1), { tasks: 3, n: 300 })
+ * print('tasks:', tasks.length, ' x:', tasks[0].x.shape, ' first rows:', toArray(tasks[0].x).slice(0, 2))
+ * const angle = ({ x, y }) => {
+ *   const [xs, ys] = [toArray(x), toArray(y)]
+ *   const m = (c, k) => xs.filter((_, i) => ys[i] === c).reduce((a, r) => a + r[k], 0) / (xs.length / 2)
+ *   return (Math.atan2(m(1, 1) - m(0, 1), m(1, 0) - m(0, 0)) * 180) / Math.PI
+ * }
+ * print('class axis of each task (degrees):', tasks.map(angle))
  */
 export function rotatingTasks(
   s: Stream,

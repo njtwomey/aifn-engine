@@ -1,6 +1,7 @@
 /**
- * Small real datasets embedded as data, read by `iris`, `oldFaithful` and `anscombe` in index.ts. Values are copied
- * verbatim from the sources cited on each constant; do not edit by hand.
+ * Small real datasets embedded as data, read by `iris`, `oldFaithful`, `anscombe`, `coalMining` and `karateClub` in
+ * `real.ts`. Values are copied verbatim from the sources cited on each constant; do not edit by hand. Tables are
+ * flattened row-major into plain number arrays.
  */
 
 /**
@@ -37,8 +38,9 @@ export const IRIS_DATA: readonly number[] = [
 ]
 
 /**
- * Old Faithful geyser eruptions (Härdle 1991, "Smoothing Techniques with Implementation in S"; R's `datasets::faithful`):
- * 272 rows of eruption duration (min) and waiting time to the next eruption (min), flattened row-major.
+ * Old Faithful geyser eruptions (Härdle 1991, "Smoothing Techniques with Implementation in S"; R's
+ * `datasets::faithful`): 272 rows of eruption duration (min) and waiting time to the next eruption (min), flattened
+ * row-major.
  */
 export const FAITHFUL_DATA: readonly number[] = [
   3.6, 79, 1.8, 54, 3.333, 74, 2.283, 62, 4.533, 85, 2.883, 55, 4.7, 88, 3.6, 85, 1.95, 51, 4.35, 85, 1.833, 54, 3.917,
@@ -67,7 +69,10 @@ export const FAITHFUL_DATA: readonly number[] = [
   84, 1.85, 58, 4.25, 83, 1.983, 43, 2.25, 60, 4.75, 75, 4.117, 81, 2.15, 46, 4.417, 90, 1.817, 46, 4.467, 74,
 ]
 
-/** Anscombe's quartet (Anscombe 1973, The American Statistician 27(1)): x₁…x₄ and y₁…y₄, eleven points each. */
+/**
+ * Anscombe's quartet (Anscombe 1973, The American Statistician 27(1)): $x_1, \dots, x_4$ in `x` and
+ * $y_1, \dots, y_4$ in `y`, one array of eleven points per set.
+ */
 export const ANSCOMBE_DATA: { readonly x: readonly (readonly number[])[]; readonly y: readonly (readonly number[])[] } =
   {
     x: [
@@ -104,8 +109,8 @@ export const COAL_MINING_DATA: readonly number[] = [
 
 /**
  * Zachary's karate club (Zachary 1977, "An information flow model for conflict and fission in small groups", Journal
- * of Anthropological Research 33(4)), as networkx's `karate_club_graph`: 78 friendships among 34 members, flattened
- * pairs (from, to), and the club each member joined after the split (0: Mr. Hi, 1: the Officer).
+ * of Anthropological Research 33(4)), as networkx's `karate_club_graph`: the 78 friendships among 34 members, as
+ * flattened pairs (from, to) of member indices $0, \dots, 33$. `KARATE_CLUBS` holds the clubs.
  */
 export const KARATE_EDGES: readonly number[] = [
   0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 10, 0, 11, 0, 12, 0, 13, 0, 17, 0, 19, 0, 21, 0, 31, 1, 2, 1, 3, 1,
@@ -115,6 +120,10 @@ export const KARATE_EDGES: readonly number[] = [
   26, 33, 27, 33, 28, 31, 28, 33, 29, 32, 29, 33, 30, 32, 30, 33, 31, 32, 31, 33, 32, 33,
 ]
 
+/**
+ * The club each of the 34 members of Zachary's karate club joined after the split (0: Mr. Hi, 1: the Officer), in
+ * member order; same source as `KARATE_EDGES`.
+ */
 export const KARATE_CLUBS: readonly number[] = [
   0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 ]

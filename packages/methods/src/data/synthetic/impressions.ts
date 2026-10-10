@@ -8,8 +8,28 @@ import { child, standardNormals, units, type Stream } from 'aifn-compute/foundat
 import { definer } from 'aifn-compute/foundation/registry'
 
 /**
- * Simulated impressions: `fields` categorical fields with `values` values each, one active value per field, and clicks
- * from a probit model with true weights N(0, scale²) (a bias field of one value comes first, with weight `bias`).
+ * Simulated impressions: `fields` categorical fields with `values` values each, one active value per field drawn
+ * uniformly, and clicks from a probit model. Feature 0 is a bias that every impression has, with weight `bias`; the
+ * other weights are drawn as $w_i \sim \Gauss(0, \sigma^2)$, $\sigma$ = `scale`. An impression with active features
+ * $A$ is clicked when $\sum_{i \in A} w_i + \varepsilon > 0$, $\varepsilon \sim \Gauss(0, 1)$, so with probability
+ * $\Phi(\sum_{i \in A} w_i)$.
+ *
+ * @param s The stream the weights, the active values and the click noise are drawn from (children `'weights'`,
+ *   `'values'` and `'noise'`).
+ * @param options The size and the model. `n` (default 5000) is the number of impressions; `fields` (default 3) the
+ *   number of categorical fields; `values` (default 10) the number of values of each field; `scale` (default 0.7) the
+ *   standard deviation $\sigma$ of the true weights; `bias` (default $-1$) the weight of the bias feature, which sets
+ *   the base click rate.
+ * @returns `impressions`, one array per impression of its active feature indices (0, then one per field: field $f$'s
+ *   value $v$ is feature $1 + f \cdot \text{values} + v$); `clicks`, whether each was clicked; `weights`, the true
+ *   weights of all `features`; and `features`, their number $1 + \text{fields} \cdot \text{values}$.
+ *
+ * @example Sparse rows and the click rate the bias sets
+ * const { impressions, clicks, weights, features } = simulatedImpressions(stream(1), { n: 2000 })
+ * print('impressions:', impressions.length, ' features:', features)
+ * print('first rows:', impressions.slice(0, 3))
+ * print('bias weight:', weights[0])
+ * print('click rate:', clicks.filter(Boolean).length / clicks.length)
  */
 export function simulatedImpressions(
   s: Stream,

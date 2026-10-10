@@ -8,8 +8,8 @@
  * - Knobs and parameters missing from a recipe take their defaults; unknown or inactive ones are dropped and listed in
  *   `meta.ignored` (as `knob`, or `op.param` for a modifier), never used silently. A modifier that needs class labels
  *   is skipped on data without them and listed as `op`.
- * - The base draws from `child(stream(seed), 'base')` and modifier i from `child(stream(seed), 'modifiers', i)`, so
- *   editing one step leaves the draws of the others alone.
+ * - The base draws from `child(stream(seed), 'base')` and modifier $i$ from `child(stream(seed), 'modifiers', i)`,
+ *   so editing one step leaves the draws of the others alone.
  * - `meta.recipe` holds the normalised recipe (every knob and parameter explicit), so `make(d.meta.recipe)` rebuilds
  *   `d`.
  */
@@ -31,20 +31,27 @@ import type { Dataset } from './types'
 
 /** One modifier step as written: the registered modifier's key and its parameters (defaults when omitted). */
 export interface RecipeStepInput {
+  /** The registry key of the modifier. */
   readonly op: string
+  /** Its parameters, by name; missing ones take their defaults. */
   readonly params?: Readonly<Record<string, unknown>>
 }
 
 /** A recipe as written: a base generator's key, and optionally a seed (default 0), knobs and modifier steps. */
 export interface RecipeInput {
+  /** The registry key of the base generator, one that returns a `Dataset`. */
   readonly base: string
+  /** The seed of the root stream the base and the modifiers draw from (default 0). */
   readonly seed?: number | string
+  /** The base generator's knobs, by name; missing ones take their defaults. */
   readonly knobs?: Readonly<Record<string, unknown>>
+  /** The modifier steps, applied in order (default none). */
   readonly modifiers?: readonly RecipeStepInput[]
 }
 
 /** A recipe with every knob and parameter explicit, and what normalising it dropped. */
 export interface NormalisedRecipe {
+  /** The recipe with the seed, every knob and every modifier parameter explicit. */
   readonly recipe: Recipe
   /** Dropped knobs (`knob`) and modifier parameters (`op.param`): unknown, or inactive under their conditions. */
   readonly ignored: readonly string[]
@@ -72,15 +79,38 @@ export interface RecipeBook {
   parse(value: unknown): RecipeInput
 }
 
+/**
+ * Whether a value is a plain object (not null and not an array), as recipe fields that hold knobs or parameters must
+ * be.
+ *
+ * @param v Any value, typically parsed from JSON.
+ * @returns True for an object that is neither null nor an array.
+ */
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
+/**
+ * A knob's value as short text for `describe`: numbers to three significant digits, objects as JSON, anything else as
+ * a string.
+ *
+ * @param v The value.
+ * @returns Its text.
+ */
 function fmt(v: SpaceValue): string {
   if (typeof v === 'number') return String(+v.toPrecision(3))
   if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
 }
 
-/** The recipe operations over a dataset registry and a modifier registry. */
+/**
+ * The recipe operations over a dataset registry and a modifier registry: the bases (the generators whose
+ * `info.output` is `'dataset'`), the ops, the space of recipes, and `normalise`, `make`, `describe`, `encode`,
+ * `decode` and `parse` (see `RecipeBook`). The recipe space's `base` defaults to `moons` when it is a base. The
+ * registries are read when the book is made and when it is used, not copied.
+ *
+ * @param datasets The dataset generators by key, as `datasetRegistry` holds them.
+ * @param modifiers The dataset modifiers by key, as `modifierRegistry` holds them.
+ * @returns The recipe operations.
+ */
 export function recipeBook(
   datasets: Readonly<Record<string, DatasetEntry>>,
   modifiers: Readonly<Record<string, ModifierEntry>>,

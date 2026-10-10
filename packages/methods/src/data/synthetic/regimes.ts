@@ -1,13 +1,17 @@
 /**
- * Seeded data with regimes: a gate over x chooses which of K simple functions generated y, the generative model of a
- * mixture of experts (Jacobs, Jordan, Nowlan and Hinton, 1991). Every generator returns the regime of each row
+ * Seeded data with regimes: a gate over $x$ chooses which of $K$ simple functions generated $y$, the generative model
+ * of a mixture of experts (Jacobs, Jordan, Nowlan and Hinton, 1991). Every generator returns the regime of each row
  * (`regime`, int32) and a `RegimeTruth` with the true gate, so a figure can score how well a fitted gate recovers the
  * regimes (the adjusted Rand index of its assignments against `regime`).
  *
- * - `piecewiseLinear`: 1-D, K lines on consecutive intervals with jumps at known breakpoints;
+ * - `piecewiseLinear`: 1-D, $K$ lines on consecutive intervals with jumps at known breakpoints;
  * - `quadrantPlanes`: 2-D, a plane per quadrant (regression) or a linear boundary per quadrant (classification);
- * - `interleavedFunctions`: 1-D, two lines that take turns over alternating bands of x;
- * - `regressionMixture`: 1-D, K lines with a soft gate, so the regimes overlap and y given x is multimodal.
+ * - `interleavedFunctions`: 1-D, two lines that take turns over alternating bands of $x$;
+ * - `regressionMixture`: 1-D, $K$ lines with a soft gate, so the regimes overlap and $y$ given $x$ is multimodal.
+ *
+ * The inputs are uniform on a box (from `child(s, 'x')`, sorted when 1-D), the regimes are drawn from the gate
+ * (`child(s, 'regime')`) and the noise from `child(s, 'noise')`; `f` holds the regime's noise-free function at each
+ * row. Every generator throws `DomainError` when `n` is not a non-negative integer.
  */
 
 import type { DatasetInfo, Size } from 'aifn-compute/foundation/contracts'
@@ -25,10 +29,36 @@ export type RegimeDataset = Dataset & {
   readonly regime: Tensor
 }
 
+/**
+ * A coefficient for a caption: two decimals, or `'0'` when it rounds to zero.
+ *
+ * @param v The coefficient.
+ * @returns The text.
+ */
 const fmt = (v: number) => (Math.abs(v) < 0.005 ? '0' : v.toFixed(2))
+/**
+ * A line $a + bx$ as caption text, with the sign of $b$ written as an operator.
+ *
+ * @param a The intercept.
+ * @param b The slope.
+ * @param x The name of the variable.
+ * @returns The text, e.g. `'0.60 + 0.80x'`.
+ */
 const line = (a: number, b: number, x = 'x') => `${fmt(a)} ${b < 0 ? '−' : '+'} ${fmt(Math.abs(b))}${x}`
 
-/** Draw n rows from a regime model: x uniform on the box, the regime from the gate, y from the regime. */
+/**
+ * Draw $n$ rows from a regime model: $\xvec$ uniform on the box, the regime from the gate (taken directly when the gate
+ * is one-hot), and $y$ from the regime: its function plus Gaussian noise (regression), or a Bernoulli draw of
+ * $\sigma(f)$ (classification).
+ *
+ * @param s The stream the inputs (`child(s, 'x')`), the regimes (`child(s, 'regime')`) and the noise
+ *   (`child(s, 'noise')`) are drawn from.
+ * @param model The regime model: its box, gate, functions and noise.
+ * @param n The number of rows.
+ * @param sorted Whether to sort the rows by $x$ (applied only when the input is 1-D).
+ * @returns The inputs `x` ($n \times d$), the targets or labels `y`, the regimes' noise-free values `f` (the log-odds
+ *   for classification) and the regime of each row.
+ */
 function draw(s: Stream, model: RegimeModel, n: Size, sorted: boolean) {
   const d = model.lower.length
   const xs = child(s, 'x')
@@ -56,6 +86,17 @@ function draw(s: Stream, model: RegimeModel, n: Size, sorted: boolean) {
   return { x: matrix(Float64Array.from(rows.flat()), n, d), y, f, regime }
 }
 
+/**
+ * The dataset of a regime model: $n$ rows drawn by `draw` (sorted when 1-D), with the truth and the recipe in `meta`.
+ *
+ * @param s The generator's stream, whose key is recorded.
+ * @param model The regime model.
+ * @param n The number of rows.
+ * @param base The generator's name, for the recipe.
+ * @param knobs The generator's options, for the recipe.
+ * @param description The dataset's one-line description.
+ * @returns The dataset with its regimes.
+ */
 function dataset(
   s: Stream,
   model: RegimeModel,
@@ -86,24 +127,46 @@ function dataset(
   }
 }
 
+/**
+ * The one-hot gate of regime $k$ among $K$.
+ *
+ * @param K The number of regimes.
+ * @param k The chosen regime.
+ * @returns $K$ weights, 1 at $k$ and 0 elsewhere.
+ */
 const oneHot = (K: number, k: number) => Array.from({ length: K }, (_, j) => (j === k ? 1 : 0))
 
 // ── Piecewise linear ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Options of `piecewiseLinear`. */
 export interface PiecewiseLinearOptions {
+  /** Number of points (default 200). */
   n?: Size
-  /** Number of pieces K (default 3), on K equal intervals of [−3, 3]. */
+  /** Number of pieces $K$, at least 1 (default 3), on $K$ equal intervals of $[-3, 3]$. */
   pieces?: Size
-  /** Noise sd (default 0.15). */
+  /** Noise standard deviation (default 0.15). */
   noise?: number
   /** The size of the jump at each breakpoint, alternating in sign (default 1; 0 joins the pieces). */
   jump?: number
 }
 
 /**
- * K lines on consecutive equal intervals of [−3, 3] (breakpoints at −3 + 6j/K): slopes of alternating sign and size
- * 0.5–1.5 drawn from the stream `lines`, each line starting where the last ended plus a jump of alternating sign.
+ * $K$ lines on consecutive equal intervals of $[-3, 3]$ (breakpoints at $-3 + 6j/K$): slopes of alternating sign and
+ * size in $[0.5, 1.5)$ drawn from `child(s, 'lines')`, the first line starting at a $\Gauss(0, 0.5^2)$ height and each
+ * later one where the last ended plus a jump of alternating sign ($+$`jump` at the first breakpoint). The gate is hard:
+ * the regime of a row is its interval. Throws `DomainError` when there are no pieces.
+ *
+ * @param s The stream the lines and the points are drawn from.
+ * @param options The number of points and pieces, the noise and the jump (`PiecewiseLinearOptions`).
+ * @returns The points (`x` $n \times 1$, sorted; `y`; `f`), the regime of each and the truth.
+ *
+ * @example The truth jumps by `jump` at the first breakpoint
+ * const d = piecewiseLinear(stream(1), { n: 300, pieces: 3, jump: 1 })
+ * const r = toArray(d.regime)
+ * print('x:', d.x.shape, ' rows per regime:', [0, 1, 2].map((k) => r.filter((v) => v === k).length))
+ * print('lines:', d.meta.truth.model.formulas)
+ * const f = toArray(d.meta.truth.mean(tensor([[-1.0001], [-0.9999]])))
+ * print('jump at x = -1:', f[1] - f[0])
  */
 export function piecewiseLinear(s: Stream, options: PiecewiseLinearOptions = {}): RegimeDataset {
   const { n = 200, pieces = 3, noise = 0.15, jump = 1 } = options
@@ -150,22 +213,49 @@ export function piecewiseLinear(s: Stream, options: PiecewiseLinearOptions = {})
 
 /** Options of `quadrantPlanes`. */
 export interface QuadrantPlanesOptions {
+  /** Number of points (default 300). */
   n?: Size
   /** `regression`: a plane per quadrant; `classification`: a linear boundary per quadrant (default regression). */
   task?: 'regression' | 'classification'
-  /** Noise sd (regression; default 0.15). */
+  /** Noise standard deviation (regression; default 0.15). */
   noise?: number
   /** Classification: the slope of the logistic link across each boundary (default 6; large is nearly noise-free). */
   sharpness?: number
 }
 
-/** The quadrant of a point, counter-clockwise from the positive one: 0 (+, +), 1 (−, +), 2 (−, −), 3 (+, −). */
+/**
+ * The quadrant of a point, counter-clockwise from the positive one: 0 $(+, +)$, 1 $(-, +)$, 2 $(-, -)$, 3 $(+, -)$. A
+ * coordinate of 0 counts as positive.
+ *
+ * @param x1 The first coordinate.
+ * @param x2 The second coordinate.
+ * @returns The quadrant, 0 to 3.
+ *
+ * @example The four quadrants, and the axes
+ * print('quadrants:', [[1, 1], [-1, 1], [-1, -1], [1, -1]].map(([a, b]) => quadrantOf(a, b)))
+ * print('origin:', quadrantOf(0, 0), ' negative x1-axis:', quadrantOf(-1, 0))
+ */
 export const quadrantOf = (x1: number, x2: number): number => (x2 >= 0 ? (x1 >= 0 ? 0 : 1) : x1 < 0 ? 2 : 3)
 
 /**
- * Inputs uniform on [−2, 2]², four regimes by quadrant. Regression: y = wₖᵀx + bₖ + ε with wₖ ~ N(0, I) and
- * bₖ ~ N(0, 1) per quadrant. Classification: P(y = 1 | x) = σ(κ wₖᵀ(x − cₖ)) with a unit direction wₖ per quadrant
- * and cₖ the quadrant's centre, so each quadrant holds a differently oriented boundary through its middle.
+ * Inputs uniform on $[-2, 2]^2$, four regimes by quadrant (`quadrantOf`). Regression:
+ * $y = \wvec_k^\top \xvec + b_k + \varepsilon$ with $\wvec_k \sim \Gauss(\zeros, \Imat)$ and $b_k \sim \Gauss(0, 1)$
+ * per quadrant. Classification: $P(y = 1 \mid \xvec) = \sigma(\kappa \wvec_k^\top (\xvec - \cvec_k))$ with a unit
+ * direction $\wvec_k$ at a uniform angle per quadrant and $\cvec_k$ the quadrant's centre $(\pm 1, \pm 1)$, so each
+ * quadrant holds a differently oriented boundary through its middle. The planes come from `child(s, 'planes')`.
+ *
+ * @param s The stream the planes and the points are drawn from.
+ * @param options The number of points, the task, the regression noise and the classification sharpness $\kappa$
+ *   (`QuadrantPlanesOptions`).
+ * @returns The points (`x` $n \times 2$; `y`, targets or int32 labels; `f`, the plane's value or the log-odds), the
+ *   regime of each and the truth.
+ *
+ * @example The regime is the quadrant, and the noise is the rest
+ * const d = quadrantPlanes(stream(1), { n: 400, noise: 0.15 })
+ * const [x, y, f, r] = [toArray(d.x), toArray(d.y), toArray(d.f), toArray(d.regime)]
+ * print('x:', d.x.shape, ' planes:', d.meta.truth.model.formulas)
+ * print('regime is the quadrant:', x.every(([a, b], i) => quadrantOf(a, b) === r[i]))
+ * print('RMS of y - f (0.15):', Math.sqrt(y.reduce((a, v, i) => a + (v - f[i]) ** 2, 0) / y.length))
  */
 export function quadrantPlanes(s: Stream, options: QuadrantPlanesOptions = {}): RegimeDataset {
   const { n = 300, task = 'regression', noise = 0.15, sharpness = 6 } = options
@@ -215,17 +305,27 @@ export function quadrantPlanes(s: Stream, options: QuadrantPlanesOptions = {}): 
 
 /** Options of `interleavedFunctions`. */
 export interface InterleavedOptions {
+  /** Number of points (default 240). */
   n?: Size
-  /** Number of bands of [−3, 3] (default 4); the two functions take turns band by band. */
+  /** Number of bands of $[-3, 3]$, at least 1 (default 4); the two functions take turns band by band. */
   bands?: Size
-  /** Noise sd (default 0.1). */
+  /** Noise standard deviation (default 0.1). */
   noise?: number
 }
 
 /**
- * Two lines, y = 0.8x + 0.6 and y = −0.5x − 0.6, taking turns over `bands` equal bands of [−3, 3]: regime k on the
- * bands j with j mod 2 = k. A gate linear in x splits the line once, so fitting the bands needs as many experts as
- * bands, or a gate that can bend (an MLP router or a hierarchy).
+ * Two lines, $y = 0.8x + 0.6$ and $y = -0.5x - 0.6$, taking turns over `bands` equal bands of $[-3, 3]$: regime $k$
+ * on the bands $j$ with $j \bmod 2 = k$. A gate linear in $x$ splits the line once, so fitting the bands needs as many
+ * experts as bands, or a gate that can bend (an MLP router or a hierarchy). The number of bands is not checked.
+ *
+ * @param s The stream the points are drawn from.
+ * @param options The number of points and bands, and the noise (`InterleavedOptions`).
+ * @returns The points (`x` $n \times 1$, sorted; `y`; `f`), the regime of each and the truth.
+ *
+ * @example The regimes alternate band by band
+ * const d = interleavedFunctions(stream(1), { n: 200, bands: 4 })
+ * print('x:', d.x.shape, ' lines:', d.meta.truth.model.formulas)
+ * print('regime at x = -2.5, -1, 0.5, 2:', d.meta.truth.regime(tensor([[-2.5], [-1], [0.5], [2]])))
  */
 export function interleavedFunctions(s: Stream, options: InterleavedOptions = {}): RegimeDataset {
   const { n = 240, bands = 4, noise = 0.1 } = options
@@ -260,21 +360,35 @@ export function interleavedFunctions(s: Stream, options: InterleavedOptions = {}
 
 /** Options of `regressionMixture`. */
 export interface RegressionMixtureOptions {
+  /** Number of points (default 300). */
   n?: Size
-  /** Number of regimes K (default 2). */
+  /** Number of regimes $K$ (default 2). */
   regimes?: Size
-  /** Noise sd (default 0.2). */
+  /** Noise standard deviation (default 0.2). */
   noise?: number
   /**
-   * How far the regimes overlap (default 1): the gate is softmax(cₖx/overlap) with cₖ evenly spaced on [−3, 3]; near
-   * 0 it is a hard partition of x, large values mix the regimes everywhere.
+   * How far the regimes overlap, $\tau > 0$ (default 1): the gate is $\operatorname{softmax}_k(c_k x / \tau)$ with
+   * $c_k$ evenly spaced on $[-3, 3]$; near 0 it is a hard partition of $x$, large values mix the regimes everywhere.
    */
   overlap?: number
 }
 
 /**
- * K lines (intercepts N(0, 1) and slopes of alternating sign, drawn from the stream `lines`) chosen by a soft gate
- * softmax(cₖx/overlap), cₖ evenly spaced on [−3, 3]: where the gate is mixed, y given x has a mode on each line.
+ * $K$ lines (intercepts $\Gauss(0, 1)$ and slopes of alternating sign and size in $[0.5, 1.5)$, drawn from
+ * `child(s, 'lines')`) chosen by a soft gate $\operatorname{softmax}_k(c_k x / \tau)$, $c_k$ evenly spaced on
+ * $[-3, 3]$ ($c_0 = 0$ when $K = 1$) and $\tau$ = `overlap`: where the gate is mixed, $y$ given $x$ has a mode on each
+ * line. Throws `DomainError` when `overlap` is not positive.
+ *
+ * @param s The stream the lines and the points are drawn from.
+ * @param options The number of points and regimes, the noise and the overlap (`RegressionMixtureOptions`).
+ * @returns The points (`x` $n \times 1$, sorted; `y`; `f`), the regime each was drawn from, and the truth.
+ *
+ * @example The gate is mixed in the middle and decided at the ends
+ * const d = regressionMixture(stream(1), { n: 300, regimes: 2, overlap: 1 })
+ * const r = toArray(d.regime)
+ * print('x:', d.x.shape, ' lines:', d.meta.truth.model.formulas)
+ * print('gate at x = -2, 0, 2:', d.meta.truth.gate(tensor([[-2], [0], [2]])))
+ * print('rows per regime:', [0, 1].map((k) => r.filter((v) => v === k).length))
  */
 export function regressionMixture(s: Stream, options: RegressionMixtureOptions = {}): RegimeDataset {
   const { n = 300, regimes = 2, noise = 0.2, overlap = 1 } = options

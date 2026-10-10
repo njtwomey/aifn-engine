@@ -1,13 +1,28 @@
 /**
- * `aifn-methods/data`: datasets: seeded synthetic generators and modifiers, small embedded real datasets, test
- * objectives, test log densities and test signals. The shared
- * layer holds the `Dataset` shape, ground truth, sizes and the recipe interpreter.
+ * `aifn-methods/data`: datasets and test problems with known answers, for figures, tests and benchmarks.
  *
- * Registries (design S §3), keyed by `info.key`: `datasetRegistry` (generators; the font table, a large module, keeps
- * its own `fontDatasetRegistry` in `aifn-methods/data/real/fonts`), `modifierRegistry`,
- * `objectiveRegistry` and `logDensityRegistry`. Recipes replay them: `recipe`, `normaliseRecipe`, `describeRecipe`,
- * `encodeRecipe`, `decodeRecipe`, `parseRecipe`, `recipeBases`, `recipeOps` and `recipeSpace` (the space of a base and
- * its knobs, derived from the registry).
+ * - `synthetic`: seeded synthetic datasets with known ground truth (point clouds, densities, regression, series,
+ *   recommendation, weak supervision, evaluation test beds) and the modifiers that change them (label noise,
+ *   prevalence, outliers, missing values, covariate shift).
+ * - `real`: small real datasets embedded in the source (`iris`, `oldFaithful`, `karateClub`, `titanic`, ...); larger
+ *   ones (an annotated electrocardiogram, fonts, hyphenation) are modules of their own under it.
+ * - `signals`: deterministic test signals (chirps, tones, the Donoho–Johnstone functions, a voiced sound), series with
+ *   a known power spectrum, and a synthetic electrocardiogram.
+ * - `objectives`: test surfaces for optimisers (Rosenbrock, Himmelblau, Beale, a quadratic bowl, Rastrigin), with
+ *   gradients, Hessians and known minima.
+ * - `targets`: target log-densities for samplers and variational inference (a banana, a Gaussian, a Gaussian mixture,
+ *   Neal's funnel), with closed-form gradients and known moments.
+ *
+ * The shared layer, exported here, holds the `Dataset` shape, the ground truth of the generating processes
+ * (`Truth`: `classificationTruth`, `regressionTruth`, `spectralTruth` and the others, each a model with the Bayes rule
+ * and the Bayes risk), exact class sizes (`classCounts`) and the recipe interpreter. A generator takes a stream first
+ * when it draws, so the same seed gives the same dataset.
+ *
+ * Registries (design S §3), keyed by `info.key`: `datasetRegistry` (generators of `synthetic`, `real` and `signals`;
+ * the font table, a large module, keeps its own `fontDatasetRegistry` in `aifn-methods/data/real/fonts`),
+ * `modifierRegistry`, `objectiveRegistry` and `logDensityRegistry`; `generate` and `modify` call their entries.
+ * Recipes replay them: `recipe`, `normaliseRecipe`, `describeRecipe`, `encodeRecipe`, `decodeRecipe`, `parseRecipe`,
+ * `recipeBases`, `recipeOps` and `recipeSpace` (the space of a base and its knobs, derived from the registry).
  */
 
 import { entries } from 'aifn-compute/foundation/registry'

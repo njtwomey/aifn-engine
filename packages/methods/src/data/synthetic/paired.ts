@@ -20,51 +20,68 @@ export type Attribute = { readonly name: string; readonly levels: readonly strin
 
 /** One view of the objects: its name, the features of each row and, for an image, its layout. */
 export type View = {
+  /** The view's name, such as `'image'` or `'caption'`. */
   readonly name: string
   /** One name per column. */
   readonly featureNames: readonly string[]
-  /** For an image view: [channels, height, width], channel-major (column c·h·w + r·w + k is channel c, row r, col k). */
+  /**
+   * For an image view: `[channels, height, width]`, channel-major (column $chw + rw + k$ is channel $c$, row $r$,
+   * column $k$, for height $h$ and width $w$).
+   */
   readonly image?: readonly [number, number, number]
 }
 
 /** What is known about each object: the pairing, its attributes, and whether its combination is held out. */
 export type PairTruth = {
-  /** The object of each row (int32, length n): row i of `a` and row i of `b` are the same object, pair[i]. */
+  /**
+   * The object of each row (int32, length $n$): row $i$ of `a` and row $i$ of `b` are the same object, `pair[i]`.
+   */
   readonly pair: Tensor
-  /** Each attribute's code per row (int32, length n), by attribute name. */
+  /** Each attribute's code per row (int32, length $n$), by attribute name. */
   readonly attributes: Readonly<Record<string, Tensor>>
   /**
-   * The class of each row (int32, length n): its combination of attributes, an index into `prototypes`.
+   * The class of each row (int32, length $n$): its combination of attributes, an index into `prototypes`.
    */
   readonly combination: Tensor
-  /** 1 for rows whose combination is held out (int32, length n). */
+  /** 1 for rows whose combination is held out (int32, length $n$). */
   readonly heldOut: Tensor
 }
 
 /**
- * Paired views: `a` [n, dA] and `b` [n, dB] describe the same n objects row by row. `prototypes` holds the clean
- * B-side description of every combination of attributes (the class names a zero-shot classifier encodes), and `truth`
- * the pairing and attributes.
+ * Paired views: `a` ($n \times d_A$) and `b` ($n \times d_B$) describe the same $n$ objects row by row. `prototypes`
+ * holds the clean B-side description of every combination of attributes (the class names a zero-shot classifier
+ * encodes), and `truth` the pairing and attributes.
  */
 export interface PairedViews {
+  /** Marks paired views, as against a dataset. */
   readonly kind: 'pairs'
+  /** The first view, $n \times d_A$ (for `pairedShapes`, the images). */
   readonly a: Tensor
+  /** The second view, $n \times d_B$ (for `pairedShapes`, the captions). */
   readonly b: Tensor
+  /** The pairing, the attributes and the held-out flags of each row. */
   readonly truth: PairTruth
-  /** The noise-free B-side view of every combination [K, dB], row k for combination k. */
+  /** The noise-free B-side view of every combination, $K \times d_B$, row $k$ for combination $k$. */
   readonly prototypes: Tensor
+  /** What the data are: names, views, attributes and combinations. */
   readonly meta: {
+    /** A short name. */
     readonly name: string
+    /** A one-line description. */
     readonly description: string
+    /** The two views, `a` then `b`. */
     readonly views: readonly [View, View]
+    /** The attributes, in the order of `combinationCodes`. */
     readonly attributes: readonly Attribute[]
-    /** A name per combination, e.g. "large red triangle", row k of `prototypes`. */
+    /** A name per combination, e.g. "large red triangle", row $k$ of `prototypes`. */
     readonly combinationNames: readonly string[]
-    /** Each combination's attribute codes [K][attributes]. */
+    /** Each combination's attribute codes, one array per combination with one code per attribute. */
     readonly combinationCodes: readonly (readonly number[])[]
     /** The held-out combinations, by index. */
     readonly heldOutCombinations: readonly number[]
+    /** The key of the stream the data were drawn from. */
     readonly key?: Key
+    /** The recipe that replays the generator. */
     readonly recipe?: Recipe
   }
 }
@@ -78,8 +95,8 @@ export const PAIRED_SIZES = ['small', 'large'] as const
 /** The colours. */
 export const PAIRED_COLOURS = ['red', 'green', 'blue'] as const
 /**
- * The RGB value of each colour, in [0, 1]. Each colour lights every channel a little, so a shape leaves its outline in
- * all three channels whatever its colour, as in a real image.
+ * The RGB value of each colour, in $[0, 1]$. Each colour lights every channel a little, so a shape leaves its outline
+ * in all three channels whatever its colour, as in a real image.
  */
 export const PAIRED_RGB: readonly (readonly [number, number, number])[] = [
   [0.9, 0.25, 0.2],
@@ -110,9 +127,11 @@ export type PairedShapesOptions = {
   pixelNoise?: number
   /** Standard deviation of the Gaussian noise on every caption entry (default 0.15). */
   captionNoise?: number
-  /** How much position and rotation vary, from 0 (centred, upright) to 1 (anywhere that fits, any angle); default 0.3. */
+  /**
+   * How much position and rotation vary, from 0 (centred, upright) to 1 (anywhere that fits, any angle); default 0.3.
+   */
   jitter?: number
-  /** How many shape–colour combinations to hold out (0 … 6, default 2: red triangles and blue squares). */
+  /** How many shape–colour combinations to hold out (0 to 6, default 2: red triangles and blue squares). */
   heldOut?: number
   /**
    * Which objects to draw: `seen` (default) only combinations that are not held out, `heldOut` only held-out ones,
@@ -121,7 +140,18 @@ export type PairedShapesOptions = {
   include?: 'seen' | 'heldOut' | 'all'
 }
 
-/** Whether point (x, y), relative to the shape's centre and in its rotated frame, is inside the shape of radius r. */
+/**
+ * Whether a point, relative to the shape's centre, is inside the shape of radius $r$ rotated by $\theta$: a circle of
+ * radius $r$, a square of half-side $0.78r$, an equilateral triangle of circumradius $r$, or a cross of arms $r$ long
+ * and $0.3r$ wide on each side.
+ *
+ * @param shape The shape's code, an index into `PAIRED_SHAPES` (0 circle, 1 square, 2 triangle, any other a cross).
+ * @param x The point's horizontal offset from the centre, in image units (the image spans $[-1, 1]^2$).
+ * @param y The point's vertical offset from the centre, upwards.
+ * @param r The shape's radius.
+ * @param theta The shape's rotation, in radians anticlockwise.
+ * @returns True when the point is inside (or on the edge).
+ */
 function inside(shape: number, x: number, y: number, r: number, theta: number): boolean {
   const [c, s] = [Math.cos(theta), Math.sin(theta)]
   const u = c * x + s * y
@@ -146,7 +176,11 @@ function inside(shape: number, x: number, y: number, r: number, theta: number): 
   }
 }
 
-/** Every combination of shape, size and colour, in code order (shape slowest, colour fastest). */
+/**
+ * Every combination of shape, size and colour, in code order (shape slowest, colour fastest).
+ *
+ * @returns The $4 \times 2 \times 3 = 24$ combinations, each `[shape, size, colour]` codes.
+ */
 function combinations(): number[][] {
   const out: number[][] = []
   for (let sh = 0; sh < PAIRED_SHAPES.length; sh++)
@@ -157,11 +191,37 @@ function combinations(): number[][] {
 
 /**
  * Paired shapes: each object is a shape (circle, square, triangle or cross), a size (small or large) and a colour
- * (red, green or blue), drawn at a random position and rotation. View `a` is the object rendered as a size × size
- * colour image (three channels: the shape's anti-aliased coverage times its colour's RGB value, plus Gaussian pixel
- * noise); view `b` is its caption, the one-hot codes of shape, size and colour (4 + 2 + 3 = 9 entries) plus Gaussian
- * noise. Position, exact size and rotation appear only in the image. The first `heldOut` shape–colour pairs (red
- * triangles, blue squares, …) are left out of `include: 'seen'` data and are the only ones in `include: 'heldOut'`.
+ * (red, green or blue), drawn at a random position and rotation. View `a` is the object rendered as an $m \times m$
+ * colour image, $m$ the `size` (three channels: the shape's anti-aliased coverage times its colour's RGB value, plus
+ * Gaussian pixel noise); view `b` is its caption, the one-hot codes of shape, size and colour ($4 + 2 + 3 = 9$ entries)
+ * plus Gaussian noise. Position, exact size and rotation appear only in the image: a small shape has radius 0.45 to
+ * 0.55 and a large one 0.75 to 0.9, on an image spanning $[-1, 1]^2$. The first `heldOut` shape–colour pairs (red
+ * triangles, blue squares, then green circles, red crosses, blue triangles and green crosses) are left out of
+ * `include: 'seen'` data and are the only ones in `include: 'heldOut'`. Each object's combination is drawn uniformly
+ * from those allowed. Throws `DomainError` when $n$ is not a non-negative integer, `size` is not an integer of at least
+ * 4, `heldOut` is not an integer from 0 to 6, or no combination is left to draw.
+ *
+ * @param s The stream the objects are drawn from (object $i$ from `child(s, 'object', i)`).
+ * @param options The size of the data and of the images, the noise of each view, the jitter, and which combinations
+ *   are held out and drawn.
+ * @returns The paired views: images `a` ($n \times 3m^2$), captions `b` ($n \times 9$), the truth, the 24 prototypes
+ *   and the metadata.
+ *
+ * @example Captions sit next to their combination's prototype
+ * const d = pairedShapes(stream(1), { n: 200 })
+ * print('a:', d.a.shape, ' b:', d.b.shape, ' prototypes:', d.prototypes.shape, ' image:', d.meta.views[0].image)
+ * print('held out:', d.meta.heldOutCombinations.map((k) => d.meta.combinationNames[k]))
+ * const b = toArray(d.b)
+ * print('first caption:', b[0], ' is a', d.meta.combinationNames[toArray(d.truth.combination)[0]])
+ * const P = toArray(d.prototypes)
+ * const nearest = (row) => {
+ *   const dist = P.map((p) => p.reduce((t, v, j) => t + (v - row[j]) ** 2, 0))
+ *   return dist.indexOf(Math.min(...dist))
+ * }
+ * const combination = toArray(d.truth.combination)
+ * const right = b.filter((row, i) => nearest(row) === combination[i]).length
+ * print('captions nearest their own prototype:', right, 'of 200')
+ * print('held-out rows drawn:', toArray(d.truth.heldOut).reduce((t, v) => t + v, 0))
  */
 export function pairedShapes(s: Stream, options: PairedShapesOptions = {}): PairedViews {
   const {

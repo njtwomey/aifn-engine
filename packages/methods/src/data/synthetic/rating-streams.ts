@@ -1,8 +1,12 @@
 /**
  * Simulated game streams with known skill trajectories, for watching rating systems track skill: a population of
- * players paired round by round (at random, or with opponents of similar rating as on chess sites), and one focal player whose skill
- * changes, facing opponents of known strength. Skills are on Elo's scale; outcomes come from the Bradley–Terry
- * (logistic) or Thurstone (probit) model of the true skills, with optional draws.
+ * players paired round by round (at random, or with opponents of similar rating as on chess sites), and one focal
+ * player whose skill changes, facing opponents of known strength. Skills are on Elo's scale; outcomes come from the
+ * Bradley–Terry (logistic) or Thurstone (probit) model of the true skills, with optional draws.
+ *
+ * Every stream is a `GameStream` (`players`, and the games of each round) that the rating systems of
+ * `aifn-methods/inference/rating-models` read directly, with the truth beside it: the true skills and each game's
+ * expected score.
  */
 
 import type { DatasetInfo, FunctionInfo } from 'aifn-compute/foundation/contracts'
@@ -16,6 +20,7 @@ import type { PairedResult } from 'aifn-methods/inference/rating-models'
 
 /** How a true skill moves over the rounds. */
 export type SkillPath =
+  /** Stays at the start. */
   | { kind: 'constant' }
   /** Jumps by `size` points at the start of round `at`. */
   | { kind: 'step'; at: number; size: number }
@@ -24,7 +29,26 @@ export type SkillPath =
   /** A Gaussian random walk with `sd` points a round. */
   | { kind: 'random-walk'; sd: number }
 
-/** A skill's value during each of `rounds` rounds, starting at `start` (a random walk draws from `s`). */
+/**
+ * A skill's value during each of `rounds` rounds, starting at `start`: constant; a step of `size` from round `at` on;
+ * a drift of `perRound` a round after round `from` (so round $\text{from} + 1$ is the first to move); or a Gaussian
+ * random walk $v_r = v_{r-1} + \sigma z_r$ from $v_0$ = `start`.
+ *
+ * @param s The stream a random walk's steps are drawn from (one standard normal per round); unused by the other
+ *   paths.
+ * @param start The skill at round 0, in Elo points.
+ * @param rounds The number of rounds.
+ * @param path How the skill moves (`SkillPath`).
+ * @returns The skill in each round.
+ *
+ * @example A step, a drift and a random walk
+ * print('step:', skillPath(stream(1), 1500, 6, { kind: 'step', at: 3, size: 200 }))
+ * print('drift:', skillPath(stream(1), 1500, 6, { kind: 'drift', from: 2, perRound: 10 }))
+ * const w = skillPath(stream(1), 1500, 2000, { kind: 'random-walk', sd: 10 })
+ * const steps = w.slice(1).map((v, r) => v - w[r])
+ * print('random walk, first rounds:', w.slice(0, 4))
+ * print('random walk, step sd (10):', Math.sqrt(steps.reduce((a, v) => a + v * v, 0) / steps.length))
+ */
 export function skillPath(s: Stream, start: number, rounds: number, path: SkillPath): Float64Array {
   const out = new Float64Array(rounds)
   const steps = path.kind === 'random-walk' ? standardNormals(s, rounds) : null
@@ -40,23 +64,47 @@ export function skillPath(s: Stream, start: number, rounds: number, path: SkillP
 
 /** The outcome model of a game between true skills. */
 export interface OutcomeOptions {
-  /** `bradley-terry`: P = 1/(1 + 10^(−d/400)); `thurstone`: P = Φ(d/(√2 β)) (default `bradley-terry`). */
+  /**
+   * `bradley-terry`: $P = 1/(1 + 10^{-d/400})$; `thurstone`: $P = \Phi(d / (\sqrt{2} \beta))$, for the skill
+   * difference $d$ (default `bradley-terry`).
+   */
   outcome?: 'bradley-terry' | 'thurstone'
-  /** Thurstone's performance noise (default `THURSTONE_BETA` ≈ 196, the logistic's slope at d = 0). */
+  /**
+   * Thurstone's performance noise $\beta$ (default `THURSTONE_BETA`, about 196, which matches the logistic's slope at
+   * $d = 0$).
+   */
   beta?: number
-  /** The chance of a draw between equals, at most ½; draws thin out as the gap grows: P(draw) = draws · 4P(1 − P) (default 0). */
+  /**
+   * The chance of a draw between equals, at most $\tfrac{1}{2}$; draws thin out as the gap grows:
+   * $P(\text{draw}) = 4 \cdot \text{draws} \cdot P(1 - P)$ (default 0).
+   */
   draws?: number
 }
 
-/** P(a beats b), ignoring draws, for the skill difference d = s_a − s_b. */
+/**
+ * $P(a \text{ beats } b)$, ignoring draws, for the skill difference $d = s_a - s_b$: the expected score of $a$.
+ *
+ * @param d The skill difference, in Elo points.
+ * @param options The outcome model and Thurstone's $\beta$ (`draws` is not read).
+ * @returns The probability, in $(0, 1)$.
+ *
+ * @example 400 points is ten to one under Bradley–Terry
+ * print('even:', winProbability(0), ' +400:', winProbability(400), ' -400:', winProbability(-400))
+ * print('Thurstone, +400:', winProbability(400, { outcome: 'thurstone' }))
+ */
 export function winProbability(d: number, options: OutcomeOptions = {}): number {
   const { outcome = 'bradley-terry', beta = THURSTONE_BETA } = options
   return outcome === 'thurstone' ? normalCdf(d / (Math.SQRT2 * beta)) : 1 / (1 + Math.pow(10, -d / 400))
 }
 
 /**
- * One game for the skill difference d: P(draw) = draws · 4P(1 − P), carved equally from wins and losses, so a's expected
- * score stays P (draws must be at most ½). Uses one uniform `u`.
+ * One game for the skill difference $d$: $P(\text{draw}) = 4 \cdot \text{draws} \cdot P(1 - P)$, carved equally from
+ * wins and losses, so $a$'s expected score stays $P$ (draws must be at most $\tfrac{1}{2}$). Uses one uniform `u`.
+ *
+ * @param d The skill difference $s_a - s_b$.
+ * @param u A uniform draw on $[0, 1)$ that decides the result.
+ * @param options The outcome model and the draw rate.
+ * @returns `score`, $a$'s score (1, $\tfrac{1}{2}$ or 0), and `p`, $a$'s expected score.
  */
 function play(d: number, u: number, options: OutcomeOptions): { score: number; p: number } {
   const p = winProbability(d, options)
@@ -66,28 +114,33 @@ function play(d: number, u: number, options: OutcomeOptions): { score: number; p
 
 /** Options of `ratingPopulation`. */
 export interface RatingPopulationOptions extends OutcomeOptions {
+  /** Number of players, at least 2 (default 200). */
   players?: number
+  /** Number of rounds (default 60). */
   rounds?: number
   /** Games each player plays per round (default 2). */
   gamesPerRound?: number
-  /** Mean and sd of the starting true skills (default 0 and 350: skills relative to the pool). */
+  /** Mean of the starting true skills (default 0: skills relative to the pool). */
   mean?: number
+  /** Standard deviation of the starting true skills (default 350). */
   spread?: number
   /** Every player's skill path (default constant). */
   path?: SkillPath
   /**
-   * `random`: uniform pairs. `rating` (default): players sorted by a matchmaking rating plus N(0, window²) noise and
-   * paired with their neighbour, as a site pairs players of similar rating; the matchmaking rating is the simulator's
-   * own Elo (K = 32, start 1500), so the games are the same whichever rating system is then run on them. `skill`: the
-   * same on the true skills (games between near-equals, which say little about the scale).
+   * `random`: uniform pairs. `rating` (default): players sorted by a matchmaking rating plus
+   * $\Gauss(0, \text{window}^2)$ noise and paired with their neighbour, as a site pairs players of similar rating; the
+   * matchmaking rating is the simulator's own Elo ($K = 32$, start 1500), so the games are the same whichever rating
+   * system is then run on them. `skill`: the same on the true skills (games between near-equals, which say little
+   * about the scale).
    */
   matchmaking?: 'random' | 'rating' | 'skill'
+  /** Standard deviation of the noise added to the sort key of `rating` and `skill` matchmaking (default 100). */
   window?: number
 }
 
 /** A simulated stream with the truth. */
 export interface RatingPopulation extends GameStream {
-  /** True skills during each round, row-major [rounds × players]. */
+  /** True skills during each round, row-major, rounds by players: round $r$, player $p$ at `r * players + p`. */
   readonly skills: Float64Array
   /** The true expected score of player a in each game, in stream order. */
   readonly probability: Float64Array
@@ -95,7 +148,24 @@ export interface RatingPopulation extends GameStream {
 
 /**
  * A population of players with known skill trajectories, paired every slot of every round by the matchmaking rule
- * (with an odd count, one player sits out a slot), outcomes from the true skills.
+ * (with an odd count, one player sits out a slot), outcomes from the true skills. Starting skills are
+ * $\Gauss(\text{mean}, \text{spread}^2)$ from `child(s, 'skills')`, and each player's path draws from
+ * `child(s, 'path', p)`. Colours alternate by slot, so neither side of a pairing is always player $a$. Throws
+ * `DomainError` with fewer than two players.
+ *
+ * @param s The stream the skills, the pairings and the outcomes are drawn from.
+ * @param options The size of the population, the skill paths, the matchmaking and the outcome model
+ *   (`RatingPopulationOptions`).
+ * @returns The games of every round, the true skills and every game's expected score.
+ *
+ * @example Every player plays twice a round, and the scores average to the expected ones
+ * const pop = ratingPopulation(stream(1), { players: 200, rounds: 5 })
+ * const games = pop.rounds.flat()
+ * const start = pop.skills.slice(0, pop.players)
+ * print('rounds:', pop.rounds.length, ' games per round:', pop.rounds[0].length, ' first game:', games[0])
+ * print('sd of the starting skills (350):', Math.sqrt(start.reduce((a, v) => a + v * v, 0) / start.length))
+ * const mean = (v) => v.reduce((a, u) => a + u, 0) / v.length
+ * print('mean score:', mean(games.map((g) => g.score)), ' mean expected:', mean(pop.probability))
  */
 export function ratingPopulation(s: Stream, options: RatingPopulationOptions = {}): RatingPopulation {
   const {
@@ -158,10 +228,12 @@ export interface FocalPlayerOptions extends OutcomeOptions {
   /** The focal player's skill path (default a step of +200 at game 150). */
   path?: SkillPath
   /**
-   * `close`: each opponent's known skill is the focal player's true skill plus N(0, window²) (matchmaking by skill);
-   * `field`: drawn from N(start, window²) whatever the focal skill (default `close`).
+   * `close`: each opponent's known skill is near the focal player's true skill plus $\Gauss(0, \text{window}^2)$
+   * (matchmaking by skill); `field`: drawn from $\Gauss(\text{start}, \text{window}^2)$ whatever the focal skill
+   * (default `close`).
    */
   opponents?: 'close' | 'field'
+  /** The spread of the opponents' skills around their target, in Elo points (default 150). */
   window?: number
   /** A break of `rounds` rounds without games just before game `at` (default none). */
   pause?: { at: number; rounds: number }
@@ -169,7 +241,7 @@ export interface FocalPlayerOptions extends OutcomeOptions {
   pool?: number
 }
 
-/** The focal player's stream: player 0 against opponents of known skill from a pool (players 1 …). */
+/** The focal player's stream: player 0 against opponents of known skill from a pool (players $1, \dots$). */
 export interface FocalPlayerStream extends GameStream {
   /** The true expected score of the focal player in each game. */
   readonly probability: Float64Array
@@ -183,9 +255,29 @@ export interface FocalPlayerStream extends GameStream {
 
 /**
  * One focal player (player 0) whose skill follows `path` (indexed by game), one game a round against an opponent of
- * known skill from a pool: with `close` opponents the pool spans the focal skill's range and each game takes the member
- * nearest the focal skill plus N(0, window²); with a `field` the pool is spread as N(start, window²) and each game takes
- * a member at random. A `pause` inserts rounds without games before game `pause.at`.
+ * known skill from a pool: with `close` opponents the pool is evenly spaced over the focal skill's range widened by
+ * $2 \cdot \text{window}$ on each side, and each game takes the member nearest the focal skill plus
+ * $\Gauss(0, \text{window}^2)$; with a `field` the pool is spread as $\Gauss(\text{start}, \text{window}^2)$ and each
+ * game takes a member at random. A `pause` inserts rounds without games before game `pause.at`. Throws `DomainError`
+ * unless there is at least one game and one opponent.
+ *
+ * @param s The stream the path, the pool, the opponents and the outcomes are drawn from.
+ * @param options The games, the focal player's start and path, the opponents, the pause and the outcome model
+ *   (`FocalPlayerOptions`).
+ * @returns The games, one a round (none in a pause), with the opponents' known skills in `fixed`, the focal player's
+ *   true skill per game in `truth`, each game's round and its expected score.
+ *
+ * @example The default step of 200 at game 150, against close opponents
+ * const f = focalPlayerStream(stream(1))
+ * print('players:', f.players, ' rounds:', f.rounds.length, ' first game:', f.rounds[0][0])
+ * print('true skill at games 149 and 150:', f.truth[149], f.truth[150])
+ * const opp = f.rounds.map((r) => f.fixed[r[0].b])
+ * const avg = (v) => v.reduce((a, u) => a + u, 0) / v.length
+ * print('mean opponent before and after the step:', avg(opp.slice(0, 150)), avg(opp.slice(150)))
+ *
+ * @example A pause adds empty rounds
+ * const f = focalPlayerStream(stream(1), { games: 10, pause: { at: 5, rounds: 3 } })
+ * print('rounds:', f.rounds.length, ' round of each game:', f.gameRound)
  */
 export function focalPlayerStream(s: Stream, options: FocalPlayerOptions = {}): FocalPlayerStream {
   const {
@@ -237,12 +329,23 @@ export function focalPlayerStream(s: Stream, options: FocalPlayerOptions = {}): 
 
 /** Flat knobs of a skill path (for the dataset registry). */
 interface PathKnobs {
+  /** The path's kind (default `constant`). */
   path?: SkillPath['kind']
+  /** The round of a step, or the round a drift starts from (default 0). */
   at?: number
+  /** The size of a step (default 0). */
   size?: number
+  /** The drift per round (default 0). */
   perRound?: number
+  /** The random walk's step standard deviation (default 0). */
   sd?: number
 }
+/**
+ * The skill path the flat knobs describe; the knobs the kind does not use are ignored.
+ *
+ * @param k The flat knobs.
+ * @returns The path.
+ */
 const pathOfKnobs = (k: PathKnobs): SkillPath => {
   const { path = 'constant', at = 0, size = 0, perRound = 0, sd = 0 } = k
   return path === 'step'
@@ -254,7 +357,18 @@ const pathOfKnobs = (k: PathKnobs): SkillPath => {
         : { kind: 'constant' }
 }
 
-/** `ratingPopulation` with flat knobs: every player's skill path given by `path`, `at`, `size`, `perRound`, `sd`. */
+/**
+ * `ratingPopulation` with flat knobs: every player's skill path given by `path`, `at`, `size`, `perRound`, `sd`, as
+ * the dataset registry passes them.
+ *
+ * @param s The stream the population is drawn from.
+ * @param knobs The options of `ratingPopulation`, with the path as flat knobs (default constant).
+ * @returns The population, as `ratingPopulation` returns it.
+ *
+ * @example Every player drifts up by 5 points a round
+ * const pop = ratingMatches(stream(1), { players: 10, rounds: 4, path: 'drift', perRound: 5 })
+ * print('player 0 by round:', [0, 1, 2, 3].map((r) => pop.skills[r * pop.players]))
+ */
 export function ratingMatches(
   s: Stream,
   knobs: Omit<RatingPopulationOptions, 'path'> & PathKnobs = {},
@@ -262,7 +376,18 @@ export function ratingMatches(
   return ratingPopulation(s, { ...knobs, path: pathOfKnobs(knobs) })
 }
 
-/** `focalPlayerStream` with flat knobs (the focal path by `path`, `at`, `size`, `perRound`, `sd`; default a step). */
+/**
+ * `focalPlayerStream` with flat knobs, as the dataset registry passes them: the focal path by `path`, `at`, `size`,
+ * `perRound`, `sd` (default a step of 200 at game 150), and no pause.
+ *
+ * @param s The stream the games are drawn from.
+ * @param knobs The options of `focalPlayerStream` without `pause`, with the path as flat knobs.
+ * @returns The stream, as `focalPlayerStream` returns it.
+ *
+ * @example A step of 100 at game 20
+ * const f = focalPlayerMatches(stream(1), { games: 40, at: 20, size: 100 })
+ * print('true skill at games 19 and 20:', f.truth[19], f.truth[20])
+ */
 export function focalPlayerMatches(
   s: Stream,
   knobs: Omit<FocalPlayerOptions, 'path' | 'pause'> & PathKnobs = {},
