@@ -1,9 +1,23 @@
 /**
- * `aifn-compute/signal/filters`: digital filters as `LtiSystem`s: FIR design by windowing (`firwin`, with Kaiser estimates),
- * IIR design (`butter`, `cheby1`, `cheby2`, `ellip`, `bessel`, `iirfilter`), equiripple FIR design (`remez`), filtering as compositions over `linearFilter` (`lfilter`,
- * `sosfilt`, `lfilterZi`, `sosfiltZi`, `filtfilt`; differentiable in the coefficients), frequency response (`freqz`,
- * a complex128 `Spectrum`), group delay and phase unwrapping; smoothing and detection (`savgolFilter`, `medfilt`,
- * `wiener`, `wienerDenoise`, `matchedFilter`). `filterDesignRegistry` lists the design methods.
+ * `aifn-compute/signal/filters`: digital filter design and filtering, as scipy.signal, on `LtiSystem`s.
+ *
+ * - FIR design: `firwin` (the window method), with Kaiser's estimates `kaiserOrder`, `kaiserBeta` and
+ *   `kaiserAttenuation`; `remez` (Parks–McClellan, minimax over arbitrary bands) and `equiripple` (the same, specified
+ *   like `firwin` by cutoff and transition width).
+ * - IIR design by the bilinear transform: `butter`, `cheby1`, `cheby2`, `ellip` and `bessel`, or `iirfilter` with the
+ *   family as an option. They return zeros, poles and gain unless `output` asks for `tf` or `sos`.
+ * - Filtering: `lfilter` (the difference equation) and `sosfilt` (second-order sections, better conditioned), with
+ *   their steady-state initial states `lfilterZi` and `sosfiltZi`, and `filtfilt` (zero phase, forwards and
+ *   backwards). They are compositions over `linearFilter`, so differentiable in the coefficients, the state and the
+ *   signal.
+ * - Responses: `freqz` (the complex frequency response, a `Spectrum`), `groupDelay` and `unwrapPhase`.
+ * - Smoothing and detection on concrete samples: `savgolFilter` (with its weights `savgolCoeffs`), `medfilt`, `wiener`
+ *   (local adaptive), `wienerDenoise` (frequency-domain shrinkage) and `matchedFilter`.
+ *
+ * Without `fs`, frequencies are fractions of the Nyquist frequency in $(0, 1)$, as in scipy (`remez` alone takes
+ * cycles per sample, up to 0.5); with `fs`, they are in its units, and the designed system's `dt` is $1/f_s$. A
+ * `Signal` input gives a `Signal` output on the same time axis. `filterDesignRegistry` lists the design methods and
+ * `filtersFunctions` the rest.
  */
 
 export {

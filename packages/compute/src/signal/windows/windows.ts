@@ -1,7 +1,11 @@
 /**
  * Window functions, as `scipy.signal.windows` (Harris, 1978, "On the use of windows for harmonic analysis with the
  * discrete Fourier transform", Proc. IEEE 66(1)). Symmetric by default (for filter design); `periodic: true` gives the
- * DFT-even form used for spectral analysis (a symmetric window of length n + 1 with its last sample dropped).
+ * DFT-even form used for spectral analysis (a symmetric window of length $n + 1$ with its last sample dropped).
+ *
+ * The cosine-sum windows (rectangular, Hann, Hamming, Blackman, Blackman–Harris, Nuttall, flat top) are
+ * $w[k] = \sum_j (-1)^j a_j \cos\big(2\pi j k / (m - 1)\big)$ for $k = 0, \dots, m - 1$ (window length $m$), with
+ * scipy's coefficients $a_j$; the others are built from their own formulas. A window of length 1 is $[1]$.
  */
 
 import { besselI0 } from 'aifn-compute/numerics/special'
@@ -9,7 +13,10 @@ import { dense, fromData, isTensor, type Tensor } from 'aifn-compute/foundation/
 import type { Size } from 'aifn-compute/foundation/contracts'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** The windows that need no parameter. */
+/**
+ * The windows that need no parameter, as `getWindow` names them: `'boxcar'` is `'rectangular'`, `'bartlett'` has zero
+ * end points and `'triangular'` (scipy's `triang`) has non-zero ones.
+ */
 export type WindowName =
   | 'rectangular'
   | 'boxcar'
@@ -22,7 +29,11 @@ export type WindowName =
   | 'bartlett'
   | 'triangular'
 
-/** A window by name, or a parameterised window. */
+/**
+ * A window by name, or a parameterised window: `kaiser` with shape $\beta$ (`beta`; larger lowers the side lobes and
+ * widens the main lobe), `gaussian` with standard deviation `std` in samples, `tukey` with `alpha`, the fraction of the
+ * window inside the cosine tapers (0 is rectangular, 1 is Hann), and the cosine (sine) window, which takes none.
+ */
 export type WindowSpec =
   | WindowName
   | { name: 'kaiser'; beta: number }
@@ -30,9 +41,13 @@ export type WindowSpec =
   | { name: 'tukey'; alpha: number }
   | { name: 'cosine' }
 
-/** A window given by spec, or explicitly as values (its length must match). */
+/**
+ * A window given by spec, or explicitly as values (a tensor or array, whose length must match the segment it is applied
+ * to).
+ */
 export type WindowInput = WindowSpec | Tensor | ArrayLike<number>
 
+/** The coefficients $a_0, a_1, \dots$ of each cosine-sum window, as scipy's (Hamming's are 0.54 and 0.46). */
 const COSINE_SUMS: Partial<Record<WindowName, readonly number[]>> = {
   rectangular: [1],
   boxcar: [1],
@@ -44,6 +59,14 @@ const COSINE_SUMS: Partial<Record<WindowName, readonly number[]>> = {
   flattop: [0.21557895, 0.41663158, 0.277263158, 0.083578947, 0.006947368],
 }
 
+/**
+ * The symmetric window of length $m$ (its values mirror about the centre $(m - 1)/2$). Throws `DomainError` for a spec
+ * it does not know.
+ *
+ * @param spec The window: a name, or a parameterised spec whose parameter is read here (not checked for range).
+ * @param m The number of samples, at least 1 (a length of 1 gives $[1]$ for every window).
+ * @returns A fresh array of $m$ values.
+ */
 function symmetric(spec: WindowSpec, m: number): Float64Array {
   const w = new Float64Array(m)
   if (m === 1) return w.fill(1)
@@ -107,9 +130,25 @@ function symmetric(spec: WindowSpec, m: number): Float64Array {
 }
 
 /**
- * A window of length n, as `scipy.signal.get_window(spec, n, fftbins=periodic)`. Names: rectangular (boxcar), hann,
- * hamming, blackman, blackmanharris, nuttall, flattop, bartlett, triangular, cosine; parameterised: kaiser (β),
- * gaussian (std, in samples), tukey (α, the tapered fraction).
+ * A window of length $n$, as `scipy.signal.get_window(spec, n, fftbins=periodic)`. Names: rectangular (boxcar), hann,
+ * hamming, blackman, blackmanharris, nuttall, flattop, bartlett, triangular; parameterised: kaiser ($\beta$), gaussian
+ * (std, in samples), tukey ($\alpha$, the tapered fraction), and cosine (`{ name: 'cosine' }`). Throws `DomainError`
+ * for a length that is not a non-negative integer or an unknown window.
+ *
+ * @param spec The window, by name or as a parameterised spec.
+ * @param n The number of samples; 0 gives an empty window.
+ * @param options Which form of the window to build.
+ * @param options.periodic `false` (default): the symmetric window, for filter design. `true`: the periodic (DFT-even)
+ *   window for spectral analysis, the symmetric window of length $n + 1$ without its last sample.
+ * @returns The $n$ window values, as a float64 tensor.
+ *
+ * @example A Hann window, symmetric and periodic
+ * print('symmetric =', getWindow('hann', 5))
+ * print('periodic =', getWindow('hann', 4, { periodic: true }))
+ *
+ * @example Parameterised windows
+ * print('kaiser, beta 5 =', getWindow({ name: 'kaiser', beta: 5 }, 5))
+ * print('tukey, alpha 0.5 =', getWindow({ name: 'tukey', alpha: 0.5 }, 8))
  */
 export function getWindow(spec: WindowSpec, n: Size, { periodic = false }: { periodic?: boolean } = {}): Tensor {
   if (!Number.isInteger(n) || n < 0)
@@ -120,8 +159,19 @@ export function getWindow(spec: WindowSpec, n: Size, { periodic = false }: { per
 }
 
 /**
- * The values of a window input of length n as a fresh float64 array: a spec is built with the given symmetry
- * (`periodic` for spectral analysis), explicit values are checked for length.
+ * The values of a window input of length $n$ as a fresh float64 array: a spec is built with the given symmetry
+ * (`periodic` for spectral analysis), explicit values are copied and checked for length. Throws `ShapeError` when
+ * explicit values do not have $n$ entries.
+ *
+ * @param input The window: a spec (name or parameterised), or its values as a tensor or array.
+ * @param n The length the window must have: the segment length it will multiply.
+ * @param periodic For a spec, whether to build the periodic (DFT-even) window rather than the symmetric one; ignored
+ *   for explicit values.
+ * @returns A fresh array of $n$ values, safe to modify.
+ *
+ * @example A spec is built, explicit values are copied
+ * print('hamming =', windowValues('hamming', 4, true))
+ * print('given =', windowValues([1, 2, 2, 1], 4, false))
  */
 export function windowValues(input: WindowInput, n: Size, periodic: boolean): Float64Array {
   if (typeof input === 'string' || (typeof input === 'object' && 'name' in input && !isTensor(input)))

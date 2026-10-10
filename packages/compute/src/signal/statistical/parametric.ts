@@ -1,10 +1,14 @@
 /**
- * Parametric spectral estimation, part of `aifn-compute/signal/statistical`: the power spectral density of an ARMA model
- * (`armaSpectrum`, the analytic truth of a simulated process), autoregressive spectral estimates by Yule–Walker, Burg
- * or least squares (`arPsd`, with `leastSquaresAr`), and the subspace estimators of line spectra, MUSIC (Schmidt,
+ * Parametric spectral estimation, part of `aifn-compute/signal/statistical`: the power spectral density of an ARMA
+ * model (`armaSpectrum`, the analytic truth of a simulated process), autoregressive spectral estimates by Yule–Walker,
+ * Burg or least squares (`arPsd`, with `leastSquaresAr`), and the subspace estimators of line spectra, MUSIC (Schmidt,
  * 1986) and ESPRIT (Roy and Kailath, 1989), with the least-squares amplitudes of sinusoids at given frequencies
- * (`sinusoidFit`). Frequencies are in Hz with `fs` (default 1: cycles per sample); densities are one-sided, as
- * `aifn-compute/signal/spectral`'s estimates, so the two can be overlaid.
+ * (`sinusoidFit`).
+ *
+ * Frequencies are in Hz with `fs` (default 1: cycles per sample); densities are one-sided, as the estimates of
+ * `aifn-compute/signal/spectral` are, so the two can be overlaid. MUSIC and ESPRIT share one step: the
+ * $m \times m$ forward–backward sample correlation matrix of the series and its eigendecomposition, whose $2K$
+ * leading eigenvectors span the signal subspace of $K$ real sinusoids.
  */
 
 import { fromData, imagPart, realPart, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -15,28 +19,61 @@ import { eig, eigh, lstsq } from 'aifn-compute/numerics/linalg'
 import { readSamples, spectrum, type SignalInput } from '../signal'
 import { burg, yuleWalker, type AutoregressiveFit } from './autoregression'
 
+/**
+ * A rank-1 float64 tensor holding a copy of the values.
+ *
+ * @param v The values.
+ * @returns The tensor, of length `v.length`.
+ */
 const vec = (v: ArrayLike<number>): Tensor => fromData(Float64Array.from(v), [v.length])
+/**
+ * The values of an optional vector as a plain array, read as samples (so a signal's data is read).
+ *
+ * @param v The vector, or undefined.
+ * @returns A fresh array of its values; empty for undefined.
+ */
 const valuesOf = (v: VectorLike | Tensor | undefined): number[] =>
   v === undefined ? [] : Array.from(readSamples(v as VectorLike, 'parametric').values)
 
-/** An ARMA(p, q) model x_t = Σ φᵢ x_{t−i} + ε_t + Σ θⱼ ε_{t−j}, ε_t ~ N(0, σ²). */
+/**
+ * An ARMA($p$, $q$) model
+ * $x_t = \sum_{i=1}^{p} \phi_i x_{t-i} + \varepsilon_t + \sum_{j=1}^{q} \theta_j \varepsilon_{t-j}$,
+ * $\varepsilon_t \sim \Gauss(0, \sigma^2)$.
+ */
 export type ArmaModel = {
-  /** φ₁ … φ_p (none: a moving average). */
+  /** The AR coefficients $\phi_1, \dots, \phi_p$ (none: a moving average). */
   ar?: VectorLike | Tensor
-  /** θ₁ … θ_q (none: an autoregression). */
+  /** The MA coefficients $\theta_1, \dots, \theta_q$ (none: an autoregression). */
   ma?: VectorLike | Tensor
-  /** Innovation variance σ² (default 1). */
+  /** Innovation variance $\sigma^2$ (default 1). */
   sigma2?: Scalar
 }
 
 /**
  * The power spectral density of an ARMA model, one-sided in power per Hz:
  *
- *   S(f) = (2σ²/fs) |1 + Σⱼ θⱼ e^{−iωj}|² / |1 − Σᵢ φᵢ e^{−iωi}|²,  ω = 2πf/fs,
+ * $$S(f) = \frac{2\sigma^2}{f_s}
+ *   \frac{\lvert 1 + \sum_j \theta_j e^{-i\omega j} \rvert^2}{\lvert 1 - \sum_i \phi_i e^{-i\omega i} \rvert^2},
+ *   \qquad \omega = 2\pi f / f_s,$$
  *
- * halved at f = 0 and f = fs/2, as a one-sided estimate is. It integrates over [0, fs/2] to the process variance
- * when the AR part is stationary (Wiener–Khinchin: the autocovariance of filtered white noise is the filter's
- * squared gain times σ²). `frequencies` (Hz) or `nfft` (the rfft grid, default 512) choose where to evaluate it.
+ * halved at $f = 0$ and $f = f_s/2$, as a one-sided estimate is. It integrates over $[0, f_s/2]$ to the process
+ * variance when the AR part is stationary (Wiener–Khinchin: the spectrum of filtered white noise is the filter's
+ * squared gain times $\sigma^2$).
+ *
+ * @param model The AR and MA coefficients and the innovation variance.
+ * @param options Where and at what rate to evaluate it.
+ * @param options.fs The sample rate $f_s$ in Hz (default 1, so frequencies are in cycles per sample).
+ * @param options.frequencies The frequencies to evaluate at, in Hz; when given, `nfft` is ignored.
+ * @param options.nfft The length whose rfft grid, $\lfloor$`nfft`$/2\rfloor + 1$ frequencies from 0 to $f_s/2$, is
+ *   used when `frequencies` is not given (default 512).
+ * @returns The one-sided PSD (`quantity: 'psd'`) at those frequencies.
+ *
+ * @example An AR(1) with coefficient 0.5: the spectrum, and its integral against the variance
+ * const s = armaSpectrum({ ar: [0.5] }, { frequencies: [0, 0.25, 0.5] })
+ * print('S at 0, 0.25, 0.5 =', s.values)
+ * const grid = armaSpectrum({ ar: [0.5] }, { nfft: 1024 })
+ * print('sum times bin width =', sum(grid.values) / 1024)
+ * print('variance 1 / (1 - 0.5^2) =', 1 / (1 - 0.25))
  */
 export function armaSpectrum(
   model: ArmaModel,
@@ -68,8 +105,13 @@ export function armaSpectrum(
 }
 
 /**
- * The reflection coefficients of an AR polynomial by the step-down (backward Levinson) recursion: k_m = φ_m^{(m)} and
- * φ_j^{(m−1)} = (φ_j^{(m)} + k_m φ_{m−j}^{(m)}) / (1 − k_m²). All |k| < 1 exactly when the AR part is stationary.
+ * The reflection coefficients of an AR polynomial by the step-down (backward Levinson) recursion:
+ * $k_m = \phi_m^{(m)}$ and $\phi_j^{(m-1)} = (\phi_j^{(m)} + k_m \phi_{m-j}^{(m)}) / (1 - k_m^2)$. All
+ * $\lvert k_m \rvert < 1$ exactly when the AR part is stationary. The recursion stops at the first
+ * $\lvert k_m \rvert \ge 1$, leaving the lower orders NaN.
+ *
+ * @param phi The AR coefficients $\phi_1, \dots, \phi_p$ of order $p$; not modified.
+ * @returns The reflection coefficients $k_1, \dots, k_p$, by order.
  */
 function stepDown(phi: readonly number[]): number[] {
   let a = [...phi]
@@ -84,10 +126,27 @@ function stepDown(phi: readonly number[]): number[] {
 }
 
 /**
- * Least-squares AR(p) estimates: minimise the forward prediction errors Σ_{t≥p} (x_t − Σᵢ φᵢ x_{t−i})² (the
- * covariance method) or, with `forwardBackward` (default), the forward and backward errors together (the modified
- * covariance method; Kay, 1988; Stoica and Moses, 2005, §3.4). Neither pads the series with zeros, so peaks are
- * sharper than Yule–Walker's; stationarity is not guaranteed. σ² is the mean squared residual.
+ * Least-squares AR($p$) estimates: minimise the forward prediction errors
+ * $\sum_{t \ge p} (x_t - \sum_i \phi_i x_{t-i})^2$ (the covariance method) or, with `forwardBackward` (default), the
+ * forward and backward errors together (the modified covariance method; Kay, 1988; Stoica and Moses, 2005, §3.4).
+ * Neither pads the series with zeros, so peaks are sharper than Yule–Walker's; stationarity is not guaranteed (the
+ * reflection coefficients, by the step-down recursion, show it). $\sigma^2$ is the mean squared residual over the
+ * prediction equations. Throws `DomainError` unless $p$ is an integer with $1 \le p < n/2$.
+ *
+ * @param x The series, of length $n$: a single-channel signal or its samples.
+ * @param order The order $p$.
+ * @param options The fitting options.
+ * @param options.demean Subtract the sample mean first (default true).
+ * @param options.forwardBackward Fit the backward predictions too, with the same coefficients (default true).
+ * @returns The coefficients, innovation variance, the mean subtracted and the reflection coefficients.
+ *
+ * @example A short AR(2) series, by the modified and the plain covariance method
+ * // x_t = 1.2 x_{t-1} - 0.6 x_{t-2} + e_t, 60 samples.
+ * const e = toArray(normals(stream(2), 60))
+ * const x = [e[0], e[1]]
+ * for (let t = 2; t < 60; t++) x.push(1.2 * x[t - 1] - 0.6 * x[t - 2] + e[t])
+ * print('forward and backward =', leastSquaresAr(x, 2).ar)
+ * print('forward only =', leastSquaresAr(x, 2, { forwardBackward: false }).ar)
  */
 export function leastSquaresAr(
   x: SignalInput,
@@ -120,14 +179,34 @@ export function leastSquaresAr(
   return { ar: vec(phi), sigma2, mean, reflection: vec(stepDown(phi)) }
 }
 
-/** An AR spectral estimate: the spectrum of the fitted model, and the fit. */
+/** An AR spectral estimate: the spectrum of the fitted model, the fit (`fit`), and the `method` that made it. */
 export type ArPsd = Spectrum & { fit: AutoregressiveFit; method: 'yule-walker' | 'burg' | 'least-squares' }
 
 /**
- * The autoregressive spectral estimate: fit an AR(p) by `method` (`burg`, the default; `yule-walker`;
+ * The autoregressive spectral estimate: fit an AR($p$) by `method` (`burg`, the default; `yule-walker`;
  * `least-squares`, the modified covariance method) and return the fitted model's PSD (`armaSpectrum`) on the rfft grid
- * of `nfft` (default 512). A parametric estimate is smooth and can resolve peaks closer than fs/n, but its peaks
- * shift and split when p is too large and merge when it is too small.
+ * of `nfft` (default 512). A parametric estimate is smooth and can resolve peaks closer than $f_s/n$, but its peaks
+ * shift and split when $p$ is too large and merge when it is too small. Throws as the chosen fit does.
+ *
+ * @param x The series, of length $n$: a single-channel signal or its samples.
+ * @param order The order $p$.
+ * @param options The method and the grid.
+ * @param options.method The fit: `'burg'` (default), `'yule-walker'` or `'least-squares'`.
+ * @param options.fs The sample rate in Hz (default: the signal's, or 1 for bare samples).
+ * @param options.nfft The length whose rfft grid the spectrum is evaluated on (default 512).
+ * @param options.demean Subtract the sample mean before fitting (default true).
+ * @returns The one-sided PSD of the fitted model, with the fit and the method.
+ *
+ * @example The peak of an AR(2) spectrum, estimated from 200 samples
+ * // x_t = 1.2 x_{t-1} - 0.6 x_{t-2} + e_t, whose spectrum peaks near 0.102 cycles per sample.
+ * const e = toArray(normals(stream(2), 200))
+ * const x = [e[0], e[1]]
+ * for (let t = 2; t < 200; t++) x.push(1.2 * x[t - 1] - 0.6 * x[t - 2] + e[t])
+ * const est = arPsd(x, 2, { nfft: 1000 })
+ * print('fitted phi =', est.fit.ar)
+ * print('estimated peak =', toArray(est.f)[argmax(est.values)])
+ * const truth = armaSpectrum({ ar: [1.2, -0.6] }, { nfft: 1000 })
+ * print('true peak =', toArray(truth.f)[argmax(truth.values)])
  */
 export function arPsd(
   x: SignalInput,
@@ -153,18 +232,30 @@ export function arPsd(
 
 /** Options of `music` and `esprit`. */
 export type SubspaceOptions = {
-  /** Number of real sinusoids K; each spans two dimensions (e^{±iωt}) of the signal subspace. */
+  /** Number of real sinusoids $K$; each spans two dimensions ($e^{\pm i\omega t}$) of the signal subspace. */
   sinusoids: Size
-  /** Size m of the correlation matrix (default min(⌊n/3⌋, 40), at least 2K + 1). */
+  /**
+   * Size $m$ of the correlation matrix, in $(2K, n]$ (default $\min(\lfloor n/3 \rfloor, 40)$, raised to $2K + 1$ if
+   * smaller).
+   */
   order?: Size
+  /** The sample rate in Hz (default: the signal's, or 1 for bare samples). */
   fs?: Scalar
   /** Subtract the mean first (default true). */
   demean?: boolean
 }
 
 /**
- * The m × m forward–backward sample correlation matrix R = ½(R_f + J R_f J) from the snapshots
- * (x_i, …, x_{i+m−1}), i = 0 … n − m, and its eigendecomposition (descending eigenvalues).
+ * The $m \times m$ forward–backward sample correlation matrix $\Rmat = \frac{1}{2}(\Rmat_f + \Jmat \Rmat_f \Jmat)$
+ * ($\Jmat$ the exchange matrix) from the snapshots $(x_i, \dots, x_{i+m-1})$, $i = 0, \dots, n - m$, and its
+ * eigendecomposition (descending eigenvalues). Throws `DomainError` unless $K$ is a positive integer and
+ * $2K < m \le n$.
+ *
+ * @param x The series, of length $n$: a single-channel signal or its samples.
+ * @param options The number of sinusoids $K$, the size $m$, the sample rate and whether to subtract the mean.
+ * @param where The caller's name for error messages.
+ * @returns The sample rate `fs`, `m`, `K2` ($2K$), the eigenvalues `values` (descending) and the eigenvectors
+ *   `vectors` (row-major $m \times m$, one per column), and `v`, the samples after any demeaning.
  */
 function subspace(x: SignalInput, options: SubspaceOptions, where: string) {
   const input = readSamples(x, where, options.fs)
@@ -191,7 +282,15 @@ function subspace(x: SignalInput, options: SubspaceOptions, where: string) {
   return { fs: input.fs, m, K2, values: e.values.data as Float64Array, vectors: e.vectors.data as Float64Array, v }
 }
 
-/** The K largest local maxima of y over the grid f, each refined by a parabola through its neighbours. */
+/**
+ * The $K$ largest local maxima of $y$ over an even grid of frequencies, each refined by a parabola through the
+ * logarithms of its value and its two neighbours (the shift clipped to half a bin). End points are never peaks.
+ *
+ * @param f The grid frequencies, ascending and evenly spaced.
+ * @param y The positive values on the grid, one per frequency.
+ * @param K The number of peaks wanted; fewer are returned when there are fewer local maxima.
+ * @returns The refined peak frequencies, ascending.
+ */
 function topPeaks(f: ArrayLike<number>, y: ArrayLike<number>, K: number): number[] {
   const peaks: { i: number; v: number }[] = []
   for (let i = 1; i < y.length - 1; i++) if (y[i] >= y[i - 1] && y[i] > y[i + 1]) peaks.push({ i, v: y[i] })
@@ -212,22 +311,38 @@ function topPeaks(f: ArrayLike<number>, y: ArrayLike<number>, K: number): number
 export type LineSpectrum = {
   /** The estimated frequencies (Hz), ascending. */
   frequencies: Tensor
-  /** The least-squares power of each sinusoid, A²/2 (`sinusoidFit`). */
+  /** The least-squares power of each sinusoid, $A^2/2$ (`sinusoidFit`). */
   powers: Tensor
   /** The correlation matrix's eigenvalues, descending: K pairs above a noise floor when the model fits. */
   eigenvalues: Tensor
-  /** The noise variance estimate: the mean of the m − 2K smallest eigenvalues. */
+  /** The noise variance estimate: the mean of the $m - 2K$ smallest eigenvalues. */
   noiseVariance: Scalar
+  /** The size $m$ of the correlation matrix used. */
   order: Size
 }
 
 /**
  * MUSIC (multiple signal classification; Schmidt, 1986): the eigenvectors of the forward–backward correlation matrix
- * split into a signal subspace (the 2K largest eigenvalues, spanned by the steering vectors e(ω) = (1, e^{iω}, …) of
- * the sinusoids) and a noise subspace orthogonal to it. The pseudospectrum P(f) = 1 / Σ_noise |e(ω)ᴴ v|² is large
- * where e(ω) is nearly orthogonal to the noise subspace, so its K highest peaks estimate the frequencies, with
- * resolution beyond fs/n at high SNR. P is not a power density: its height says nothing about power (`powers` comes
- * from a least-squares fit at the estimated frequencies). Evaluated on the rfft grid of `nfft` (default 2048).
+ * split into a signal subspace (the $2K$ largest eigenvalues, spanned by the steering vectors
+ * $\evec(\omega) = (1, e^{i\omega}, \dots, e^{i(m-1)\omega})$ of the sinusoids) and a noise subspace orthogonal to
+ * it. The pseudospectrum $P(f) = 1 / \sum_{\vvec \in \text{noise}} \lvert \evec(\omega)^{\mathsf{H}} \vvec \rvert^2$
+ * is large where $\evec(\omega)$ is nearly orthogonal to the noise subspace, so its $K$ highest peaks estimate the
+ * frequencies, with resolution beyond $f_s/n$ at high SNR. $P$ is not a power density: its height says nothing about
+ * power (`powers` comes from a least-squares fit at the estimated frequencies). Evaluated on the rfft grid of `nfft`
+ * (default 2048). Throws `DomainError` for a bad $K$ or $m$.
+ *
+ * @param x The series, of length $n$: a single-channel signal or its samples.
+ * @param options The number of `sinusoids` $K$, the correlation size `order`, `fs`, `demean`, and `nfft`, the length
+ *   whose rfft grid the pseudospectrum is evaluated on (default 2048, raised to $m$ if smaller).
+ * @returns The pseudospectrum as a `Spectrum` (`quantity: 'power'`), with the line estimates of `LineSpectrum`.
+ *
+ * @example Two tones 0.02 cycles per sample apart, closer than the 1/40 a 40-sample periodogram resolves
+ * const noise = toArray(normals(stream(4), 40, 0, 0.1))
+ * const x = noise.map((e, t) => Math.sin(2 * Math.PI * 0.1 * t) + Math.sin(2 * Math.PI * 0.12 * t + 1) + e)
+ * const est = music(x, { sinusoids: 2 })
+ * print('frequencies =', est.frequencies)
+ * print('powers =', est.powers)
+ * print('noise variance =', est.noiseVariance)
  */
 export function music(x: SignalInput, options: SubspaceOptions & { nfft?: Size }): Spectrum & LineSpectrum {
   const s = subspace(x, options, 'music')
@@ -259,6 +374,14 @@ export function music(x: SignalInput, options: SubspaceOptions & { nfft?: Size }
   }
 }
 
+/**
+ * The line-spectrum summary of a subspace estimate: the frequencies, their least-squares powers, the eigenvalues and
+ * the noise floor.
+ *
+ * @param s The correlation eigendecomposition, from `subspace`.
+ * @param frequencies The estimated frequencies, in Hz.
+ * @returns The `LineSpectrum`, with powers from `sinusoidFit` on the (demeaned) series.
+ */
 function lineSummary(s: ReturnType<typeof subspace>, frequencies: number[]): LineSpectrum {
   let floor = 0
   for (let j = s.K2; j < s.m; j++) floor += s.values[j]
@@ -274,9 +397,23 @@ function lineSummary(s: ReturnType<typeof subspace>, frequencies: number[]): Lin
 
 /**
  * ESPRIT (estimation of signal parameters via rotational invariance; Roy and Kailath, 1989), least-squares form: the
- * signal subspace U_s (the 2K leading eigenvectors of the forward–backward correlation matrix) is shift-invariant,
- * U_s[1:] = U_s[:−1] Φ, and the eigenvalues of Φ are e^{±iωₖ}. Φ is the least-squares solution; the frequencies are
- * the positive angles of its eigenvalues times fs/2π. No search over a grid, so the estimate is not quantised.
+ * signal subspace $\Umat_s$ (the $2K$ leading eigenvectors of the forward–backward correlation matrix) is
+ * shift-invariant, $\Umat_s^{\downarrow} = \Umat_s^{\uparrow} \Phimat$ with $\Umat_s^{\uparrow}$ its first $m - 1$
+ * rows and $\Umat_s^{\downarrow}$ its last, and the eigenvalues of $\Phimat$ are $e^{\pm i\omega_k}$. $\Phimat$ is
+ * the least-squares solution; the frequencies are the positive angles of its eigenvalues times $f_s/2\pi$. No search
+ * over a grid, so the estimate is not quantised. Throws `DomainError` for a bad $K$ or $m$.
+ *
+ * @param x The series, of length $n$: a single-channel signal or its samples.
+ * @param options The number of `sinusoids` $K$, the correlation size `order`, `fs` and `demean`.
+ * @returns The line estimates: frequencies, powers, eigenvalues and noise floor.
+ *
+ * @example The same two close tones, without a grid
+ * const noise = toArray(normals(stream(4), 40, 0, 0.1))
+ * const x = noise.map((e, t) => Math.sin(2 * Math.PI * 0.1 * t) + Math.sin(2 * Math.PI * 0.12 * t + 1) + e)
+ * const est = esprit(x, { sinusoids: 2 })
+ * print('frequencies =', est.frequencies)
+ * print('powers =', est.powers)
+ * print('eigenvalues =', est.eigenvalues)
  */
 export function esprit(x: SignalInput, options: SubspaceOptions): LineSpectrum {
   const s = subspace(x, options, 'esprit')
@@ -305,9 +442,11 @@ export function esprit(x: SignalInput, options: SubspaceOptions): LineSpectrum {
 
 /** Sinusoids fitted at known frequencies. */
 export type SinusoidFit = {
-  /** Amplitude Aₖ, phase φₖ (of Aₖ sin(2πfₖt/fs + φₖ)) and power Aₖ²/2 of each frequency. */
+  /** Amplitude $A_k$ of each frequency, in the model $A_k \sin(2\pi f_k t / f_s + \varphi_k)$. */
   amplitudes: Tensor
+  /** Phase $\varphi_k$ of each frequency, in radians, in that model. */
   phases: Tensor
+  /** Power $A_k^2/2$ of each frequency: its line in a one-sided spectrum. */
   powers: Tensor
   /** The fitted constant. */
   offset: Scalar
@@ -316,9 +455,25 @@ export type SinusoidFit = {
 }
 
 /**
- * The least-squares fit x_t ≈ c + Σₖ (aₖ cos 2πfₖt/fs + bₖ sin 2πfₖt/fs) at given frequencies (Stoica and Moses,
- * 2005, §4.3): with the frequencies fixed the model is linear. Aₖ = √(aₖ² + bₖ²), φₖ = atan2(aₖ, bₖ), and the power
- * of each line in a one-sided spectrum is Aₖ²/2.
+ * The least-squares fit $x_t \approx c + \sum_k (a_k \cos(2\pi f_k t / f_s) + b_k \sin(2\pi f_k t / f_s))$ at given
+ * frequencies (Stoica and Moses, 2005, §4.3): with the frequencies fixed the model is linear. Then
+ * $A_k = \sqrt{a_k^2 + b_k^2}$, $\varphi_k = \operatorname{atan2}(a_k, b_k)$, and the power of each line in a
+ * one-sided spectrum is $A_k^2/2$. The time $t$ counts samples from 0.
+ *
+ * @param x The series: a single-channel signal or its samples.
+ * @param frequencies The frequencies $f_k$ of the sinusoids, in Hz.
+ * @param options The sampling.
+ * @param options.fs The sample rate $f_s$ in Hz (default: the signal's, or 1 for bare samples).
+ * @returns The amplitude, phase and power of each frequency, the constant and the mean squared residual (NaN when
+ *   the least-squares residual is not available).
+ *
+ * @example Amplitudes 1 and 1, phases 0 and 1, recovered from noisy samples
+ * const noise = toArray(normals(stream(4), 40, 0, 0.1))
+ * const x = noise.map((e, t) => Math.sin(2 * Math.PI * 0.1 * t) + Math.sin(2 * Math.PI * 0.12 * t + 1) + e)
+ * const fit = sinusoidFit(x, [0.1, 0.12])
+ * print('amplitudes =', fit.amplitudes)
+ * print('phases =', fit.phases)
+ * print('residual variance =', fit.residualVariance)
  */
 export function sinusoidFit(
   x: SignalInput,

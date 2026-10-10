@@ -1,7 +1,12 @@
 /**
- * Variational mode decomposition (Dragomiretskiy & Zosso, 2014, "Variational mode decomposition", IEEE Trans. Signal
- * Process. 62(3)): K band-limited modes, each compact around a centre frequency, found together by ADMM in the
- * Fourier domain. `vmdSteps` is one ADMM sweep per step (traceable); `vmd` runs it and returns a `Decomposition`.
+ * Variational mode decomposition (Dragomiretskiy and Zosso, 2014, "Variational mode decomposition", IEEE Trans. Signal
+ * Process. 62(3)): $K$ band-limited modes $u_k$, each compact around a centre frequency $\omega_k$, found together by
+ * ADMM in the Fourier domain. `vmdSteps` is one ADMM sweep per step (traceable); `vmd` runs it and returns a
+ * `Decomposition`.
+ *
+ * The port follows the authors' reference code (as vmdpy does): the signal is trimmed to even length $n$ and mirrored
+ * to $T = 2n$ samples, the modes live as one-sided spectra on the mirrored signal's frequency grid, and frequencies are
+ * in cycles per sample, from 0 to $\tfrac{1}{2}$. Nothing is differentiable: the results are plain tensors.
  */
 
 import { fft, fftshift, ifft, ifftshift } from 'aifn-compute/foundation/fourier'
@@ -14,20 +19,21 @@ import { readSamples, type SignalInput } from '../signal'
 
 /** Options for `vmd` and `vmdSteps`. */
 export type VmdOptions = {
-  /** The number of modes K. */
+  /** The number of modes $K$, a positive integer. */
   modes: Size
-  /** The bandwidth penalty α (larger: narrower modes). Default 2000. */
+  /** The bandwidth penalty $\alpha > 0$ (larger: narrower modes). Default 2000. */
   alpha?: Scalar
-  /** The dual ascent step τ (0 lets the modes absorb noise: no exact reconstruction is enforced). Default 0. */
+  /** The dual ascent step $\tau$ (0 lets the modes absorb noise: no exact reconstruction is enforced). Default 0. */
   tau?: Scalar
   /** Hold the first mode at zero frequency (a trend). Default false. */
   dc?: boolean
   /**
-   * The initial centre frequencies (cycles per sample, in [0, ½]): `'zero'`, `'uniform'` (ωₖ = k/(2K), the
-   * default), or a `Stream` to draw them log-uniformly, as the reference code's `init = 2`.
+   * The initial centre frequencies (cycles per sample, in $[0, \tfrac{1}{2}]$): `'zero'`, `'uniform'`
+   * ($\omega_k = k / (2K)$ for $k = 0, \dots, K - 1$, the default), or a `Stream` to draw them log-uniformly on
+   * $[1/n, \tfrac{1}{2}]$ and sort them, as the reference code's `init = 2`.
    */
   init?: 'zero' | 'uniform' | Stream
-  /** Stop when Σₖ ‖ûₖⁿ⁺¹ − ûₖⁿ‖²/T falls below this. Default 1e-7. */
+  /** Stop when $\sum_k \norm{\hat u_k^{n+1} - \hat u_k^n}^2 / T$ falls to this or below. Default 1e-7. */
   tolerance?: Scalar
 }
 
@@ -35,19 +41,33 @@ export type VmdOptions = {
 export interface VmdState extends Status {
   /** ADMM sweeps made. */
   t: Size
-  /** The modes' one-sided spectra on the mirrored signal: complex128 [K, T], fftshifted (index T/2 is 0). */
+  /**
+   * The modes' one-sided spectra $\hat u_k$ on the mirrored signal: complex128, $K \times T$, fftshifted (index
+   * $T/2$ is frequency 0, and the negative half is zero).
+   */
   spectra: Tensor
-  /** The centre frequencies ωₖ in cycles per sample (length K). */
+  /** The centre frequencies $\omega_k$ in cycles per sample (length $K$), in the order of the modes. */
   omega: Vector
-  /** The Lagrange multiplier's spectrum λ̂ (complex128 [T]). */
+  /** The Lagrange multiplier's spectrum $\hat\lambda$ (complex128, length $T$); stays zero when $\tau = 0$. */
   multiplier: Tensor
-  /** The update size Σₖ ‖ûₖⁿ⁺¹ − ûₖⁿ‖²/T of the last sweep (∞ at the start). */
+  /**
+   * The update size $\sum_k \norm{\hat u_k^{n+1} - \hat u_k^n}^2 / T$ of the last sweep, plus machine epsilon
+   * ($\infty$ at the start).
+   */
   change: Scalar
   /** The update size fell below the tolerance. */
   converged: boolean
 }
 
-/** The mirrored signal (half of each end reflected, as the reference code) and its fftshifted spectrum, zero for f < 0. */
+/**
+ * The mirrored signal (half of each end reflected, as the reference code) and its fftshifted spectrum, zero for
+ * $f < 0$. An odd-length signal first loses its last sample.
+ *
+ * @param x The samples.
+ * @returns `n`, the even length used; `T` $= 2n$, the mirrored length; `fPlus`, the one-sided spectrum $\hat f$ as
+ *   $T$ interleaved complex values (re, im), fftshifted; and `freqs`, the frequency of each of its bins in cycles per
+ *   sample, $i / T - \tfrac{1}{2}$ for bin $i$.
+ */
 function prepare(x: Float64Array) {
   const v = x.length % 2 ? x.subarray(0, x.length - 1) : x
   const n = v.length
@@ -69,15 +89,32 @@ function prepare(x: Float64Array) {
 }
 
 /**
- * VMD as a traceable algorithm. The signal (trimmed to even length n and mirrored to T = 2n) is split into K modes
- * minimising Σₖ ‖∂ₜ[(δ + j/πt) ∗ uₖ] e^{−jωₖt}‖² (each mode's analytic signal, shifted to baseband, has little
- * bandwidth) subject to Σₖ uₖ = f. Each step is one ADMM sweep over the modes (Gauss–Seidel), in the Fourier domain:
+ * VMD as a traceable algorithm. The signal (trimmed to even length $n$ and mirrored to $T = 2n$) is split into $K$
+ * modes minimising $\sum_k \norm{\partial_t [(\delta(t) + \frac{j}{\pi t}) * u_k(t)] e^{-j\omega_k t}}_2^2$ (each
+ * mode's analytic signal, shifted to baseband, has little bandwidth) subject to $\sum_k u_k = f$. Each step is one
+ * ADMM sweep over the modes (Gauss–Seidel, so mode $k$ sees the new values of modes before it), in the Fourier domain:
  *
- *   ûₖ ← (f̂ − Σ_{i≠k} ûᵢ − λ̂/2) / (1 + 2α(ω − ωₖ)²)   (a Wiener filter centred on ωₖ; the reference code's α absorbs the 2)
- *   ωₖ ← ∫₀^∞ ω|ûₖ(ω)|² dω / ∫₀^∞ |ûₖ(ω)|² dω          (the centre of gravity of the mode's power)
- *   λ̂ ← λ̂ + τ(Σₖ ûₖ − f̂)
+ * - $\hat u_k \leftarrow (\hat f - \sum_{i \ne k} \hat u_i - \hat\lambda / 2) / (1 + \alpha (\omega - \omega_k)^2)$,
+ *   a Wiener filter centred on $\omega_k$;
+ * - $\omega_k \leftarrow \int_0^\infty \omega \abs{\hat u_k}^2 \, d\omega / \int_0^\infty \abs{\hat u_k}^2 \, d\omega$,
+ *   the centre of gravity of the mode's power (held at 0 for the first mode with `dc`);
+ * - $\hat\lambda \leftarrow \hat\lambda + \tau (\sum_k \hat u_k - \hat f)$.
  *
- * as the authors' reference code (ported by vmdpy), whose denominator is 1 + α(ω − ωₖ)². `init` takes no start.
+ * The paper's denominator is $1 + 2\alpha(\omega - \omega_k)^2$; the authors' reference code (ported by vmdpy), which
+ * this follows, has $1 + \alpha(\omega - \omega_k)^2$, so its $\alpha$ absorbs the 2. `init` takes no start.
+ *
+ * @param x The signal: a single-channel `Signal` or its samples, at least 4 of them.
+ * @param options The number of modes, the penalties, the initial centre frequencies and the tolerance. A `modes` that
+ *   is not a positive integer, an `alpha` that is not positive, or fewer than 4 samples throw `DomainError`.
+ * @returns The algorithm, to run with `run` or step by hand; it is done when `converged`.
+ *
+ * @example The centre frequencies move onto two tones
+ * const x = Array.from({ length: 256 }, (_, t) => Math.cos((2 * Math.PI * t) / 8) + Math.cos((2 * Math.PI * t) / 32))
+ * const alg = vmdSteps(x, { modes: 2 })
+ * print('start:', run(alg, undefined, 0).omega)
+ * print('after one sweep:', run(alg, undefined, 1).omega)
+ * const last = run(alg, undefined, 200)
+ * print('after', last.t, 'sweeps:', last.omega, 'converged:', last.converged)
  */
 export function vmdSteps(x: SignalInput, options: VmdOptions): Algorithm<undefined, VmdState> {
   const { modes: K, alpha = 2000, tau = 0, dc = false, init = 'uniform', tolerance = 1e-7 } = options
@@ -164,7 +201,20 @@ export function vmdSteps(x: SignalInput, options: VmdOptions): Algorithm<undefin
 
 /**
  * The time-domain modes of a VMD state: each mode's one-sided spectrum is completed by Hermitian symmetry, inverted,
- * and the middle n samples (the unmirrored signal) kept. Returns K arrays of length n.
+ * and the middle $n$ samples (the unmirrored signal) kept.
+ *
+ * @param s A state of `vmdSteps`; only its `spectra` are read.
+ * @returns $K$ arrays of length $n = T/2$, in the state's order of modes (not sorted by centre frequency).
+ *
+ * @example The modes of a converged state are the tones
+ * const fast = Array.from({ length: 256 }, (_, t) => Math.cos((2 * Math.PI * t) / 8))
+ * const slow = Array.from({ length: 256 }, (_, t) => Math.cos((2 * Math.PI * t) / 32))
+ * const state = run(vmdSteps(fast.map((v, t) => v + slow[t]), { modes: 2 }), undefined, 200)
+ * const [first, second] = vmdModes(state)
+ * print('centre frequencies:', state.omega)
+ * const error = (mode, tone) => Math.max(...tone.map((v, t) => Math.abs(mode[t] - v)).slice(32, 224))
+ * print('mode 1 against the slow tone, largest error away from the ends:', error(first, slow))
+ * print('mode 2 against the fast tone, largest error away from the ends:', error(second, fast))
  */
 export function vmdModes(s: VmdState): Float64Array[] {
   const [K, T] = s.spectra.shape
@@ -196,12 +246,28 @@ export function vmdModes(s: VmdState): Float64Array[] {
 }
 
 /**
- * Variational mode decomposition of a real signal into K modes, as a `Decomposition` (`method: 'vmd'`), modes sorted
- * by centre frequency (slowest first). Each component carries `meta: { centreFrequency }` in the signal's units (Hz
- * for a `Signal`, cycles per sample for bare samples); `residual` is f − Σₖ uₖ (small when τ > 0 or α is small, not
- * zero: VMD trades reconstruction for narrow bands). An odd-length signal loses its last sample, as the reference
- * code. Stops at convergence or after `maxSteps` sweeps (default 500); `meta` on the result is not set, so read
- * `vmdSteps` for the convergence trace.
+ * Variational mode decomposition of a real signal into $K$ modes, as a `Decomposition` (`method: 'vmd'`), modes sorted
+ * by centre frequency (slowest first) and named `mode 1`, `mode 2`, and so on. Each component carries
+ * `meta: { centreFrequency, iterations, converged }`: the centre frequency in the signal's units (Hz for a `Signal`,
+ * cycles per sample for bare samples), and the sweeps made and whether they converged (the same for every mode).
+ * `residual` is $f - \sum_k u_k$ (small when $\tau > 0$ or $\alpha$ is small, not zero: VMD trades reconstruction for
+ * narrow bands). An odd-length signal loses its last sample, as the reference code. Stops at convergence or after
+ * `maxSteps` $- 1$ sweeps (default 500, so 499), as the reference code; read `vmdSteps` for the convergence trace.
+ * As `vmdpy.VMD`.
+ *
+ * @param x The signal: a single-channel `Signal` or its samples, at least 4 of them.
+ * @param options The options of `vmdSteps`, and `maxSteps`, one more than the most sweeps made (default 500).
+ * @returns The modes as components, slowest first, with the residual and the (trimmed) original.
+ *
+ * @example Two tones, with their centre frequencies
+ * const x = Array.from({ length: 256 }, (_, t) => Math.cos((2 * Math.PI * t) / 8) + Math.cos((2 * Math.PI * t) / 32))
+ * const d = vmd(x, { modes: 2 })
+ * for (const c of d.components) print(c.name, c.meta)
+ *
+ * @example The dual step enforces reconstruction
+ * const x = Array.from({ length: 256 }, (_, t) => Math.cos((2 * Math.PI * t) / 8) + Math.cos((2 * Math.PI * t) / 32))
+ * print('tau = 0, largest residual:', max(abs(vmd(x, { modes: 2 }).residual)))
+ * print('tau = 0.1, largest residual:', max(abs(vmd(x, { modes: 2, tau: 0.1 }).residual)))
  */
 export function vmd(x: SignalInput, options: VmdOptions & { maxSteps?: Size }): Decomposition {
   const input = readSamples(x, 'vmd')

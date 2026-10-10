@@ -1,8 +1,13 @@
 /**
  * Wavelets: orthogonal Daubechies filters, the periodic discrete wavelet transform by Mallat's pyramid algorithm
  * (Mallat, 1989, IEEE Trans. PAMI 11(7)), the cascade algorithm for the scaling and wavelet functions (Daubechies,
- * 1992, "Ten Lectures on Wavelets", §6.5), and the Morlet continuous wavelet transform computed per scale by FFT
- * (Torrence and Compo, 1998, Bull. Amer. Meteor. Soc. 79(1)).
+ * 1992, "Ten Lectures on Wavelets", §6.5), the Morlet continuous wavelet transform computed per scale by FFT
+ * (Torrence and Compo, 1998, Bull. Amer. Meteor. Soc. 79(1)), and wavelet shrinkage (Donoho and Johnstone, 1994).
+ *
+ * The discrete transforms share pywt's filter convention: the scaling filter $h$ (`rec_lo`) and the high-pass
+ * $g[n] = (-1)^n h[L - 1 - n]$ of an $L$-tap wavelet. They wrap around the end of the signal (periodic extension), so
+ * one level halves an even length exactly and is orthogonal: energy is preserved and the inverse is the adjoint. Names
+ * outside `WaveletName` throw `DomainError`; an odd length at any level throws `ShapeError`.
  */
 
 import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -15,9 +20,10 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 export type WaveletName = 'haar' | 'db1' | 'db2' | 'db3' | 'db4' | 'db5' | 'db6' | 'db7' | 'db8' | 'db9' | 'db10'
 
 /**
- * Scaling (low-pass reconstruction) filters h with Σ h = √2 and Σ h[n] h[n − 2k] = δ[k] (pywt's `rec_lo`). dbN has N
- * vanishing moments and 2N taps (Daubechies, 1988, Comm. Pure Appl. Math. 41(7)). Computed by spectral
- * factorisation with minimum-phase roots in 60-digit arithmetic (mpmath), so each is exact to double precision.
+ * Scaling (low-pass reconstruction) filters $h$ with $\sum_n h[n] = \sqrt{2}$ and $\sum_n h[n]\, h[n - 2k] = \delta[k]$
+ * (pywt's `rec_lo`). `dbN` has $N$ vanishing moments and $2N$ taps (Daubechies, 1988, Comm. Pure Appl. Math. 41(7)).
+ * Computed by spectral factorisation with minimum-phase roots in 60-digit arithmetic (mpmath), so each is exact to
+ * double precision.
  */
 const SCALING: Record<WaveletName, readonly number[]> = {
   haar: [Math.SQRT1_2, Math.SQRT1_2],
@@ -65,27 +71,55 @@ const SCALING: Record<WaveletName, readonly number[]> = {
   ],
 }
 
-/** The four filters of an orthogonal wavelet, in pywt's convention. */
+/** The four filters of an orthogonal wavelet, in pywt's convention, each a rank-1 tensor of $L$ taps. */
 export interface WaveletFilters {
+  /** The wavelet's name, as given. */
   name: WaveletName
-  /** Decomposition low-pass (the scaling filter reversed) and high-pass. */
+  /** Decomposition low-pass: the scaling filter $h$ reversed. */
   decLo: Tensor
+  /** Decomposition high-pass: the high-pass $g$ reversed. */
   decHi: Tensor
-  /** Reconstruction low-pass h (the scaling filter) and high-pass g[n] = (−1)ⁿ h[L − 1 − n]. */
+  /** Reconstruction low-pass $h$ (the scaling filter). */
   recLo: Tensor
+  /** Reconstruction high-pass $g[n] = (-1)^n h[L - 1 - n]$. */
   recHi: Tensor
+  /** The number of vanishing moments of the wavelet: $N$ for `dbN`, 1 for `haar`. */
   vanishingMoments: Size
 }
 
+/**
+ * A copy of the scaling filter $h$ of a wavelet. Throws `DomainError` for an unknown name.
+ *
+ * @param name The wavelet, e.g. `'db2'`.
+ * @returns The $L$ taps of $h$, a fresh array the caller may modify.
+ */
 function scaling(name: WaveletName): number[] {
   const h = SCALING[name]
   if (!h) throw new DomainError('scaling', `unknown wavelet ${name}`)
   return [...h]
 }
 
+/**
+ * The quadrature-mirror high-pass $g[n] = (-1)^n h[L - 1 - n]$ of a scaling filter $h$.
+ *
+ * @param h The $L$ taps of the scaling filter; not modified.
+ * @returns The $L$ taps of $g$.
+ */
 const highpass = (h: readonly number[]) => h.map((_, n) => (n % 2 === 0 ? 1 : -1) * h[h.length - 1 - n])
 
-/** The filters of an orthogonal wavelet (pywt's `Wavelet(name).filter_bank`). */
+/**
+ * The filters of an orthogonal wavelet (pywt's `Wavelet(name).filter_bank`). Throws `DomainError` for an unknown name.
+ *
+ * @param name The wavelet: `'haar'` (the same as `'db1'`) or `'db2'` to `'db10'`.
+ * @returns The decomposition and reconstruction low- and high-pass filters, with the number of vanishing moments.
+ *
+ * @example Haar and Daubechies 2
+ * const haar = waveletFilters('haar')
+ * print('haar: recLo =', haar.recLo, ' recHi =', haar.recHi)
+ * const db2 = waveletFilters('db2')
+ * print('db2: recLo =', db2.recLo, ' decLo =', db2.decLo)
+ * print('db2: sum of recLo =', sum(db2.recLo), ' vanishing moments =', db2.vanishingMoments)
+ */
 export function waveletFilters(name: WaveletName): WaveletFilters {
   const h = scaling(name)
   const g = highpass(h)
@@ -99,6 +133,15 @@ export function waveletFilters(name: WaveletName): WaveletFilters {
   }
 }
 
+/**
+ * One level of the periodic analysis: $a[k] = \sum_m h[m]\, x[(2k + m) \bmod n]$ and
+ * $d[k] = \sum_m g[m]\, x[(2k + m) \bmod n]$. Throws `ShapeError` when $n$ is odd.
+ *
+ * @param x The $n$ samples; not modified.
+ * @param h The scaling filter (low-pass).
+ * @param g The high-pass filter, as `highpass` makes it from `h`.
+ * @returns The $n/2$ approximation coefficients `approx` ($a$) and $n/2$ detail coefficients `detail` ($d$).
+ */
 function analysis(x: Float64Array, h: number[], g: number[]) {
   const n = x.length
   if (n % 2) throw new ShapeError('dwt', 'dwt: the signal length must be even at every level')
@@ -119,6 +162,16 @@ function analysis(x: Float64Array, h: number[], g: number[]) {
   return { approx, detail }
 }
 
+/**
+ * One level of the periodic synthesis, the adjoint (and so the inverse) of `analysis`:
+ * $x[(2k + m) \bmod n] \mathrel{+}= h[m]\, a[k] + g[m]\, d[k]$ with $n$ twice the number of coefficients.
+ *
+ * @param approx The approximation coefficients $a$; not modified.
+ * @param detail The detail coefficients $d$, as many as `approx` (not checked).
+ * @param h The scaling filter (low-pass).
+ * @param g The high-pass filter, as `highpass` makes it from `h`.
+ * @returns The $n$ reconstructed samples.
+ */
 function synthesis(approx: Float64Array, detail: Float64Array, h: number[], g: number[]): Float64Array {
   const n = approx.length * 2
   const x = new Float64Array(n)
@@ -128,10 +181,27 @@ function synthesis(approx: Float64Array, detail: Float64Array, h: number[], g: n
 }
 
 /**
- * One level of the periodic orthogonal DWT: a[k] = Σ_m h[m] x[(2k + m) mod n], d[k] = Σ_m g[m] x[(2k + m) mod n].
- * An orthogonal transform: energy is preserved and `idwt` inverts it exactly. For dbN the coefficients are pywt's
- * 'periodization' coefficients of x rolled by (N + 1) mod 2 samples, rolled back by ⌊N/2⌋ coefficients (checked
- * against PyWavelets in the fixtures).
+ * One level of the periodic orthogonal DWT: $a[k] = \sum_m h[m]\, x[(2k + m) \bmod n]$,
+ * $d[k] = \sum_m g[m]\, x[(2k + m) \bmod n]$. An orthogonal transform: energy is preserved and `idwt` inverts it
+ * exactly. For `dbN` the coefficients are pywt's `'periodization'` coefficients of $x$ rolled by $(N + 1) \bmod 2$
+ * samples, rolled back by $\lfloor N/2 \rfloor$ coefficients (checked against PyWavelets in the fixtures); for Haar
+ * they are pywt's own. Throws `ShapeError` for an odd length and `DomainError` for an unknown wavelet.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples) of even length $n$. Its sample rate is not used.
+ * @param wavelet The orthogonal wavelet.
+ * @returns The $n/2$ approximation coefficients `approx` ($a$) and the $n/2$ detail coefficients `detail` ($d$).
+ *
+ * @example Haar on [1, 2, 3, 4]
+ * // Pairwise sums and differences, divided by sqrt(2), as pywt.dwt([1, 2, 3, 4], 'haar').
+ * const { approx, detail } = dwt([1, 2, 3, 4])
+ * print('approx =', approx)
+ * print('detail =', detail)
+ *
+ * @example Energy is preserved
+ * const x = [3, 1, 4, 1, 5, 9, 2, 6]
+ * const { approx, detail } = dwt(x, 'db2')
+ * print('energy of x =', sum(square(tensor(x))))
+ * print('energy of the coefficients =', add(sum(square(approx)), sum(square(detail))))
  */
 export function dwt(x: SignalInput, wavelet: WaveletName = 'haar'): { approx: Tensor; detail: Tensor } {
   const h = scaling(wavelet)
@@ -139,7 +209,20 @@ export function dwt(x: SignalInput, wavelet: WaveletName = 'haar'): { approx: Te
   return { approx: fromData(r.approx, [r.approx.length]), detail: fromData(r.detail, [r.detail.length]) }
 }
 
-/** The inverse of `dwt`: x[(2k + m) mod n] += h[m] a[k] + g[m] d[k] (the adjoint, which is the inverse). */
+/**
+ * The inverse of `dwt`: $x[(2k + m) \bmod n] \mathrel{+}= h[m]\, a[k] + g[m]\, d[k]$ (the adjoint, which is the
+ * inverse). Throws `DomainError` for an unknown wavelet.
+ *
+ * @param approx The approximation coefficients $a$, as `dwt` returns them.
+ * @param detail The detail coefficients $d$, as many as `approx` (not checked).
+ * @param wavelet The wavelet the coefficients were computed with.
+ * @returns The $n$ samples, $n$ twice the number of coefficients, as a rank-1 tensor.
+ *
+ * @example Round trip
+ * const { approx, detail } = dwt([1, 2, 3, 4], 'db2')
+ * print('approx =', approx, ' detail =', detail)
+ * print('idwt =', idwt(approx, detail, 'db2'))
+ */
 export function idwt(approx: VectorLike, detail: VectorLike, wavelet: WaveletName = 'haar'): Tensor {
   const h = scaling(wavelet)
   const x = synthesis(dense.toF64(approx, 'idwt'), dense.toF64(detail, 'idwt'), h, highpass(h))
@@ -148,15 +231,34 @@ export function idwt(approx: VectorLike, detail: VectorLike, wavelet: WaveletNam
 
 /** A multilevel decomposition: the coarsest approximation and details from finest (level 1) to coarsest. */
 export interface WaveletDecomposition {
+  /** The approximation coefficients at the coarsest level $J$: $n / 2^J$ values. */
   approx: Tensor
+  /** The detail coefficients of each level, finest first: level $j$ (entry $j - 1$) has $n / 2^j$ values. */
   details: Tensor[]
+  /** The wavelet used, which `waverec` reconstructs with. */
   wavelet: WaveletName
-  /** The sample rate and start time of the decomposed signal, so `waverec` returns a `Signal` on the same axis. */
+  /** The sample rate of the decomposed signal, so `waverec` returns a `Signal` on the same axis. */
   fs: Scalar
+  /** The start time of the decomposed signal, in seconds. */
   t0: Scalar
 }
 
-/** J levels of the periodic DWT (the signal length must be divisible by 2^J). */
+/**
+ * $J$ levels of the periodic DWT, each applied to the previous level's approximation (Mallat's pyramid). The order of
+ * `details` is the reverse of pywt's `wavedec` list, which puts the coarsest first. Throws `ShapeError` when the
+ * length is not divisible by $2^J$.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples); its length must be divisible by $2^J$.
+ * @param wavelet The orthogonal wavelet.
+ * @param levels The number of levels $J$.
+ * @returns The coarsest approximation, the details from finest to coarsest, the wavelet, and the signal's `fs` and
+ *   `t0`.
+ *
+ * @example Two Haar levels of a ramp
+ * const d = wavedec([1, 2, 3, 4, 5, 6, 7, 8], 'haar', 2)
+ * print('approx (level 2) =', d.approx)
+ * print('details (level 1, level 2) =', d.details)
+ */
 export function wavedec(x: SignalInput, wavelet: WaveletName = 'haar', levels: Size = 1): WaveletDecomposition {
   const h = scaling(wavelet)
   const g = highpass(h)
@@ -173,7 +275,19 @@ export function wavedec(x: SignalInput, wavelet: WaveletName = 'haar', levels: S
   return { approx: fromData(a, [a.length]), details, wavelet, fs: input.fs, t0: input.t0 }
 }
 
-/** Reconstruct the signal from `wavedec`. Zeroing some details first gives a denoised or smoothed signal. */
+/**
+ * Reconstruct the signal from `wavedec`, coarsest level first. Zeroing some details first gives a denoised or
+ * smoothed signal.
+ *
+ * @param d The decomposition, as `wavedec` returns it, possibly with its coefficients changed.
+ * @returns A `Signal` with the decomposition's `fs` and `t0`.
+ *
+ * @example Perfect reconstruction, and a smoothed ramp
+ * const d = wavedec([1, 2, 3, 4, 5, 6, 7, 8], 'db2', 2)
+ * print('reconstructed =', waverec(d).data)
+ * const h = wavedec([1, 2, 3, 4, 5, 6, 7, 8], 'haar', 2)
+ * print('without the details =', waverec({ ...h, details: h.details.map((c) => zeros(c.shape)) }).data)
+ */
 export function waverec(d: WaveletDecomposition): Signal {
   const h = scaling(d.wavelet)
   const g = highpass(h)
@@ -183,9 +297,25 @@ export function waverec(d: WaveletDecomposition): Signal {
 }
 
 /**
- * The scaling function φ and wavelet ψ by the cascade algorithm: iterate the two-scale equation
- * φ(t) = √2 Σ h[n] φ(2t − n) from a unit impulse. After `iterations` steps the samples approximate φ and ψ on a grid
- * of spacing 2^{−iterations} over [0, L − 1] (L taps), as pywt's `Wavelet.wavefun`.
+ * The scaling function $\phi$ and wavelet $\psi$ by the cascade algorithm: iterate the two-scale equation
+ * $\phi(t) = \sqrt{2} \sum_n h[n]\, \phi(2t - n)$ from a unit impulse, with
+ * $\psi(t) = \sqrt{2} \sum_n g[n]\, \phi(2t - n)$. After $j$ steps (`iterations`) the samples approximate $\phi$ and
+ * $\psi$ on a grid of spacing $2^{-j}$ over $[0, L - 1]$ ($L$ taps), as pywt's `Wavelet.wavefun`, with
+ * $\phi = \psi = 0$ at $t = 0$. Throws `DomainError` for an unknown wavelet.
+ *
+ * @param wavelet The orthogonal wavelet.
+ * @param iterations The number of cascade steps $j$: the grid has $(L - 1) 2^j + 1$ points.
+ * @returns The grid `t` and the samples `phi` and `psi` on it, rank-1 tensors of the same length.
+ *
+ * @example Haar's box and step
+ * const { t, phi, psi } = wavefun('haar', 2)
+ * print('t =', t)
+ * print('phi =', phi)
+ * print('psi =', psi)
+ *
+ * @example The scaling function integrates to one
+ * const { t, phi } = wavefun('db2', 6)
+ * print('grid points =', t.shape[0], ' integral of phi =', mul(sum(phi), 2 ** -6))
  */
 export function wavefun(wavelet: WaveletName = 'db2', iterations: Size = 8): { t: Tensor; phi: Tensor; psi: Tensor } {
   const h = scaling(wavelet)
@@ -216,7 +346,20 @@ export function wavefun(wavelet: WaveletName = 'db2', iterations: Size = 8): { t
   }
 }
 
-/** The Morlet wavelet ψ(t) = π^{−1/4} e^{iω₀t} e^{−t²/2} (without the small admissibility correction). */
+/**
+ * The Morlet wavelet $\psi(t) = \pi^{-1/4} e^{i\omega_0 t} e^{-t^2/2}$ (without the small admissibility correction).
+ *
+ * @param t The times at which to evaluate it, in units of the scale.
+ * @param options Options.
+ * @param options.omega0 The centre frequency $\omega_0$, in radians per unit time (default 6).
+ * @returns The complex values $\psi(t)$, a complex128 tensor with one entry per time.
+ *
+ * @example At the centre and half a unit away
+ * // psi(0) = pi^(-1/4) = 0.7511; |psi(0.5)| = 0.7511 exp(-1/8) = 0.6629.
+ * const psi = morlet([0, 0.5])
+ * print('psi =', psi)
+ * print('|psi| =', complexAbs(psi))
+ */
 export function morlet(t: VectorLike, { omega0 = 6 }: { omega0?: Scalar } = {}): Tensor {
   const ts = dense.toF64(t, 'morlet')
   const k = Math.PI ** -0.25
@@ -228,7 +371,13 @@ export function morlet(t: VectorLike, { omega0 = 6 }: { omega0?: Scalar } = {}):
   return fromData(out, [ts.length], 'complex128')
 }
 
-/** True when the values are evenly spaced on a log scale (and not also evenly spaced linearly). */
+/**
+ * True when the values are evenly spaced on a log scale (and not also evenly spaced linearly): at least three, the
+ * first positive, with a constant ratio other than 1.
+ *
+ * @param f The frequencies, in order.
+ * @returns Whether `f` is a geometric sequence.
+ */
 function geometric(f: ArrayLike<number>): boolean {
   if (f.length < 3 || !(f[0] > 0)) return false
   const r = f[1] / f[0]
@@ -238,23 +387,40 @@ function geometric(f: ArrayLike<number>): boolean {
 }
 
 /**
- * A continuous wavelet transform: a `TimeFrequency` raster (`method: 'cwt'`; `frequencyScale` 'log' for geometric
- * frequencies) whose values are
- * the complex coefficients W(a, b), complex128 [f, t], with the scalogram's magnitude |W| and the
- * scales.
+ * A continuous wavelet transform: a `TimeFrequency` raster (`method: 'cwt'`; `frequencyScale` `'log'` for geometric
+ * frequencies) whose values are the complex coefficients $W(a, b)$, complex128 $[f, t]$, with the scalogram's
+ * magnitude $\abs{W}$ and the scales.
  */
 export type Cwt = TimeFrequency & {
-  /** |W|, the scalogram's magnitude, [f, t]. */
+  /** $\abs{W}$, the scalogram's magnitude, $[f, t]$. */
   magnitude: Tensor
-  /** Scales a = ω₀ / (2π f), in seconds. */
+  /** Scales $a = \omega_0 / (2\pi f)$, in seconds. */
   scales: Tensor
 }
 
 /**
- * The Morlet continuous wavelet transform W(a, b) = (1/√a) ∫ x(t) ψ*((t − b)/a) dt at the given frequencies (fs
- * units), with a = ω₀/(2πf). Computed per scale in the frequency domain, where the analytic Morlet is a Gaussian at
- * ω₀/a; the signal is zero-padded to twice its length to avoid wrap-around. Magnitudes are divided by √fs so that
- * they do not depend on the sampling rate. fs comes from the signal (or the `fs` option); frequencies are in Hz.
+ * The Morlet continuous wavelet transform
+ * $W(a, b) = \frac{1}{\sqrt{a}} \int x(t)\, \psi^*\!\left(\frac{t - b}{a}\right) dt$ at the given frequencies,
+ * with $a = \omega_0 / (2\pi f)$. Computed per scale in the frequency domain, where the analytic Morlet is a Gaussian
+ * at $\omega_0 / a$ (negative frequencies are dropped); the signal is zero-padded to a power of two at least twice its
+ * length to avoid wrap-around. The coefficients (and so the magnitudes) are then divided by $\sqrt{f_s}$, so for a
+ * signal of fixed duration they scale as $f_s^{-1/2}$. $f_s$ comes from the signal (or the `fs` option); frequencies
+ * are in Hz.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param frequencies The analysis frequencies $f$ in Hz, each positive; one row of the result per frequency, in the
+ *   order given.
+ * @param options `fs`, the sample rate in Hz (default the signal's, or 1 for bare samples), and `omega0`, the
+ *   Morlet's centre frequency $\omega_0$ (default 6).
+ * @returns The transform: `values` (complex, $[f, t]$), `magnitude`, `scales`, and the axes `t` (the sample times) and
+ *   `f`.
+ *
+ * @example A 4 Hz sinusoid
+ * // One second at 64 Hz: halfway through, the 4 Hz row is the largest.
+ * const x = Array.from({ length: 64 }, (_, i) => Math.sin((2 * Math.PI * 4 * i) / 64))
+ * const W = cwt(x, [2, 4, 8], { fs: 64 })
+ * print('scales =', W.scales, ' frequency scale =', W.frequencyScale)
+ * print('|W| at t = 0.5 s (2, 4, 8 Hz) =', W.magnitude.data[32], W.magnitude.data[96], W.magnitude.data[160])
  */
 export function cwt(x: SignalInput, frequencies: VectorLike, options: { fs?: Scalar; omega0?: Scalar } = {}): Cwt {
   const { omega0 = 6 } = options
@@ -312,8 +478,17 @@ export function cwt(x: SignalInput, frequencies: VectorLike, options: { fs?: Sca
 }
 
 /**
- * Soft or hard thresholding of coefficients, as `pywt.threshold`: hard keeps |c| ≥ λ and zeroes the rest; soft also
- * shrinks the survivors towards zero by λ, sign(c) max(|c| − λ, 0).
+ * Soft or hard thresholding of coefficients, as `pywt.threshold`: hard keeps $\abs{c} \ge \lambda$ and zeroes the
+ * rest; soft also shrinks the survivors towards zero by $\lambda$, $\sgn(c) \max(\abs{c} - \lambda, 0)$.
+ *
+ * @param values The coefficients $c$; not modified.
+ * @param lambda The threshold $\lambda \ge 0$.
+ * @param mode `'soft'` (shrink) or `'hard'` (keep or zero).
+ * @returns The thresholded coefficients, one per value.
+ *
+ * @example Soft against hard
+ * print('soft:', waveletThreshold([-3, -1, 0.5, 2], 1))
+ * print('hard:', waveletThreshold([-3, -1, 0.5, 2], 1, 'hard'))
  */
 export function waveletThreshold(values: VectorLike, lambda: Scalar, mode: 'soft' | 'hard' = 'soft'): Tensor {
   const v = dense.toF64(values, 'waveletThreshold')
@@ -325,22 +500,48 @@ export function waveletThreshold(values: VectorLike, lambda: Scalar, mode: 'soft
 
 /** Options of `waveletDenoise`. */
 export type WaveletDenoiseOptions = {
+  /** The orthogonal wavelet (default `'db4'`). */
   wavelet?: WaveletName
-  /** Decomposition levels (default as many as divide the length by 2, at most 6). */
+  /**
+   * Decomposition levels. Default: the most, up to 6, for which the length divides by $2^J$ and the coarsest
+   * approximation keeps at least 8 coefficients.
+   */
   levels?: Size
+  /** `'soft'` (default) or `'hard'` thresholding, as `waveletThreshold`. */
   mode?: 'soft' | 'hard'
-  /** A fixed threshold, or `universal` (default): λ = σ̂ √(2 ln n), σ̂ = median |d₁| / 0.6745. */
+  /**
+   * A fixed threshold, or `'universal'` (default): $\lambda = \hat\sigma \sqrt{2 \ln n}$, with
+   * $\hat\sigma = \operatorname{median} \abs{d_1} / 0.6745$ from the finest details $d_1$ and $n$ the signal length.
+   */
   threshold?: Scalar | 'universal'
 }
 
-/** The denoised signal with the threshold and the noise estimate used. */
+/**
+ * The denoised signal with the threshold and the noise estimate used: `signal` (on the input's axis), `threshold` (the
+ * $\lambda$ applied), `sigma` (the noise estimate $\hat\sigma$, computed even when the threshold is fixed) and
+ * `levels` (the number of levels decomposed).
+ */
 export type WaveletDenoised = { signal: Signal; threshold: Scalar; sigma: Scalar; levels: Size }
 
 /**
  * Wavelet shrinkage (Donoho and Johnstone, 1994, Biometrika 81(3)): decompose with the periodic DWT, threshold every
- * detail level (the approximation is kept), reconstruct. The universal threshold σ̂√(2 ln n), with σ̂ from the median
- * absolute finest detail, removes white noise with high probability while an orthogonal transform concentrates a
- * smooth or piecewise-smooth signal into a few large coefficients.
+ * detail level (the approximation is kept), reconstruct. The universal threshold $\hat\sigma \sqrt{2 \ln n}$, with
+ * $\hat\sigma$ from the median absolute finest detail, removes white noise with high probability while an orthogonal
+ * transform concentrates a smooth or piecewise-smooth signal into a few large coefficients. Throws `ShapeError` when
+ * no level can be taken (an odd length, or `levels` 0) or the length is not divisible by $2^J$.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples); the result keeps its `fs` and `t0`.
+ * @param options The wavelet, levels, thresholding mode and threshold; see `WaveletDenoiseOptions`.
+ * @returns The denoised signal, with the threshold, noise estimate and number of levels used.
+ *
+ * @example A noisy step
+ * const n = 128
+ * const clean = Array.from({ length: n }, (_, i) => (i < n / 2 ? 1 : -1))
+ * const noisy = add(tensor(clean), normals(stream(1), n, 0, 0.2))
+ * const r = waveletDenoise(noisy, { wavelet: 'haar' })
+ * print('levels =', r.levels, ' sigma =', r.sigma, ' threshold =', r.threshold)
+ * const rms = (x) => Math.sqrt(mean(square(sub(x, tensor(clean)))))
+ * print('rms error: noisy =', rms(noisy), ' denoised =', rms(r.signal.data))
  */
 export function waveletDenoise(x: SignalInput, options: WaveletDenoiseOptions = {}): WaveletDenoised {
   const { wavelet = 'db4', mode = 'soft' } = options

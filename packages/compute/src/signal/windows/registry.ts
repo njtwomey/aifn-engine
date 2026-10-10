@@ -11,19 +11,43 @@ import type { Size } from 'aifn-compute/foundation/contracts'
 import type { Tensor } from 'aifn-compute/foundation/tensor'
 import { getWindow, type WindowName } from './windows'
 
-/** A window of length n; parameterised windows take their parameter in the options. */
+/**
+ * A window of length $n$ (in samples), as a tensor. The options hold `periodic` (`true` for the periodic window of
+ * spectral analysis, otherwise the symmetric one) and a parameterised window's parameter by name (`beta`, `std` or
+ * `alpha`, defaulting to the registry's default when left out).
+ */
 export type WindowFunction = (n: Size, options?: { periodic?: boolean } & Record<string, number | boolean>) => Tensor
 
+/** Registers a window function under `signal/windows`. */
 const define = definer<WindowInfo>('window', 'signal/windows')
 const cite = ['harris1978']
 const notes = ['spectral-leakage-and-windows']
 const none = space({})
 
+/**
+ * Registers a window that takes no parameter, as `getWindow(key, n)`.
+ *
+ * @param key The name `getWindow` takes, which is also the registry key.
+ * @param name The display name.
+ * @param mainLobeWidth The main-lobe width between the first nulls, in DFT bins.
+ * @param sideLobeDb The peak side-lobe level, in dB (negative).
+ * @returns The registry entry.
+ */
 const plain = (key: WindowName, name: string, mainLobeWidth: number, sideLobeDb: number) =>
   define({ key, name, params: none, mainLobeWidth, sideLobeDb, cite, notes }, ((n, o = {}) =>
     getWindow(key, n, { periodic: o.periodic === true })) as WindowFunction)
 
-/** Every window, keyed by the name `getWindow` takes. */
+/**
+ * Every window, keyed by the name `getWindow` takes (`boxcar` is not listed apart from `rectangular`). Each entry is
+ * the window as a function of its length, with its `info`: parameters, and the main-lobe width (DFT bins) and peak
+ * side-lobe level (dB) at the default parameters, where known (the Gaussian has none recorded).
+ *
+ * @example A window and its figures of merit
+ * const hann = windowRegistry.hann
+ * print('hann(5) =', hann(5))
+ * print('main lobe (bins) =', hann.info.mainLobeWidth)
+ * print('side lobe (dB) =', hann.info.sideLobeDb)
+ */
 export const windowRegistry: Readonly<Record<string, Entry<WindowFunction, WindowInfo>>> = entries<WindowInfo>(
   'window',
   {

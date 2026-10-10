@@ -19,46 +19,70 @@ export type LombScargleOptions = {
    * `classic`: Lomb–Scargle on the mean-subtracted series, a sinusoid fitted at each frequency (scipy's
    * `precenter=True`). `floating-mean` (default): a sinusoid plus a constant fitted at each frequency (Cumming, Marcy
    * and Butler, 1999; scipy's `floating_mean=True`), which stays right when the sampling correlates with the phase.
-   * `generalised`: the floating-mean fit weighted by 1/dy² (Zechmeister and Kürster, 2009).
+   * `generalised`: the floating-mean fit weighted by $1/\text{dy}^2$ (Zechmeister and Kürster, 2009).
    */
   method?: 'classic' | 'floating-mean' | 'generalised'
-  /** Per-sample uncertainties (the `generalised` weights 1/dy²). */
+  /** Per-sample uncertainties, all positive (the `generalised` weights $1/\text{dy}^2$); ignored by other methods. */
   dy?: VectorLike
   /**
-   * `standard` (default): the fraction of the variance the sinusoid explains, (χ²_ref − χ²(f)) / χ²_ref ∈ [0, 1].
-   * `psd`: ½(χ²_ref − χ²(f)) with χ² weighted by 1/dy² (dy = 1 by default), which for even sampling is the classical
-   * periodogram (scipy's unnormalised output).
+   * `standard` (default): the fraction of the variance the sinusoid explains,
+   * $(\chi^2_\text{ref} - \chi^2(f)) / \chi^2_\text{ref} \in [0, 1]$. `psd`: $\tfrac12 (\chi^2_\text{ref} - \chi^2(f))$
+   * with $\chi^2$ weighted by $1/\text{dy}^2$ (dy = 1 unless `generalised` with `dy`), which for even sampling is the
+   * classical periodogram (scipy's unnormalised output).
    */
   normalization?: 'standard' | 'psd'
 }
 
 /** A Lomb–Scargle periodogram: a `Spectrum` of `power` over cycles per unit time, with what its FAP needs. */
 export type LombScargle = Spectrum & {
+  /** The fit used, as the `method` option. */
   method: 'classic' | 'floating-mean' | 'generalised'
+  /** The normalisation of `values`, as the `normalization` option. */
   normalization: 'standard' | 'psd'
   /** Number of samples. */
   n: Size
   /** The weighted variance of the times (for the effective baseline of Baluev's bound). */
   timeVariance: Scalar
-  /** The weighted variance of the values, χ²_ref / Σ w. */
+  /** The weighted variance of the values, $\chi^2_\text{ref} / \sum w$. */
   valueVariance: Scalar
-  /** Σ 1/dy² (n without dy). */
+  /** $\sum 1/\text{dy}^2$ ($n$ without `dy`). */
   weightSum: Scalar
 }
 
+/**
+ * The values of a vector as a fresh float64 array.
+ *
+ * @param v A rank-1 tensor or an array.
+ * @param where The caller's name, for error messages.
+ * @returns A copy of the values.
+ */
 const toF64 = (v: VectorLike | Tensor, where: string) => readSamples(v as VectorLike, where).values
 
 /**
- * The Lomb–Scargle periodogram of samples y at times t, at frequencies f (cycles per unit of t): for each f, the
- * least-squares fit of a sinusoid (plus a constant, unless `classic`) and the reduction in χ² it gives. With the
- * normalised weights wᵢ = (1/dyᵢ²)/Σ(1/dy²) and c = cos 2πft, s = sin 2πft, the weighted centred sums YY, YC, YS, CC,
- * SS and CS (each Σwᵢ uᵢvᵢ minus the product of the weighted means; `classic` centres only y) give
+ * The Lomb–Scargle periodogram of samples $y$ at times $t$, at frequencies $f$ (cycles per unit of $t$): for each $f$,
+ * the least-squares fit of a sinusoid (plus a constant, unless `classic`) and the reduction in $\chi^2$ it gives. With
+ * the normalised weights $w_i = (1/\text{dy}_i^2) / \sum (1/\text{dy}^2)$ and $c = \cos 2\pi f t$,
+ * $s = \sin 2\pi f t$, the weighted centred sums $YY$, $YC$, $YS$, $CC$, $SS$ and $CS$ (each $\sum w_i u_i v_i$ minus
+ * the product of the weighted means; `classic` centres only $y$) give
+ * $p(f) = (SS \cdot YC^2 + CC \cdot YS^2 - 2\, CS \cdot YC \cdot YS) / (YY \cdot (CC \cdot SS - CS^2))$, which is
+ * Scargle's $\tau$-shifted form without the shift (Zechmeister and Kürster, 2009, eq. 20). Unlike a DFT it needs no
+ * grid, so gaps and jitter do not leak power through interpolation; the sampling still aliases (see
+ * `spectralWindow`). A degenerate fit (a constant $y$, or a frequency the times cannot tell from 0) gives 0. Throws
+ * `ShapeError` when `t`, `y` (and `dy`) differ in length and `DomainError` for fewer than three samples or a `dy`
+ * that is not positive.
  *
- *   p(f) = (SS·YC² + CC·YS² − 2·CS·YC·YS) / (YY·(CC·SS − CS²)),
+ * @param t The sample times, in any order.
+ * @param y The values, one per time.
+ * @param frequencies The frequencies to evaluate, in cycles per unit of $t$ (e.g. from `lombScargleFrequencies`).
+ * @param options The fit, uncertainties and normalisation; see `LombScargleOptions`.
+ * @returns The periodogram as a `Spectrum` of `power`, with what `falseAlarmProbability` needs.
  *
- * which is Scargle's τ-shifted form without the shift (Zechmeister and Kürster, 2009, eq. 20). Unlike a DFT it needs
- * no grid, so gaps and jitter do not leak power through interpolation; the sampling still aliases (see
- * `spectralWindow`).
+ * @example A sinusoid sampled at random times
+ * // 60 random times in [0, 20]: the peak sits at the true 0.7 cycles per unit, and explains almost all the variance.
+ * const t = Array.from(uniform(stream(3), 0, 20, { shape: [60] }).data)
+ * const y = t.map((ti) => Math.sin(2 * Math.PI * 0.7 * ti))
+ * const ls = lombScargle(t, y, lombScargleFrequencies(t))
+ * print('peak at', ls.f.data[argmax(ls.values)], ' power', max(ls.values))
  */
 export function lombScargle(
   t: VectorLike | Tensor,
@@ -149,10 +173,25 @@ export function lombScargle(
 }
 
 /**
- * A frequency grid for `lombScargle`, as astropy's `autofrequency`: spacing 1/(samplesPerPeak · T) for the baseline
- * T = max t − min t (a peak's width is about 1/T), from `minimum` (default half a spacing) to `maximum` (default
- * nyquistFactor × the "average Nyquist frequency" n/(2T)). Uneven sampling has no hard Nyquist limit, so the top is
- * a choice.
+ * A frequency grid for `lombScargle`, as astropy's `autofrequency`: spacing $1/(\text{samplesPerPeak} \cdot T)$ for
+ * the baseline $T = \max t - \min t$ (a peak's width is about $1/T$), from `minimum` (default half a spacing) to
+ * `maximum` (default `nyquistFactor` times the "average Nyquist frequency" $n/(2T)$). Uneven sampling has no hard
+ * Nyquist limit, so the top is a choice. Throws `DomainError` when the times span no interval.
+ *
+ * @param t The sample times.
+ * @param options Options.
+ * @param options.samplesPerPeak Grid points across a peak's width $1/T$ (default 5).
+ * @param options.nyquistFactor The top of the grid as a multiple of $n/(2T)$ (default 5).
+ * @param options.minimum The first frequency (default half a spacing).
+ * @param options.maximum The top frequency (default from `nyquistFactor`); the grid stops at the nearest whole number
+ *   of spacings.
+ * @returns The evenly spaced frequencies, at least one.
+ *
+ * @example Ten unit-spaced times
+ * // T = 9: spacing 1/45, from 1/90 up to 5 * 10 / 18 = 2.78.
+ * const f = lombScargleFrequencies(Array.from({ length: 10 }, (_, i) => i))
+ * print('count =', f.shape[0], ' first =', f.data[0], ' spacing =', f.data[1] - f.data[0])
+ * print('last =', f.data[f.shape[0] - 1])
  */
 export function lombScargleFrequencies(
   t: VectorLike | Tensor,
@@ -182,14 +221,30 @@ export function lombScargleFrequencies(
 /**
  * The probability that noise alone gives a peak at least as high as `power` somewhere below `maximum` frequency, by
  * Baluev's (2008) upper bound for the `standard` floating-mean periodogram (as astropy's `fap_baluev`):
+ * $\text{FAP} \approx 1 - (1 - \text{FAP}_1(z))\, e^{-\tau(z)}$ with $\text{FAP}_1(z) = (1 - z)^{(n-3)/2}$,
+ * $\tau(z) = \gamma(n - 1)\, W (1 - z)^{(n-4)/2} \sqrt{(n - 1) z / 2}$, $W = f_{\max} \sqrt{4\pi \var t}$ and
+ * $\gamma(N) = \sqrt{2/N}\, \Gamma(N/2) / \Gamma((N-1)/2)$, where $\text{FAP}_1$ is the single-frequency tail (a Beta
+ * law of the explained variance) and $\tau$ counts the effective number of independent upcrossings. astropy's
+ * `false_alarm_probability` takes $f_{\max}$ as the top of its `autofrequency` grid (`lombScargleFrequencies`), not
+ * the requested maximum. For the `psd` normalisation (in units of the noise variance) $\text{FAP}_1 = e^{-z}$ and
+ * $\tau = W e^{-z} \sqrt{z}$, which assumes `dy` are the noise's standard deviations. Tight for small FAPs;
+ * conservative otherwise.
  *
- *   FAP ≈ 1 − (1 − FAP₁(z)) e^{−τ(z)},  FAP₁(z) = (1 − z)^{(n−3)/2},
- *   τ(z) = γ(n − 1) · W · (1 − z)^{(n−4)/2} · √((n − 1) z / 2),  W = f_max √(4π Var t),  γ(N) = √(2/N) Γ(N/2)/Γ((N−1)/2),
+ * @param power The peak height $z$, in the periodogram's normalisation (clamped to $[0, 1]$ for `standard`).
+ * @param ls The periodogram the peak came from, for $n$, $\var t$ and its normalisation.
+ * @param options Options.
+ * @param options.maximum The top frequency $f_{\max}$ searched (default the largest of `ls.f`).
+ * @returns The false-alarm probability, in $[0, 1]$.
  *
- * where FAP₁ is the single-frequency tail (a Beta law of the explained variance) and τ counts the effective number of
- * independent upcrossings. astropy's `false_alarm_probability` takes f_max as the top of its `autofrequency` grid
- * (`lombScargleFrequencies`), not the requested maximum. For the `psd` normalisation (in units of the noise variance) FAP₁ = e^{−z} and
- * τ = W e^{−z} √z, which assumes dy are the noise's standard deviations. Tight for small FAPs; conservative otherwise.
+ * @example Signal against noise
+ * // The same random times: a sinusoid buried in unit noise, and the noise alone.
+ * const t = Array.from(uniform(stream(3), 0, 20, { shape: [60] }).data)
+ * const f = lombScargleFrequencies(t)
+ * const tone = add(tensor(t.map((ti) => Math.sin(2 * Math.PI * 0.7 * ti))), normals(stream(4), 60))
+ * for (const [name, y] of [['tone + noise', tone], ['noise', normals(stream(5), 60)]]) {
+ *   const ls = lombScargle(t, y, f)
+ *   print(`${name}: highest peak`, max(ls.values), ' FAP', falseAlarmProbability(max(ls.values), ls))
+ * }
  */
 export function falseAlarmProbability(power: Scalar, ls: LombScargle, { maximum }: { maximum?: Scalar } = {}): number {
   const fmax = maximum ?? Math.max(...(ls.f.data as Float64Array))
@@ -216,7 +271,18 @@ export function falseAlarmProbability(power: Scalar, ls: LombScargle, { maximum 
 
 /**
  * The power whose false-alarm probability (`falseAlarmProbability`) is `probability`: the detection threshold a
- * peak must exceed to be called significant at that level. Found by bisection on [0, 1] (`standard`).
+ * peak must exceed to be called significant at that level. Found by bisection on $[0, 1]$. Throws `DomainError`
+ * unless the periodogram has the `standard` normalisation.
+ *
+ * @param probability The false-alarm probability wanted, e.g. 0.01.
+ * @param ls The periodogram, for $n$, $\var t$ and the frequency grid.
+ * @param options `maximum`, the top frequency searched (default the largest of `ls.f`), as `falseAlarmProbability`.
+ * @returns The power $z$ with that false-alarm probability.
+ *
+ * @example Thresholds at 1% and 10%
+ * const t = Array.from(uniform(stream(3), 0, 20, { shape: [60] }).data)
+ * const ls = lombScargle(t, normals(stream(5), 60), lombScargleFrequencies(t))
+ * print('1%:', falseAlarmLevel(0.01, ls), ' 10%:', falseAlarmLevel(0.1, ls), ' highest noise peak:', max(ls.values))
  */
 export function falseAlarmLevel(probability: Scalar, ls: LombScargle, options: { maximum?: Scalar } = {}): number {
   if (ls.normalization !== 'standard')
@@ -232,10 +298,22 @@ export function falseAlarmLevel(probability: Scalar, ls: LombScargle, options: {
 }
 
 /**
- * The spectral window of a sampling pattern: |Σⱼ e^{−2πi f tⱼ}|² / n², the periodogram of a constant observed at the
- * times t (Scargle, 1982; VanderPlas, 2018, §4). It is 1 at f = 0 and its other peaks are the aliases the sampling
- * creates: a true frequency f₀ shows up again at f₀ ± f_alias for each window peak f_alias (1 cycle per day for nightly
- * observations, 1 per year for seasonal ones). Even sampling with spacing Δ has peaks at multiples of 1/Δ.
+ * The spectral window of a sampling pattern: $\abs{\sum_j e^{-2\pi i f t_j}}^2 / n^2$, the periodogram of a constant
+ * observed at the times $t$ (Scargle, 1982; VanderPlas, 2018, §4). It is 1 at $f = 0$ and its other peaks are the
+ * aliases the sampling creates: a true frequency $f_0$ shows up again at $f_0 \pm f_\text{alias}$ for each window peak
+ * $f_\text{alias}$ (1 cycle per day for nightly observations, 1 per year for seasonal ones). Even sampling with
+ * spacing $\Delta$ has peaks at multiples of $1/\Delta$.
+ *
+ * @param t The $n$ sample times.
+ * @param frequencies The frequencies to evaluate, in cycles per unit of $t$.
+ * @returns The window as a `Spectrum` of `power`, in $[0, 1]$.
+ *
+ * @example Even and jittered daily sampling
+ * // 30 daily samples alias 1 cycle per day onto 0; jittering the times weakens the alias.
+ * const daily = Array.from({ length: 30 }, (_, i) => i)
+ * const jittered = daily.map((ti) => ti + 0.1 * Math.sin(7 * ti))
+ * print('daily at 0, 0.5, 1:', spectralWindow(daily, [0, 0.5, 1]).values)
+ * print('jittered at 0, 0.5, 1:', spectralWindow(jittered, [0, 0.5, 1]).values)
  */
 export function spectralWindow(t: VectorLike | Tensor, frequencies: VectorLike | Tensor): Spectrum {
   const ts = toF64(t, 'spectralWindow')
@@ -266,7 +344,22 @@ export function spectralWindow(t: VectorLike | Tensor, frequencies: VectorLike |
  * can be applied: `linear` interpolates between neighbouring samples (a low-pass that also bridges every gap with a
  * straight line), `zero-fill` puts each mean-subtracted sample in its nearest grid cell (averaging cells that receive
  * several) and leaves the others at zero, whose periodogram is the uneven data's spectrum convolved with the spectral
- * window. Returns a `Signal` with fs = 1/dt and t0 the first time.
+ * window. Returns a `Signal` with $f_s = 1/\text{dt}$ and $t_0$ the first time. Throws `ShapeError` when `t` and `y`
+ * differ in length and `DomainError` for a `dt` that is not positive.
+ *
+ * @param t The sample times, in any order (sorted here; of repeated times `linear` keeps the first).
+ * @param y The values, one per time.
+ * @param options Options.
+ * @param options.dt The grid spacing, in the units of `t`; the grid has
+ *   $\lfloor (t_{\max} - t_{\min}) / \text{dt} \rfloor + 1$ points.
+ * @param options.method `'linear'` (default) or `'zero-fill'`.
+ * @returns The gridded `Signal`.
+ *
+ * @example Interpolated and zero-filled
+ * const t = [0, 0.9, 2.2, 3, 5]
+ * const y = [0, 1, 2, 3, 5]
+ * print('linear:', gridSamples(t, y, { dt: 1 }).data)
+ * print('zero-fill (mean 2.2 removed):', gridSamples(t, y, { dt: 1, method: 'zero-fill' }).data)
  */
 export function gridSamples(
   t: VectorLike | Tensor,

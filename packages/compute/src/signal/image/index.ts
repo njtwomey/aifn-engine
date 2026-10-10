@@ -1,16 +1,23 @@
 /**
- * `aifn-compute/signal/image`: classical image processing on greyscale images ([height, width] tensors, row 0 at the top), on
- * the 2-D filtering of `aifn-compute/foundation/convolution`.
+ * `aifn-compute/signal/image`: classical image processing on greyscale images, as scipy.ndimage and scikit-image.
  *
  * - Linear filters: `gaussianKernel`, `gaussianBlur`, `gradients` (Sobel, Scharr, Prewitt), `sobel`,
- *   `gaussianLaplace` (the Laplacian of Gaussian, as scipy), `structureTensor`.
- * - Edges: `canny` (every stage: smoothed, gradient, suppressed, strong, weak, edges).
- * - Corners: `harrisResponse`, `shiTomasiResponse`, `imagePeaks` (non-maximum suppression), `detectCorners`.
- * - Blobs: `blobsLog` (scale-normalised LoG), `blobsDog` (difference of Gaussians).
- * - Hough: `houghLines` + `houghLinePeaks`, `houghCircles` + `houghCirclePeaks`.
- * - Morphology: `erode`, `dilate`, `opening`, `closing`, `morphologicalGradient`, `topHat`; `squareElement`,
- *   `discElement`.
- * - Pyramids: `pyramidReduce`, `pyramidExpand`, `gaussianPyramid`, `laplacianPyramid`, `reconstructLaplacian`.
+ *   `gaussianLaplace` (the Laplacian of Gaussian, as scipy), and `structureTensor`, the second-moment matrix the
+ *   corner detectors read.
+ * - Edges: `canny`, which returns every stage (smoothed, gradient, suppressed, strong, weak, edges).
+ * - Corners: `harrisResponse` and `shiTomasiResponse` from the structure tensor, `imagePeaks` (non-maximum suppression)
+ *   and `detectCorners`, the two together.
+ * - Blobs: `blobsLog` (scale-normalised LoG, finer scales) and `blobsDog` (difference of Gaussians, faster).
+ * - Hough: `houghLines` then `houghLinePeaks`, `houghCircles` then `houghCirclePeaks`.
+ * - Morphology with a flat structuring element (`squareElement`, `discElement`): `erode`, `dilate`, `opening`,
+ *   `closing`, `morphologicalGradient`, `topHat`.
+ * - Pyramids: `pyramidReduce` and `pyramidExpand`, `gaussianPyramid`, `laplacianPyramid` and its exact inverse
+ *   `reconstructLaplacian`.
+ * - `imageFunctions`: the module's functions with the notes and citations that define them.
+ *
+ * An image is an $h \times w$ tensor or an array of rows, row 0 at the top; positions are (row, column), and $x$
+ * means the column. Filters correlate on the 2-D filtering of `aifn-compute/foundation/convolution` and read beyond the
+ * edge with scipy.ndimage's border modes. Detections (peaks, blobs, lines, circles) are listed strongest first.
  */
 
 export {

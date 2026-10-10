@@ -1,7 +1,8 @@
 /**
  * The registry of filter design methods (design S §2.13): each design function with its family (FIR or IIR), the band
  * types it designs, the specification fields it honours and its parameters. The FIR and IIR design notes and the
- * lab's filter picker enumerate this table.
+ * lab's filter picker enumerate this table. The other functions of the module are registered with the notes they
+ * serve, in `filtersFunctions`.
  */
 
 import {
@@ -16,6 +17,7 @@ import * as filters from './filters'
 import * as remez from './remez'
 import * as smoothing from './smoothing'
 
+/** Registers a filter design method under `signal/filters`. */
 const define = definer<FilterDesignInfo>('filter-design', 'signal/filters')
 const bands = ['lowpass', 'highpass', 'bandpass', 'bandstop'] as const
 const order = int(1, 12, { default: 4, label: 'n', doc: 'filter order' })
@@ -150,12 +152,20 @@ define(
   remez.equiripple,
 )
 
-/** Every filter design method, keyed by function name. */
+/**
+ * Every filter design method, keyed by function name: the IIR families (`butter`, `cheby1`, `cheby2`, `ellip`,
+ * `bessel`) and the FIR methods (`firwin`, `equiripple`). Each entry is the design function with its `info`: the
+ * family, the band types, the specification fields it honours and its parameters.
+ *
+ * @example The design methods and their families
+ * for (const [key, entry] of Object.entries(filterDesignRegistry)) print(key, entry.info.family, entry.info.honours)
+ */
 export const filterDesignRegistry: Readonly<Record<string, Entry<(...args: never[]) => unknown, FilterDesignInfo>>> =
   entries<FilterDesignInfo>('filter-design', filters, remez) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FilterDesignInfo>>
   >
 
+/** Registers a function of `signal/filters` that is not a design method. */
 const fn = definer<FunctionInfo>('function', 'signal/filters')
 const IIR = ['infinite-impulse-response-filters', 'difference-equations']
 
@@ -332,7 +342,13 @@ fn(
   smoothing.matchedFilter,
 )
 
-/** The functions of the module, keyed by name. */
+/**
+ * The functions of the module, keyed by name, each with its registry `info` (name, role, notes, citations); the design
+ * methods are in `filterDesignRegistry`.
+ *
+ * @example The registered functions
+ * print('keys =', Object.keys(filtersFunctions))
+ */
 export const filtersFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
   entries<FunctionInfo>('function', filters, smoothing, remez) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>

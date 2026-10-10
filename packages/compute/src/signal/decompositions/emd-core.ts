@@ -1,19 +1,33 @@
 /**
- * Empirical mode decomposition, the array-level compute (private to the module; the public API is in emd.ts). Ported from
- * the site's `time-frequency/_shared/emd.ts`, which follows the reference algorithm of Rilling, Flandrin and Gonçalvès
- * (2003, "On empirical mode decomposition and its algorithms", IEEE-EURASIP NSIP) as implemented by PyEMD: extrema
- * mirrored twice at each end, not-a-knot cubic-spline envelopes (natural for three knots), and PyEMD's default
- * stopping rule. Checked against PyEMD when it was written.
+ * Empirical mode decomposition on plain arrays: the compute behind `emd.ts`, which holds the public API (this file is
+ * private to the module). Ported from the site's `time-frequency/_shared/emd.ts`, which follows the reference algorithm
+ * of Rilling, Flandrin and Gonçalvès (2003, "On empirical mode decomposition and its algorithms", IEEE-EURASIP NSIP) as
+ * implemented by PyEMD: extrema mirrored twice at each end, not-a-knot cubic-spline envelopes (natural for three
+ * knots), and PyEMD's default stopping rule. Checked against PyEMD when it was written.
+ *
+ * One sifting step replaces the candidate $h$ by $h - (e_+ + e_-) / 2$, where the envelopes $e_+$ and $e_-$ are cubic
+ * splines through its maxima and minima; sifting repeats the step until a `StopRule` holds, and the decomposition
+ * $x = \sum_k c_k + r$ sifts each intrinsic mode function $c_k$ out of the residue in turn, fastest first. Signals are
+ * plain arrays of samples indexed from 0; nothing here throws.
  */
+
+/** The extrema of a signal and its number of zero crossings, as `findExtrema` returns them. */
 export type Extrema = {
-  /** Indices of local maxima and minima. */
+  /** Indices of local maxima, ascending. */
   maxima: number[]
+  /** Indices of local minima, ascending. */
   minima: number[]
   /** Number of zero crossings. */
   zeroCrossings: number
 }
 
-/** Local extrema (a point above or below both neighbours; flat plateaus count once, at their middle). */
+/**
+ * Local extrema (a point above or below both neighbours; flat plateaus count once, at their middle, rounded up) and
+ * the number of zero crossings. The first and last samples are never extrema, nor is a plateau that runs to the end.
+ *
+ * @param x The samples.
+ * @returns The indices of the maxima and minima, ascending, and the zero-crossing count of `countZeroCrossings`.
+ */
 export function findExtrema(x: ArrayLike<number>): Extrema {
   const n = x.length
   const maxima: number[] = []
@@ -38,7 +52,12 @@ export function findExtrema(x: ArrayLike<number>): Extrema {
   return { maxima, minima, zeroCrossings: countZeroCrossings(x) }
 }
 
-/** Sign changes between neighbours, plus runs of exact zeros counted once each. */
+/**
+ * The number of zero crossings: sign changes between neighbours, plus runs of exact zeros counted once each.
+ *
+ * @param x The samples.
+ * @returns The count.
+ */
 export function countZeroCrossings(x: ArrayLike<number>): number {
   let count = 0
   for (let i = 0; i + 1 < x.length; i++) if (x[i] * x[i + 1] < 0) count++
@@ -50,12 +69,21 @@ export function countZeroCrossings(x: ArrayLike<number>): number {
   return count
 }
 
+/** Spline knots: positions `t` (strictly increasing sample indices, possibly outside the signal) and values `y`. */
 type Knots = { t: number[]; y: number[] }
 
 /**
  * Mirror up to `nbsym` extrema about each end so that the envelopes are interpolated, not extrapolated, over the
  * whole signal. The mirror is the first (last) extremum when the signal's end lies inside the envelopes, and the end
- * sample itself otherwise, which then also becomes a knot. A port of Rilling's `boundary_conditions`.
+ * sample itself otherwise, which then also becomes a knot. A mirrored knot that would land inside the signal falls
+ * back to mirroring about the end sample. A port of Rilling's `boundary_conditions`.
+ *
+ * @param x The samples.
+ * @param maxima The indices of the local maxima of `x`, ascending; at least one.
+ * @param minima The indices of the local minima of `x`, ascending; at least one.
+ * @param nbsym How many extrema of each kind are mirrored at each end.
+ * @returns The knots of the upper envelope (the maxima with their mirror images) and of the lower one (the minima
+ *   with theirs), with repeated positions dropped.
  */
 export function mirrorKnots(x: ArrayLike<number>, maxima: number[], minima: number[], nbsym = 2) {
   const n = x.length
@@ -130,9 +158,16 @@ export function mirrorKnots(x: ArrayLike<number>, maxima: number[], minima: numb
 }
 
 /**
- * Cubic spline through (t, y), evaluated at the integers 0..n−1. Four or more knots use not-a-knot end conditions
- * (SciPy's default), three use natural ones, two a straight line. Outside the knots the end pieces are extrapolated.
- * Second derivatives M solve a tridiagonal system after the not-a-knot rows are folded into their neighbours.
+ * Cubic spline through the knots $(t_i, y_i)$, evaluated at the integers $0, \dots, n - 1$. Four or more knots use
+ * not-a-knot end conditions (SciPy's default), three use natural ones, two a straight line, and one (or none) a
+ * constant ($y_0$, or 0). Outside the knots the end pieces are extrapolated. The second derivatives $M_i$ solve the
+ * tridiagonal system $h_{i-1} M_{i-1} + 2(h_{i-1} + h_i) M_i + h_i M_{i+1} = 6(s_i - s_{i-1})$ ($h_i$ the knot
+ * spacings, $s_i$ the slopes), by the Thomas algorithm after the not-a-knot rows are folded into their neighbours.
+ *
+ * @param t The knot positions $t_i$, strictly increasing.
+ * @param y The knot values $y_i$, one per position.
+ * @param n The number of integer points to evaluate at.
+ * @returns The spline at $0, \dots, n - 1$.
  */
 export function cubicSpline(t: number[], y: number[], n: number): Float64Array {
   const k = t.length
@@ -198,18 +233,31 @@ export function cubicSpline(t: number[], y: number[], n: number): Float64Array {
 export type SiftStep = {
   /** The signal being sifted, before this step. */
   h: Float64Array
+  /** Indices of the local maxima of `h`. */
   maxima: number[]
+  /** Indices of the local minima of `h`. */
   minima: number[]
+  /** The upper envelope $e_+$: the spline through the maxima, at every sample. */
   upper: Float64Array
+  /** The lower envelope $e_-$: the spline through the minima, at every sample. */
   lower: Float64Array
+  /** The envelope mean $(e_+ + e_-) / 2$. */
   mean: Float64Array
-  /** h − mean: the candidate IMF after this step. */
+  /** $h - (e_+ + e_-) / 2$: the candidate IMF after this step. */
   next: Float64Array
   /** Knots of the upper and lower envelopes, including mirrored ones. */
   knots: { upper: Knots; lower: Knots }
 }
 
-/** One sifting step, or null when h has too few extrema to build envelopes. */
+/**
+ * One sifting step, or null when $h$ has too few extrema to build envelopes (fewer than three, or no maximum or no
+ * minimum).
+ *
+ * @param h The candidate to sift; not modified.
+ * @param mirror Whether to mirror extrema at the ends (`mirrorKnots`); without it the envelopes are extrapolated
+ *   beyond the outermost extrema.
+ * @returns The step, or null.
+ */
 export function siftStep(h: Float64Array, mirror = true): SiftStep | null {
   const { maxima, minima } = findExtrema(h)
   if (maxima.length + minima.length < 3 || !maxima.length || !minima.length) return null
@@ -233,12 +281,17 @@ export function siftStep(h: Float64Array, mirror = true): SiftStep | null {
 
 /**
  * When to stop sifting one IMF.
- * - `fixed`: a fixed number of sifts (Wu & Huang use 10 in ensemble EMD).
- * - `sd`: Huang's SD = Σ (h_{k−1} − h_k)² / Σ h_{k−1}² below a threshold, 0.2 to 0.3 in Huang et al. (1998). (The
- *   original sums the ratio pointwise; the ratio of sums used here avoids division by near-zero samples.)
- * - `snumber`: the numbers of extrema and zero crossings differ by at most one for S consecutive sifts.
- * - `rilling`: with σ(t) = |mean| / amplitude, σ < θ1 on all but a fraction α of samples and σ < θ2 everywhere.
- * - `pyemd`: PyEMD's default rule (scaled variance, SD or energy ratio, plus the extrema/zero-crossing condition).
+ * - `fixed`: after `sifts` sifts (Wu and Huang use 10 in ensemble EMD).
+ * - `sd`: Huang's $\mathrm{SD} = \sum_t (h_{k-1}(t) - h_k(t))^2 / \sum_t h_{k-1}(t)^2$ below `threshold`, 0.2 to 0.3
+ *   in Huang et al. (1998). (The original sums the ratio pointwise; the ratio of sums used here avoids division by
+ *   near-zero samples.)
+ * - `snumber`: the numbers of extrema and zero crossings differ by at most one for `s` consecutive sifts.
+ * - `rilling`: with $\sigma(t) = \abs{m(t)} / a(t)$ ($m$ the envelope mean and $a = \abs{e_+ - e_-} / 2$ the
+ *   amplitude, of one more sifting step), $\sigma < \theta_1$ (`theta1`) on all but a fraction $\alpha$ (`alpha`) of
+ *   samples and $\sigma < \theta_2$ (`theta2`) everywhere, with the extrema and zero crossings differing by at most
+ *   one.
+ * - `pyemd`: PyEMD's default rule (scaled variance, SD or energy ratio, plus the extrema and zero-crossing condition);
+ *   see `pyemdCheck`.
  */
 export type StopRule =
   | { kind: 'fixed'; sifts: number }
@@ -247,7 +300,13 @@ export type StopRule =
   | { kind: 'rilling'; theta1: number; theta2: number; alpha: number }
   | { kind: 'pyemd' }
 
-/** Huang's SD between consecutive sifts, as a ratio of sums. */
+/**
+ * Huang's SD between consecutive sifts, as a ratio of sums: $\sum_t (h_{k-1}(t) - h_k(t))^2 / \sum_t h_{k-1}(t)^2$.
+ *
+ * @param prev The candidate before the sift, $h_{k-1}$.
+ * @param next The candidate after it, $h_k$, of the same length.
+ * @returns The SD, or 0 when `prev` is all zeros.
+ */
 export function sdCriterion(prev: ArrayLike<number>, next: ArrayLike<number>): number {
   let num = 0
   let den = 0
@@ -258,7 +317,15 @@ export function sdCriterion(prev: ArrayLike<number>, next: ArrayLike<number>): n
   return den > 0 ? num / den : 0
 }
 
-/** Rilling's evaluation: fraction of samples with σ(t) = |mean|/amplitude above θ1, and max σ. */
+/**
+ * Rilling's evaluation of a sifting step: the fraction of samples with $\sigma(t) = \abs{m(t)} / a(t)$ above
+ * $\theta_1$, and the largest $\sigma$, with $m$ the envelope mean and $a = \abs{e_+ - e_-} / 2$ the amplitude
+ * (floored at $10^{-12}$).
+ *
+ * @param step The sifting step whose envelopes are evaluated.
+ * @param theta1 The threshold $\theta_1$.
+ * @returns `fractionAbove`, the fraction of samples with $\sigma > \theta_1$, and `maxSigma`, the largest $\sigma$.
+ */
 export function rillingStats(step: SiftStep, theta1: number) {
   let above = 0
   let max = 0
@@ -271,7 +338,18 @@ export function rillingStats(step: SiftStep, theta1: number) {
   return { fractionAbove: above / step.mean.length, maxSigma: max }
 }
 
-/** PyEMD's default stopping test (scaled variance, SD or energy ratio) for the step from `prev` to `next`. */
+/**
+ * PyEMD's default stopping test for the step from `prev` to `next` (the extrema and zero-crossing condition is checked
+ * by `stopTest`). It fails when a maximum knot is negative or a minimum knot positive, or when `next` has energy below
+ * $10^{-10}$; otherwise it holds when any of these does, with $d = h_\text{next} - h_\text{prev}$: the scaled
+ * variance $\sum_t d(t)^2 / (\max h_\text{prev} - \min h_\text{prev}) < 0.001$, the SD
+ * $\sum_t (d(t) / h_\text{next}(t))^2 < 0.2$, or the energy ratio $\sum_t d(t)^2 / \sum_t h_\text{prev}(t)^2 < 0.2$.
+ *
+ * @param next The candidate after the step.
+ * @param prev The candidate before it.
+ * @param step The step itself, whose envelope knots are checked for sign.
+ * @returns Whether sifting may stop.
+ */
 export function pyemdCheck(next: Float64Array, prev: Float64Array, step: SiftStep): boolean {
   // Mirrored maxima must be positive and minima negative.
   if (step.knots.upper.y.some((v) => v < 0) || step.knots.lower.y.some((v) => v > 0)) return false
@@ -298,6 +376,7 @@ export function pyemdCheck(next: Float64Array, prev: Float64Array, step: SiftSte
 
 /** The result of `sift`. */
 export type SiftResult = {
+  /** The sifted candidate: the IMF, or `x` itself (or its partly sifted form) when not `oscillating`. */
   imf: Float64Array
   /** Every step taken, in order (empty when x had too few extrema). */
   steps: SiftStep[]
@@ -306,8 +385,19 @@ export type SiftResult = {
 }
 
 /**
- * The stopping test after one sifting step from `prev` to `h` = `step.next`: whether the rule holds, and the updated
- * count of consecutive balanced steps (the S-number rule's counter). `n` is the number of sifts made so far.
+ * The stopping test after one sifting step from `prev` to $h$ = `step.next`: whether the rule holds, and the updated
+ * count of consecutive balanced steps (the S-number rule's counter). A step is balanced when the numbers of extrema
+ * and zero crossings of $h$ differ by at most one. The Rilling rule sifts $h$ once more to evaluate it, and holds when
+ * $h$ has too few extrema for that.
+ *
+ * @param rule The stopping rule.
+ * @param prev The candidate before the step.
+ * @param step The step, whose `next` is the candidate being tested.
+ * @param n The number of sifts made so far, this one included (read by the `fixed` rule).
+ * @param balancedRun The number of consecutive balanced steps before this one (read by the `snumber` rule).
+ * @param mirror Whether the Rilling rule's extra step mirrors extrema at the ends.
+ * @returns `converged`, whether the rule holds, and `balancedRun`, updated by the `snumber` rule and passed through by
+ *   the others.
  */
 export function stopTest(
   rule: StopRule,
@@ -333,7 +423,16 @@ export function stopTest(
   return { converged: balanced && fractionAbove <= rule.alpha && maxSigma < rule.theta2, balancedRun }
 }
 
-/** Sift one IMF out of x. */
+/**
+ * Sift one IMF out of $x$: repeat `siftStep` until the stopping rule holds, $h$ has too few extrema, or
+ * `maxSifts` $- 1$ sifts have been made.
+ *
+ * @param x The samples; not modified.
+ * @param rule When to stop (PyEMD's rule by default).
+ * @param mirror Whether to mirror extrema at the ends before fitting envelopes.
+ * @param maxSifts One more than the most sifts made.
+ * @returns The IMF, every step taken, and whether $x$ oscillated enough to sift.
+ */
 export function sift(x: ArrayLike<number>, rule: StopRule = { kind: 'pyemd' }, mirror = true, maxSifts = 1000) {
   let h: Float64Array = Float64Array.from(x)
   const steps: SiftStep[] = []
@@ -355,13 +454,27 @@ export function sift(x: ArrayLike<number>, rule: StopRule = { kind: 'pyemd' }, m
   return { imf: h, steps, oscillating } satisfies SiftResult
 }
 
-/** The arrays of an empirical mode decomposition. */
+/** The arrays of an empirical mode decomposition: the IMFs `imfs`, fastest first, and the `residue`. */
 export type EmdArrays = { imfs: Float64Array[]; residue: Float64Array }
 
-/** Options of the array-level `emd`. */
+/**
+ * Options of the array-level `emd`: `maxImfs`, the most IMFs to extract ($-1$, the default, for no limit); `rule`, when
+ * to stop sifting one IMF (PyEMD's rule by default); `mirror`, whether to mirror extrema at the ends (default true).
+ */
 export type EmdCoreOptions = { maxImfs?: number; rule?: StopRule; mirror?: boolean }
 
-/** Empirical mode decomposition: x = Σ imfs + residue, fastest IMF first. */
+/**
+ * Empirical mode decomposition: $x = \sum_k c_k + r$, fastest IMF $c_1$ first. IMFs are sifted out of the residue
+ * until it has too few extrema, `maxImfs` are found, or (PyEMD's thresholds) the residue's range falls below 0.001 or
+ * its $\ell_1$ norm below 0.005. The thresholds are absolute, so they depend on the signal's scale.
+ *
+ * @param x The samples; not modified.
+ * @param options What to extract and how; see `EmdCoreOptions`.
+ * @param options.maxImfs The most IMFs to extract ($-1$ for no limit).
+ * @param options.rule When to stop sifting one IMF.
+ * @param options.mirror Whether to mirror extrema at the ends before fitting envelopes.
+ * @returns The IMFs and the residue, which sum to $x$.
+ */
 export function emd(
   x: ArrayLike<number>,
   { maxImfs = -1, rule = { kind: 'pyemd' }, mirror = true }: EmdCoreOptions = {},

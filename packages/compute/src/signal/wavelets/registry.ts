@@ -13,6 +13,12 @@ const define = definer<WaveletInfo>('wavelet', 'signal/wavelets')
 const none = space({})
 const orthogonalNotes = ['wavelet-families', 'discrete-wavelet-transform']
 
+/**
+ * The registry entry of the Daubechies wavelet `dbN`, whose function returns its filters (`waveletFilters`).
+ *
+ * @param n The number of vanishing moments $N$, 1 to 10; the filters have $2N$ taps.
+ * @returns The entry, keyed `dbN`.
+ */
 const daubechies = (n: number): Entry<() => ReturnType<typeof waveletFilters>, WaveletInfo> => {
   const key = `db${n}` as WaveletName
   return define(

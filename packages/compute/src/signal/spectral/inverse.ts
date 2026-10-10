@@ -11,7 +11,15 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import { windowValues, type WindowInput } from 'aifn-compute/signal/windows'
 import { signal } from '../signal'
 
-/** Sums over the overlapped positions of one hop: Σ_k g(w[i + k·step]) for i < step, as scipy's binsums. */
+/**
+ * Sums over the overlapped positions of one hop: $\sum_k g(w[i + k \cdot \text{step}])$ for $i < \text{step}$, as
+ * scipy's `_binsums` (a last partial hop adds to the first positions).
+ *
+ * @param win The window values; not modified.
+ * @param step The hop, in samples.
+ * @param g The function applied to each window value before summing (the identity for COLA, the square for NOLA).
+ * @returns The `step` sums.
+ */
 function binSums(win: Float64Array, step: Size, g: (w: number) => number): Float64Array {
   const n = win.length
   const sums = new Float64Array(step)
@@ -21,6 +29,15 @@ function binSums(win: Float64Array, step: Size, g: (w: number) => number): Float
   return sums
 }
 
+/**
+ * The hop of a segmentation, after checking it. Throws `DomainError` unless `nperseg` is a positive integer and
+ * `noverlap` an integer in $[0, \text{nperseg})$.
+ *
+ * @param nperseg The segment length.
+ * @param noverlap The samples shared by consecutive segments.
+ * @param where The caller's name, for error messages.
+ * @returns The hop $\text{nperseg} - \text{noverlap}$.
+ */
 function checkOverlap(nperseg: Size, noverlap: Size, where: string): Size {
   if (!(Number.isInteger(nperseg) && nperseg >= 1)) throw new DomainError(where, `${where}: nperseg must be ≥ 1`)
   if (!(Number.isInteger(noverlap) && noverlap >= 0 && noverlap < nperseg))
@@ -29,10 +46,23 @@ function checkOverlap(nperseg: Size, noverlap: Size, where: string): Size {
 }
 
 /**
- * The constant overlap-add (COLA) condition: shifted copies of the window, hop nperseg − noverlap apart, sum to a
- * constant (to within `tolerance`). Under COLA, overlap-adding the unmodified segments of a signal returns the signal
- * times that constant; it is sufficient for an STFT to be invertible but not necessary (see `checkNola`). The window
- * is built periodic, as `stft` builds it.
+ * The constant overlap-add (COLA) condition: shifted copies of the window, hop $\text{nperseg} - \text{noverlap}$
+ * apart, sum to a constant (to within `tolerance` of their median). Under COLA, overlap-adding the unmodified segments
+ * of a signal returns the signal times that constant; it is sufficient for an STFT to be invertible but not necessary
+ * (see `checkNola`). The window is built periodic, as `stft` builds it. Throws `DomainError` for an invalid
+ * segmentation.
+ *
+ * @param window The window: a spec or explicit values of length `nperseg`.
+ * @param nperseg The segment length.
+ * @param noverlap The samples shared by consecutive segments, in $[0, \text{nperseg})$.
+ * @param options Options.
+ * @param options.tolerance The largest deviation of an overlap-added sum from the median allowed (default 1e-10).
+ * @returns Whether the window and overlap satisfy COLA.
+ *
+ * @example Hann at half overlap, Hamming, and too little overlap
+ * print('hann, 8, 4:', checkCola('hann', 8, 4))
+ * print('hamming, 8, 4:', checkCola('hamming', 8, 4))
+ * print('hann, 8, 2:', checkCola('hann', 8, 2))
  */
 export function checkCola(window: WindowInput, nperseg: Size, noverlap: Size, { tolerance = 1e-10 } = {}): boolean {
   const step = checkOverlap(nperseg, noverlap, 'checkCola')
@@ -43,9 +73,23 @@ export function checkCola(window: WindowInput, nperseg: Size, noverlap: Size, { 
 }
 
 /**
- * The nonzero overlap-add (NOLA) condition: the squared window, overlap-added with hop nperseg − noverlap, is
- * positive everywhere (above `tolerance`). NOLA is necessary and sufficient for `istft` to invert `stft` exactly: the
- * least-squares overlap-add divides by that sum.
+ * The nonzero overlap-add (NOLA) condition: the squared window, overlap-added with hop
+ * $\text{nperseg} - \text{noverlap}$, is positive everywhere (above `tolerance`). NOLA is necessary and sufficient
+ * for `istft` to invert `stft` exactly: the least-squares overlap-add divides by that sum. Throws `DomainError` for an
+ * invalid segmentation.
+ *
+ * @param window The window: a spec (built periodic) or explicit values of length `nperseg`.
+ * @param nperseg The segment length.
+ * @param noverlap The samples shared by consecutive segments, in $[0, \text{nperseg})$.
+ * @param options Options.
+ * @param options.tolerance The least overlap-added sum of squares that counts as positive (default 1e-10).
+ * @returns Whether the window and overlap satisfy NOLA.
+ *
+ * @example A window that is zero at its ends needs overlap
+ * // The periodic Hann window is 0 at its first sample, so without overlap that sample is lost.
+ * print('hann, no overlap:', checkNola('hann', 8, 0))
+ * print('hann, half overlap:', checkNola('hann', 8, 4))
+ * print('boxcar, no overlap:', checkNola('boxcar', 8, 0))
  */
 export function checkNola(window: WindowInput, nperseg: Size, noverlap: Size, { tolerance = 1e-10 } = {}): boolean {
   const step = checkOverlap(nperseg, noverlap, 'checkNola')
@@ -54,32 +98,52 @@ export function checkNola(window: WindowInput, nperseg: Size, noverlap: Size, { 
 
 /** Options for `istft`. */
 export type IstftOptions = {
-  /** Sampling frequency. Default: from the input's frequency axis (Δf·nfft), else 1. */
+  /** Sampling frequency. Default: from the input's frequency axis ($\Delta f \cdot n_\text{fft}$), else 1. */
   fs?: Scalar
   /** The window `stft` used. Default `'hann'`. */
   window?: WindowInput
-  /** Segment length. Default: the input's `window.length`, else 2(nfreq − 1) for one-sided input. */
+  /**
+   * Segment length. Default: the input's `window.length`, else $2(n_\text{freq} - 1)$ for one-sided input
+   * ($n_\text{freq}$ two-sided).
+   */
   nperseg?: Size
-  /** Overlap. Default: from the input's `window.hop`, else nperseg/2. */
+  /** Overlap. Default: from the input's `window.hop`, else $\lfloor \text{nperseg}/2 \rfloor$. */
   noverlap?: Size
-  /** FFT length. Default: implied by Z, 2(nfreq − 1) one-sided (nperseg when that is one less than an odd nperseg). */
+  /**
+   * FFT length. Default: implied by $\Zmat$, $2(n_\text{freq} - 1)$ one-sided (`nperseg` when that is one less than
+   * an odd `nperseg`) or $n_\text{freq}$ two-sided.
+   */
   nfft?: Size
   /** Whether the input holds one-sided spectra of a real signal (irfft) or two-sided ones (ifft). Default true. */
   onesided?: boolean
-  /** Whether `stft` padded nperseg/2 samples at each end (strip them). Default true. */
+  /** Whether `stft` padded $\lfloor \text{nperseg}/2 \rfloor$ samples at each end (strip them). Default true. */
   boundary?: boolean
 }
 
 /**
- * The inverse STFT, as `scipy.signal.istft` (scaling 'spectrum'): each column of Z is inverse transformed, multiplied
- * by the window's sum (undoing `stft`'s scaling), windowed again and overlap-added; the sum is divided by the
- * overlap-added squared window. That division is the least-squares inverse of Griffin & Lim: for any Z it returns the
- * signal whose STFT is closest to Z, and for the STFT of a signal it returns that signal exactly whenever the window
- * and overlap satisfy NOLA (`checkNola`), which `istft` checks and otherwise refuses with a `DomainError`.
+ * The inverse STFT, as `scipy.signal.istft` (scaling `'spectrum'`): each column of $\Zmat$ is inverse transformed,
+ * multiplied by the window's sum (undoing `stft`'s scaling), windowed again and overlap-added; the sum is divided by
+ * the overlap-added squared window. That division is the least-squares inverse of Griffin & Lim: for any $\Zmat$ it
+ * returns the signal whose STFT is closest to $\Zmat$, and for the STFT of a signal it returns that signal exactly
+ * whenever the window and overlap satisfy NOLA (`checkNola`), which `istft` checks and otherwise refuses with a
+ * `DomainError`.
  *
- * Z is a `TimeFrequency` from `stft` (complex [f, t]; its time axis gives t0) or a complex128 tensor [f, t]. Returns a
- * real `Signal` for one-sided input and a complex one for two-sided input; its length is the padded length that
- * `stft` transformed (trim to the original length when `stft` padded the end).
+ * $\Zmat$ is a `TimeFrequency` from `stft` (complex $[f, t]$; its time axis gives $t_0$) or a complex128 tensor
+ * $[f, t]$. Returns a real `Signal` for one-sided input and a complex one for two-sided input; its length is the
+ * padded length that `stft` transformed (trim to the original length when `stft` padded the end). Throws `ShapeError`
+ * when $\Zmat$ is not two-dimensional and `DomainError` for an invalid segmentation or an `nfft` below `nperseg`.
+ *
+ * @param Z The STFT: a `TimeFrequency` from `stft`, whose window length, hop and axes supply the defaults, or a bare
+ *   complex tensor $[f, t]$.
+ * @param options The sample rate, window, segment length, overlap, FFT length, sidedness and boundary; see
+ *   `IstftOptions`. The window must be the one `stft` used.
+ * @returns The signal, with $f_s$ and $t_0$ from the options or the input's axes.
+ *
+ * @example Round trip
+ * const x = Array.from({ length: 16 }, (_, i) => i)
+ * const y = istft(stft(x, { nperseg: 8 }))
+ * print('x back =', y.data)
+ * print('largest error =', max(abs(sub(y.data, tensor(x)))))
  */
 export function istft(Z: TimeFrequency | Tensor, options: IstftOptions = {}): Signal {
   const tf = isTensor(Z) ? undefined : Z

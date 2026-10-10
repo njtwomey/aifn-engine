@@ -13,15 +13,15 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** Options for `cqt`. */
 export type CqtOptions = {
-  /** The lowest centre frequency f_min, in Hz (in cycles per sample when the input has no sample rate). */
+  /** The lowest centre frequency $f_{\min}$, in Hz (in cycles per sample when the input has no sample rate). */
   fmin: Scalar
-  /** Bins per octave b (default 12: semitones). */
+  /** Bins per octave $b$ (default 12: semitones). */
   binsPerOctave?: Size
-  /** Number of bins K (default: every bin whose centre lies below Nyquist). */
+  /** Number of bins $K$ (default: every bin whose centre lies below Nyquist). */
   bins?: Size
   /** Samples between frame centres (default: a quarter of the shortest window, at least 1). */
   hop?: Size
-  /** The window w_k of each bin, stretched to its length N_k (default Hamming, as Brown). */
+  /** The window $w_k$ of each bin, stretched to its length $N_k$ (default Hamming, as Brown). */
   window?: WindowSpec
   /**
    * Drop spectral-kernel entries below this fraction of each kernel's largest magnitude (Brown and Puckette's
@@ -33,13 +33,32 @@ export type CqtOptions = {
 }
 
 /**
- * The constant-Q transform of a single-channel signal: for bins k = 0 … K − 1 at f_k = f_min·2^{k/b}, with
- * Q = 1/(2^{1/b} − 1) and window length N_k = round(Q·fs/f_k),
- * X[k, m] = (1/N_k) Σ_{n<N_k} w_k[n] x[c_m − ⌊N_k/2⌋ + n] e^{−i2πQn/N_k}, each window centred on the frame centre
- * c_m = m·hop (x is 0 outside its samples). Every window spans Q cycles of its own frequency, so the bins have constant
- * relative bandwidth. Computed per frame as (1/N) Σⱼ X_m[j] K_k*[j] (Parseval), with X_m the N-point FFT of the frame
- * (N the power of two ≥ N_0) and K_k the FFT of bin k's kernel. Returns a complex `TimeFrequency` ([K, frames],
- * `method: 'cqt'`, `frequencyScale: 'log'`).
+ * The constant-Q transform of a single-channel signal: for bins $k = 0, \dots, K - 1$ at
+ * $f_k = f_{\min} 2^{k/b}$, with $Q = 1/(2^{1/b} - 1)$ and window length $N_k = \operatorname{round}(Q f_s / f_k)$,
+ * $X[k, m] = \frac{1}{N_k} \sum_{n < N_k} w_k[n]\, x[c_m - \lfloor N_k/2 \rfloor + n]\, e^{-i 2\pi Q n / N_k}$, each
+ * window centred on the frame centre $c_m = m \cdot \text{hop}$ ($x$ is 0 outside its samples). Every window spans
+ * $Q$ cycles of its own frequency, so the bins have constant relative bandwidth. Computed per frame as
+ * $\frac{1}{N} \sum_j X_m[j]\, K_k^*[j]$ (Parseval), with $X_m$ the $N$-point FFT of the frame ($N$ the power of two
+ * $\ge N_0$) and $K_k$ the FFT of bin $k$'s kernel. Throws `DomainError` when $f_{\min}$ is not in $(0, f_s/2)$,
+ * $b$ or $K$ is not a positive integer, or the top bin lies at or above Nyquist.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The lowest frequency (required), bins per octave, number of bins, hop, window, sparsity and sample
+ *   rate; see `CqtOptions`.
+ * @returns A complex `TimeFrequency` ($[K, \text{frames}]$, `method: 'cqt'`, `frequencyScale: 'log'`) with
+ *   $\lceil n / \text{hop} \rceil$ frames (at least 1) at times $t_0 + c_m / f_s$, the bin frequencies $f_k$, and the
+ *   window's name, longest length $N_0$ and hop.
+ *
+ * @example A 440 Hz tone
+ * // Semitone bins from 220 Hz: bin 12 is 440 Hz, and holds (Hamming mean 0.54) / 2 of the unit amplitude.
+ * const fs = 8000
+ * const x = Array.from({ length: 2048 }, (_, i) => Math.sin((2 * Math.PI * 440 * i) / fs))
+ * const C = cqt(x, { fmin: 220, bins: 25, fs })
+ * print('shape =', C.values.shape, ' f[12] =', C.f.data[12], 'Hz')
+ * const frames = C.t.shape[0]
+ * const mag = complexAbs(C.values).data
+ * const middle = Array.from({ length: 25 }, (_, k) => mag[k * frames + (frames >> 1)])
+ * print('loudest bin =', middle.indexOf(Math.max(...middle)), ' |X| there =', Math.max(...middle))
  */
 export function cqt(x: SignalInput, options: CqtOptions): TimeFrequency {
   const where = 'cqt'

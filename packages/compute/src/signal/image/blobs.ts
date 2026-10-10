@@ -1,38 +1,55 @@
 /**
  * Blob detection in scale space (Lindeberg, 1998, "Feature detection with automatic scale selection", IJCV 30(2)):
- * the scale-normalised Laplacian of Gaussian −σ²∇²(G_σ ∗ I) peaks at the centre of a bright blob of radius ≈ σ√2 at
- * σ = r/√2; the difference of Gaussians G_{kσ} ∗ I − G_σ ∗ I approximates (k − 1)σ²∇²G and is what SIFT uses (Lowe,
- * 2004, IJCV 60(2)).
+ * the scale-normalised Laplacian of Gaussian $-\sigma^2 \nabla^2 (G_\sigma * I)$ peaks at the centre of a bright blob
+ * of radius $r$ at $\sigma = r / \sqrt{2}$; the difference of Gaussians $G_{k\sigma} * I - G_\sigma * I$ approximates
+ * $(k - 1) \sigma^2 \nabla^2 G_\sigma * I$ and is what SIFT uses (Lowe, 2004, IJCV 60(2)).
+ *
+ * Both detectors build a cube of responses over position and scale, keep its $3 \times 3 \times 3$ local maxima above
+ * a threshold, and drop the weaker of two blobs whose discs overlap too much. Only bright blobs on a dark background
+ * are found; invert the image for dark ones.
  */
 
 import { readImage, type ImageInput } from 'aifn-compute/foundation/convolution'
 import { DomainError } from 'aifn-compute/foundation/errors'
 import { gaussianBlur, gaussianLaplace } from './filters'
 
-/** A blob: centre (row, column), scale σ and the scale-normalised response there. */
+/** A blob: centre (row, column), scale $\sigma$ and the scale-normalised response there. */
 export interface Blob {
+  /** The centre's row. */
   row: number
+  /** The centre's column. */
   col: number
+  /** The scale $\sigma$ of the level the blob peaked at, in pixels. */
   sigma: number
-  /** The radius σ√2 of the blob a 2-D Laplacian of Gaussian matches. */
+  /** The radius $\sigma \sqrt{2}$ of the blob a 2-D Laplacian of Gaussian matches. */
   radius: number
+  /** The scale-normalised response at the peak. */
   value: number
 }
 
 /** Options for the blob detectors. */
 export interface BlobOptions {
+  /** The smallest scale $\sigma$, in pixels. Default 1. */
   minSigma?: number
+  /** The largest scale $\sigma$, in pixels. Default 8. */
   maxSigma?: number
   /** Keep blobs whose response is at least this. Default 0.2 (for images in [0, 1]). */
   threshold?: number
   /**
-   * Drop the weaker (smaller response) of two blobs whose discs overlap by more than this fraction of the smaller disc's
-   * area. Default 0.5. (scikit-image drops the smaller disc instead.)
+   * Drop the weaker (smaller response) of two blobs whose discs overlap by more than this fraction of the smaller
+   * disc's area. Default 0.5. (scikit-image drops the smaller disc instead.)
    */
   overlap?: number
 }
 
-/** The area of overlap of two discs (radii r1, r2, centres d apart) over the smaller disc's area. */
+/**
+ * The area of overlap of two discs over the smaller disc's area: 0 when they are apart, 1 when one holds the other.
+ *
+ * @param r1 The first disc's radius.
+ * @param r2 The second disc's radius.
+ * @param d The distance between their centres.
+ * @returns The fraction of the smaller disc covered, in $[0, 1]$.
+ */
 function discOverlap(r1: number, r2: number, d: number): number {
   if (d >= r1 + r2) return 0
   const small = Math.min(r1, r2)
@@ -43,7 +60,19 @@ function discOverlap(r1: number, r2: number, d: number): number {
   return (a1 + a2 - a3) / (Math.PI * small * small)
 }
 
-/** Local maxima of a scale-space cube (levels × h × w) over 3 × 3 × 3 neighbourhoods, pruned by overlap. */
+/**
+ * Local maxima of a scale-space cube (levels $\times h \times w$) over $3 \times 3 \times 3$ neighbourhoods (cut at
+ * the cube's faces, so border pixels and end levels can peak), pruned by overlap: strongest first, a blob is kept
+ * unless its disc overlaps a kept one's by more than `overlap`.
+ *
+ * @param cube The levels, one row-major $h \times w$ array per scale.
+ * @param sigmas The scale $\sigma$ of each level.
+ * @param h The image height.
+ * @param w The image width.
+ * @param threshold The least response a blob may have.
+ * @param overlap The largest overlap allowed, as a fraction of the smaller disc's area.
+ * @returns The blobs kept, strongest first.
+ */
 function cubePeaks(
   cube: Float64Array[],
   sigmas: number[],
@@ -83,9 +112,21 @@ function cubePeaks(
 }
 
 /**
- * Bright blobs by the scale-normalised Laplacian of Gaussian (Lindeberg, 1998), as `skimage.feature.blob_log`: the cube
- * −σ²∇²(G_σ ∗ I) over `levels` (default 10) σ evenly spaced from `minSigma` (1) to `maxSigma` (8), its 3 × 3 × 3 local
- * maxima above `threshold`, and the weaker of overlapping blobs dropped.
+ * Bright blobs by the scale-normalised Laplacian of Gaussian (Lindeberg, 1998), as `skimage.feature.blob_log`: the
+ * cube $-\sigma^2 \nabla^2 (G_\sigma * I)$ over `levels` (default 10) values of $\sigma$ evenly spaced from `minSigma`
+ * (1) to `maxSigma` (8), its $3 \times 3 \times 3$ local maxima above `threshold`, and the weaker of overlapping
+ * blobs dropped. The Laplacian reads beyond the edge by reflection.
+ *
+ * @param img The image, $h \times w$, bright blobs on a dark background, best in $[0, 1]$ for the default threshold.
+ * @param options The scales, the threshold and the overlap of `BlobOptions`, and `levels`, the number of scales.
+ * @returns The blobs, strongest first.
+ *
+ * @example Two discs, of radius 2 and 5, found at their scales
+ * const disc = (r0, c0, radius) => (r, c) => (r - r0) ** 2 + (c - c0) ** 2 <= radius ** 2
+ * const small = disc(6, 6, 2)
+ * const large = disc(15, 15, 5)
+ * const img = Array.from({ length: 24 }, (_, r) => Array.from({ length: 24 }, (_, c) => +(small(r, c) || large(r, c))))
+ * for (const b of blobsLog(img, { maxSigma: 5, levels: 9 })) print(b)
  */
 export function blobsLog(img: ImageInput, options: BlobOptions & { levels?: number } = {}): Blob[] {
   const { h, w } = readImage(img, 'blobsLog')
@@ -98,9 +139,23 @@ export function blobsLog(img: ImageInput, options: BlobOptions & { levels?: numb
 }
 
 /**
- * Bright blobs by the difference of Gaussians (Lowe, 2004): σ grows geometrically by `ratio` (default 1.6) from
- * `minSigma` to past `maxSigma`, and level k is (G_{σ_k} − G_{σ_{k+1}}) ∗ I scaled by σ_k/(σ_{k+1} − σ_k), so it
- * approximates −σ²∇²G and shares the LoG's threshold scale.
+ * Bright blobs by the difference of Gaussians (Lowe, 2004): $\sigma$ grows geometrically by `ratio` (default 1.6) from
+ * `minSigma` to at least `maxSigma`, and level $k$ is $(G_{\sigma_k} - G_{\sigma_{k+1}}) * I$ scaled by
+ * $\sigma_k / (\sigma_{k+1} - \sigma_k)$, so it approximates $-\sigma_k^2 \nabla^2 G_{\sigma_k} * I$ and shares the
+ * LoG's threshold scale. Faster than `blobsLog`, but with coarser scales. Throws `DomainError` unless the ratio
+ * exceeds 1.
+ *
+ * @param img The image, $h \times w$, bright blobs on a dark background.
+ * @param options The scales, the threshold and the overlap of `BlobOptions`, and `ratio`, the factor between
+ *   successive scales.
+ * @returns The blobs, strongest first.
+ *
+ * @example The same two discs, on the coarser scales of the difference of Gaussians
+ * const disc = (r0, c0, radius) => (r, c) => (r - r0) ** 2 + (c - c0) ** 2 <= radius ** 2
+ * const small = disc(6, 6, 2)
+ * const large = disc(15, 15, 5)
+ * const img = Array.from({ length: 24 }, (_, r) => Array.from({ length: 24 }, (_, c) => +(small(r, c) || large(r, c))))
+ * for (const b of blobsDog(img, { maxSigma: 5 })) print(b)
  */
 export function blobsDog(img: ImageInput, options: BlobOptions & { ratio?: number } = {}): Blob[] {
   const { h, w } = readImage(img, 'blobsDog')

@@ -1,17 +1,20 @@
 /**
  * The matrix profile (Yeh et al. 2016, "Matrix Profile I: all pairs similarity joins for time series", ICDM): for every
- * subsequence of length m, the z-normalised distance to its nearest neighbour elsewhere in the series and that
- * neighbour's index. Matches within the exclusion zone |i − j| ≤ ⌈m/4⌉ (stumpy's default) are trivial and skipped.
+ * subsequence of length $m$, the z-normalised distance to its nearest neighbour elsewhere in the series and that
+ * neighbour's index. Matches within the exclusion zone $\lvert i - j \rvert \le \lceil m/4 \rceil$ (stumpy's
+ * default) are trivial and skipped.
  *
- * - **STOMP** (Zhu et al. 2016, "Matrix Profile II", ICDM) computes the distance matrix row by row in O(n²) from one
- *   FFT: the dot products update along each diagonal, QTᵢ,ⱼ = QTᵢ₋₁,ⱼ₋₁ − tᵢ₋₁tⱼ₋₁ + tᵢ₊ₘ₋₁tⱼ₊ₘ₋₁.
+ * - **STOMP** (Zhu et al. 2016, "Matrix Profile II", ICDM) computes the distance matrix row by row in $O(n^2)$ from one
+ *   FFT: the dot products update along each diagonal,
+ *   $QT_{i,j} = QT_{i-1,j-1} - t_{i-1}t_{j-1} + t_{i+m-1}t_{j+m-1}$.
  * - **SCRIMP++** (Zhu et al. 2018, "Matrix Profile XI: SCRIMP++", ICDM) is anytime: PreSCRIMP computes the full
- *   distance profiles of every s-th subsequence (s = ⌊m/4⌋) and walks each best match's diagonal s steps either way,
- *   which already finds most motifs; then SCRIMP visits the diagonals in random order, each one exactly, so the
- *   profile only falls and is exact once every diagonal is done.
+ *   distance profiles of every $s$-th subsequence ($s = \lfloor m/4 \rfloor$, at least 1) and walks each best match's
+ *   diagonal $s - 1$ steps either way, which already finds most motifs; then SCRIMP visits the diagonals in random
+ *   order, each one exactly, so the profile only falls and is exact once every diagonal is done.
  *
  * Motifs are the pairs with the smallest profile values; discords the subsequences with the largest (the most unusual
- * shapes), each pick excluding its neighbourhood from later ones.
+ * shapes), each pick excluding its neighbourhood from later ones. Distances between constant subsequences follow
+ * `zDistance`.
  */
 
 import type { Size, Status } from 'aifn-compute/foundation/contracts'
@@ -24,25 +27,42 @@ import { checkWindow, meanStd, slidingDotProduct, zDistance } from './profile'
 
 /** A matrix profile. */
 export interface MatrixProfile {
+  /** The brand of a matrix profile. */
   readonly kind: 'matrix-profile'
-  /** The subsequence length. */
+  /** The subsequence length $m$. */
   readonly m: Size
-  /** Trivial matches |i − j| ≤ exclusion are skipped. */
+  /** The exclusion zone: trivial matches with $\lvert i - j \rvert \le$ `exclusion` are skipped. */
   readonly exclusion: Size
-  /** Nearest-neighbour distance of every subsequence (n − m + 1); Infinity where none exists. */
+  /** Nearest-neighbour distance of every subsequence ($n - m + 1$ of them); Infinity where none exists. */
   readonly profile: Tensor
-  /** The nearest neighbour's index (int32, −1 where none). */
+  /** The nearest neighbour's index (int32, $-1$ where none). */
   readonly index: Tensor
 }
 
 /** Options of the matrix-profile functions. */
 export interface MatrixProfileOptions {
-  /** The exclusion zone (default ⌈m/4⌉). */
+  /** The exclusion zone, in samples (default $\lceil m/4 \rceil$). */
   exclusion?: Size
 }
 
+/**
+ * The exclusion zone to use: the option if given, else $\lceil m/4 \rceil$.
+ *
+ * @param m The subsequence length.
+ * @param options The options, whose `exclusion` overrides the default.
+ * @returns The exclusion zone, in samples.
+ */
 const exclusionOf = (m: number, options: MatrixProfileOptions) => options.exclusion ?? Math.ceil(m / 4)
 
+/**
+ * Reads a series and its sliding statistics for a matrix profile. Throws `DomainError` unless $m$ is an integer in
+ * $2, \dots, n$ and the series has at least two subsequences.
+ *
+ * @param series The series: a single-channel signal or its samples.
+ * @param m The subsequence length.
+ * @param where The caller's name for error messages.
+ * @returns The samples `t`, the number of subsequences `k` ($n - m + 1$), and each subsequence's `mean` and `std`.
+ */
 function prepare(series: SignalInput, m: Size, where: string) {
   const t = readSamples(series, where).values
   checkWindow(m, t.length, where)
@@ -52,6 +72,15 @@ function prepare(series: SignalInput, m: Size, where: string) {
   return { t, k, mean, std }
 }
 
+/**
+ * A `MatrixProfile` from its parts, copying the arrays.
+ *
+ * @param m The subsequence length.
+ * @param exclusion The exclusion zone used.
+ * @param P The nearest-neighbour distances.
+ * @param I The nearest-neighbour indices ($-1$ where none).
+ * @returns The matrix profile.
+ */
 const result = (m: number, exclusion: number, P: Float64Array, I: Int32Array): MatrixProfile => ({
   kind: 'matrix-profile',
   m,
@@ -60,7 +89,21 @@ const result = (m: number, exclusion: number, P: Float64Array, I: Int32Array): M
   index: fromData(Int32Array.from(I)),
 })
 
-/** The matrix profile of a series by STOMP (exact, O(n²)); see the module notes. */
+/**
+ * The matrix profile of a series by STOMP (exact, $O(n^2)$; see the file notes). Throws `DomainError` unless $m$ is an
+ * integer in $2, \dots, n$ and there are at least two subsequences.
+ *
+ * @param series The series, of length $n$: a single-channel signal or its samples.
+ * @param m The subsequence length.
+ * @param options `exclusion`, the exclusion zone (default $\lceil m/4 \rceil$).
+ * @returns The profile and index of all $n - m + 1$ subsequences.
+ *
+ * @example A shape that recurs: its two occurrences point at each other
+ * const x = [0, 1, 3, 1, 0, 2, 0, 1, 3, 1, 0, 1, 2, 2]
+ * const mp = matrixProfile(x, 4)
+ * print('profile =', mp.profile)
+ * print('index =', mp.index)
+ */
 export function matrixProfile(series: SignalInput, m: Size, options: MatrixProfileOptions = {}): MatrixProfile {
   const { t, k, mean, std } = prepare(series, m, 'matrixProfile')
   const ex = exclusionOf(m, options)
@@ -89,14 +132,17 @@ export function matrixProfile(series: SignalInput, m: Size, options: MatrixProfi
 
 /** One state of SCRIMP++: the profile so far and the diagonals done. */
 export interface ScrimpState extends Status {
+  /** The nearest-neighbour distances found so far; each only falls, to the exact value. */
   readonly profile: Tensor
+  /** The nearest-neighbour indices found so far ($-1$ where none yet). */
   readonly index: Tensor
   /** Diagonals evaluated so far, out of `diagonals`. */
   readonly done: number
+  /** The number of diagonals outside the exclusion zone, all of which are evaluated by convergence. */
   readonly diagonals: number
   /** The diagonal offsets evaluated in the last step. */
   readonly last: readonly number[]
-  /** The order in which the diagonals (offsets j − i) are visited. */
+  /** The order in which the diagonals (offsets $j - i$) are visited. */
   readonly order: readonly number[]
 }
 
@@ -109,9 +155,26 @@ export interface ScrimpOptions extends MatrixProfileOptions {
 }
 
 /**
- * SCRIMP++ as steps (module notes): the initial state is PreSCRIMP's approximate profile; each step evaluates the next
- * batch of diagonals in a random order drawn from the `init` stream; converged once every diagonal is done, when the
- * profile equals {@link matrixProfile}'s.
+ * SCRIMP++ as steps (see the file notes): the initial state is PreSCRIMP's approximate profile; each step evaluates
+ * the next batch of diagonals in a random order drawn from the `init` stream; converged once every diagonal is done,
+ * when the profile equals {@link matrixProfile}'s (up to rounding, and to which neighbour a tie picks). Throws
+ * `DomainError` as `matrixProfile` does.
+ *
+ * @param series The series, of length $n$: a single-channel signal or its samples.
+ * @param m The subsequence length.
+ * @param options `exclusion` (default $\lceil m/4 \rceil$), `diagonalsPerStep` (default about 2% of the diagonals)
+ *   and `prescrimp` (default true).
+ * @returns The algorithm, to run with `run`; its start is unused.
+ *
+ * @example The anytime profile on noise: PreSCRIMP is nearly exact, the steps finish the job
+ * const x = normals(stream(3), 80)
+ * const exact = toArray(matrixProfile(x, 8).profile)
+ * const alg = scrimpSteps(x, 8, { diagonalsPerStep: 20 })
+ * for (const steps of [0, 1, 2, 3, 4]) {
+ *   const s = run(alg, undefined, steps, { stream: stream(1) })
+ *   const wrong = toArray(s.profile).filter((v, i) => Math.abs(v - exact[i]) > 1e-9).length
+ *   print(`${steps} steps:`, s.done, 'of', s.diagonals, 'diagonals; entries not yet exact:', wrong)
+ * }
  */
 export function scrimpSteps(series: SignalInput, m: Size, options: ScrimpOptions = {}): Algorithm<void, ScrimpState> {
   const { t, k, mean, std } = prepare(series, m, 'scrimpSteps')
@@ -215,20 +278,39 @@ export function scrimpSteps(series: SignalInput, m: Size, options: ScrimpOptions
 
 /** Options of {@link motifs} and {@link discords}. */
 export interface PickOptions {
-  /** How many to return (default 3). */
+  /** How many to return at most (default 3); fewer when the exclusions leave no candidate. */
   count?: Size
-  /** Picks closer than this to an earlier pick are skipped (default: the profile's m, a whole subsequence). */
+  /**
+   * Picks within this many samples of an earlier pick are skipped (default: the profile's $m$, a whole
+   * subsequence).
+   */
   exclusion?: Size
 }
 
 /** A motif: a pair of subsequences, the closest pair not yet excluded, and their distance. */
 export interface Motif {
+  /** The start of the earlier subsequence of the pair. */
   readonly a: number
+  /** The start of the later subsequence of the pair. */
   readonly b: number
+  /** Their z-normalised distance. */
   readonly distance: number
 }
 
-/** The top motifs of a matrix profile: smallest profile values first, excluding the neighbourhoods of earlier picks. */
+/**
+ * The top motifs of a matrix profile: smallest profile values first, each paired with its nearest neighbour. A pick
+ * excludes the neighbourhoods of both its subsequences from later picks, and a candidate whose neighbour is excluded
+ * is passed over.
+ *
+ * @param mp The matrix profile, from `matrixProfile` or `scrimpProfile`.
+ * @param options `count`, the most motifs to return (default 3), and `exclusion`, the neighbourhood radius in samples
+ *   (default the profile's $m$).
+ * @returns The motifs, closest first.
+ *
+ * @example A shape repeated in a sine wave
+ * const x = Array.from({ length: 40 }, (_, i) => (i === 25 ? 3 : Math.sin((2 * Math.PI * i) / 10)))
+ * print('motifs =', motifs(matrixProfile(x, 10), { count: 2 }))
+ */
 export function motifs(mp: MatrixProfile, options: PickOptions = {}): Motif[] {
   const { count = 3, exclusion = mp.m } = options
   const P = toFlat(mp.profile)
@@ -254,12 +336,27 @@ export function motifs(mp: MatrixProfile, options: PickOptions = {}): Motif[] {
 
 /** A discord: the subsequence farthest from its nearest neighbour. */
 export interface Discord {
+  /** The start of the subsequence. */
   readonly at: number
+  /** Its distance to its nearest neighbour: the profile value. */
   readonly distance: number
+  /** The start of that nearest neighbour. */
   readonly neighbour: number
 }
 
-/** The top discords of a matrix profile: largest finite profile values first, excluding earlier picks' neighbourhoods. */
+/**
+ * The top discords of a matrix profile: largest finite profile values first, each pick excluding its neighbourhood
+ * from later ones.
+ *
+ * @param mp The matrix profile, from `matrixProfile` or `scrimpProfile`.
+ * @param options `count`, the most discords to return (default 3), and `exclusion`, the neighbourhood radius in
+ *   samples (default the profile's $m$).
+ * @returns The discords, most unusual first.
+ *
+ * @example A spike in a sine wave is the most unusual shape
+ * const x = Array.from({ length: 40 }, (_, i) => (i === 25 ? 3 : Math.sin((2 * Math.PI * i) / 10)))
+ * print('discord =', discords(matrixProfile(x, 10), { count: 1 }))
+ */
 export function discords(mp: MatrixProfile, options: PickOptions = {}): Discord[] {
   const { count = 3, exclusion = mp.m } = options
   const P = toFlat(mp.profile)
@@ -276,7 +373,21 @@ export function discords(mp: MatrixProfile, options: PickOptions = {}): Discord[
   return out
 }
 
-/** The matrix profile held by a SCRIMP++ state. */
+/**
+ * The matrix profile held by a SCRIMP++ state, so that `motifs` and `discords` can read an anytime result. The arrays
+ * are shared with the state, not copied.
+ *
+ * @param state A state of `scrimpSteps`, converged or not.
+ * @param m The subsequence length the state was computed with.
+ * @param options `exclusion`, the zone the state was computed with (default $\lceil m/4 \rceil$); only recorded.
+ * @returns The matrix profile.
+ *
+ * @example The discord of a finished SCRIMP++ run
+ * const x = Array.from({ length: 40 }, (_, i) => (i === 25 ? 3 : Math.sin((2 * Math.PI * i) / 10)))
+ * const s = run(scrimpSteps(x, 10), undefined, 100, { stream: stream(1) })
+ * print('converged after', s.t, 'steps:', s.converged)
+ * print('discord =', discords(scrimpProfile(s, 10), { count: 1 }))
+ */
 export function scrimpProfile(state: ScrimpState, m: Size, options: MatrixProfileOptions = {}): MatrixProfile {
   return {
     kind: 'matrix-profile',

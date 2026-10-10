@@ -13,40 +13,61 @@ import { gaussianBlur, gradients } from './filters'
 export interface Canny {
   /** The smoothed image. */
   smoothed: Tensor
-  /** Gradient magnitude and direction (radians, atan2(g_r, g_c)). */
+  /** The Sobel gradient magnitude of the smoothed image. */
   magnitude: Tensor
+  /** The gradient direction in radians, $\operatorname{atan2}(g_r, g_c)$ ($g_r$ along rows, $g_c$ along columns). */
   direction: Tensor
   /** The magnitude where it is a local maximum across the edge, else 0. */
   suppressed: Tensor
-  /** 1 where the suppressed magnitude ≥ high, else 0. */
+  /** 1 where the suppressed magnitude is positive and at least `high`, else 0. */
   strong: Tensor
-  /** 1 where low ≤ suppressed < high, else 0. */
+  /** 1 where the suppressed magnitude is positive, at least `low` and below `high`, else 0. */
   weak: Tensor
   /** The edges: strong pixels and the weak pixels 8-connected to them (0/1). */
   edges: Tensor
-  /** The thresholds used (absolute magnitudes). */
+  /** The low threshold used, as an absolute magnitude. */
   low: number
+  /** The high threshold used, as an absolute magnitude. */
   high: number
 }
 
 /** Options for `canny`. */
 export interface CannyOptions {
-  /** Gaussian smoothing σ in pixels. Default 1. */
+  /** Gaussian smoothing $\sigma$ in pixels (0 for none). Default 1. */
   sigma?: number
-  /** Thresholds on the gradient magnitude; with `quantile: true`, quantiles of the nonzero suppressed magnitudes. */
+  /**
+   * The low threshold on the gradient magnitude (default 10% of the largest magnitude); with `quantile`, a quantile
+   * of the nonzero suppressed magnitudes (default 0.7).
+   */
   low?: number
+  /** The high threshold, likewise (default 20% of the largest magnitude, or the 0.9 quantile). */
   high?: number
+  /** Read `low` and `high` as quantiles in $[0, 1]$ rather than magnitudes. Default false. */
   quantile?: boolean
   /** Border mode for the filters. Default `nearest`. */
   border?: Border
 }
 
 /**
- * Canny edges (Canny, 1986). The image is blurred with σ, differentiated by Sobel, and each pixel kept only if its
- * magnitude is at least that of both neighbours along the gradient direction (rounded to the nearest of 0°, 45°, 90°,
- * 135°). Pixels at or above `high` are edges; pixels between `low` and `high` become edges when 8-connected to one.
- * Thresholds default to 10% and 20% of the largest magnitude; with `quantile`, they are quantiles of the suppressed
- * nonzero magnitudes (e.g. 0.7 and 0.9). The one-pixel frame is never an edge.
+ * Canny edges (Canny, 1986). The image is blurred with $\sigma$, differentiated by Sobel, and each pixel kept only if
+ * its magnitude is at least that of both neighbours along the gradient direction (rounded to the nearest of
+ * $0^\circ$, $45^\circ$, $90^\circ$ and $135^\circ$). Pixels at or above `high` are edges; pixels
+ * between `low` and `high` become edges when 8-connected to one, directly or through other such pixels. Thresholds
+ * default to 10% and 20% of the largest magnitude; with `quantile`, they are quantiles of the suppressed nonzero
+ * magnitudes (by default 0.7 and 0.9). The one-pixel frame is never an edge. Throws `DomainError` for a negative
+ * $\sigma$ or a `low` above `high`.
+ *
+ * @param img The image, $h \times w$.
+ * @param options The smoothing, the thresholds and the border mode.
+ * @returns Every stage, from the smoothed image to the edges, with the thresholds used.
+ *
+ * @example Suppression thins a soft edge to one pixel
+ * const img = [0, 1, 2, 3, 4].map(() => [0, 0, 0, 1, 2, 2, 2])
+ * const { magnitude, suppressed, edges, low, high } = canny(img, { sigma: 0 })
+ * print('magnitude:', magnitude)
+ * print('suppressed:', suppressed)
+ * print('thresholds:', low, high)
+ * print('edges:', edges)
  */
 export function canny(img: ImageInput, options: CannyOptions = {}): Canny {
   const { v, h, w } = readImage(img, 'canny')

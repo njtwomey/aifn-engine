@@ -2,8 +2,9 @@
  * Nonparametric spectral estimates beyond the periodogram and Welch: Bartlett's average of non-overlapping
  * periodograms (Bartlett, 1946), the Blackman–Tukey lag-window estimate, the cross-spectral density and the
  * magnitude-squared coherence (Carter, Knapp and Nuttall, 1973) as `scipy.signal.csd` and `scipy.signal.coherence`,
- * χ² confidence intervals for an estimate with ν equivalent degrees of freedom, the coherence's null threshold, and
- * the log-spectral error of an estimate against a reference spectrum.
+ * $\chi^2$ confidence intervals for an estimate with $\nu$ equivalent degrees of freedom, the coherence's null
+ * threshold, the delay read from a cross-spectrum's phase, and the log-spectral error of an estimate against a
+ * reference spectrum, with the resolution test `peakDip`.
  *
  * Conventions follow `welch`: one-sided densities (doubled off DC and Nyquist) in power per Hz with `fs`.
  */
@@ -28,8 +29,18 @@ import {
 
 /**
  * Bartlett's method: the mean of rectangular-window periodograms of non-overlapping segments of length `nperseg`
- * (Bartlett, 1946). It is `welch` with a boxcar window and no overlap: averaging K segments divides the variance by K
- * and widens the resolution from fs/n to fs/nperseg. Default segment length: n/8 (at least 16 samples).
+ * (Bartlett, 1946). It is `welch` with a boxcar window and no overlap: averaging $K$ segments divides the variance by
+ * $K$ and widens the resolution from $f_s/n$ to $f_s/\text{nperseg}$. Default segment length: $\lfloor n/8 \rfloor$,
+ * at least 16 samples and at most $n$.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `SegmentOptions` other than `noverlap` (always 0); `window` defaults to `'boxcar'`.
+ * @returns The estimate as a `Spectrum`, with `segments` and `dof` ($2K$ for the boxcar).
+ *
+ * @example Eight segments of white noise
+ * const B = bartlett(normals(stream(1), 1024))
+ * print('segments =', B.segments, ' dof =', B.dof, ' bins =', B.f.shape[0])
+ * print('mean density =', mean(B.values), ' (white noise of unit variance: 2)')
  */
 export function bartlett(
   x: SignalInput,
@@ -46,16 +57,17 @@ export function bartlett(
 
 /** Options of `blackmanTukey`. */
 export type BlackmanTukeyOptions = {
+  /** The sample rate in Hz (default the signal's, or 1 for bare samples). */
   fs?: Scalar
-  /** The largest lag M used (default ⌊n/10⌋, at least 1): resolution ≈ fs/M. */
+  /** The largest lag $M$ used (default $\lfloor n/10 \rfloor$, at least 1): resolution $\approx f_s/M$. */
   maxLag?: Size
   /**
-   * The lag window, any window spec, built symmetric of length 2M + 1 and centred on lag 0 (default `bartlett`, the
-   * triangle 1 − |k|/M, whose estimate is never negative). Other windows can give negative values where the
+   * The lag window, any window spec, built symmetric of length $2M + 1$ and centred on lag 0 (default `bartlett`, the
+   * triangle $1 - \abs{k}/M$, whose estimate is never negative). Other windows can give negative values where the
    * spectrum is small.
    */
   lagWindow?: WindowInput
-  /** FFT length (≥ 2M + 1; default the larger of n and 2M + 1). */
+  /** FFT length ($\ge 2M + 1$; default the larger of $n$ and $2M + 1$). */
   nfft?: Size
   /** Subtract the mean first (default true). */
   detrend?: boolean
@@ -63,13 +75,22 @@ export type BlackmanTukeyOptions = {
 
 /**
  * The Blackman–Tukey (lag-window, correlogram) estimate: the Fourier transform of the biased sample autocovariance
- * γ̂(k) (÷ n) tapered by a lag window w of half-width M,
+ * $\hat\gamma(k)$ (divided by $n$) tapered by a lag window $w$ of half-width $M$,
+ * $S(f) = \frac{1}{f_s} \sum_{\abs{k} \le M} w(k)\, \hat\gamma(k)\, e^{-2\pi i f k / f_s}$, one-sided (doubled off
+ * DC and Nyquist). With $w = 1$ and $M = n - 1$ it is exactly the periodogram (Wiener–Khinchin for the sample); a
+ * short window smooths the periodogram by convolving it with the window's transform. Equivalent degrees of freedom
+ * $\nu = 2n / \sum_{\abs{k} \le M} w(k)^2$ (Percival and Walden, 1993, eq. 248a). Throws `DomainError` unless $M$
+ * is an integer in $[0, n - 1]$.
  *
- *   S(f) = (1/fs) Σ_{|k|≤M} w(k) γ̂(k) e^{−2πi fk/fs},
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The sample rate, largest lag, lag window, FFT length and mean removal; see `BlackmanTukeyOptions`.
+ * @returns The one-sided density as a `Spectrum`, with `dof` and the `maxLag` $M$ used.
  *
- * one-sided (doubled off DC and Nyquist). With w = 1 and M = n − 1 it is exactly the periodogram (Wiener–Khinchin
- * for the sample); a short window smooths the periodogram by convolving it with the window's transform. Equivalent
- * degrees of freedom ν = 2n / Σ_{|k|≤M} w(k)² (Percival and Walden, 1993, eq. 248a).
+ * @example A smoothed estimate of white noise
+ * // M = 102 lags of 1024 samples: about 30 degrees of freedom, against the periodogram's 2.
+ * const T = blackmanTukey(normals(stream(1), 1024))
+ * print('maxLag =', T.maxLag, ' dof =', T.dof)
+ * print('mean density =', mean(T.values), ' min =', min(T.values), ' max =', max(T.values))
  */
 export function blackmanTukey(
   x: SignalInput,
@@ -109,6 +130,7 @@ export function blackmanTukey(
   }
 }
 
+/** The segment defaults of `csd` and `coherence`, as `welch`'s: Hann, 256 samples, half overlap, constant detrend. */
 const SEGMENT_DEFAULTS = {
   window: 'hann' as WindowInput,
   nperseg: 256,
@@ -116,7 +138,16 @@ const SEGMENT_DEFAULTS = {
   detrend: 'constant' as Detrend,
 }
 
-/** The segment transforms of two equally long signals under the same options. */
+/**
+ * The segment transforms of two equally long signals under the same options. Throws `ShapeError` when the lengths
+ * differ.
+ *
+ * @param x The first signal (a `Signal`, or bare samples); its sample rate is used unless `options.fs` is given.
+ * @param y The second signal, of the same length.
+ * @param options The `SegmentOptions`, resolved over `welch`'s defaults.
+ * @param where The caller's name, for error messages.
+ * @returns The resolved options and the segment transforms `sx` and `sy`.
+ */
 function pairedSegments(x: SignalInput, y: SignalInput, options: SegmentOptions, where: string) {
   const a = readSamples(x, where, options.fs)
   const b = readSamples(y, where, options.fs ?? a.fs)
@@ -127,10 +158,27 @@ function pairedSegments(x: SignalInput, y: SignalInput, options: SegmentOptions,
 }
 
 /**
- * The cross-spectral density of x and y by Welch's method, as `scipy.signal.csd`: the mean over segments of
- * conj(Xₖ(f)) Yₖ(f), scaled as `welch` scales a PSD and one-sided (doubled off DC and Nyquist). For y = h ∗ x + noise
- * independent of x, P_xy(f) = H(f) P_xx(f): its phase is the phase of the filter (−2πfτ for a delay τ). Returns a
- * complex128 `Spectrum` (`quantity: 'complex'`); `segments` is the number averaged.
+ * The cross-spectral density of $x$ and $y$ by Welch's method, as `scipy.signal.csd`: the mean over segments of
+ * $X_k^*(f)\, Y_k(f)$, scaled as `welch` scales a PSD and one-sided (doubled off DC and Nyquist). For
+ * $y = h * x + \text{noise}$ independent of $x$, $P_{xy}(f) = H(f) P_{xx}(f)$: its phase is the phase of the filter
+ * ($-2\pi f \tau$ for a delay $\tau$). Returns a complex128 `Spectrum` (`quantity: 'complex'`); `segments` is the
+ * number averaged.
+ *
+ * @param x The first signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param y The second signal, of the same length (`ShapeError` otherwise).
+ * @param options The `SegmentOptions`, with `welch`'s defaults.
+ * @returns The cross-spectral density, with the number of segments.
+ *
+ * @example A delayed copy
+ * // y is x delayed by 3 samples plus noise: |P_xy| matches the density of x, about 2, and its phase is -2 pi f 3.
+ * const x = normals(stream(1), 4096)
+ * const xs = x.data
+ * const y = add(tensor(Array.from(xs, (_, i) => (i >= 3 ? xs[i - 3] : 0))), normals(stream(2), 4096, 0, 0.5))
+ * const P = csd(x, y, { nperseg: 128 })
+ * print('segments =', P.segments, ' mean |P_xy| =', mean(complexAbs(P.values)))
+ * const phase = angle(P.values).data
+ * print('phase at bins 8, 16 =', phase[8], phase[16])
+ * print('-2 pi f 3 there =', -6 * Math.PI * P.f.data[8], -6 * Math.PI * P.f.data[16])
  */
 export function csd(x: SignalInput, y: SignalInput, options: SegmentOptions = {}): Spectrum & { segments: Size } {
   const { o, sx, sy } = pairedSegments(x, y, options, 'csd')
@@ -164,12 +212,26 @@ export function csd(x: SignalInput, y: SignalInput, options: SegmentOptions = {}
 }
 
 /**
- * The magnitude-squared coherence C_xy(f) = |P_xy(f)|² / (P_xx(f) P_yy(f)), each density estimated by Welch's method
- * with the same segments, as `scipy.signal.coherence`. C lies in [0, 1]; for y = h ∗ x + v with v independent of x it
- * is the fraction of y's power at f explained linearly by x, |H|²P_xx / (|H|²P_xx + P_vv). With one segment it is 1
- * identically, so coherence needs averaging; with K independent segments, its estimate is biased upwards by about
- * (1 − C)²/K (Carter, Knapp and Nuttall, 1973). `segments` is K; `coherenceThreshold(K)` is the level an
- * uncoupled pair exceeds with a given probability.
+ * The magnitude-squared coherence $C_{xy}(f) = \abs{P_{xy}(f)}^2 / (P_{xx}(f) P_{yy}(f))$, each density estimated by
+ * Welch's method with the same segments, as `scipy.signal.coherence`. $C$ lies in $[0, 1]$; for $y = h * x + v$ with
+ * $v$ independent of $x$ it is the fraction of $y$'s power at $f$ explained linearly by $x$,
+ * $\abs{H}^2 P_{xx} / (\abs{H}^2 P_{xx} + P_{vv})$. With one segment it is 1 identically, so coherence needs
+ * averaging; with $K$ independent segments, its estimate is biased upwards by about $(1 - C)^2/K$ (Carter, Knapp and
+ * Nuttall, 1973). `segments` is $K$; `coherenceThreshold(K)` is the level an uncoupled pair exceeds with a given
+ * probability. Bins where either density is 0 get 0.
+ *
+ * @param x The first signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param y The second signal, of the same length (`ShapeError` otherwise).
+ * @param options The `SegmentOptions`, with `welch`'s defaults.
+ * @returns The coherence as a `Spectrum` (`quantity: 'coherence'`), with the number of segments.
+ *
+ * @example A noisy copy
+ * // y = x + noise of a quarter the power: C = 1 / (1 + 0.25) = 0.8 at every frequency.
+ * const x = normals(stream(1), 4096)
+ * const y = add(x, normals(stream(2), 4096, 0, 0.5))
+ * const C = coherence(x, y, { nperseg: 128 })
+ * print('segments =', C.segments, ' mean coherence =', mean(C.values))
+ * print('an unrelated pair:', mean(coherence(x, normals(stream(3), 4096), { nperseg: 128 }).values))
  */
 export function coherence(x: SignalInput, y: SignalInput, options: SegmentOptions = {}): Spectrum & { segments: Size } {
   const { o, sx, sy } = pairedSegments(x, y, options, 'coherence')
@@ -211,36 +273,73 @@ export function coherence(x: SignalInput, y: SignalInput, options: SegmentOption
 }
 
 /**
- * The level that the estimated coherence of two independent signals exceeds with probability 1 − `level`, from K
- * independent segments: under independence P(Ĉ ≥ c) = (1 − c)^{K−1} (Carter, Knapp and Nuttall, 1973), so
- * c = 1 − (1 − level)^{1/(K−1)}. Overlapping segments are not independent; pass their effective number.
+ * The level that the estimated coherence of two independent signals exceeds with probability $1 - \text{level}$, from
+ * $K$ independent segments: under independence $P(\hat{C} \ge c) = (1 - c)^{K-1}$ (Carter, Knapp and Nuttall, 1973),
+ * so $c = 1 - (1 - \text{level})^{1/(K-1)}$. Overlapping segments are not independent; pass their effective number.
+ *
+ * @param segments The number of independent segments $K$; 1 or fewer gives 1 (one segment's coherence is always 1).
+ * @param options Options.
+ * @param options.level The probability that the threshold is not exceeded under independence (default 0.95).
+ * @returns The threshold $c$.
+ *
+ * @example More segments, a lower threshold
+ * for (const K of [2, 8, 32]) print(`K = ${K}:`, coherenceThreshold(K))
  */
 export function coherenceThreshold(segments: Scalar, { level = 0.95 }: { level?: Scalar } = {}): number {
   if (!(segments > 1)) return 1
   return 1 - Math.pow(1 - level, 1 / (segments - 1))
 }
 
-/** A two-sided χ² interval for a spectrum. */
+/** A two-sided $\chi^2$ interval for a spectrum. */
 export type SpectralInterval = {
-  /** Lower and upper limits, the shape of the spectrum's values. */
+  /** Lower limits, one per frequency. */
   lower: Tensor
+  /** Upper limits, one per frequency. */
   upper: Tensor
   /** The degrees of freedom used, per frequency. */
   dof: Tensor
+  /** The confidence level, e.g. 0.95. */
   level: Scalar
 }
 
-/** The p-quantile of χ²_ν: 2 P⁻¹(ν/2, p), through the inverse regularised incomplete gamma function. */
+/**
+ * The $p$-quantile of $\chi^2_\nu$: $2 P^{-1}(\nu/2, p)$, through the inverse regularised incomplete gamma function.
+ *
+ * @param nu The degrees of freedom $\nu > 0$ (need not be an integer).
+ * @param p The probability $p$, in $[0, 1]$.
+ * @returns The value below which $\chi^2_\nu$ falls with probability $p$.
+ *
+ * @example Two degrees of freedom
+ * // chi^2_2 is exponential with mean 2: its p-quantile is -2 ln(1 - p).
+ * print('2.5% and 97.5% =', chiSquareQuantile(2, 0.025), chiSquareQuantile(2, 0.975))
+ * print('-2 ln(0.975), -2 ln(0.025) =', -2 * Math.log(0.975), -2 * Math.log(0.025))
+ */
 export function chiSquareQuantile(nu: Scalar, p: Scalar): number {
   return 2 * (regularisedGammaPInverse(nu / 2, p) as number)
 }
 
 /**
- * The 100·level % confidence interval of a power spectral estimate Ŝ(f) with ν equivalent degrees of freedom:
- * νŜ/S ~ χ²_ν, so [νŜ / χ²_ν(1 − α/2), νŜ / χ²_ν(α/2)] with α = 1 − level (Percival and Walden, 1993, §6.10;
- * Welch, 1967). On a dB scale the interval has the same width at every frequency. `dof` is a number (a periodogram's
- * 2, Welch's `dof`, Blackman–Tukey's `dof`) or one per frequency (adaptive multitaper). The χ² law holds away from DC
- * and Nyquist and for a spectrum smooth over the estimator's bandwidth; it fails at spectral lines.
+ * The $100 \cdot \text{level}\%$ confidence interval of a power spectral estimate $\hat{S}(f)$ with $\nu$ equivalent
+ * degrees of freedom: $\nu\hat{S}/S \sim \chi^2_\nu$, so
+ * $[\nu\hat{S} / \chi^2_\nu(1 - \alpha/2), \nu\hat{S} / \chi^2_\nu(\alpha/2)]$ with $\alpha = 1 - \text{level}$
+ * (Percival and Walden, 1993, §6.10; Welch, 1967). On a dB scale the interval has the same width at every frequency.
+ * `dof` is a number (a periodogram's 2, Welch's `dof`, Blackman–Tukey's `dof`) or one per frequency (adaptive
+ * multitaper). The $\chi^2$ law holds away from DC and Nyquist and for a spectrum smooth over the estimator's
+ * bandwidth; it fails at spectral lines. Throws `ShapeError` when `dof` has not one value per frequency.
+ *
+ * @param s The estimate, a real-valued `Spectrum`.
+ * @param dof The equivalent degrees of freedom: one number, or one per frequency.
+ * @param options Options.
+ * @param options.level The confidence level (default 0.95).
+ * @returns The lower and upper limits, the degrees of freedom used and the level.
+ *
+ * @example Welch's estimate of white noise
+ * // The true density is 2 everywhere: about 95% of the intervals should contain it.
+ * const W = welch(normals(stream(1), 1024), { nperseg: 128 })
+ * const ci = spectralConfidence(W, W.dof)
+ * print('dof =', W.dof, ' bin 10:', ci.lower.data[10], '<', W.values.data[10], '<', ci.upper.data[10])
+ * const covered = Array.from(W.values.data, (_, i) => ci.lower.data[i] <= 2 && 2 <= ci.upper.data[i])
+ * print('intervals containing 2:', covered.filter(Boolean).length, 'of', covered.length)
  */
 export function spectralConfidence(
   s: Spectrum,
@@ -270,21 +369,47 @@ export function spectralConfidence(
 
 /** Which frequencies a spectral error counts: inside `band`, outside every `exclude` interval (e.g. around lines). */
 export type SpectralErrorOptions = {
+  /** The closed interval of frequencies counted (default all). */
   band?: readonly [number, number]
+  /** Closed intervals of frequencies left out (default none). */
   exclude?: readonly (readonly [number, number])[]
   /** The frequencies, when the estimate is given as bare values. */
   f?: ArrayLike<number>
 }
 
+/**
+ * Whether a frequency is counted under the options: inside `band` and outside every `exclude` interval.
+ *
+ * @param freq The frequency, or undefined when the frequencies are not known (then it is always counted).
+ * @param o The band and exclusions.
+ * @returns True when the frequency counts.
+ */
 const counted = (freq: number | undefined, o: SpectralErrorOptions) =>
   freq === undefined ||
   ((!o.band || (freq >= o.band[0] && freq <= o.band[1])) && !(o.exclude ?? []).some(([a, b]) => freq >= a && freq <= b))
 
 /**
- * The error of a spectral estimate against a reference on the same frequencies, in dB: dᵢ = 10 log₁₀(Ŝᵢ / Sᵢ).
- * `bias` is the mean of d, `sd` its standard deviation and `distance` the log-spectral distance √(mean d²), so
- * distance² = bias² + sd². Frequencies where either spectrum is not positive, outside `band` or inside an `exclude`
- * interval are left out.
+ * The error of a spectral estimate against a reference on the same frequencies, in dB:
+ * $d_i = 10 \log_{10}(\hat{S}_i / S_i)$. `bias` is the mean of $d$, `sd` its standard deviation and `distance` the
+ * log-spectral distance $\sqrt{\operatorname{mean} d^2}$, so $\text{distance}^2 = \text{bias}^2 + \text{sd}^2$.
+ * Frequencies where either spectrum is not positive, outside `band` or inside an `exclude` interval are left out; with
+ * no frequencies known (bare values and no `f`) the band and exclusions are ignored. All NaN when nothing is counted.
+ * Throws `ShapeError` when the lengths differ.
+ *
+ * @param estimate The estimate $\hat{S}$: a `Spectrum` (whose `f` is used) or bare values.
+ * @param reference The reference $S$ at the same frequencies.
+ * @param options Which frequencies count; see `SpectralErrorOptions`.
+ * @param options.band The closed interval of frequencies counted (default all).
+ * @param options.exclude Closed intervals of frequencies left out (default none).
+ * @param options.f The frequencies of the values, needed for `band` and `exclude` when `estimate` is bare values
+ *   (default the estimate's `f`).
+ * @returns `bias`, `sd` and `distance` in dB, and `count`, the number of frequencies counted.
+ *
+ * @example Welch against the flat truth
+ * const W = welch(normals(stream(1), 4096), { nperseg: 128 })
+ * const reference = Array(W.f.shape[0]).fill(2)
+ * print('all bins:', logSpectralError(W, reference))
+ * print('away from DC and Nyquist:', logSpectralError(W, reference, { band: [0.01, 0.49] }))
  */
 export function logSpectralError(
   estimate: Spectrum | ArrayLike<number>,
@@ -313,11 +438,29 @@ export function logSpectralError(
 }
 
 /**
- * The bias and variance of a spectral estimator, from R estimates of independent realisations on one frequency grid,
- * in dB: at each frequency the mean of 10 log₁₀ Ŝ_r against 10 log₁₀ S (squared: bias²) and the variance of
- * 10 log₁₀ Ŝ_r about that mean, each averaged over the counted frequencies; mse = bias² + variance. Smoothing more
- * (shorter segments, a shorter lag window, more tapers, a lower AR order) trades variance for bias. On the log scale
- * even a consistent estimator is biased by E log(χ²_ν/ν) (−2.5 dB for a periodogram's ν = 2).
+ * The bias and variance of a spectral estimator, from $R$ estimates of independent realisations on one frequency
+ * grid, in dB: at each frequency the mean of $10 \log_{10} \hat{S}_r$ against $10 \log_{10} S$ (squared:
+ * $\text{bias}^2$) and the variance of $10 \log_{10} \hat{S}_r$ about that mean, each averaged over the counted
+ * frequencies; $\text{mse} = \text{bias}^2 + \text{variance}$. Smoothing more (shorter segments, a shorter lag
+ * window, more tapers, a lower AR order) trades variance for bias. On the log scale even a consistent estimator is
+ * biased by $\expect \log(\chi^2_\nu/\nu)$ ($-2.5$ dB for a periodogram's $\nu = 2$). Estimates are floored at
+ * $10^{-300}$ before the log; frequencies where the reference is not positive are left out.
+ *
+ * @param estimates The $R$ estimates, each with one value per frequency of `reference`.
+ * @param reference The true spectrum $S$.
+ * @param options The band and exclusions, which need the frequencies `f`; see `SpectralErrorOptions`.
+ * @returns `bias2`, `variance` and `mse` in $\text{dB}^2$, and `count`, the number of frequencies counted (all NaN
+ *   when it is 0).
+ *
+ * @example The periodogram against Blackman–Tukey
+ * // White noise of density 2: the periodogram has the -2.5 dB log bias and a large variance; the smoothed
+ * // Blackman–Tukey estimate trades most of both away.
+ * const f = Array.from({ length: 33 }, (_, k) => k / 64)
+ * const reference = Array(33).fill(2)
+ * const runs = (estimate) => Array.from({ length: 20 }, (_, r) => estimate(normals(stream(r), 64)).values.data)
+ * const options = { f, band: [0.01, 0.49] }
+ * print('periodogram:', replicateSpectralError(runs((x) => periodogram(x)), reference, options))
+ * print('Blackman–Tukey:', replicateSpectralError(runs((x) => blackmanTukey(x, { nfft: 64 })), reference, options))
  */
 export function replicateSpectralError(
   estimates: readonly ArrayLike<number>[],
@@ -342,9 +485,25 @@ export function replicateSpectralError(
 }
 
 /**
- * Whether a spectral estimate shows two peaks near f₁ < f₂ as separate: the highest value within a quarter of the
+ * Whether a spectral estimate shows two peaks near $f_1 < f_2$ as separate: the highest value within a quarter of the
  * separation of each, and the lowest value between them; `dip` is the weaker peak's height above that valley in dB,
  * and the peaks count as resolved when the dip is at least `threshold` (default 3 dB, the Rayleigh-like criterion).
+ * When no bin lies near a peak or between them, the dip is 0 and the peaks are not resolved.
+ *
+ * @param s The estimate, a real-valued `Spectrum`.
+ * @param f1 One peak's frequency, in the units of `s.f`.
+ * @param f2 The other's (the order does not matter).
+ * @param options Options.
+ * @param options.threshold The dip in dB at which the peaks count as resolved (default 3).
+ * @returns `dip` in dB and `resolved`.
+ *
+ * @example Short segments blur two close tones
+ * // Tones 0.02 cycles per sample apart: Welch with 32-sample segments merges them; a Hann periodogram of all 256
+ * // samples separates them.
+ * const tone = (f, i) => Math.sin(2 * Math.PI * f * i)
+ * const x = Array.from({ length: 256 }, (_, i) => tone(0.1, i) + tone(0.12, i))
+ * print('welch, nperseg 32:', peakDip(welch(x, { nperseg: 32 }), 0.1, 0.12))
+ * print('periodogram, hann:', peakDip(periodogram(x, { window: 'hann' }), 0.1, 0.12))
  */
 export function peakDip(
   s: Spectrum,
@@ -371,10 +530,24 @@ export function peakDip(
 }
 
 /**
- * The delay τ of y behind x from the phase of their cross-spectral density: for y = x(t − τ) filtered and with noise,
- * arg S_xy(f) = −2πfτ, so τ is the slope of the unwrapped phase through the origin, fitted by least squares weighted
- * by C/(1 − C) (the inverse phase variance, up to a constant) over the bins with coherence at least `minCoherence`
- * (default 0.5), unwrapped in order of frequency. In the time units of the spectra (samples when fs = 1).
+ * The delay $\tau$ of $y$ behind $x$ from the phase of their cross-spectral density: for $y = x(t - \tau)$ filtered
+ * and with noise, $\arg S_{xy}(f) = -2\pi f \tau$, so $\tau$ is the slope of the unwrapped phase through the origin,
+ * fitted by least squares weighted by $C/(1 - C)$ (the inverse phase variance, up to a constant) over the bins with
+ * coherence at least `minCoherence` (default 0.5), unwrapped in order of frequency. In the time units of the spectra
+ * (samples when $f_s = 1$). The DC bin and bins with coherence exactly 1 (infinite weight) are skipped, so a
+ * noise-free copy gives NaN.
+ *
+ * @param cross The cross-spectral density, as `csd` returns it.
+ * @param coh The coherence on the same frequencies, as `coherence` returns it.
+ * @param options Options.
+ * @param options.minCoherence The least coherence a bin needs to be used (default 0.5).
+ * @returns `delay` (NaN when no bin is used) and `bins`, the number of bins used.
+ *
+ * @example A 3-sample delay
+ * const x = normals(stream(1), 4096)
+ * const xs = x.data
+ * const y = add(tensor(Array.from(xs, (_, i) => (i >= 3 ? xs[i - 3] : 0))), normals(stream(2), 4096, 0, 0.5))
+ * print(crossSpectralDelay(csd(x, y, { nperseg: 128 }), coherence(x, y, { nperseg: 128 })))
  */
 export function crossSpectralDelay(
   cross: Spectrum,

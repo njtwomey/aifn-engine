@@ -1,10 +1,11 @@
 /**
  * Quadratic time–frequency distributions of Cohen's class (Cohen, 1989, Proc. IEEE 77(7)): the Wigner–Ville
- * distribution W(t, f) = Σ_τ z[t + τ] z*[t − τ] e^{−i4πfτ} of the analytic signal z (Ville, 1948), its pseudo form (a
- * lag window h(τ), which smooths along frequency) and its smoothed pseudo form (also a time window g, which smooths
- * along time), as the Time–Frequency Toolbox's `tfrwv`, `tfrpwv` and `tfrspwv` (Auger, Flandrin, Gonçalvès and Lemoine,
- * 1996). The distribution is real and can be negative: two components interfere half way between them (cross-terms),
- * oscillating at a rate set by their separation, and the smoothing windows trade those terms against resolution.
+ * distribution $W(t, f) = \sum_\tau z[t + \tau]\, z^*[t - \tau]\, e^{-i 4\pi f \tau}$ of the analytic signal $z$
+ * (Ville, 1948), its pseudo form (a lag window $h(\tau)$, which smooths along frequency) and its smoothed pseudo form
+ * (also a time window $g$, which smooths along time), as the Time–Frequency Toolbox's `tfrwv`, `tfrpwv` and `tfrspwv`
+ * (Auger, Flandrin, Gonçalvès and Lemoine, 1996). The distribution is real and can be negative: two components
+ * interfere half way between them (cross-terms), oscillating at a rate set by their separation, and the smoothing
+ * windows trade those terms against resolution.
  */
 
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -19,26 +20,45 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 export type WignerOptions = {
   /** Sample rate (default the signal's, else 1). */
   fs?: Scalar
-  /** Frequency bins over [0, fs/2) (default the next power of two ≥ the length, at most 1024). */
+  /** Frequency bins over $[0, f_s/2)$ (default the next power of two $\ge$ the length, at most 1024). */
   nfft?: Size
-  /** Compute every `hop`-th time sample (default 1). */
+  /** Compute every `hop`-th time sample (default 1; rounded down, at least 1). */
   hop?: Size
-  /** Analyse the analytic signal (default true), which removes the interference between positive and negative frequencies. */
+  /**
+   * Analyse the analytic signal (default true), which removes the interference between positive and negative
+   * frequencies. When false the real samples are analysed as they are.
+   */
   analytic?: boolean
-  /** A lag window h(τ) of odd length (pseudo-WVD): smooths along frequency. A spec with `lagLength`, or values. */
+  /**
+   * A lag window $h(\tau)$ of odd length (pseudo-WVD): smooths along frequency. A spec with `lagLength`, or values.
+   * It is scaled so that $h(0) = 1$, and limits the lags to its half-length.
+   */
   lagWindow?: WindowInput
+  /** The odd length of a `lagWindow` given as a spec (default 63); ignored for values. */
   lagLength?: Size
-  /** A time window g of odd length (smoothed pseudo-WVD): smooths along time. A spec with `timeLength`, or values. */
+  /**
+   * A time window $g$ of odd length (smoothed pseudo-WVD): smooths along time. A spec with `timeLength`, or values.
+   * The local autocorrelation is averaged over it, divided by the sum of its weights inside the record.
+   */
   timeWindow?: WindowInput
+  /** The odd length of a `timeWindow` given as a spec (default 63); ignored for values. */
   timeLength?: Size
 }
 
-/** A Wigner–Ville raster: real values [f, t] (`quantity: 'distribution'`), possibly negative. */
+/** A Wigner–Ville raster: real values $[f, t]$ (`quantity: 'distribution'`, `method: 'wvd'`), possibly negative. */
 export type WignerVille = TimeFrequency & {
   /** The smoothing applied: none, lag (pseudo) or lag and time (smoothed pseudo). */
   smoothing: 'none' | 'pseudo' | 'smoothed-pseudo'
 }
 
+/**
+ * The values of an optional smoothing window, which must have odd length. Throws `DomainError` for an even length.
+ *
+ * @param input The window: a spec (name or parameterised), its values, or undefined for none.
+ * @param length The length for a spec (default 63); ignored for values.
+ * @param where The caller's name for error messages.
+ * @returns The symmetric window's values, or null when `input` is undefined.
+ */
 function oddWindow(input: WindowInput | undefined, length: Size | undefined, where: string): Float64Array | null {
   if (input === undefined) return null
   const L =
@@ -50,11 +70,26 @@ function oddWindow(input: WindowInput | undefined, length: Size | undefined, whe
 }
 
 /**
- * The (pseudo, smoothed pseudo) Wigner–Ville distribution of a signal: for each analysed time t the local
- * autocorrelation K(t, τ) = h(τ) Σ_s g(s) z[t + s + τ] z*[t + s − τ] over the lags that fit, Fourier transformed over τ.
- * The lag runs in steps of one sample on each side, so bin k is the frequency k fs/(2 nfft) and the raster covers
- * [0, fs/2) with the analytic signal (a real input analysed directly folds negative frequencies in). The marginal
- * (1/nfft) Σ_f W(t, f) is |z(t)|² for the plain distribution.
+ * The (pseudo, smoothed pseudo) Wigner–Ville distribution of a signal: for each analysed time $t$ the local
+ * autocorrelation $K(t, \tau) = h(\tau) \sum_s g(s)\, z[t + s + \tau]\, z^*[t + s - \tau]$ over the lags that fit,
+ * Fourier transformed over $\tau$. The lag runs in steps of one sample on each side, so bin $k$ is the frequency
+ * $k f_s / (2 n_\text{fft})$ and the raster covers $[0, f_s/2)$ with the analytic signal (a real input analysed
+ * directly folds negative frequencies in). The marginal $\frac{1}{n_\text{fft}} \sum_f W(t, f)$ is $\abs{z(t)}^2$ for
+ * the plain distribution. The lags used at $t$ are limited by the record's ends, by the lag window's half-length and
+ * by $n_\text{fft}/2 - 1$. Throws `DomainError` for a smoothing window of even length.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The sample rate, frequency bins, hop, analytic flag and smoothing windows; see `WignerOptions`.
+ *   Without windows this is the plain distribution.
+ * @returns The real raster $[n_\text{fft}, T]$ for the $T$ analysed times, with the smoothing applied.
+ *
+ * @example A tone sits on its frequency
+ * // cos at 0.125 cycles per sample: the middle column peaks at 0.125, and its mean is |z|^2 = 1.
+ * const x = Array.from({ length: 64 }, (_, i) => Math.cos(2 * Math.PI * 0.125 * i))
+ * const W = wignerVille(x)
+ * const column = Array.from({ length: 64 }, (_, k) => W.values.data[k * 64 + 32])
+ * print('peak at f =', W.f.data[argmax(tensor(column))], ' mean of the column =', mean(tensor(column)))
+
  */
 export function wignerVille(x: SignalInput, options: WignerOptions = {}): WignerVille {
   const input = readSamples(x, 'wignerVille', options.fs)
@@ -139,7 +174,24 @@ export function wignerVille(x: SignalInput, options: WignerOptions = {}): Wigner
   }
 }
 
-/** The pseudo Wigner–Ville distribution: `wignerVille` with a lag window (default Hann of `lagLength`, 63). */
+/**
+ * The pseudo Wigner–Ville distribution: `wignerVille` with a lag window (default Hann of `lagLength`, 63), which
+ * smooths along frequency and limits the lags to $\pm 31$ (by default).
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `WignerOptions` without a time window; `lagWindow` defaults to `'hann'`.
+ * @returns The real raster, `smoothing: 'pseudo'`.
+ *
+ * @example The lag window spreads a tone
+ * // A shorter lag window gives a wider ridge: count the bins above half the peak in the middle column.
+ * const x = Array.from({ length: 128 }, (_, i) => Math.cos(2 * Math.PI * 0.2 * i))
+ * for (const lagLength of [15, 63]) {
+ *   const W = pseudoWignerVille(x, { lagLength })
+ *   const column = Array.from({ length: 128 }, (_, k) => W.values.data[k * 128 + 64])
+ *   const peak = Math.max(...column)
+ *   print(`lagLength ${lagLength}: bins above half the peak =`, column.filter((v) => v > peak / 2).length)
+ * }
+ */
 export function pseudoWignerVille(
   x: SignalInput,
   options: Omit<WignerOptions, 'timeWindow' | 'timeLength'> = {},
@@ -150,6 +202,21 @@ export function pseudoWignerVille(
 /**
  * The smoothed pseudo Wigner–Ville distribution: lag and time windows (default Hann of 63 and 15 samples), a separable
  * Cohen-class kernel that removes most cross-terms at some cost in resolution.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `WignerOptions`; `lagWindow` and `timeWindow` default to `'hann'` and `timeLength` to 15.
+ * @returns The real raster, `smoothing: 'smoothed-pseudo'`.
+ *
+ * @example Cross-terms between two tones
+ * // Halfway between tones at 0.1 and 0.3 the pseudo form keeps an oscillating cross-term; time smoothing removes
+ * // it.
+ * const tone = (f, i) => Math.cos(2 * Math.PI * f * i)
+ * const x = Array.from({ length: 128 }, (_, i) => tone(0.1, i) + tone(0.3, i))
+ * const at = (W, f) => W.values.data[Math.round(f * 256) * 128 + 64]
+ * const P = pseudoWignerVille(x, { lagLength: 31 })
+ * const S = smoothedPseudoWignerVille(x, { lagLength: 31 })
+ * print('pseudo at 0.1, 0.2, 0.3 =', at(P, 0.1), at(P, 0.2), at(P, 0.3))
+ * print('smoothed pseudo at 0.1, 0.2, 0.3 =', at(S, 0.1), at(S, 0.2), at(S, 0.3))
  */
 export function smoothedPseudoWignerVille(x: SignalInput, options: WignerOptions = {}): WignerVille {
   return wignerVille(x, { lagWindow: 'hann', timeWindow: 'hann', timeLength: 15, ...options })

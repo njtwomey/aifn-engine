@@ -1,7 +1,16 @@
 /**
- * `aifn-compute/signal/cepstrum`: the cepstrum and pitch. The real cepstrum (`realCepstrum`), the complex cepstrum and its
- * inverse (`complexCepstrum`, `inverseComplexCepstrum`), cepstral pitch (`cepstralPitch`), and the YIN estimator for
- * one frame (`yinPitch`, with `yinDifference`) and as a frame-by-frame tracker (`yin`).
+ * `aifn-compute/signal/cepstrum`: the cepstrum, cepstral smoothing, and pitch by the cepstrum and by YIN.
+ *
+ * - Cepstra: `realCepstrum` ($\log \abs{X}$ only, even in quefrency), and `complexCepstrum` (with the unwrapped phase,
+ *   linear phase removed) with its inverse `inverseComplexCepstrum`.
+ * - Spectral envelope: `cepstralEnvelope`, the log spectrum smoothed by keeping only the low quefrencies (liftering).
+ * - Pitch of one frame: `cepstralPitch` (the largest cepstral peak in a quefrency range) or `yinPitch` (the first dip
+ *   of YIN's normalised difference $d'$ below a threshold, with `yinDifference` for $d$ and $d'$ themselves).
+ * - Pitch over time: `yin`, YIN frame by frame, NaN where a frame is unvoiced.
+ * - `cepstrumFunctions` lists the functions with the notes they serve.
+ *
+ * Quefrencies and lags are in samples inside the transforms; the pitch functions report seconds and Hz, with the
+ * sample rate from the signal or an `fs` option.
  */
 
 export {

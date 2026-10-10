@@ -3,9 +3,10 @@
  * IEEE Trans. Audio Electroacoust. 15(2)), `spectrogram`, `stft`, and Thomson's multitaper estimate (Thomson, 1982,
  * Proc. IEEE 70(9)) with discrete prolate spheroidal sequences (Slepian, 1978, Bell System Tech. J. 57(5)).
  *
- * Densities are one-sided by default: power at frequencies 0 < f < fs/2 is doubled, so the PSD integrates over
- * [0, fs/2] to the signal's variance (mean power after detrending). Estimates are `Spectrum`s and short-time
- * transforms `TimeFrequency` rasters; a `Signal` input supplies fs, which an `fs` option overrides.
+ * Densities are one-sided by default: power at frequencies $0 < f < f_s/2$ is doubled, so the PSD integrates over
+ * $[0, f_s/2]$ to the signal's variance (mean power after detrending). Estimates are `Spectrum`s and short-time
+ * transforms `TimeFrequency` rasters; a `Signal` input supplies $f_s$, which an `fs` option overrides (bare samples
+ * have $f_s = 1$, so frequencies are in cycles per sample).
  */
 
 import { fromData, isTensor, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -15,7 +16,10 @@ import { windowValues, type WindowInput } from 'aifn-compute/signal/windows'
 import { complexValues, powerUnit, readSamples, spectrum, timeFrequency, type SignalInput } from '../signal'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** Detrending of each segment before its transform. */
+/**
+ * Detrending of each segment before its transform: `'constant'` subtracts the mean, `'linear'` the least-squares
+ * line, and `false` leaves the segment as it is.
+ */
 export type Detrend = 'constant' | 'linear' | false
 
 /** Options shared by the segment-based estimators. */
@@ -24,20 +28,30 @@ export interface SegmentOptions {
   fs?: Scalar
   /** Window spec or explicit values of length `nperseg`; built periodic (DFT-even), as scipy does. */
   window?: WindowInput
-  /** Samples per segment. */
+  /** Samples per segment (default set by each estimator, and at most the signal's length). */
   nperseg?: number
-  /** Samples shared by consecutive segments. */
+  /** Samples shared by consecutive segments, in $[0, \text{nperseg})$ (default set by each estimator). */
   noverlap?: number
-  /** FFT length (≥ nperseg; zero-padded). Default nperseg. */
+  /** FFT length ($\ge$ `nperseg`; zero-padded). Default `nperseg`. */
   nfft?: number
+  /** Detrending of each segment (default set by each estimator). */
   detrend?: Detrend
-  /** `density` (power per Hz, V²/Hz) or `spectrum` (power per bin, V²). Default `density`. */
+  /**
+   * `density` (power per Hz, e.g. $\text{V}^2/\text{Hz}$) or `spectrum` (power per bin, $\text{V}^2$). Default
+   * `density`.
+   */
   scaling?: 'density' | 'spectrum'
   /** One-sided spectrum for real input. Default true. */
   onesided?: boolean
 }
 
-/** Detrend one segment in place (module-internal; `estimation` and `uneven` share it). */
+/**
+ * Detrend one segment in place (module-internal; `estimation` and `uneven` share it).
+ *
+ * @param seg The segment; overwritten with its detrended values.
+ * @param kind `'constant'` (subtract the mean), `'linear'` (subtract the least-squares line through $(i, x_i)$) or
+ *   `false` (leave it).
+ */
 export function detrendInPlace(seg: Float64Array, kind: Detrend): void {
   const n = seg.length
   if (!kind || n === 0) return
@@ -62,18 +76,33 @@ export function detrendInPlace(seg: Float64Array, kind: Detrend): void {
 
 /** Segment transforms of one signal (module-internal). */
 export interface Segmented {
+  /** The frequency of each bin, in Hz: $0$ to $f_s/2$ one-sided, or in FFT order (negative half last) two-sided. */
   freqs: Float64Array
+  /** The centre of each segment, in seconds from the first sample. */
   times: Float64Array
-  /** Per segment: real and imaginary parts of the scaled, windowed transform (length nfreq each). */
+  /** Per segment: the real parts of the windowed, detrended transform (`nfreq` each), not yet scaled. */
   re: Float64Array[]
+  /** Per segment: the imaginary parts, as `re`. */
   im: Float64Array[]
+  /** The number of bins kept: $\lfloor n_\text{fft}/2 \rfloor + 1$ one-sided, else $n_\text{fft}$. */
   nfreq: number
+  /**
+   * The factor that turns $\abs{X}^2$ into the requested scaling: $1/(f_s \sum w^2)$ for a density, $1/(\sum w)^2$
+   * for a power spectrum.
+   */
   scale: number
 }
 
 /**
- * scipy.signal's `_spectral_helper` for real input: split into segments of `nperseg` stepping by nperseg − noverlap,
- * detrend, window, and take the FFT. Returns the unscaled transforms and the scale factor for the requested scaling.
+ * scipy.signal's `_spectral_helper` for real input: split into segments of `nperseg` stepping by
+ * $\text{nperseg} - \text{noverlap}$, detrend, window (built periodic), and take the FFT. Returns the unscaled
+ * transforms and the scale factor for the requested scaling. Samples after the last whole segment are not used.
+ * Throws `DomainError` when `nperseg` is not in $[1, n]$, `noverlap` not in $[0, \text{nperseg})$ or `nfft` is below
+ * `nperseg`.
+ *
+ * @param x The $n$ samples; not modified.
+ * @param o The resolved options (every field set), as `resolveSegments` returns them.
+ * @returns The bin frequencies, segment times, per-segment transforms and scale.
  */
 export function segmentTransforms(
   x: Float64Array,
@@ -129,7 +158,14 @@ export function segmentTransforms(
   return out
 }
 
-/** Power per segment, scaled, with one-sided doubling of the bins strictly between DC and Nyquist. */
+/**
+ * Power per segment, scaled, with one-sided doubling of the bins strictly between DC and Nyquist.
+ *
+ * @param s The segment transforms, as `segmentTransforms` returns them.
+ * @param nfft The FFT length they were taken with (to find the Nyquist bin).
+ * @param onesided Whether to double the bins strictly between DC and Nyquist.
+ * @returns One array of `nfreq` powers per segment.
+ */
 export function segmentPowers(s: Segmented, nfft: number, onesided: boolean): Float64Array[] {
   return s.re.map((re, k) => {
     const im = s.im[k]
@@ -143,6 +179,17 @@ export function segmentPowers(s: Segmented, nfft: number, onesided: boolean): Fl
   })
 }
 
+/**
+ * The segment options with every field set: the caller's options over the estimator's defaults, with `nperseg`
+ * capped at the signal's length.
+ *
+ * @param x The samples (only their length is read).
+ * @param fs The sample rate in Hz.
+ * @param o The caller's options; `fs` there is ignored in favour of the `fs` argument.
+ * @param defaults The estimator's window, segment length, overlap (a function of the resolved `nperseg`) and
+ *   detrending.
+ * @returns The options `segmentTransforms` takes; `scaling` defaults to `'density'` and `onesided` to true.
+ */
 export function resolveSegments(
   x: Float64Array,
   fs: Scalar,
@@ -162,14 +209,28 @@ export function resolveSegments(
   }
 }
 
-/** The name of a window input, for readouts: its spec name, or `custom` for explicit values. */
+/**
+ * The name of a window input, for readouts: its spec name, or `custom` for explicit values.
+ *
+ * @param w The window: a spec (name or parameterised) or explicit values.
+ * @returns The name.
+ */
 function windowName(w: WindowInput): string {
   if (typeof w === 'string') return w
   if (!isTensor(w) && typeof w === 'object' && 'name' in w) return (w as { name: string }).name
   return 'custom'
 }
 
-/** A power `Spectrum` of a real signal from one-sided (or two-sided) frequencies and values. */
+/**
+ * A power `Spectrum` of a real signal from one-sided (or two-sided) frequencies and values.
+ *
+ * @param f The frequencies, in Hz; copied.
+ * @param values The power at each frequency; copied.
+ * @param o The sample rate, the scaling (`'density'` gives `quantity: 'psd'`, `'spectrum'` gives `'power'`) and
+ *   whether the values are one-sided.
+ * @param unit The unit of the signal's values, from which the power's unit is made; undefined for none.
+ * @returns The `Spectrum`, on a Hz axis.
+ */
 export function powerSpectrum(
   f: ArrayLike<number>,
   values: ArrayLike<number>,
@@ -189,12 +250,24 @@ export function powerSpectrum(
 }
 
 /**
- * The equivalent degrees of freedom of a Welch average of K segments of length nperseg, hop nperseg − noverlap, under
- * a window w (Percival and Walden, 1993, "Spectral Analysis for Physical Applications", eq. 292b; Welch, 1967):
- * ν = 2K / (1 + 2 Σ_{l=1}^{K−1} (1 − l/K) ρ²(l)), with ρ(l) = Σₙ w[n] w[n + l·hop] / Σₙ w[n]² the overlap correlation
- * of segments l hops apart. Each periodogram ordinate is ≈ S(f) χ²₂/2, so a mean of K independent ones has ν = 2K;
+ * The equivalent degrees of freedom of a Welch average of $K$ segments of length `nperseg`, hop
+ * $\text{nperseg} - \text{noverlap}$, under a window $w$ (Percival and Walden, 1993, "Spectral Analysis for Physical
+ * Applications", eq. 292b; Welch, 1967): $\nu = 2K / (1 + 2 \sum_{l=1}^{K-1} (1 - l/K) \rho^2(l))$, with
+ * $\rho(l) = \sum_n w[n]\, w[n + l \cdot \text{hop}] / \sum_n w[n]^2$ the overlap correlation of segments $l$ hops
+ * apart. Each periodogram ordinate is $\approx S(f) \chi^2_2/2$, so a mean of $K$ independent ones has $\nu = 2K$;
  * overlapping segments are correlated and count for less. Valid away from DC and Nyquist (where a periodogram has one
  * degree of freedom) and for a smooth spectrum.
+ *
+ * @param window The window, as given to `welch` (built periodic, as there).
+ * @param nperseg The segment length in samples.
+ * @param noverlap The samples shared by consecutive segments.
+ * @param segments The number of segments averaged, $K$.
+ * @returns $\nu$; 0 when there is no segment.
+ *
+ * @example Overlap costs degrees of freedom
+ * // Ten Hann segments: half overlap gives a little less than 2K = 20, as the overlapping segments are correlated.
+ * print('50% overlap:', welchDof('hann', 128, 64, 10))
+ * print('no overlap:', welchDof('hann', 128, 0, 10))
  */
 export function welchDof(window: WindowInput, nperseg: Size, noverlap: Size, segments: Size): number {
   if (segments < 1) return 0
@@ -215,7 +288,19 @@ export function welchDof(window: WindowInput, nperseg: Size, noverlap: Size, seg
  * Welch's estimate of the power spectral density, as `scipy.signal.welch`: the average (mean or median) of windowed,
  * detrended periodograms of overlapping segments. Defaults: Hann window, 256-sample segments (or the whole signal if
  * shorter), 50% overlap, constant detrending. `segments` is the number averaged and `dof` the equivalent degrees of
- * freedom of the mean (`welchDof`), for `spectralConfidence`.
+ * freedom of the mean (`welchDof`), for `spectralConfidence`. The median, as scipy, is divided by the median's bias
+ * for $\chi^2_2$ variables, $\sum_{i=1}^{K'} (-1)^{i+1}/i$ with $K'$ the largest odd number $\le K$; `dof` is still
+ * that of the mean.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `SegmentOptions`, and `average`, `'mean'` (default) or `'median'` (robust to bursts).
+ * @returns The estimate as a `Spectrum` (`quantity: 'psd'` or `'power'`), with `segments` and `dof`.
+ *
+ * @example White noise is flat
+ * // Unit-variance noise has a one-sided density of 2 at every frequency (fs = 1).
+ * const W = welch(normals(stream(1), 4096), { nperseg: 128 })
+ * print('segments =', W.segments, ' dof =', W.dof)
+ * print('mean =', mean(W.values), ' min =', min(W.values), ' max =', max(W.values))
  */
 export function welch(
   x: SignalInput,
@@ -255,7 +340,20 @@ export function welch(
 /**
  * The periodogram, as `scipy.signal.periodogram`: one segment (the whole signal), rectangular window by default,
  * constant detrending. With a window it is the modified periodogram. `dof` is 2: each ordinate away from DC and
- * Nyquist is S(f) χ²₂/2, so its standard deviation equals its mean however long the record.
+ * Nyquist is $S(f) \chi^2_2/2$, so its standard deviation equals its mean however long the record.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `SegmentOptions` other than `nperseg` and `noverlap`; `window` defaults to `'boxcar'`, and an
+ *   `nfft` below the signal's length is raised to it.
+ * @returns The estimate as a `Spectrum`, with `dof` 2.
+ *
+ * @example A sinusoid peaks at its frequency
+ * // A unit sine at 8 Hz, one second at 64 Hz: all its power, 1/2, is in the 8 Hz bin, 1 Hz wide.
+ * const fs = 64
+ * const x = Array.from({ length: 64 }, (_, i) => Math.sin((2 * Math.PI * 8 * i) / fs))
+ * const P = periodogram(x, { fs })
+ * print('peak at', P.f.data[argmax(P.values)], 'Hz, density', max(P.values))
+ * print('total power =', mul(sum(P.values), fs / 64))
  */
 export function periodogram(
   x: SignalInput,
@@ -273,9 +371,22 @@ export function periodogram(
 }
 
 /**
- * The spectrogram, as `scipy.signal.spectrogram` (mode 'psd'): the scaled periodogram of each segment, arranged
- * frequency × time, as a `TimeFrequency` raster (`method: 'stft'`, `quantity: 'power'`; times are segment centres
- * after the signal's t0). Defaults: Tukey(0.25) window, 256-sample segments, 1/8 overlap, constant detrending.
+ * The spectrogram, as `scipy.signal.spectrogram` (mode `'psd'`): the scaled periodogram of each segment, arranged
+ * frequency $\times$ time, as a `TimeFrequency` raster (`method: 'stft'`, `quantity: 'power'`; times are segment
+ * centres after the signal's $t_0$). Defaults: Tukey(0.25) window, 256-sample segments, 1/8 overlap, constant
+ * detrending. Unlike `stft`, the signal is not padded, so there are
+ * $\lfloor (n - \text{noverlap}) / \text{hop} \rfloor$ segments.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `SegmentOptions`.
+ * @returns The raster $[n_\text{freq}, T]$ of density (or power, with `scaling: 'spectrum'`) per segment.
+ *
+ * @example Frames of a tone
+ * // 1000 samples in segments of 100 overlapping by 12: 11 segments, centred 88 samples apart.
+ * const x = Array.from({ length: 1000 }, (_, i) => Math.sin(2 * Math.PI * 0.1 * i))
+ * const S = spectrogram(x, { nperseg: 100 })
+ * print('shape [f, t] =', S.values.shape, ' first centres =', S.t.data.slice(0, 3))
+ * print('loudest frequency =', S.f.data[argmax(S.values) / S.t.shape[0] | 0])
  */
 export function spectrogram(x: SignalInput, options: SegmentOptions = {}): TimeFrequency {
   const input = readSamples(x, 'spectrogram', options.fs)
@@ -306,10 +417,21 @@ export function spectrogram(x: SignalInput, options: SegmentOptions = {}): TimeF
 }
 
 /**
- * The short-time Fourier transform, as `scipy.signal.stft`: the signal is padded with nperseg/2 zeros at both ends
- * (so the first and last segments are centred on the ends) and at the end to a whole number of steps, and each
+ * The short-time Fourier transform, as `scipy.signal.stft`: the signal is padded with $\text{nperseg}/2$ zeros at both
+ * ends (so the first and last segments are centred on the ends) and at the end to a whole number of steps, and each
  * windowed segment's transform is divided by the window's sum. Defaults: Hann window, 256 samples, 50% overlap, no
- * detrending. Returns a `TimeFrequency` raster with complex128 values [f, t].
+ * detrending. Returns a `TimeFrequency` raster with complex128 values $[f, t]$; `istft` inverts it.
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The `SegmentOptions` other than `scaling`, with `boundary` (pad $\text{nperseg}/2$ zeros at both
+ *   ends; default true) and `padded` (pad the end to a whole number of hops; default true).
+ * @returns The raster, with times the segment centres (the first at the signal's $t_0$ when `boundary`).
+ *
+ * @example The frame count
+ * // 16 samples, segments of 8 with hop 4: padded to 24, giving 5 frames of 5 one-sided bins.
+ * const Z = stft(Array.from({ length: 16 }, (_, i) => i), { nperseg: 8 })
+ * print('shape [f, t] =', Z.values.shape)
+ * print('t =', Z.t, ' f =', Z.f)
  */
 export function stft(
   x: SignalInput,
@@ -374,9 +496,14 @@ export function stft(
 // ── Multitaper ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Eigenpairs of the largest `k` eigenvalues of a symmetric tridiagonal matrix (diagonal d, off-diagonal e), by
+ * Eigenpairs of the largest `k` eigenvalues of a symmetric tridiagonal matrix (diagonal $d$, off-diagonal $e$), by
  * Sturm-sequence bisection for the eigenvalues and inverse iteration for the vectors (Golub and Van Loan, 2013,
- * "Matrix Computations", §8.4.1–8.4.2). O(n k) per iteration; suited to the well-separated DPSS spectrum.
+ * "Matrix Computations", §8.4.1–8.4.2). $O(nk)$ per iteration; suited to the well-separated DPSS spectrum.
+ *
+ * @param d The $n$ diagonal entries; not modified.
+ * @param e The $n - 1$ off-diagonal entries; not modified.
+ * @param k The number of eigenpairs, from the largest eigenvalue down.
+ * @returns The eigenvalues in descending order and their unit eigenvectors (sign not fixed).
  */
 function tridiagonalTop(d: Float64Array, e: Float64Array, k: number): { values: number[]; vectors: Float64Array[] } {
   const n = d.length
@@ -440,7 +567,16 @@ function tridiagonalTop(d: Float64Array, e: Float64Array, k: number): { values: 
   return { values, vectors }
 }
 
-/** Solve (T − σI) y = b for tridiagonal T, by Gaussian elimination with partial pivoting (LAPACK's gttrf/gttrs). */
+/**
+ * Solve $(\Tmat - \sigma\Imat)\yvec = \bvec$ for a symmetric tridiagonal $\Tmat$, by Gaussian elimination with
+ * partial pivoting (LAPACK's `gttrf`/`gttrs`). A zero pivot is replaced by $10^{-300}$, as inverse iteration wants.
+ *
+ * @param d The $n$ diagonal entries of $\Tmat$; not modified.
+ * @param e The $n - 1$ off-diagonal entries of $\Tmat$ (above and below); not modified.
+ * @param sigma The shift $\sigma$.
+ * @param b The right-hand side $\bvec$; not modified.
+ * @returns The solution $\yvec$.
+ */
 function solveTridiagonal(d: Float64Array, e: Float64Array, sigma: number, b: Float64Array): Float64Array {
   const n = d.length
   // Rows as (sub, diag, sup, sup2) after pivoting.
@@ -483,17 +619,30 @@ function solveTridiagonal(d: Float64Array, e: Float64Array, sigma: number, b: Fl
 
 /** Discrete prolate spheroidal sequences. */
 export interface Dpss {
-  /** The tapers, k × n, each of unit energy. */
+  /** The tapers, $k \times n$, each of unit energy. */
   tapers: Tensor
-  /** Concentration ratios λ: the fraction of each taper's energy inside the band |f| < W. */
+  /** Concentration ratios $\lambda$: the fraction of each taper's energy inside the band $\abs{f} < W$. */
   concentrations: Tensor
 }
 
 /**
- * The first k discrete prolate spheroidal (Slepian) sequences of length n and time–half-bandwidth product NW, as
+ * The first $k$ discrete prolate spheroidal (Slepian) sequences of length $n$ and time–half-bandwidth product $NW$, as
  * `scipy.signal.windows.dpss(n, NW, k)`: the leading eigenvectors of the tridiagonal matrix that commutes with the
  * concentration operator (Percival and Walden, 1993, "Spectral Analysis for Physical Applications", §8.3). Unit
- * energy; even tapers have a positive sum, odd tapers start with a positive lobe (Percival and Walden, p. 379).
+ * energy; even tapers have a positive sum, odd tapers start with a positive lobe (Percival and Walden, p. 379). The
+ * concentrations are computed from each taper's autocorrelation, as scipy's `return_ratios`. Throws `DomainError`
+ * unless $1 \le k \le n$.
+ *
+ * @param n The taper length $n$.
+ * @param nw The time–half-bandwidth product $NW$: the band is $\abs{f} < W = NW/n$ cycles per sample.
+ * @param k The number of tapers $k$.
+ * @returns The tapers and their concentrations, in decreasing order of concentration.
+ *
+ * @example The first 2NW tapers are well concentrated
+ * // NW = 2.5: about 2NW = 5 tapers keep nearly all their energy in the band; the fourth starts to leak.
+ * const d = dpss(32, 2.5, 4)
+ * print('concentrations =', d.concentrations)
+ * print('energies =', sum(square(d.tapers), 1))
  */
 export function dpss(n: Size, nw: Scalar, k: Size): Dpss {
   if (!(k >= 1 && k <= n)) throw new DomainError('dpss', `dpss: need 1 ≤ k ≤ n, got k = ${k}`)
@@ -530,32 +679,57 @@ export function dpss(n: Size, nw: Scalar, k: Size): Dpss {
 
 /** Options of `multitaper`. */
 export type MultitaperOptions = {
-  /** Time–half-bandwidth product NW (default 4): the tapers concentrate in |f| < NW/n cycles per sample. */
+  /** Time–half-bandwidth product $NW$ (default 4): the tapers concentrate in $\abs{f} < NW/n$ cycles per sample. */
   nw?: Scalar
-  /** Number of tapers (default 2NW − 1, the well-concentrated ones). */
+  /** Number of tapers (default $\lfloor 2NW \rfloor - 1$, the well-concentrated ones, at least 1). */
   k?: Size
+  /** The sample rate in Hz (default the signal's, or 1 for bare samples). */
   fs?: Scalar
+  /** FFT length (default the signal's length; a smaller value is raised to it). */
   nfft?: Size
+  /** Detrending of the series before tapering (default `'constant'`). */
   detrend?: Detrend
   /**
    * Thomson's adaptive weights (default false): down-weight high-order tapers where their broadband leakage would
    * exceed the local spectrum. Off, every taper has weight 1/k.
    */
   adaptive?: boolean
-  /** Adaptive iterations: the relative change at which to stop (default 1e-10) and the cap (default 150). */
+  /** Adaptive iterations: the relative change in $S(f)$ at which to stop (default 1e-10). */
   tolerance?: Scalar
+  /** Adaptive iterations: the most per frequency (default 150). */
   maxIterations?: Size
 }
 
 /**
- * Thomson's multitaper PSD (Thomson, 1982): eigenspectra Sₖ(f) = |Σₙ vₖ[n] x[n] e^{−2πi fn/fs}|² / fs under the k
- * DPSS tapers of time–half-bandwidth NW, combined and made one-sided (doubled off DC and Nyquist). Default k = 2NW − 1.
+ * Thomson's multitaper PSD (Thomson, 1982): eigenspectra
+ * $S_k(f) = \abs{\sum_n v_k[n]\, x[n]\, e^{-2\pi i f n / f_s}}^2 / f_s$ under the $k$ DPSS tapers of
+ * time–half-bandwidth $NW$, combined and made one-sided (doubled off DC and Nyquist). Default $k = 2NW - 1$.
  *
- * Without `adaptive` the estimate is their mean, with ν = 2k degrees of freedom. With `adaptive`, Thomson's weights
- * (Percival and Walden, 1993, §7.4, eqs. 368a and 370a) are iterated from the mean of the first two eigenspectra:
- * dₖ(f) = √λₖ S(f) / (λₖ S(f) + (1 − λₖ) σ²/fs) and S(f) = Σ dₖ² Sₖ / Σ dₖ², where λₖ is taper k's concentration and
- * σ² the series' variance (the broadband leakage a taper lets in is (1 − λₖ)σ²). The degrees of freedom then vary
- * with frequency, ν(f) = 2 (Σ dₖ²)² / Σ dₖ⁴, between 2 and 2k. `weights` holds dₖ(f) as [k, nfreq].
+ * Without `adaptive` the estimate is their mean, with $\nu = 2k$ degrees of freedom. With `adaptive`, Thomson's
+ * weights (Percival and Walden, 1993, §7.4, eqs. 368a and 370a) are iterated from the mean of the first two
+ * eigenspectra: $d_k(f) = \sqrt{\lambda_k} S(f) / (\lambda_k S(f) + (1 - \lambda_k) \sigma^2/f_s)$ and
+ * $S(f) = \sum d_k^2 S_k / \sum d_k^2$, where $\lambda_k$ is taper $k$'s concentration and $\sigma^2$ the series'
+ * variance (the broadband leakage a taper lets in is $(1 - \lambda_k)\sigma^2$). The degrees of freedom then vary
+ * with frequency, $\nu(f) = 2 (\sum d_k^2)^2 / \sum d_k^4$, between 2 and $2k$. `weights` holds $d_k(f)$ as
+ * $[k, n_\text{freq}]$ (all $1/\sqrt{k}$ without `adaptive`, or with one taper).
+ *
+ * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
+ * @param options The tapers, sample rate, FFT length, detrending and adaptive weighting; see `MultitaperOptions`.
+ * @returns The one-sided density as a `Spectrum`, the tapers and concentrations, `dof` per frequency and `weights`.
+ *
+ * @example White noise, flat and with 2k degrees of freedom
+ * const M = multitaper(normals(stream(1), 1024))
+ * print('tapers =', M.tapers.shape[0], ' dof =', M.dof.data[10])
+ * print('mean density =', mean(M.values), ' (white noise of unit variance: 2)')
+ *
+ * @example Adaptive weights near a spectral line
+ * // A strong 20 Hz line in weak noise: the adaptive weights keep every taper at the line, and down-weight the
+ * // leaky high-order tapers elsewhere, where the degrees of freedom fall below 2k = 14.
+ * const fs = 100
+ * const line = Array.from({ length: 512 }, (_, i) => Math.sin((2 * Math.PI * 20 * i) / fs))
+ * const A = multitaper(add(tensor(line), normals(stream(2), 512, 0, 0.1)), { fs, adaptive: true })
+ * const peak = argmax(A.values)
+ * print('line at', A.f.data[peak], 'Hz: dof =', A.dof.data[peak], ' away from it: dof =', A.dof.data[200])
  */
 export function multitaper(
   x: SignalInput,

@@ -1,7 +1,9 @@
 /**
- * Corner detection from the structure tensor M: the Harris response det M − k (tr M)² (Harris & Stephens, 1988, "A
- * combined corner and edge detector", Alvey Vision Conf.), the Shi–Tomasi response λ_min(M) (Shi & Tomasi, 1994, "Good
- * features to track", CVPR), and peak picking with non-maximum suppression.
+ * Corner detection from the structure tensor $\Mmat$ of `structureTensor`: the Harris response
+ * $\det \Mmat - k (\trace \Mmat)^2$ (Harris and Stephens, 1988, "A combined corner and edge detector", Alvey Vision
+ * Conf.), the Shi–Tomasi response $\lambda_\text{min}(\Mmat)$ (Shi and Tomasi, 1994, "Good features to track", CVPR),
+ * and peak picking with non-maximum suppression. The responses are images of the input's shape; peaks are listed
+ * strongest first, with row and column indices.
  */
 
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -10,14 +12,30 @@ import { structureTensor } from './filters'
 
 /** Options shared by the corner responses. */
 export interface CornerOptions {
-  /** σ of the Gaussian window that sums the structure tensor. Default 1. */
+  /** $\sigma$ of the Gaussian window that sums the structure tensor, in pixels. Default 1. */
   sigma?: number
+  /** The border mode of the derivatives and the window. Default `constant`. */
   border?: Border
 }
 
 /**
- * The Harris corner response R = det M − k (tr M)² (Harris & Stephens, 1988), as `skimage.feature.corner_harris`
- * (method `k`): large and positive at corners (both eigenvalues large), negative along edges, small in flat regions.
+ * The Harris corner response $R = \det \Mmat - k (\trace \Mmat)^2$ (Harris and Stephens, 1988), as
+ * `skimage.feature.corner_harris` (method `k`): large and positive at corners (both eigenvalues large), negative along
+ * edges, small in flat regions.
+ *
+ * @param img The image, $h \times w$.
+ * @param options The structure tensor's window `sigma` and `border` (see `CornerOptions`), and $k$.
+ * @param options.k The sensitivity $k$ (default 0.05); larger values make edges more negative and fewer corners.
+ * @param options.options The remaining fields, `sigma` and `border`, passed to `structureTensor`.
+ * @returns The response $R$ at every pixel, $h \times w$.
+ *
+ * @example Positive at a corner, negative on an edge, near zero where flat
+ * const inside = (i) => i >= 3 && i <= 8
+ * const img = Array.from({ length: 12 }, (_, r) => Array.from({ length: 12 }, (_, c) => +(inside(r) && inside(c))))
+ * const R = harrisResponse(img)
+ * print('corner (3, 3):', R.data[3 * 12 + 3])
+ * print('edge (5, 3):', R.data[5 * 12 + 3])
+ * print('flat (0, 0):', R.data[0])
  */
 export function harrisResponse(img: ImageInput, { k = 0.05, ...options }: CornerOptions & { k?: number } = {}): Tensor {
   const M = structureTensor(img, options)
@@ -31,8 +49,20 @@ export function harrisResponse(img: ImageInput, { k = 0.05, ...options }: Corner
 }
 
 /**
- * The Shi–Tomasi response, the smaller eigenvalue of the structure tensor (Shi & Tomasi, 1994), as
- * `skimage.feature.corner_shi_tomasi`: ((M_rr + M_cc) − √((M_rr − M_cc)² + 4M_rc²))/2.
+ * The Shi–Tomasi response, the smaller eigenvalue of the structure tensor (Shi and Tomasi, 1994), as
+ * `skimage.feature.corner_shi_tomasi`: $\big(M_{rr} + M_{cc} - \sqrt{(M_{rr} - M_{cc})^2 + 4 M_{rc}^2}\big) / 2$.
+ *
+ * @param img The image, $h \times w$.
+ * @param options The structure tensor's window and border.
+ * @returns The smaller eigenvalue at every pixel, $h \times w$; never negative.
+ *
+ * @example Largest at a corner, small on an edge
+ * const inside = (i) => i >= 3 && i <= 8
+ * const img = Array.from({ length: 12 }, (_, r) => Array.from({ length: 12 }, (_, c) => +(inside(r) && inside(c))))
+ * const S = shiTomasiResponse(img)
+ * print('corner (3, 3):', S.data[3 * 12 + 3])
+ * print('edge (5, 3):', S.data[5 * 12 + 3])
+ * print('flat (0, 0):', S.data[0])
  */
 export function shiTomasiResponse(img: ImageInput, options: CornerOptions = {}): Tensor {
   const M = structureTensor(img, options)
@@ -47,16 +77,22 @@ export function shiTomasiResponse(img: ImageInput, options: CornerOptions = {}):
 
 /** A detected peak: its row, column and response. */
 export interface ImagePeak {
+  /** The peak's row, from the top. */
   row: number
+  /** The peak's column, from the left. */
   col: number
+  /** The image's value at the peak. */
   value: number
 }
 
 /** Options for `imagePeaks`. */
 export interface PeakOptions {
-  /** Peaks are local maxima over a (2d + 1)² window and at least d pixels apart. Default 1. */
+  /**
+   * The distance $d$: peaks are local maxima over a $(2d + 1) \times (2d + 1)$ window, and more than $d$ pixels apart
+   * in row or column. Default 1.
+   */
   minDistance?: number
-  /** Keep peaks with value ≥ this. Default: `relative`·max. */
+  /** Keep peaks with values at least this. Default `relative` times the largest value. */
   threshold?: number
   /** Threshold relative to the largest value, used when `threshold` is not given. Default 0.1. */
   relative?: number
@@ -67,10 +103,24 @@ export interface PeakOptions {
 }
 
 /**
- * The local maxima of an image, strongest first (as `skimage.feature.peak_local_max` and `corner_peaks`): a
- * pixel is a peak when it equals the maximum over its (2d + 1)² window and clears the threshold; peaks closer than d to
- * a stronger one are then dropped. Only positive values can be peaks (a response such as Harris's is negative along
- * edges), whatever the threshold.
+ * The local maxima of an image, strongest first (as `skimage.feature.peak_local_max` and `corner_peaks`): a pixel is a
+ * peak when it equals the maximum over its $(2d + 1) \times (2d + 1)$ window and clears the threshold; a peak within
+ * $d$ rows and $d$ columns of a stronger one is then dropped. Only positive values can be peaks (a response such as
+ * Harris's is negative along edges), whatever the threshold. Ties are broken by row, then column.
+ *
+ * @param response The image to search, $h \times w$, typically a corner response.
+ * @param options The window, the threshold, the most peaks and the border to ignore.
+ * @returns The peaks, strongest first.
+ *
+ * @example Two peaks, and a weaker neighbour suppressed
+ * const img = [
+ *   [0, 0, 0, 0, 0, 0],
+ *   [0, 5, 4, 0, 0, 0],
+ *   [0, 0, 0, 0, 3, 0],
+ *   [0, 0, 0, 0, 0, 0],
+ * ]
+ * print('peaks:', imagePeaks(img))
+ * print('the strongest only:', imagePeaks(img, { count: 1 }))
  */
 export function imagePeaks(response: ImageInput, options: PeakOptions = {}): ImagePeak[] {
   const { v, h, w } = readImage(response, 'imagePeaks')
@@ -106,7 +156,20 @@ export function imagePeaks(response: ImageInput, options: PeakOptions = {}): Ima
   return kept
 }
 
-/** Corners: the peaks of the Harris (default) or Shi–Tomasi response. */
+/**
+ * Corners: the peaks of the Harris (default) or Shi–Tomasi response, by `imagePeaks`.
+ *
+ * @param img The image, $h \times w$.
+ * @param options The response's window and border, the peak picking of `PeakOptions`, the `method` (`'harris'`,
+ *   the default, or `'shi-tomasi'`), and Harris's `k`.
+ * @returns The corners, strongest first.
+ *
+ * @example The four corners of a bright square
+ * const inside = (i) => i >= 3 && i <= 8
+ * const img = Array.from({ length: 12 }, (_, r) => Array.from({ length: 12 }, (_, c) => +(inside(r) && inside(c))))
+ * print('Harris:', detectCorners(img))
+ * print('Shi-Tomasi:', detectCorners(img, { method: 'shi-tomasi' }))
+ */
 export function detectCorners(
   img: ImageInput,
   options: CornerOptions & PeakOptions & { method?: 'harris' | 'shi-tomasi'; k?: number } = {},

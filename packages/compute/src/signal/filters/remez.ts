@@ -3,6 +3,11 @@
  * Circuit Theory 19(2)), as `scipy.signal.remez` with `type='bandpass'`: the Remez exchange on a dense frequency grid,
  * with the amplitude interpolated in barycentric form through the current extremal set (McClellan, Parks and Rabiner,
  * 1973). Types I (odd length) and II (even length, zero at Nyquist) are designed.
+ *
+ * The amplitude of a type I filter of $N$ taps is a polynomial in $\cos\omega$ of $r = (N + 1)/2$ terms; a type II
+ * filter's is $\cos(\omega/2)$ times one of $r = N/2$ terms. The exchange finds the $r + 1$ frequencies where the
+ * weighted error $W(\omega)\big(D(\omega) - A(\omega)\big)$ alternates in sign at its largest magnitude $\delta$, and
+ * the taps are then read off the amplitude at $N$ equally spaced frequencies.
  */
 
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -12,31 +17,49 @@ import { transferFunction, type LtiOf, type TransferFunctionForm } from 'aifn-co
 
 /** Options for `remez`. */
 export interface RemezOptions {
-  /** One weight per band (default 1 each): the error in band b is weighted by `weight[b]`. */
+  /** One weight per band (default 1 each): the error in band `b` is weighted by `weight[b]`. */
   weight?: readonly Scalar[]
-  /** Sampling frequency (default 1: band edges in cycles per sample, up to 0.5). The system gets dt = 1/fs. */
+  /** Sampling frequency (default 1: band edges in cycles per sample, up to 0.5). The system gets `dt` $= 1/f_s$. */
   fs?: Scalar
   /** Grid points per extremal frequency (default 16, as scipy). */
   gridDensity?: Size
-  /** The most exchange iterations (default 40). */
+  /** The most exchange iterations (default 40); the design of the last one is returned without an error. */
   maxiter?: Size
 }
 
-/** The design and how it went: the taps, the minimax error δ, the extremal frequencies and the iteration count. */
+/**
+ * The design and how it went: the FIR system (taps in `repr.b`), the minimax error $\delta$, the extremal frequencies
+ * and the iteration count.
+ */
 export type RemezResult = LtiOf<TransferFunctionForm> & {
-  /** The weighted ripple |δ| at convergence. */
+  /** The weighted ripple $\lvert\delta\rvert$ at convergence. */
   readonly ripple: Scalar
   /** The extremal frequencies of the final alternation, in the units of `fs`. */
   readonly extremals: Tensor
+  /** The number of exchange iterations run before the extremal set settled (at most `maxiter`). */
   readonly iterations: Size
 }
 
 /**
  * A linear-phase FIR filter of `numtaps` taps whose weighted error from a piecewise-constant desired amplitude is
- * minimax over the bands, as `scipy.signal.remez(numtaps, bands, desired, weight, fs=fs)`. `bands` holds edge pairs
- * [f₀, f₁, f₂, f₃, …] (increasing, within [0, fs/2]) and `desired` one gain per band; the gaps between bands are don't
- * care regions. By the alternation theorem the optimum error equiripples with r + 1 extrema, r the number of cosine
- * terms. An even `numtaps` (type II) has a zero at Nyquist, so it cannot design a high-pass.
+ * minimax over the bands, as `scipy.signal.remez(numtaps, bands, desired, weight, fs=fs)`. The gaps between bands are
+ * don't care regions. By the alternation theorem the optimum error equiripples with $r + 1$ extrema, $r$ the number of
+ * cosine terms. An even `numtaps` (type II) has a zero at Nyquist, so it cannot design a high-pass. Throws
+ * `DomainError` for fewer than 3 taps, mismatched bands, gains and weights, edges that decrease or leave
+ * $[0, f_s/2]$, or bands too narrow for the number of taps; `NumericalError` when the exchange breaks down.
+ *
+ * @param numtaps The number of taps $N$, an integer of at least 3.
+ * @param bands The band edges as pairs $[f_0, f_1, f_2, f_3, \dots]$, increasing, within $[0, f_s/2]$.
+ * @param desired The desired gain in each band, one per pair of edges.
+ * @param options The band weights, the sampling frequency, the grid density and the iteration limit.
+ * @returns The FIR system, its taps in `repr.b`, with the `ripple`, `extremals` and `iterations` of the exchange.
+ *
+ * @example An 11-tap low-pass, against scipy.signal.remez
+ * // scipy: [-0.050504, -0.030697, 0.032755, 0.14642, 0.258528, 0.30544, 0.258528, ...].
+ * const h = remez(11, [0, 0.1, 0.2, 0.5], [1, 0])
+ * print('taps =', h.repr.b)
+ * print('ripple =', h.ripple)
+ * print('extremals =', h.extremals)
  */
 export function remez(
   numtaps: Size,
@@ -141,7 +164,12 @@ export function remez(
   })
 }
 
-/** Barycentric weights 1/Πⱼ≠ₖ (xₖ − xⱼ), rescaled to avoid overflow (only ratios matter). */
+/**
+ * Barycentric weights $1/\prod_{j \ne k} (x_k - x_j)$, rescaled by $2^{-(n-1)}$ to avoid overflow (only ratios matter).
+ *
+ * @param xs The $n$ distinct nodes $x_k$, in $[-1, 1]$.
+ * @returns The weight of each node.
+ */
 function baryWeights(xs: readonly number[]): number[] {
   const n = xs.length
   return xs.map((xk, k) => {
@@ -152,7 +180,15 @@ function baryWeights(xs: readonly number[]): number[] {
   })
 }
 
-/** The barycentric (second form) interpolant through (xs, ys) at x. */
+/**
+ * The barycentric (second form) interpolant through the points $(x_k, y_k)$, evaluated at $x$.
+ *
+ * @param xs The nodes $x_k$.
+ * @param ys The values $y_k$ at the nodes.
+ * @param ws The barycentric weights of the nodes, from `baryWeights`.
+ * @param x Where to evaluate; a node gives its value exactly.
+ * @returns The interpolant at $x$.
+ */
 function barycentric(xs: readonly number[], ys: readonly number[], ws: readonly number[], x: number): number {
   let num = 0
   let den = 0
@@ -167,8 +203,14 @@ function barycentric(xs: readonly number[], ys: readonly number[], ws: readonly 
 }
 
 /**
- * The next extremal set: local extrema of the error E with |E| ≥ |δ|, one per run of equal sign (the largest), then
- * trimmed from whichever end is smaller until `count` remain. Null when too few alternations are left.
+ * The next extremal set: local extrema of the error $E$ with $\lvert E \rvert \ge \lvert\delta\rvert$ (less a relative
+ * $10^{-6}$), one per run of equal sign (the largest), then trimmed from whichever end is smaller until `count` remain.
+ * Null when too few alternations are left.
+ *
+ * @param E The weighted error on the grid.
+ * @param delta The current $\lvert\delta\rvert$, the least magnitude an extremum may have.
+ * @param count How many extremals to keep, $r + 1$.
+ * @returns The grid indices of the extremals in increasing order, or null.
  */
 function extremals(E: Float64Array, delta: number, count: Size): number[] | null {
   const G = E.length
@@ -197,6 +239,7 @@ function extremals(E: Float64Array, delta: number, count: Size): number[] | null
 
 /** Options of `equiripple`. */
 export interface EquirippleOptions {
+  /** The band type. Default `lowpass` for one cutoff, `bandpass` for two. */
   btype?: 'lowpass' | 'highpass' | 'bandpass' | 'bandstop'
   /** Sampling frequency (default 2: edges as fractions of Nyquist, as `firwin`). */
   fs?: Scalar
@@ -206,8 +249,28 @@ export interface EquirippleOptions {
 
 /**
  * An equiripple FIR filter specified like `firwin`: band type, cutoff edge(s) and a transition width, the bands built
- * for `remez` with the passband ending (or starting) at each cutoff and the stopband a transition width beyond it. A
- * high-pass or band-stop needs an odd `numtaps`.
+ * for `remez` with the passband ending (or starting) at each cutoff and the stopband a transition width beyond it
+ * (edges clipped to $[0, f_s/2]$). A high-pass or band-stop needs an odd `numtaps`: an even one is not refused, but
+ * its zero at Nyquist spoils the design. Errors are `remez`'s.
+ *
+ * @param numtaps The number of taps, an integer of at least 3.
+ * @param cutoff The passband edge, or the two edges of a band-pass or band-stop, in units of `fs` (fractions of
+ *   Nyquist without it).
+ * @param transition The width of each transition band, in the units of `cutoff`.
+ * @param options The band type, the sampling frequency and the stopband weight.
+ * @returns The `remez` design.
+ *
+ * @example A 21-tap low-pass at 0.4 of Nyquist
+ * const h = equiripple(21, 0.4, 0.1)
+ * print('gain at DC =', sum(h.repr.b))
+ * print('ripple =', h.ripple)
+ *
+ * @example Weighting the stopband trades passband ripple for attenuation
+ * // The ripple is the weighted error: the passband's, and the stopband's times the weight.
+ * const plain = equiripple(21, 0.4, 0.1)
+ * const weighted = equiripple(21, 0.4, 0.1, { stopWeight: 10 })
+ * print('weight 1: pass, stop =', plain.ripple, plain.ripple)
+ * print('weight 10: pass, stop =', weighted.ripple, weighted.ripple / 10)
  */
 export function equiripple(
   numtaps: Size,

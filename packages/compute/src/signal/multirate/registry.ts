@@ -5,6 +5,7 @@
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as multirate from './multirate'
 
+/** Registers a function of `signal/multirate` with its metadata. */
 const fn = definer<FunctionInfo>('function', 'signal/multirate')
 
 fn(
@@ -62,7 +63,13 @@ fn(
   multirate.sincInterpolate,
 )
 
-/** The functions of the module, keyed by name. */
+/**
+ * The functions of the module, keyed by name, each with its registry `info` (name, role, notes, citations).
+ *
+ * @example The registered functions
+ * print('keys =', Object.keys(multirateFunctions))
+ * print('resamplePoly =', multirateFunctions.resamplePoly.info.name)
+ */
 export const multirateFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
   entries<FunctionInfo>('function', multirate) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
