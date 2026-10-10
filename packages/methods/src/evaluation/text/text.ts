@@ -1,8 +1,13 @@
 /**
  * Text metrics: BLEU (corpus and sentence, with smoothing), chrF, ROUGE-N and ROUGE-L, edit-distance alignment with
- * WER, CER, MER, WIP and WIL, translation edit rate with greedy block shifts, SQuAD exact match and token F₁, and
- * BERTScore from given token embeddings. Every metric takes the reference first and the candidate second; corpus
- * metrics take arrays (one candidate per entry, each with one reference or an array of references).
+ * WER, CER, MER, WIP and WIL, translation edit rate with greedy block shifts, SQuAD exact match and token $F_1$,
+ * BERTScore from given token embeddings, and backretrieval. Every metric takes the reference first and the candidate
+ * second; corpus metrics take arrays (one candidate per entry, each with one reference or an array of references).
+ *
+ * Text is tokenised by a `Tokeniser`: `whitespaceTokens` by default, which changes nothing else, so lowercase and
+ * strip punctuation first (or pass `words`) and report which was used, since scores are not comparable otherwise.
+ * Corpus scores pool their counts over the corpus before dividing, as the reference implementations do, rather than
+ * averaging sentence scores.
  */
 
 import { defineMetric, type Rows } from 'aifn-compute/learning/metrics'
@@ -10,13 +15,31 @@ import { editDistance } from 'aifn-compute/optim/programming'
 import { denseMatrix as dense, divide } from 'aifn-compute/learning/metrics'
 import { ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A tokeniser: text to tokens. */
+/** A tokeniser: text to tokens, in order. */
 export type Tokeniser = (text: string) => string[]
 
-/** The default tokeniser: split on whitespace, no other change. Normalise case and punctuation before, and say so. */
+/**
+ * The default tokeniser: split on whitespace, no other change. Normalise case and punctuation before, and say so.
+ *
+ * @param s The text.
+ * @returns Its whitespace-separated tokens, with no empty ones.
+ *
+ * @example Case and punctuation are kept
+ * print(whitespaceTokens('  The cat, the  hat. '))
+ */
 export const whitespaceTokens: Tokeniser = (s) => s.split(/\s+/).filter(Boolean)
 
-/** A normalising tokeniser: lowercase, punctuation (other than apostrophes) to spaces, split on whitespace. */
+/**
+ * A normalising tokeniser: lowercase, punctuation (anything but letters, digits, whitespace and apostrophes) to spaces,
+ * split on whitespace.
+ *
+ * @param s The text.
+ * @returns Its lowercased word tokens, apostrophes kept.
+ *
+ * @example Beside `whitespaceTokens`
+ * print(words("The cat's hat, the CAT."))
+ * print(whitespaceTokens("The cat's hat, the CAT."))
+ */
 export const words: Tokeniser = (s) =>
   s
     .toLowerCase()
@@ -27,29 +50,65 @@ export const words: Tokeniser = (s) =>
 /** Text: a string, tokenised by the metric's tokeniser (pass a custom `tokenise` for pre-split input). */
 export type Text = string
 
+/**
+ * The tokens of a text.
+ *
+ * @param t The text.
+ * @param tokenise The tokeniser to apply.
+ * @returns The tokens.
+ */
 const tokensOf = (t: Text, tokenise: Tokeniser) => tokenise(t)
 
-/** The n-grams of a token list, as joined strings (tokens separated by U+0001). */
+/**
+ * The $n$-grams of a token list, as joined strings (tokens separated by U+0001, so they can be counted in a map).
+ *
+ * @param tokens The tokens, in order.
+ * @param n The order: the number of consecutive tokens per $n$-gram.
+ * @returns The $\max(0, L - n + 1)$ $n$-grams of the $L$ tokens, in order, repeats kept.
+ *
+ * @example The bigrams of four words
+ * print(ngrams(['the', 'cat', 'sat', 'down'], 2).map((g) => g.split('\u0001').join(' ')))
+ */
 export function ngrams(tokens: readonly string[], n: number): string[] {
   return Array.from({ length: Math.max(0, tokens.length - n + 1) }, (_, i) => tokens.slice(i, i + n).join('\u0001'))
 }
 
+/**
+ * The number of times each distinct item occurs.
+ *
+ * @param items The items, such as $n$-grams.
+ * @returns A map from each distinct item to its count.
+ */
 function counts(items: readonly string[]): Map<string, number> {
   const m = new Map<string, number>()
   for (const it of items) m.set(it, (m.get(it) ?? 0) + 1)
   return m
 }
 
+/**
+ * The total of the counts in a map.
+ *
+ * @param m Counts, as `counts` returns them.
+ * @returns Their sum: the number of items counted.
+ */
 const total = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0)
 
-/** Matches clipped at the reference count: Σ_g min(count_cand(g), cap(g)). */
+/**
+ * Matches clipped at the reference count: $\sum_g \min(c(g), \text{cap}(g))$ over the candidate's items $g$.
+ *
+ * @param candidate The candidate's count $c(g)$ of each item.
+ * @param cap The most each item may match, $\text{cap}(g)$: the reference counts (an item absent from it matches 0).
+ * @returns The number of clipped matches.
+ */
 function clippedMatches(candidate: Map<string, number>, cap: Map<string, number>): number {
   let m = 0
   for (const [k, c] of candidate) m += Math.min(c, cap.get(k) ?? 0)
   return m
 }
 
-/** A corpus as parallel lists of references (each one or several) and candidates. */
+/**
+ * A corpus as parallel lists: `refs`, the references of each candidate (one or several), and `cands`, the candidates.
+ */
 type Corpus = { refs: (readonly string[])[]; cands: string[] }
 
 /** References for a corpus: one entry per candidate, each a string or an array of alternative references. */
@@ -57,7 +116,13 @@ export type References = string | readonly (string | readonly string[])[]
 
 /**
  * A single candidate (a string, whose reference is a string or an array of alternative references), or a corpus
- * (an array of candidates with one references entry each).
+ * (an array of candidates with one references entry each), as parallel lists. A corpus whose references are a string,
+ * or of a different length, throws `ShapeError`.
+ *
+ * @param references The references: for one candidate, a string or an array of alternatives; for a corpus, one entry
+ *   per candidate.
+ * @param candidates One candidate string, or an array of them.
+ * @returns The corpus, each candidate with its array of references.
  */
 function corpusOf(references: References, candidates: string | readonly string[]): Corpus {
   if (typeof candidates === 'string')
@@ -73,38 +138,64 @@ function corpusOf(references: References, candidates: string | readonly string[]
 // ── BLEU ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Smoothing of zero n-gram counts for sentence-level BLEU (Chen and Cherry 2014): `none`; `add-one` (their method 2,
- * add 1 to matched and total counts for n ≥ 2); `epsilon` (method 1, ε = 0.1 matches when an order has none);
- * `exponential` (method 3, NIST: the k-th order without matches gets precision 1/(2^k · total)).
+ * Smoothing of zero $n$-gram counts for sentence-level BLEU (Chen and Cherry 2014): `none`; `add-one` (their method 2,
+ * add 1 to matched and total counts for $n \ge 2$); `epsilon` (method 1, $\epsilon = 0.1$ matches when an order has
+ * none); `exponential` (method 3, NIST: the $k$-th order without matches gets precision $1/(2^k \cdot \text{total})$).
  */
 export type BleuSmoothing = 'none' | 'add-one' | 'epsilon' | 'exponential'
 
 /** Options of BLEU. */
 export type BleuOptions = {
-  /** Maximum n-gram order N (default 4), with uniform weights 1/N. */
+  /** Maximum $n$-gram order $N$ (default 4), with uniform weights $1/N$. */
   maxOrder?: number
+  /** How zero counts are smoothed (default `none`). */
   smoothing?: BleuSmoothing
+  /** The tokeniser (default `whitespaceTokens`). */
   tokenise?: Tokeniser
 }
 
 /** BLEU with its parts. */
 export type BleuResult = {
+  /** The BLEU score, in $[0, 1]$. */
   score: number
-  /** The (smoothed) n-gram precisions p₁ … p_N. */
+  /** The (smoothed) $n$-gram precisions $p_1, \dots, p_N$. */
   precisions: number[]
-  /** Clipped matches and candidate n-gram totals per order, pooled over the corpus. */
+  /** Clipped matches per order, pooled over the corpus. */
   matched: number[]
+  /** Candidate $n$-gram totals per order, pooled over the corpus. */
   totals: number[]
+  /** The brevity penalty $\text{BP}$. */
   brevityPenalty: number
+  /** The total candidate length $c$, in tokens. */
   candidateLength: number
+  /** The total effective reference length $r$, in tokens. */
   referenceLength: number
 }
 
 /**
- * Corpus BLEU (Papineni et al. 2002; bleu): BP · exp(Σₙ (1/N) log pₙ), with pₙ the clipped n-gram precision pooled over
- * the corpus (each candidate n-gram count capped at its largest count in any one reference), c the total candidate
- * length, r the total effective reference length (per sentence the reference length closest to the candidate's,
- * shorter on ties), and BP = 1 if c > r else e^{1 − r/c}. In [0, 1].
+ * Corpus BLEU (Papineni et al. 2002; bleu): $\text{BP} \cdot \exp(\sum_n \frac{1}{N} \log p_n)$, with $p_n$ the
+ * clipped $n$-gram precision pooled over the corpus (each candidate $n$-gram count capped at its largest count in any
+ * one reference), $c$ the total candidate length, $r$ the total effective reference length (per sentence the
+ * reference length closest to the candidate's, shorter on ties), and $\text{BP} = 1$ if $c > r$ else
+ * $e^{1 - r/c}$. In $[0, 1]$; 0 when any precision is 0, which smoothing avoids for single sentences.
+ *
+ * @param references For one candidate, its reference or an array of alternative references; for a corpus, one such
+ *   entry per candidate.
+ * @param candidates One candidate string, or an array of them.
+ * @param options The maximum order, smoothing and tokeniser (see `BleuOptions`).
+ * @returns The score with its precisions, counts, brevity penalty and lengths.
+ *
+ * @example One sentence against one reference
+ * const r = bleuScore('the cat sat on the mat', 'the cat sat on a mat')
+ * print('BLEU =', r.score)
+ * print('precisions =', r.precisions)
+ * print('brevity penalty =', r.brevityPenalty)
+ *
+ * @example A short candidate with no 4-gram match, unsmoothed and smoothed
+ * const ref = 'the quick brown fox jumps'
+ * print('none:', bleuScore(ref, 'the quick brown dog').score)
+ * print('epsilon:', bleuScore(ref, 'the quick brown dog', { smoothing: 'epsilon' }).score)
+ * print('add-one:', bleuScore(ref, 'the quick brown dog', { smoothing: 'add-one' }).score)
  */
 export function bleuScore(
   references: References,
@@ -151,7 +242,23 @@ export function bleuScore(
   return { score, precisions, matched, totals, brevityPenalty: bp, candidateLength: c, referenceLength: r }
 }
 
-/** Corpus BLEU as a metric (see `bleuScore`); for one sentence, pass strings. */
+/**
+ * Corpus BLEU as a metric (see `bleuScore`); for one sentence, pass strings.
+ *
+ * @param references For one candidate, its reference or an array of alternative references; for a corpus, one such
+ *   entry per candidate.
+ * @param candidates One candidate string, or an array of them.
+ * @param options The maximum order, smoothing and tokeniser (see `BleuOptions`).
+ * @returns The BLEU score, in $[0, 1]$.
+ *
+ * @example A corpus of two sentences, the second with two references
+ * const references = [
+ *   'the cat sat on the mat',
+ *   ['there is a dog in the garden', 'a dog is in the garden'],
+ * ]
+ * const candidates = ['the cat sat on a mat', 'a dog is in the garden']
+ * print('corpus BLEU =', bleu(references, candidates))
+ */
 export const bleu = defineMetric(
   {
     module: 'applied/evaluation/text',
@@ -170,9 +277,21 @@ export const bleu = defineMetric(
 // ── chrF ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * chrF_β (Popović 2015; chrf): character n-gram precision and recall (spaces removed, counts clipped), each averaged
- * over n = 1 … N (default 6), combined as (1 + β²)PR/(β²P + R) with β = 2 by default. Over a corpus, n-gram statistics
- * are pooled before the averages. Returns the score with its average precision and recall.
+ * $\text{chrF}_\beta$ (Popović 2015; chrf): character $n$-gram precision and recall (whitespace removed, counts
+ * clipped), each averaged over $n = 1, \dots, N$, combined as $(1 + \beta^2)PR/(\beta^2 P + R)$. Over a corpus,
+ * $n$-gram statistics are pooled before the averages. Only the first reference of each candidate is used; an order
+ * with no $n$-grams (a text shorter than $n$) adds 0 to the averages.
+ *
+ * @param references For one candidate, its reference (or an array whose first entry is used); for a corpus, one such
+ *   entry per candidate.
+ * @param candidates One candidate string, or an array of them.
+ * @param options The maximum order and $\beta$.
+ * @param options.maxOrder The largest character $n$-gram order $N$ (default 6).
+ * @param options.beta The weight $\beta$ of recall over precision (default 2).
+ * @returns `score`, in $[0, 1]$, with the average `precision` and `recall`.
+ *
+ * @example British and American spelling
+ * print(chrFScore('the colour of the harbour', 'the color of the harbor'))
  */
 export function chrFScore(
   references: References,
@@ -209,7 +328,18 @@ export function chrFScore(
   return { score: P + R === 0 ? 0 : ((1 + b2) * P * R) / (b2 * P + R), precision: P, recall: R }
 }
 
-/** chrF as a metric (see `chrFScore`). Uses the first reference of each candidate. */
+/**
+ * chrF as a metric (see `chrFScore`). Uses the first reference of each candidate.
+ *
+ * @param references For one candidate, its reference; for a corpus, one entry per candidate.
+ * @param candidates One candidate string, or an array of them.
+ * @param options `maxOrder`, the largest character $n$-gram order (default 6), and `beta` (default 2).
+ * @returns The chrF score, in $[0, 1]$.
+ *
+ * @example A near miss scores higher than a different word
+ * print('colour/color:', chrF('colour', 'color'))
+ * print('colour/shade:', chrF('colour', 'shade'))
+ */
 export const chrF = defineMetric(
   {
     module: 'applied/evaluation/text',
@@ -230,15 +360,37 @@ export const chrF = defineMetric(
 
 // ── ROUGE ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Precision, recall and F of an overlap score. */
+/** Precision, recall and $F$ of an overlap score, each in $[0, 1]$. */
 export type Prf = { precision: number; recall: number; f: number }
 
+/**
+ * The $F_\beta$ score $(1 + \beta^2)PR/(R + \beta^2 P)$ of a precision and a recall, 0 when both are 0.
+ *
+ * @param p The precision $P$.
+ * @param r The recall $R$.
+ * @param beta The weight $\beta$ of recall over precision.
+ * @returns $F_\beta$.
+ */
 const fOf = (p: number, r: number, beta = 1) =>
   p === 0 && r === 0 ? 0 : ((1 + beta * beta) * p * r) / (r + beta * beta * p)
 
 /**
- * ROUGE-N (Lin 2004; rouge) of one candidate against one or more references: recall is the clipped n-gram matches over
- * the references' n-grams, precision over the candidate's; with several references both sum over them.
+ * ROUGE-N (Lin 2004; rouge) of one candidate against one or more references: recall is the clipped $n$-gram matches
+ * over the references' $n$-grams, precision over the candidate's; with several references both sum over them (the
+ * candidate's $n$-grams counted once per reference). $F$ is $F_1$.
+ *
+ * @param references The reference, or an array of references.
+ * @param candidate The candidate text.
+ * @param options The order and tokeniser.
+ * @param options.n The $n$-gram order (default 1).
+ * @param options.tokenise The tokeniser (default `whitespaceTokens`).
+ * @returns The precision, recall and $F_1$ (each 0 when there is nothing to divide by).
+ *
+ * @example ROUGE-1 and ROUGE-2 of a summary
+ * const ref = 'the cat was found under the bed'
+ * const cand = 'the cat was under the bed'
+ * print('ROUGE-1:', rougeNScores(ref, cand))
+ * print('ROUGE-2:', rougeNScores(ref, cand, { n: 2 }))
  */
 export function rougeNScores(
   references: Text | readonly Text[],
@@ -263,7 +415,17 @@ export function rougeNScores(
   return { precision, recall, f: fOf(precision, recall) }
 }
 
-/** Length of the longest common subsequence of two token lists, by dynamic programming in O(|a||b|). */
+/**
+ * Length of the longest common subsequence of two token lists, by dynamic programming in
+ * $O(\lvert a \rvert \lvert b \rvert)$ time and $O(\lvert b \rvert)$ memory.
+ *
+ * @param a The first token list.
+ * @param b The second token list.
+ * @returns The length of their longest common subsequence (tokens in order, not necessarily adjacent).
+ *
+ * @example Four tokens in common, in order
+ * print(longestCommonSubsequence(['a', 'b', 'c', 'd', 'e'], ['a', 'c', 'x', 'd', 'e']))
+ */
 export function longestCommonSubsequence(a: readonly string[], b: readonly string[]): number {
   let prev = new Int32Array(b.length + 1)
   for (let i = 0; i < a.length; i++) {
@@ -274,7 +436,22 @@ export function longestCommonSubsequence(a: readonly string[], b: readonly strin
   return prev[b.length]
 }
 
-/** ROUGE-L: R = LCS/|reference|, P = LCS/|candidate|, F_β (default β = 1). */
+/**
+ * ROUGE-L (Lin 2004; rouge): $R = \text{LCS}/\lvert \text{reference} \rvert$,
+ * $P = \text{LCS}/\lvert \text{candidate} \rvert$ and $F_\beta$, from the longest common subsequence of tokens.
+ *
+ * @param reference The reference text.
+ * @param candidate The candidate text.
+ * @param options The weight $\beta$ and tokeniser.
+ * @param options.beta The weight $\beta$ of recall over precision in $F_\beta$ (default 1).
+ * @param options.tokenise The tokeniser (default `whitespaceTokens`).
+ * @returns The precision, recall and $F_\beta$ (each 0 when there is nothing to divide by).
+ *
+ * @example Word order matters, unlike ROUGE-1
+ * const ref = 'police killed the gunman'
+ * print('in order:', rougeLScores(ref, 'police kill the gunman'))
+ * print('reordered:', rougeLScores(ref, 'the gunman kill police'))
+ */
 export function rougeLScores(
   reference: Text,
   candidate: Text,
@@ -289,7 +466,21 @@ export function rougeLScores(
   return { precision, recall, f: fOf(precision, recall, options.beta ?? 1) }
 }
 
-/** ROUGE-N F-score (or `measure: 'recall' | 'precision'`) as a metric. Default n = 1. */
+/**
+ * ROUGE-N $F_1$ (or another `measure`) as a metric (see `rougeNScores`).
+ *
+ * @param references The reference, or an array of references.
+ * @param candidate The candidate text.
+ * @param options The order, measure and tokeniser.
+ * @param options.n The $n$-gram order (default 1).
+ * @param options.measure Which of `precision`, `recall` and `f` to return (default `f`).
+ * @param options.tokenise The tokeniser (default `whitespaceTokens`).
+ * @returns The chosen measure, in $[0, 1]$.
+ *
+ * @example ROUGE-2 recall against two references
+ * const refs = ['the cat sat on the mat', 'a cat was on the mat']
+ * print('ROUGE-2 recall =', rougeN(refs, 'the cat was on the mat', { n: 2, measure: 'recall' }))
+ */
 export const rougeN = defineMetric(
   {
     module: 'applied/evaluation/text',
@@ -308,7 +499,20 @@ export const rougeN = defineMetric(
   ): number => rougeNScores(references, candidate, options)[options.measure ?? 'f'],
 )
 
-/** ROUGE-L F-score (or `measure`) as a metric. */
+/**
+ * ROUGE-L $F_\beta$ (or another `measure`) as a metric (see `rougeLScores`).
+ *
+ * @param reference The reference text.
+ * @param candidate The candidate text.
+ * @param options The measure, $\beta$ and tokeniser.
+ * @param options.measure Which of `precision`, `recall` and `f` to return (default `f`).
+ * @param options.beta The weight $\beta$ of recall over precision (default 1).
+ * @param options.tokenise The tokeniser (default `whitespaceTokens`).
+ * @returns The chosen measure, in $[0, 1]$.
+ *
+ * @example ROUGE-L of a summary
+ * print('ROUGE-L =', rougeL('the cat was found under the bed', 'the cat was under the bed'))
+ */
 export const rougeL = defineMetric(
   {
     module: 'applied/evaluation/text',
@@ -331,26 +535,46 @@ export const rougeL = defineMetric(
 
 /** One step of an alignment. */
 export type EditOperation = {
+  /** The kind of step: a hit (equal tokens), a substitution, a deletion (of a reference token) or an insertion. */
   op: 'hit' | 'substitution' | 'deletion' | 'insertion'
+  /** The reference token (absent for an insertion). */
   reference?: string
+  /** The hypothesis token (absent for a deletion). */
   hypothesis?: string
 }
 
-/** A minimum-edit alignment and its counts: N = H + S + D reference tokens, P = H + S + I hypothesis tokens. */
+/**
+ * A minimum-edit alignment and its counts: $N = H + S + D$ reference tokens, $P = H + S + I$ hypothesis tokens.
+ */
 export type Alignment = {
+  /** The Levenshtein distance $S + D + I$. */
   distance: number
+  /** The steps of one cheapest alignment, in order. */
   operations: EditOperation[]
+  /** The number of hits $H$. */
   hits: number
+  /** The number of substitutions $S$. */
   substitutions: number
+  /** The number of deletions $D$. */
   deletions: number
+  /** The number of insertions $I$. */
   insertions: number
 }
 
 /**
  * The Levenshtein alignment of a reference and a hypothesis token list (word-and-character-error-rates), by
- * `aifn-compute/optim/programming`'s `editDistance` with unit costs: its operations named in WER terms (hit, substitution,
- * deletion, insertion) and counted. On ties the traceback prefers a hit or substitution, then a deletion, then an
- * insertion.
+ * `aifn-compute/optim/programming`'s `editDistance` with unit costs: its operations named in WER terms (hit,
+ * substitution, deletion, insertion) and counted. On ties the traceback prefers a hit or substitution, then a
+ * deletion, then an insertion.
+ *
+ * @param reference The reference tokens.
+ * @param hypothesis The hypothesis tokens.
+ * @returns The distance, the operations and their counts.
+ *
+ * @example One substitution and one insertion
+ * const a = editAlignment(['the', 'cat', 'sat'], ['the', 'bat', 'sat', 'down'])
+ * print('distance =', a.distance, ' H S D I =', a.hits, a.substitutions, a.deletions, a.insertions)
+ * for (const o of a.operations) print(o)
  */
 export function editAlignment(reference: readonly string[], hypothesis: readonly string[]): Alignment {
   const r = editDistance(reference, hypothesis)
@@ -371,7 +595,15 @@ export function editAlignment(reference: readonly string[], hypothesis: readonly
   }
 }
 
-/** Pooled alignment counts over a corpus of (reference, hypothesis) pairs. */
+/**
+ * Pooled alignment counts over a corpus of (reference, hypothesis) pairs. Lists of different lengths throw
+ * `ShapeError`.
+ *
+ * @param references One reference string, or one per pair.
+ * @param hypotheses One hypothesis string, or one per pair.
+ * @param split The tokeniser that turns each string into the units aligned (words or characters).
+ * @returns The hits `H`, substitutions `S`, deletions `D` and insertions `I`, summed over the pairs.
+ */
 function pooledCounts(
   references: string | readonly string[],
   hypotheses: string | readonly string[],
@@ -392,8 +624,23 @@ function pooledCounts(
   return out
 }
 
+/**
+ * The character tokeniser: every code point, spaces included.
+ *
+ * @param s The text.
+ * @returns Its characters, in order.
+ */
 const characters: Tokeniser = (s) => Array.from(s)
 
+/**
+ * The metric metadata shared by the error rates: module, `sequences` inputs, lower is better, and the
+ * `word-and-character-error-rates` note.
+ *
+ * @param key The metric's registry key.
+ * @param name The metric's display name.
+ * @param range The metric's range (default $[0, \infty)$).
+ * @returns The spec for `defineMetric`.
+ */
 const errorRateInfo = (key: string, name: string, range: readonly [number, number] = [0, Infinity]) =>
   ({
     module: 'applied/evaluation/text',
@@ -407,8 +654,17 @@ const errorRateInfo = (key: string, name: string, range: readonly [number, numbe
   }) as const
 
 /**
- * Word error rate (S + D + I)/N over a corpus (total edits over total reference words); unbounded above. Strings are
+ * Word error rate $(S + D + I)/N$ over a corpus (total edits over total reference words); unbounded above. Strings are
  * split on whitespace unless `tokenise` is given.
+ *
+ * @param references One reference string, or an array of them (a corpus).
+ * @param hypotheses One hypothesis string, or one per reference.
+ * @param options `tokenise`, the tokeniser (default `whitespaceTokens`).
+ * @returns The WER: 0 for a perfect transcript, and above 1 when there are many insertions.
+ *
+ * @example One substitution and one deletion in six words
+ * print('WER =', wordErrorRate('the cat sat on the mat', 'the bat sat on mat'))
+ * print('corpus WER =', wordErrorRate(['a b c', 'd e'], ['a b c', 'd x y']))
  */
 export const wordErrorRate = defineMetric(
   errorRateInfo('wordErrorRate', 'Word error rate'),
@@ -422,7 +678,16 @@ export const wordErrorRate = defineMetric(
   },
 )
 
-/** Character error rate: WER over characters (spaces included). */
+/**
+ * Character error rate: WER over characters (spaces included).
+ *
+ * @param references One reference string, or an array of them (a corpus).
+ * @param hypotheses One hypothesis string, or one per reference.
+ * @returns The CER: total character edits over total reference characters.
+ *
+ * @example One wrong letter in eleven characters
+ * print('CER =', characterErrorRate('hello world', 'hallo world'))
+ */
 export const characterErrorRate = defineMetric(
   errorRateInfo('characterErrorRate', 'Character error rate'),
   (references: string | readonly string[], hypotheses: string | readonly string[]): number => {
@@ -431,7 +696,19 @@ export const characterErrorRate = defineMetric(
   },
 )
 
-/** Match error rate (S + D + I)/(H + S + D + I), in [0, 1] (Morris et al. 2004). */
+/**
+ * Match error rate $(S + D + I)/(H + S + D + I)$, in $[0, 1]$ (Morris et al. 2004): the probability that a given match
+ * is wrong, bounded where WER is not.
+ *
+ * @param references One reference string, or an array of them (a corpus).
+ * @param hypotheses One hypothesis string, or one per reference.
+ * @param options `tokenise`, the tokeniser (default `whitespaceTokens`).
+ * @returns The MER, in $[0, 1]$.
+ *
+ * @example Many insertions: WER above 1, MER below it
+ * print('WER =', wordErrorRate('yes', 'yes yes yes yes'))
+ * print('MER =', matchErrorRate('yes', 'yes yes yes yes'))
+ */
 export const matchErrorRate = defineMetric(
   errorRateInfo('matchErrorRate', 'Match error rate', [0, 1]),
   (
@@ -444,7 +721,19 @@ export const matchErrorRate = defineMetric(
   },
 )
 
-/** Word information lost 1 − (H/N)(H/P) (Morris et al. 2004); word information preserved is 1 − WIL. */
+/**
+ * Word information lost $1 - (H/N)(H/P)$ (Morris et al. 2004); word information preserved (WIP) is
+ * $1 - \text{WIL}$.
+ *
+ * @param references One reference string, or an array of them (a corpus).
+ * @param hypotheses One hypothesis string, or one per reference.
+ * @param options `tokenise`, the tokeniser (default `whitespaceTokens`).
+ * @returns The WIL, in $[0, 1]$.
+ *
+ * @example WIL and WIP of a transcript with one substitution
+ * const wil = wordInformationLost('the cat sat down', 'the bat sat down')
+ * print('WIL =', wil, ' WIP =', 1 - wil)
+ */
 export const wordInformationLost = defineMetric(
   errorRateInfo('wordInformationLost', 'Word information lost', [0, 1]),
   (
@@ -461,9 +750,21 @@ export const wordInformationLost = defineMetric(
 
 /**
  * The fewest edits (insertions, deletions, substitutions and block shifts, each costing 1) turning a hypothesis into a
- * reference, by the greedy shift search of Snover et al. (2006): repeatedly apply the shift of a hypothesis block (up
- * to `maxShiftSize` words, default 10) that occurs in the reference and most reduces the Levenshtein distance, while
- * some shift reduces it; then add the remaining Levenshtein distance. An upper bound on the true minimum.
+ * reference, by the greedy shift search of Snover et al. (2006): repeatedly apply the shift of a hypothesis block that
+ * occurs in the reference and most reduces the Levenshtein distance, while some shift reduces it; then add the
+ * remaining Levenshtein distance. An upper bound on the true minimum. Each round tries every block and position, so
+ * it is cubic or worse in the length: meant for sentences.
+ *
+ * @param reference The reference tokens.
+ * @param hypothesis The hypothesis tokens; not modified.
+ * @param maxShiftSize The longest block, in tokens, that one shift may move.
+ * @returns `edits`, the shifts plus the remaining Levenshtein distance, and `shifts`, the number of shifts.
+ *
+ * @example A clause moved to the front: one shift instead of four edits
+ * const reference = ['a', 'b', 'c', 'd', 'e']
+ * const hypothesis = ['d', 'e', 'a', 'b', 'c']
+ * print(translationEdits(reference, hypothesis))
+ * print('Levenshtein distance =', editAlignment(reference, hypothesis).distance)
  */
 export function translationEdits(
   reference: readonly string[],
@@ -502,7 +803,21 @@ export function translationEdits(
 
 /**
  * Translation edit rate (Snover et al. 2006; translation-edit-rate): the fewest edits, shifts included, to the closest
- * reference, divided by the average reference length, pooled over a corpus. 0 for an exact match; can exceed 1.
+ * reference (by `translationEdits`), divided by the average reference length, pooled over a corpus. 0 for an exact
+ * match; can exceed 1.
+ *
+ * @param references For one candidate, its reference or an array of alternative references; for a corpus, one such
+ *   entry per candidate.
+ * @param candidates One candidate string, or an array of them.
+ * @param options The tokeniser and shift size.
+ * @param options.tokenise The tokeniser (default `whitespaceTokens`).
+ * @param options.maxShiftSize The longest block, in tokens, that one shift may move (default 10).
+ * @returns The TER: total edits over total average reference length.
+ *
+ * @example A reordered sentence, against one and two references
+ * const hypothesis = 'on the mat the cat sat'
+ * print('TER =', translationEditRate('the cat sat on the mat', hypothesis))
+ * print('TER, two refs =', translationEditRate([['the cat sat on the mat', hypothesis]], [hypothesis]))
  */
 export const translationEditRate = defineMetric(
   {
@@ -536,7 +851,16 @@ export const translationEditRate = defineMetric(
 
 // ── SQuAD ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** SQuAD answer normalisation: lowercase, remove ASCII punctuation, remove the articles a, an, the, collapse spaces. */
+/**
+ * SQuAD answer normalisation, as the official evaluation script: lowercase, remove ASCII punctuation, remove the
+ * articles a, an and the, collapse whitespace.
+ *
+ * @param s The answer text.
+ * @returns The normalised answer, its words separated by single spaces.
+ *
+ * @example Case, punctuation and articles go
+ * print(normaliseAnswer('  The Eiffel   Tower! '))
+ */
 export function normaliseAnswer(s: string): string {
   return s
     .toLowerCase()
@@ -547,6 +871,14 @@ export function normaliseAnswer(s: string): string {
     .join(' ')
 }
 
+/**
+ * The SQuAD token $F_1$ of one prediction against one gold answer: the $F_1$ of the multiset overlap of their
+ * normalised tokens. 1 when both are empty after normalisation, 0 when only one is.
+ *
+ * @param gold The gold answer.
+ * @param prediction The predicted answer.
+ * @returns The token $F_1$, in $[0, 1]$.
+ */
 function squadF1Of(gold: string, prediction: string): number {
   const g = normaliseAnswer(gold).split(' ').filter(Boolean)
   const p = normaliseAnswer(prediction).split(' ').filter(Boolean)
@@ -558,9 +890,20 @@ function squadF1Of(gold: string, prediction: string): number {
   return (2 * precision * recall) / (precision + recall)
 }
 
-/** Gold answers per question (one string or several) and one predicted answer per question. */
+/**
+ * Question-answering input as parallel lists: `golds`, the gold answers per question (one string or several), and
+ * `predictions`, one predicted answer per question.
+ */
 type QaInput = { golds: (string | readonly string[])[]; predictions: string[] }
 
+/**
+ * One question or a list of them as parallel lists. A list of predictions whose golds are a string, or of a different
+ * length, throws `ShapeError`.
+ *
+ * @param golds For one question, its gold answer or an array of them; for a list, one such entry per prediction.
+ * @param predictions One predicted answer, or one per question.
+ * @returns The golds and predictions as parallel lists.
+ */
 function qaOf(
   golds: string | readonly (string | readonly string[])[],
   predictions: string | readonly string[],
@@ -572,11 +915,27 @@ function qaOf(
   return { golds: [...golds], predictions: [...predictions] }
 }
 
+/**
+ * One gold answer or several as a list.
+ *
+ * @param g A gold answer, or an array of them.
+ * @returns The gold answers as an array.
+ */
 const asList = (g: string | readonly string[]) => (typeof g === 'string' ? [g] : g)
 
 /**
- * SQuAD exact match (Rajpurkar et al. 2016; squad-exact-match-and-f1): 1 when the normalised prediction equals a
- * normalised gold answer, averaged over questions.
+ * SQuAD exact match (Rajpurkar et al. 2016; squad-exact-match-and-f1): 1 when the normalised prediction
+ * (`normaliseAnswer`) equals a normalised gold answer, averaged over questions.
+ *
+ * @param golds For one question, its gold answer or an array of acceptable ones; for several questions, one such entry
+ *   per prediction.
+ * @param predictions One predicted answer, or one per question.
+ * @returns The fraction of questions answered exactly, in $[0, 1]$.
+ *
+ * @example Normalisation forgives case and articles, not extra words
+ * const golds = [['Denver Broncos', 'Broncos'], 'the Eiffel Tower']
+ * print('exact match =', squadExactMatch(golds, ['broncos', 'Eiffel Tower in Paris']))
+ * print('token F1 =', squadF1(golds, ['broncos', 'Eiffel Tower in Paris']))
  */
 export const squadExactMatch = defineMetric(
   {
@@ -600,7 +959,18 @@ export const squadExactMatch = defineMetric(
   },
 )
 
-/** SQuAD token F₁: the best multiset-overlap F₁ against any gold answer, averaged over questions. */
+/**
+ * SQuAD token $F_1$: the best multiset-overlap $F_1$ of normalised tokens against any gold answer, averaged over
+ * questions.
+ *
+ * @param golds For one question, its gold answer or an array of acceptable ones; for several questions, one such entry
+ *   per prediction.
+ * @param predictions One predicted answer, or one per question.
+ * @returns The mean token $F_1$, in $[0, 1]$.
+ *
+ * @example Partial credit for a partly right answer
+ * print('token F1 =', squadF1('Saint Bernard dog', 'a Bernard'))
+ */
 export const squadF1 = defineMetric(
   {
     module: 'applied/evaluation/text',
@@ -626,8 +996,21 @@ export const squadF1 = defineMetric(
 /**
  * BERTScore from contextual token embeddings (Zhang et al. 2020; bertscore): rows are normalised to unit length, each
  * reference token takes its most similar candidate token for recall and each candidate token its most similar
- * reference token for precision; F is their harmonic mean. Optional importance weights (e.g. idf) weight each token's
- * best similarity. The embedding model is the caller's.
+ * reference token for precision; $F$ is their harmonic mean. Optional importance weights (e.g. idf) weight each token's
+ * best similarity. The embedding model is the caller's, and no baseline rescaling is applied. Embeddings of different
+ * dimensions throw `ShapeError`.
+ *
+ * @param referenceEmbeddings The reference's token embeddings, one token per row.
+ * @param candidateEmbeddings The candidate's token embeddings, one token per row, of the same dimension.
+ * @param options Importance weights.
+ * @param options.referenceWeights One weight per reference token, for recall (default 1 each).
+ * @param options.candidateWeights One weight per candidate token, for precision (default 1 each).
+ * @returns The precision, recall and $F_1$, cosine similarities in $[-1, 1]$.
+ *
+ * @example Three reference tokens, two of them matched closely
+ * const reference = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+ * const candidate = [[0.9, 0.1, 0], [0, 1, 0.1]]
+ * print(bertScore(reference, candidate))
  */
 export function bertScore(
   referenceEmbeddings: Rows,
@@ -672,11 +1055,30 @@ export function bertScore(
 // ── Backretrieval ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Backretrieval BkR@K (Fain, Twomey and Bollegala 2021; backretrieval): each source query q retrieves the target text
- * j*(q) with the highest text similarity (`textSimilarity`, N × M, source queries by target texts), then ranks every
- * source image by its similarity to j*'s image (`imageSimilarity`, M × N, target images by source images); the score
- * is the fraction of queries whose own image ranks in the top K, with rank 1 + #{images strictly more similar} (ties
- * favour the query). Default K = 10. Evaluates the text embedding; the image similarity is a fixed instrument.
+ * Backretrieval BkR@K (Fain, Twomey and Bollegala 2021; backretrieval): each source query $q$ retrieves the target text
+ * $j^*(q)$ with the highest text similarity (the first on ties), then ranks every source image by its similarity to
+ * $j^*$'s image; the score is the fraction of queries whose own image ranks in the top $K$, with rank
+ * $1 + \#\{\text{images strictly more similar}\}$ (ties favour the query). Evaluates the text embedding; the image
+ * similarity is a fixed instrument. Similarity matrices of mismatched shapes throw `ShapeError`.
+ *
+ * @param textSimilarity The $N \times M$ text similarities: source queries as rows, target texts as columns.
+ * @param imageSimilarity The $M \times N$ image similarities: target images as rows, source images as columns.
+ * @param options `k`, the rank $K$ a query's own image must reach (default 10).
+ * @returns The fraction of queries whose own image is retrieved in the top $K$, in $[0, 1]$.
+ *
+ * @example Three queries, one retrieving the wrong text, at $K = 1$ and $K = 2$
+ * const textSimilarity = [
+ *   [0.9, 0.1, 0.2],
+ *   [0.3, 0.2, 0.8],
+ *   [0.75, 0.7, 0.3],
+ * ]
+ * const imageSimilarity = [
+ *   [1.0, 0.2, 0.5],
+ *   [0.2, 0.4, 0.9],
+ *   [0.1, 0.8, 0.6],
+ * ]
+ * print('BkR@1 =', backretrieval(textSimilarity, imageSimilarity, { k: 1 }))
+ * print('BkR@2 =', backretrieval(textSimilarity, imageSimilarity, { k: 2 }))
  */
 export const backretrieval = defineMetric(
   {
