@@ -1,8 +1,9 @@
 /**
  * Two classifiers of one architecture trained side by side on the same minibatches, one by cross-entropy and one by
  * JEM, as a generator of plain-data snapshots for a worker to stream. At checkpoints each model reports its logits on a
- * grid (decision regions, p(y | x) and the energy −logsumexp f), Langevin samples from p(x) and from each p(x | y),
- * test accuracy and confidence ECE, and how well its energy separates test points from out-of-distribution ones.
+ * grid (decision regions, $p(y \mid \xvec)$ and the energy $-\operatorname{logsumexp} f$), Langevin samples from
+ * $p(\xvec)$ and from each $p(\xvec \mid y)$, test accuracy and confidence ECE, and how well its energy separates
+ * test points from out-of-distribution ones. The points are 2-d.
  */
 
 import type { Params } from 'aifn-compute/foundation/pytree'
@@ -19,10 +20,13 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A labelled dataset as the run reads it, with the class densities in `meta.truth.model` when known. */
 export type JemData = {
+  /** The points, $n \times 2$. */
   x: Tensor
-  /** Integer labels (required). */
+  /** Integer labels from 0, $n$ of them (required: `jemRun` throws without them). */
   y?: Tensor
-  /** A truth with a labelled density (`knownDensity`) gives the true energy. */
+  /**
+   * Class names, and the dataset's truth: one with a labelled density (`knownDensity`) gives the true log-density.
+   */
   meta?: { labelNames?: readonly string[]; truth?: unknown }
 }
 
@@ -30,21 +34,27 @@ export type JemData = {
 export type JemRunOptions = {
   /** Updates of each model. Default 600. */
   steps?: number
+  /** Points per minibatch. Default 64. */
   batchSize?: number
+  /** The classifier's hidden widths. Default $[64, 64]$. */
   hidden?: readonly number[]
-  /** Adam's step size. Default 1e-3. */
+  /** Adam's step size. Default $10^{-3}$. */
   stepSize?: number
-  /** The Langevin sampler of JEM's negatives and of the shown samples. */
+  /** Langevin steps per draw of JEM's negatives. Default 20. */
   langevinSteps?: number
+  /** The Langevin step size $\epsilon$, of JEM's negatives and of the shown samples. Default 0.02. */
   langevinStepSize?: number
-  /** Noise sd; default √(2α), proper Langevin. */
+  /** The Langevin noise's standard deviation. Default $\sqrt{2\epsilon}$, proper Langevin. */
   langevinNoise?: number
+  /** The probability that a chain of the replay buffer restarts from uniform on the box. Default 0.05. */
   reinitialise?: number
+  /** Persistent chains in JEM's replay buffer. Default 1000. */
   bufferSize?: number
   /** The energy-magnitude penalty of the CD term (Du & Mordatch, 2019). Default 0.1; 0 often diverges. */
   regularisation?: number
+  /** The seed of the run's stream. Default 0. */
   seed?: number | string
-  /** Grid cells per side. Default 40. */
+  /** Grid cells per side $g$. Default 40. */
   grid?: number
   /** Checkpoints besides step 0. Default 12. */
   checkpoints?: number
@@ -56,22 +66,25 @@ export type JemRunOptions = {
 
 /** One model's state at a checkpoint. */
 export type JemCheckpoint = {
+  /** The updates applied so far. */
   step: number
   /** The parameters, so a page can evaluate the model at a probe point. */
   params: Params[]
-  /** Logits on the grid, row-major [g² × K]. */
+  /** Logits on the grid's cell centres, row-major $g^2 \times K$, one grid row after another. */
   logits: Float64Array
-  /** Langevin samples from p(x), [m × 2], started uniform on the box. */
+  /** Langevin samples from $p(\xvec)$, row-major $m \times 2$ ($m$ = `samples`), started uniform on the box. */
   samples: Float64Array
-  /** Langevin samples from each p(x | y), [K][m/2 × 2]. */
+  /** Langevin samples from each $p(\xvec \mid y)$: per class, row-major $\lceil m/2 \rceil \times 2$. */
   conditional: Float64Array[]
+  /** The share of test points classified correctly. */
   accuracy: number
   /** Confidence (top-label) ECE on the test points. */
   ece: number
-  /** AUROC of −E(x) separating test points (positive) from out-of-distribution points. */
+  /** AUROC of $-E(\xvec)$ separating test points (positive) from out-of-distribution points. */
   oodAuroc: number
-  /** E(x) at the test and the out-of-distribution points. */
+  /** $E(\xvec)$ at the test points. */
   testEnergy: Float64Array
+  /** $E(\xvec)$ at the out-of-distribution points. */
   oodEnergy: Float64Array
 }
 
@@ -81,37 +94,65 @@ export type JemTrack = {
   crossEntropy: Float64Array
   /** The contrastive-divergence term per update (NaN for the cross-entropy model). */
   contrastive: Float64Array
-  /** Mean energy of the data minibatch and of the negatives per update (NaN for the cross-entropy model). */
+  /** Mean energy of the data minibatch per update (NaN for the cross-entropy model). */
   dataEnergy: Float64Array
+  /** Mean energy of the negatives per update (NaN for the cross-entropy model). */
   sampleEnergy: Float64Array
+  /** The checkpoints so far. */
   checkpoints: JemCheckpoint[]
 }
 
 /** A run so far. */
 export type JemRun = {
+  /** The updates the run will make. */
   steps: number
+  /** The updates made so far. */
   done: number
+  /** True at the end of the run. */
   finished: boolean
+  /** The number of classes $K$ (one more than the largest training label). */
   classes: number
+  /** The class names: the data's, or `class 1`, `class 2`, and so on. */
   labelNames: string[]
+  /** The grid's half-width: the square $[-\text{box}, \text{box}]^2$ holds the data with a margin. */
   box: number
+  /** The grid's cell centres along $x_1$. */
   gridX: Float64Array
+  /** The grid's cell centres along $x_2$. */
   gridY: Float64Array
-  /** The true log p(x) on the grid, when the class densities are known; else null. */
+  /** The true $\log p(\xvec)$ on the grid, when the class densities are known; else null. */
   trueLogDensity: Float64Array | null
+  /** The training points, row-major $n \times 2$. */
   data: Float64Array
+  /** The training labels. */
   labels: Int32Array
+  /** The test points, row-major. */
   test: Float64Array
+  /** The test labels. */
   testLabels: Int32Array
+  /** The out-of-distribution points, row-major. */
   ood: Float64Array
+  /** The cross-entropy model's track. */
   crossEntropy: JemTrack
+  /** The JEM model's track. */
   jem: JemTrack
 }
 
-/** Rows of a [n, d] tensor as a fresh Float64Array. */
+/**
+ * The entries of a tensor (or a traced value's tensor) as a fresh array, row-major.
+ *
+ * @param t The tensor, such as $n \times d$ points.
+ * @returns Its values, row-major.
+ */
 const rows = (t: Tensor | Value) => Float64Array.from(toFlat(unwrap(t as Value) as Tensor))
 
-/** The model's energy −logsumexp f at rows, from logits [n × K]. */
+/**
+ * The model's energy $E = -\operatorname{logsumexp} f$ at each row, from its logits.
+ *
+ * @param logits The logits, row-major $n \times K$.
+ * @param K The number of classes $K$.
+ * @returns The $n$ energies.
+ */
 function energiesFrom(logits: Float64Array, K: number): Float64Array {
   const n = logits.length / K
   return Float64Array.from({ length: n }, (_, i) => {
@@ -126,7 +167,29 @@ function energiesFrom(logits: Float64Array, K: number): Float64Array {
 /**
  * Train a cross-entropy classifier and a JEM classifier (same network, initial parameters and minibatches) on `data`
  * and yield snapshots about every twentieth of the run and at the end. `test` scores accuracy and calibration; `ood`
- * holds out-of-distribution points for the energy's separation.
+ * holds out-of-distribution points for the energy's separation. Checkpoints are taken at step 0, about every
+ * `steps / checkpoints` updates and at the end. Throws `DomainError` when `data` or `test` has no labels.
+ * Deterministic in `seed`.
+ *
+ * @param data The training points, $n \times 2$, with their labels (and, when known, their true densities).
+ * @param test The test points and labels, for accuracy, calibration and the energy's separation.
+ * @param ood Out-of-distribution points, $m \times 2$.
+ * @param options The run's length, the network and optimiser, the Langevin sampler and replay buffer, and what the
+ *   checkpoints hold.
+ * @returns A generator of `JemRun` snapshots; the last has `finished` set.
+ *
+ * @example A tiny run on two clusters, both models side by side
+ * const cluster = (s, c) => normal(s, c, 0.3, { shape: [8, 2] })
+ * const x = concat([cluster(stream(1), -1), cluster(stream(2), 1)], 0)
+ * const y = tensor([...Array(8).fill(0), ...Array(8).fill(1)])
+ * const ood = { x: normal(stream(3), 0, 4, { shape: [8, 2] }) }
+ * const options = { steps: 10, batchSize: 8, hidden: [8], langevinSteps: 3, bufferSize: 16, grid: 4 }
+ * let last
+ * for (const r of jemRun({ x, y }, { x, y }, ood, { ...options, checkpoints: 1, samples: 2, sampleSteps: 2 })) last = r
+ * const [ce, jem] = [last.crossEntropy.checkpoints.at(-1), last.jem.checkpoints.at(-1)]
+ * print('test accuracy, cross-entropy and JEM:', ce.accuracy, jem.accuracy)
+ * print('JEM cross-entropy by update:', last.jem.crossEntropy)
+ * print('OOD AUROC of the energy, cross-entropy and JEM:', ce.oodAuroc, jem.oodAuroc)
  */
 export function* jemRun(
   data: JemData,

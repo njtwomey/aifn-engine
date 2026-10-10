@@ -8,6 +8,7 @@ import * as diagnostics from './diagnostics'
 import * as networks from './gan'
 import * as run from './run'
 
+/** A table of the module's registry entries of one kind, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'generative/gan')
 const fn = definer<FunctionInfo>('function', 'generative/gan')

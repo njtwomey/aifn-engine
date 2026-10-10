@@ -1,4 +1,4 @@
-/** The registry of `aifn-methods/generative/flows`. */
+/** The registry of `aifn-methods/generative/flows`: RealNVP's construction, densities, samples and training run. */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as realnvp from './realnvp'

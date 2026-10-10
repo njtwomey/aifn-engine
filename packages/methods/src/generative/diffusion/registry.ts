@@ -11,6 +11,7 @@ import * as predictor from './predictor'
 import * as samplers from './samplers'
 import * as schedules from './schedules'
 
+/** A table of the module's registry entries, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'generative/diffusion')
 const fn = definer<FunctionInfo>('function', 'generative/diffusion')

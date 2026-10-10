@@ -1,8 +1,9 @@
 /**
  * A small learned noise predictor: an MLP on the noised point and features of its noise level, trained with the
- * "simple" DDPM objective E‖ε − ε̂_θ(√ᾱₜx₀ + √(1 − ᾱₜ)ε, ᾱₜ)‖² with t uniform on 1 … T (Ho et al., 2020, eq. 14 and
- * Algorithm 1). Enough to learn 1-D and 2-D toy data in the browser; the network and its training loop come from
- * `aifn-compute/nn`, the loss from `aifn-compute/learning/losses`.
+ * simple DDPM objective $\expect \lVert \epsilonvec - \hat\epsilonvec_{\thetavec}(\xvec_t, \bar\alpha_t) \rVert^2$,
+ * with $\xvec_t = \sqrt{\bar\alpha_t}\,\xvec_0 + \sqrt{1 - \bar\alpha_t}\,\epsilonvec$ and $t$ uniform on
+ * $1, \dots, T$ (Ho et al., 2020, eq. 14 and Algorithm 1). Enough to learn 1-d and 2-d toy data in the browser; the
+ * network and its training loop come from `aifn-compute/nn`, the loss from `aifn-compute/learning/losses`.
  */
 
 import { meanSquaredErrorLoss } from 'aifn-compute/learning/losses'
@@ -17,26 +18,41 @@ import type { Algorithm } from 'aifn-compute/foundation/trace'
 import type { NoisePredictor } from './predictor'
 import { alphaBarAt, type NoiseSchedule } from './schedules'
 
-/** A noise-prediction network: an MLP from [x, noise-level features] to ε̂. */
+/** A noise-prediction network: an MLP from the point and its noise-level features to $\hat\epsilonvec$. */
 export type Denoiser = {
+  /** The MLP, from $d + 1 + 2K$ inputs to $d$ outputs; its parameters are kept apart (`layer.init`). */
   readonly layer: Layer<Params[]>
-  /** The data's dimension d. */
+  /** The data's dimension $d$. */
   readonly dimension: number
-  /** Frequencies K of the noise-level features (1 + 2K features). */
+  /** Frequencies $K$ of the noise-level features ($1 + 2K$ features). */
   readonly frequencies: number
 }
 
 /** Options of `denoiser`. */
 export type DenoiserOptions = {
-  /** Hidden layer widths (default [64, 64]). */
+  /** Hidden layer widths (default `[64, 64]`). */
   hidden?: readonly number[]
-  /** Frequencies K of the noise-level features (default 4). */
+  /** Frequencies $K$ of the noise-level features (default 4). */
   frequencies?: number
   /** Hidden activation (default SiLU, as in DDPM's U-Net). */
   activation?: Activation
 }
 
-/** A noise-prediction MLP for d-dimensional data. */
+/**
+ * A noise-prediction MLP for $d$-dimensional data, without parameters (`net.layer.init(stream)` draws them).
+ *
+ * @param dimension The data's dimension $d$, the network's output width.
+ * @param options The network's shape.
+ * @param options.hidden The hidden layers' widths.
+ * @param options.frequencies The number $K$ of sinusoid frequencies in the noise-level features.
+ * @param options.activation The hidden layers' activation.
+ * @returns The network.
+ *
+ * @example A network with one hidden layer of 16 for 2-d data: $2 + 1 + 2 \cdot 3 = 9$ inputs
+ * const net = denoiser(2, { hidden: [16], frequencies: 3 })
+ * const params = net.layer.init(stream(1))
+ * print('weight shapes:', params[0].weight.shape, params[2].weight.shape)
+ */
 export function denoiser(
   dimension: number,
   { hidden = [64, 64], frequencies = 4, activation = 'silu' }: DenoiserOptions = {},
@@ -46,14 +62,29 @@ export function denoiser(
 }
 
 /**
- * The features of a noise level: the noise scale σ = √(1 − ᾱ) and sin(kπσ), cos(kπσ) for k = 1 … K, a sinusoidal
- * embedding (as Vaswani et al., 2017, for positions) of a bounded quantity that orders the levels.
+ * The features of a noise level: the noise scale $\sigma = \sqrt{1 - \bar\alpha}$ and $\sin(k\pi\sigma)$,
+ * $\cos(k\pi\sigma)$ for $k = 1, \dots, K$, a sinusoidal embedding (as Vaswani et al., 2017, for positions) of a
+ * bounded quantity that orders the levels.
+ *
+ * @param alphaBar The signal level $\bar\alpha \in [0, 1]$.
+ * @param frequencies The number of frequencies $K$.
+ * @returns The $1 + 2K$ features, in the order $\sigma, \sin \pi\sigma, \cos \pi\sigma, \sin 2\pi\sigma, \dots$.
+ *
+ * @example At $\bar\alpha = 0.75$, $\sigma = 0.5$
+ * print(noiseLevelFeatures(0.75, 2))
  */
 export function noiseLevelFeatures(alphaBar: number, frequencies: number): Tensor {
   const f = levelFeatures(alphaBar, frequencies)
   return fromData(Float64Array.from(f), [f.length])
 }
 
+/**
+ * The features of `noiseLevelFeatures` as a plain array.
+ *
+ * @param alphaBar The signal level $\bar\alpha \in [0, 1]$.
+ * @param frequencies The number of frequencies $K$.
+ * @returns The $1 + 2K$ features.
+ */
 function levelFeatures(alphaBar: number, frequencies: number): number[] {
   const sigma = Math.sqrt(1 - alphaBar)
   const out = [sigma]
@@ -61,7 +92,18 @@ function levelFeatures(alphaBar: number, frequencies: number): number[] {
   return out
 }
 
-/** The network input [x, features(ᾱᵢ)] for points x [n, d] and one level ᾱ per row (or one for all). */
+/**
+ * The network's input: each point followed by the features of its noise level, $[\xvec_i, \phi(\bar\alpha_i)]$.
+ *
+ * @param net The network, for its $K$.
+ * @param x The noised points, $[n, d]$.
+ * @param alphaBars The signal level of each row ($n$ values), or one number for every row.
+ * @returns The input, $[n, d + 1 + 2K]$.
+ *
+ * @example Two points at different noise levels, with $K = 1$
+ * const net = denoiser(2, { frequencies: 1 })
+ * print(denoiserInput(net, tensor([[1, 2], [3, 4]]), [0.75, 0]))
+ */
 export function denoiserInput(net: Denoiser, x: Tensor, alphaBars: number | ArrayLike<number>): Tensor {
   const [n, d] = x.shape
   const width = d + 1 + 2 * net.frequencies
@@ -76,16 +118,29 @@ export function denoiserInput(net: Denoiser, x: Tensor, alphaBars: number | Arra
   return fromData(out, [n, width])
 }
 
-/** The trained network as a noise predictor. */
+/**
+ * The network, under given parameters, as a noise predictor for the samplers.
+ *
+ * @param net The network.
+ * @param params Its parameters, as `net.layer.init` or `denoiserTraining` give them.
+ * @returns The predictor: points $[n, d]$ and one level $\bar\alpha$ to $\hat\epsilonvec$, $[n, d]$.
+ *
+ * @example An untrained network's prediction for two points
+ * const net = denoiser(2, { hidden: [16] })
+ * const predictor = networkNoisePredictor(net, net.layer.init(stream(1)))
+ * print(predictor(tensor([[1, 2], [0, 0]]), 0.5))
+ */
 export function networkNoisePredictor(net: Denoiser, params: Params[]): NoisePredictor {
   return (x, alphaBar) => unwrap(net.layer.apply(params, denoiserInput(net, x, alphaBar))) as Tensor
 }
 
 /** Options of `denoiserTraining`. */
 export type DenoiserTrainingOptions = {
-  /** Training points x₀, shape [n, d]. */
+  /** Training points $\xvec_0$, shape $[n, d]$. */
   data: Tensor
+  /** The noise schedule whose levels $\bar\alpha_t$ are drawn. */
   schedule: NoiseSchedule
+  /** The network trained. */
   net: Denoiser
   /** Points per step (default 128). */
   batchSize?: number
@@ -94,9 +149,21 @@ export type DenoiserTrainingOptions = {
 }
 
 /**
- * Training of a noise predictor as a traceable algorithm (`aifn-compute/nn`'s `trainingLoop`): each step takes a minibatch of
- * data, a level t ~ U{1 … T} and noise ε ~ N(0, I) per point, all from the step's stream, and takes one optimiser step
- * on the mean squared error between ε̂ and ε. `init` takes `{ params: net.layer.init(stream) }`.
+ * Training of a noise predictor as a traceable algorithm (`aifn-compute/nn`'s `trainingLoop`): each step takes a
+ * minibatch of data, a level $t \sim \mathcal{U}\{1, \dots, T\}$ and noise $\epsilonvec \sim \Gauss(\zeros, \Imat)$ per
+ * point, all from the step's stream, and takes one optimiser step on the mean squared error between
+ * $\hat\epsilonvec$ and $\epsilonvec$. `init` takes `{ params: net.layer.init(stream) }`.
+ *
+ * @param options The data, the schedule, the network, the batch size and the update rule.
+ * @returns The algorithm; its state's `params` go to `networkNoisePredictor`, and `loss` is the minibatch loss.
+ *
+ * @example A few steps on two clusters: the loss falls
+ * const s = stream(1)
+ * const data = sampleMixture(s, gaussianMixtureData([1, 1], [[-2, 0], [2, 0]], [0.3, 0.3]), 256)
+ * const net = denoiser(2, { hidden: [16] })
+ * const training = denoiserTraining({ data, schedule: linearSchedule(100), net, batchSize: 64 })
+ * const start = { params: net.layer.init(s) }
+ * for (const steps of [0, 20, 100]) print('after', steps, 'steps: loss', run(training, start, steps).loss)
  */
 export function denoiserTraining(
   options: DenoiserTrainingOptions,

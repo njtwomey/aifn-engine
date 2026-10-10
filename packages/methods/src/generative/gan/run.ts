@@ -1,8 +1,11 @@
 /**
- * A GAN training run as a generator of plain-data snapshots, for a worker to stream (as `aifn-methods/gym`'s
- * `training`): the losses at every step, and at checkpoints the generated points from fixed latents, the
- * discriminator on a grid, the generator's gradient at a subset of the generated points, and, when the data's density
- * is known, the optimal discriminator and the mode coverage.
+ * A GAN training run on 2-d data as a generator of plain-data snapshots, for a worker to stream (as
+ * `aifn-methods/gym`'s `training`): the losses at every step, and at checkpoints the generated points from fixed
+ * latents, the discriminator on a grid, the push $-\nabla_{\xvec}$ of the generator's loss at a subset of the generated
+ * points, and, when the data's density is known, the optimal discriminator and the mode coverage.
+ *
+ * Every array is plain data (`Float64Array`, `Int32Array`), row-major, so a snapshot can be posted from a worker as
+ * it is.
  */
 
 import { valueAndGrad } from 'aifn-compute/foundation/autodiff'
@@ -16,15 +19,29 @@ import { knownDensity, mixtureLogDensityOf, squareGrid } from '../densities'
 import { modeCoverage, optimalDiscriminator, type ModeCoverage } from './diagnostics'
 import { discriminate, gan, ganTraining, latents, sampleGenerator, scoresAt } from './gan'
 
-/** An optimiser by name, with its step size and (Adam) β₁ or (SGD) momentum. */
+/** An optimiser by name, with its step size and (Adam) $\beta_1$ or (SGD) momentum. */
 export type OptimizerSpec = {
+  /** Which update rule: Adam, SGD (with momentum) or RMSProp. */
   name: 'adam' | 'sgd' | 'rmsprop'
+  /** The step size $\eta$. */
   stepSize: number
-  /** Adam's β₁ (default 0.5) or SGD's momentum (default 0). */
+  /** Adam's $\beta_1$ (default 0.5) or SGD's momentum (default 0); RMSProp ignores it. */
   beta1?: number
 }
 
-/** The update rule an `OptimizerSpec` names. */
+/**
+ * The update rule an `OptimizerSpec` names: `adamRule`, `sgdRule` or `rmspropRule` of `aifn-compute/optim/first-order`
+ * with the spec's step size, and $\beta_1$ (Adam, default 0.5) or momentum (SGD, default 0).
+ *
+ * @param spec The optimiser's name, step size and optional $\beta_1$ or momentum.
+ * @returns The update rule, for either network of `ganTraining`.
+ *
+ * @example One SGD update of a two-parameter tree
+ * const rule = optimizerOf({ name: 'sgd', stepSize: 0.1 })
+ * const params = { w: tensor([1, 2]) }
+ * const { updates } = rule.update({ w: tensor([0.5, -1]) }, rule.init(params), params)
+ * print(rule.name, 'update:', updates.w)
+ */
 export function optimizerOf(spec: OptimizerSpec): UpdateRule<unknown> {
   switch (spec.name) {
     case 'adam':
@@ -36,27 +53,39 @@ export function optimizerOf(spec: OptimizerSpec): UpdateRule<unknown> {
   }
 }
 
-/** A dataset as the run reads it: points, mode labels, and the known density in `meta.truth.model` when there is one. */
+/**
+ * A dataset as the run reads it: points, mode labels, and the known density in `meta.truth.model` when there is one.
+ */
 export type GanData = {
+  /** The points $[N, 2]$. */
   x: Tensor
+  /** Their mode labels, $N$ integers from 0 (optional: without them every point has label 0). */
   y?: Tensor
-  /** A truth with a labelled density (`knownDensity`) gives D* and mode coverage. */
+  /** A truth with a labelled density (`knownDensity`) gives $D^*$ and mode coverage. */
   meta?: { truth?: unknown }
 }
 
 /** Options of `ganRun`; plain data, so a worker task can carry them. */
 export type GanRunOptions = {
+  /** The game. Default `non-saturating`. */
   game?: AdversarialGame
   /** Generator updates. Default 2000. */
   steps?: number
+  /** Discriminator updates per generator update. Default 5 for `wasserstein`, else 1. */
   criticSteps?: number
+  /** Points per batch, real and generated alike. Default 128. */
   batchSize?: number
+  /** Hidden widths of both networks. Default `[64, 64]`. */
   hidden?: readonly number[]
+  /** The latent width $L$. Default 2. */
   latent?: number
+  /** The generator's optimiser. Default Adam with step $10^{-3}$ ($5 \times 10^{-4}$ for `wasserstein`). */
   generator?: OptimizerSpec
+  /** The discriminator's optimiser. Default the generator's. */
   critic?: OptimizerSpec
   /** Gradient-penalty weight (default 10 for `wasserstein`, else 0). */
   penalty?: number
+  /** The seed of the run's root stream: the initial parameters, the shown latents and every batch derive from it. */
   seed?: number | string
   /** Generated points shown per checkpoint (fixed latents). Default 512. */
   samples?: number
@@ -70,46 +99,94 @@ export type GanRunOptions = {
 
 /** One checkpoint of a run. */
 export type GanCheckpoint = {
+  /** The generator update the checkpoint was taken after (0 for the initial networks). */
   step: number
-  /** Generated points from the run's fixed latents, row-major [samples × 2]. */
+  /** Generated points from the run's fixed latents, row-major, two values per point (`samples` points). */
   samples: Float64Array
-  /** The discriminator on the grid: D(x) = σ(logit) for the minimax and non-saturating games, else the critic score. */
+  /**
+   * The discriminator on the grid, row by row: $D(\xvec) = \sigma(\text{logit})$ for the minimax and non-saturating
+   * games, else the critic score.
+   */
   field: Float64Array
-  /** D*(x) on the grid when the data density is known and the game has a probability discriminator; else null. */
+  /**
+   * $D^*(\xvec)$ on the grid, row by row, when the data density is known and the game has a probability discriminator;
+   * else null.
+   */
   optimal: Float64Array | null
-  /** −∇ₓ of the generator's loss at the first `arrows` points, row-major [arrows × 2]: where G is pushed to move them. */
+  /**
+   * $-\nabla_{\xvec}$ of the generator's loss at the first `arrows` generated points, row-major, two values per point:
+   * where $G$ is pushed to move them.
+   */
   push: Float64Array
+  /** The mode coverage of the generated points when the data density is known; else null. */
   coverage: ModeCoverage | null
 }
 
 /** A run so far. */
 export type GanRun = {
+  /** The game played. */
   game: AdversarialGame
+  /** The generator updates the run will make. */
   steps: number
+  /** The generator updates made so far. */
   done: number
+  /** Whether the run has ended, after `steps` updates or on diverging. */
   finished: boolean
-  /** The grid's half-width and axes. */
+  /**
+   * The grid's half-width: 1.3 times the largest absolute coordinate of the data, rounded up to a multiple of 0.5. The
+   * grid covers $[-b, b]^2$.
+   */
   box: number
+  /** The grid's cell centres along $x$. */
   gridX: Float64Array
+  /** The grid's cell centres along $y$ (the same values). */
   gridY: Float64Array
-  /** log p_data on the grid, or null when unknown. */
+  /** $\log p_{\text{data}}$ on the grid, row by row, or null when unknown. */
   dataLogDensity: Float64Array | null
-  /** Real points [N × 2] and their mode labels. */
+  /** Real points, row-major, two values per point. */
   data: Float64Array
+  /** The real points' mode labels (all 0 without labels). */
   labels: Int32Array
-  /** Mode centres (the mean of each mode's real points), [k × 2]; empty without labels. */
+  /**
+   * Mode centres (the mean of each mode's real points), row-major, two values per mode, for the known density's $k$
+   * modes or else one more than the largest label. A mode with no labelled point has its centre at the origin.
+   */
   modes: Float64Array
-  /** Losses per generator update. */
+  /** The critic's loss at each generator update (that of its last critic update). */
   criticLoss: Float64Array
+  /** The generator's loss at each generator update. */
   generatorLoss: Float64Array
+  /** The checkpoints so far, in step order. */
   checkpoints: GanCheckpoint[]
 }
 
+/**
+ * Whether a game's discriminator outputs logits of a probability (minimax, non-saturating) rather than a critic score.
+ *
+ * @param g The game.
+ * @returns True for `minimax` and `non-saturating`.
+ */
 const probabilityGame = (g: AdversarialGame) => g === 'minimax' || g === 'non-saturating'
 
 /**
- * Train a GAN on `data` and yield snapshots: after about every twentieth of the run and at the end. Checkpoints are
- * evenly spaced, from step 0. Deterministic in `seed`.
+ * Train a GAN on 2-d `data` and yield snapshots: after every twentieth of the run (rounded up) and at the end, which is
+ * also returned. Checkpoints are evenly spaced, from step 0, with one at the last step. The run ends early, with a
+ * checkpoint, when training diverges. Deterministic in `seed`.
+ *
+ * @param data The points $[N, 2]$, their mode labels when known, and the truth whose labelled density gives $D^*$
+ *   and the mode coverage.
+ * @param options The game, the networks, the optimisers, the run's length and seed, and what each checkpoint holds;
+ *   every field has a default.
+ * @returns A generator of the run so far; each snapshot holds every loss and checkpoint up to it.
+ *
+ * @example A short run on a Gaussian cloud, read from its last snapshot
+ * const x = normal(stream(1), 0, 1, { shape: [64, 2] })
+ * let last
+ * for (const snapshot of ganRun({ x }, { steps: 10, checkpoints: 2, hidden: [8], samples: 16, arrows: 4, grid: 4 }))
+ *   last = snapshot
+ * print('steps done:', last.done, ' finished:', last.finished)
+ * print('checkpoints at steps:', last.checkpoints.map((c) => c.step))
+ * print('critic losses:', last.criticLoss)
  */
 export function* ganRun(data: GanData, options: GanRunOptions = {}): Generator<GanRun, GanRun> {
   const {

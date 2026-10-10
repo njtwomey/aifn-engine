@@ -1,10 +1,10 @@
 /**
  * A deep belief network, lite (Hinton, Osindero and Teh, 2006; Bengio et al., 2007): a stack of RBMs trained greedily,
- * one layer at a time. Layer 1 is an RBM on the data; its hidden probabilities p(h¹ | v) become the data of layer 2,
- * and so on. The trained stack is a generative model whose top two layers form an RBM (an undirected associative
- * memory) and whose lower layers are directed sigmoid belief layers p(hˡ⁻¹ | hˡ) = σ(aˡ + Wˡ hˡ), each using the
- * generative weights of the RBM that was trained on it. Sampling runs Gibbs in the top RBM, then one ancestral pass
- * down.
+ * one layer at a time. Layer 1 is an RBM on the data; its hidden probabilities $p(\hvec^{(1)} \mid \vvec)$ become the
+ * data of layer 2, and so on. The trained stack is a generative model whose top two layers form an RBM (an undirected
+ * associative memory) and whose lower layers are directed sigmoid belief layers
+ * $p(\hvec^{(l-1)} \mid \hvec^{(l)}) = \sigma(\avec^{(l)} + \Wmat^{(l)} \hvec^{(l)})$, each using the generative
+ * weights of the RBM that was trained on it. Sampling runs Gibbs in the top RBM, then one ancestral pass down.
  *
  * Each added layer improves a variational lower bound on the data's log-likelihood when it is initialised from the
  * layer below's transposed weights (Hinton, Osindero and Teh, 2006, §4); here new layers start from small random
@@ -44,10 +44,25 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A deep belief network: RBMs whose visible layer is the hidden layer of the one before. */
 export interface Dbn {
+  /** The RBMs, bottom (on the data) to top. */
   readonly layers: readonly Rbm[]
 }
 
-/** The recognition (up) pass: p(hˡ | hˡ⁻¹) for each layer from one visible vector, layer by layer. */
+/**
+ * The recognition (up) pass: $p(\hvec^{(l)} = 1 \mid \hvec^{(l-1)})$ for each layer from one visible vector
+ * ($\hvec^{(0)} = \vvec$), layer by layer. Each layer is fed the probabilities of the one below, not samples (a
+ * mean-field pass).
+ *
+ * @param model The network.
+ * @param v The visible vector, $D$ values.
+ * @returns One array of hidden probabilities per layer, bottom to top.
+ *
+ * @example Hidden probabilities up a stack of two RBMs
+ * const model = { layers: [rbm(stream(1), 4, 3), rbm(stream(2), 3, 2)] }
+ * const [h1, h2] = dbnUp(model, [1, 0, 1, 0])
+ * print('layer 1:', h1)
+ * print('layer 2:', h2)
+ */
 export function dbnUp(model: Dbn, v: ArrayLike<number>): Float64Array[] {
   const out: Float64Array[] = []
   let x: ArrayLike<number> = v
@@ -58,13 +73,32 @@ export function dbnUp(model: Dbn, v: ArrayLike<number>): Float64Array[] {
   return out
 }
 
-/** Sample 0/1 units from probabilities. */
+/**
+ * Sample 0/1 units from probabilities: unit $i$ is 1 when $u_i < p_i$.
+ *
+ * @param p The units' probabilities of being 1.
+ * @param u Uniforms on $[0, 1)$, at least as many as `p`.
+ * @returns The 0/1 states, one per entry of `p`.
+ */
 const bernoulli = (p: ArrayLike<number>, u: ArrayLike<number>) => Float64Array.from(p, (q, i) => (u[i] < q ? 1 : 0))
 
 /**
- * Samples from the DBN: `count` chains of `gibbsSteps` block Gibbs steps in the top RBM from random states, then one
- * ancestral pass down through the directed layers. Returns the bottom layer's probabilities p(v | h¹) per sample, as
- * rows [count × D].
+ * Samples from the DBN: `count` chains of `gibbsSteps` block Gibbs steps in the top RBM from uniform random 0/1
+ * states, then one ancestral pass down through the directed layers, sampling each layer but the bottom one. A network
+ * of one layer samples its hidden units once more and goes down to the visible units. Throws `DomainError` for a
+ * network with no layers.
+ *
+ * @param model The network.
+ * @param s The stream; chain $c$ starts from `child(s, 'start', c)` and runs on `child(s, 'gibbs', c)`.
+ * @param options `count`, the number of samples (default 16), and `gibbsSteps`, the Gibbs steps of each chain in the
+ *   top RBM (default 200).
+ * @returns The bottom layer's probabilities $p(\vvec = 1 \mid \hvec^{(1)})$ of each sample, row-major
+ *   `count` $\times D$.
+ *
+ * @example Two samples from a stack of two untrained RBMs
+ * // Untrained, the weights are small and the probabilities near 1/2 (exactly 1/2 when the units above are all 0).
+ * const model = { layers: [rbm(stream(1), 4, 3), rbm(stream(2), 3, 2)] }
+ * print('p(v = 1 | h), two rows of 4:', dbnSample(model, stream(3), { count: 2, gibbsSteps: 10 }))
  */
 export function dbnSample(model: Dbn, s: Stream, options: { count?: number; gibbsSteps?: number } = {}): Float64Array {
   const { count = 16, gibbsSteps = 200 } = options
@@ -89,56 +123,103 @@ export function dbnSample(model: Dbn, s: Stream, options: { count?: number; gibb
 
 /** Options of `dbnRun`. */
 export interface DbnRunOptions {
-  /** Hidden layer sizes, bottom to top (default [32, 16]). */
+  /** Hidden layer sizes, bottom to top (default $[32, 16]$). */
   layers?: readonly number[]
-  /** CD epochs per layer (default 200), Gibbs steps k (default 1), step size (default 0.1), minibatch rows (default 10). */
+  /** CD epochs per layer (default 200). */
   epochs?: number
+  /** Gibbs steps $k$ per CD update (default 1). */
   k?: number
+  /** The CD step size (default 0.1). */
   learningRate?: number
+  /** Rows per CD minibatch (default 10). */
   batchSize?: number
-  /** Gibbs steps in the top RBM before each shown sample (default 200), and samples shown (default 16). */
+  /** Gibbs steps in the top RBM before each shown sample (default 200). */
   sampleSteps?: number
+  /** Samples shown at each checkpoint (default 16). */
   samples?: number
-  /**
-   * The discriminative fine-tune: Adam epochs (default 300; 0 skips it), step size (default 0.01), labelled rows per
-   * class taken from the training half (default 2), and the share of rows held out to test (default 0.5).
-   */
+  /** The discriminative fine-tune's Adam epochs (default 300; 0 skips it). */
   fineTuneEpochs?: number
+  /** The fine-tune's Adam step size (default 0.01). */
   fineTuneRate?: number
+  /** Labelled rows per class the fine-tune trains on, taken from the training rows (default 2). */
   labelsPerClass?: number
+  /** The share of rows held out to test the fine-tune, when there are labels (default 0.5). */
   testFraction?: number
+  /** The seed of the run's stream (default 0). */
   seed?: number | string
 }
 
 /** One checkpoint of the greedy phase: after `epoch` epochs of layer `layer`. */
 export interface DbnCheckpoint {
+  /** The layer being trained, from 0 at the bottom. */
   layer: number
+  /** Its epochs so far (0 before its training). */
   epoch: number
-  /** Layer 1's weights (D × H₁, row-major) and samples from the stack trained so far (rows of D). */
+  /** The bottom RBM's weights, row-major $D \times H_1$ (the layer being trained, while it is the bottom one). */
   weights: Float64Array
+  /** Samples from the stack trained so far (`dbnSample`'s probabilities), `samples` rows of $D$, row-major. */
   samples: Float64Array
 }
 
 /** A DBN run so far. */
 export interface DbnRun {
+  /** The number of visible units $D$. */
   visible: number
+  /** The hidden layer sizes, bottom to top. */
   sizes: number[]
   /**
-   * Per layer, the reconstruction error per epoch, and the exact log-likelihood of its RBM on its input (layers of at
-   * most 16 units) at the checkpoint epochs, NaN at the others.
+   * Per layer, the mean reconstruction error per row in each epoch, from epoch 0 (NaN), as
+   * `contrastiveDivergenceStep` reports it.
    */
   reconstructionError: number[][]
+  /**
+   * Per layer, the exact log-likelihood of its RBM on its input (layers of at most 16 units) at epoch 0 and the
+   * checkpoint epochs, NaN at the others. Above the bottom layer the input is the probabilities of the layer below,
+   * so the value is $-F - \log Z$ evaluated there, not a likelihood of binary data.
+   */
   logLikelihood: number[][]
+  /** The checkpoints so far, every layer's: epoch 0 and about every tenth of its epochs. */
   checkpoints: DbnCheckpoint[]
-  /** Fine-tune: test accuracy per epoch from the DBN's weights and from random weights; labelled and test row counts. */
+  /**
+   * The fine-tune, null until it starts (and when there are no labels): test accuracy per epoch, from epoch 0, from
+   * the DBN's weights and from random weights, and the labelled and test row counts.
+   */
   fineTune: { pretrained: number[]; random: number[]; labelled: number; test: number } | null
+  /** What the run is doing. */
   phase: 'pretraining' | 'fine-tuning' | 'done'
+  /** True at the end of the run. */
   done: boolean
 }
 
+/** A sigmoid MLP's parameters: per layer, the weights (inputs $\times$ outputs) and the biases. */
 type MlpParams = { weight: Tensor; bias: Tensor }[]
 
-/** Greedy layer-wise training of a DBN on rows x [n, D] in [0, 1], then the optional fine-tune (module docs). */
+/**
+ * Greedy layer-wise training of a DBN, then the optional discriminative fine-tune (see the file's introduction), as a
+ * generator of snapshots. With labels, a random `testFraction` of the rows is held out first: pretraining sees the
+ * other rows only, without their labels, and the held-out rows score the fine-tune. Entries are clipped to $[0, 1]$.
+ * Throws `DomainError` when `layers` is empty. Deterministic in `seed`.
+ *
+ * @param data The rows, $n \times D$ with entries in $[0, 1]$: a matrix, or `{ x, y }` with integer class labels `y`
+ *   ($n$ of them; without them there is no fine-tune).
+ * @param options The layer sizes, the CD settings, the samples shown, the fine-tune and the seed.
+ * @returns A generator of `DbnRun` snapshots: at every checkpoint of pretraining, about every tenth of the fine-tune,
+ *   and at the end (the last has `done` set).
+ *
+ * @example Pretrain two layers on two patterns, then fine-tune on one labelled row of each
+ * const x = tensor([
+ *   [1, 1, 0, 0], [0, 0, 1, 1], [1, 1, 0, 0], [0, 0, 1, 1],
+ *   [1, 1, 0, 0], [0, 0, 1, 1], [1, 1, 0, 0], [0, 0, 1, 1],
+ * ])
+ * const y = tensor([0, 1, 0, 1, 0, 1, 0, 1])
+ * const options = { layers: [3, 2], epochs: 50, batchSize: 2, learningRate: 0.5, samples: 2, sampleSteps: 10 }
+ * let run
+ * for (const r of dbnRun({ x, y }, { ...options, fineTuneEpochs: 20, labelsPerClass: 1 })) run = r
+ * print('layer 1 log-likelihood at the start and the end:', run.logLikelihood[0][0], run.logLikelihood[0].at(-1))
+ * print('test accuracy by fine-tune epoch, from the DBN:', run.fineTune.pretrained)
+ * print('… and from random weights:', run.fineTune.random)
+ * print('phase:', run.phase)
+ */
 export function* dbnRun(
   data: { x: MatrixLike; y?: VectorLike } | MatrixLike,
   options: DbnRunOptions = {},

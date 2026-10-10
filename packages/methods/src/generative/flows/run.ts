@@ -1,7 +1,8 @@
 /**
  * A RealNVP training run as a generator of plain-data snapshots: Adam on minibatches of the negative log-likelihood
- * (`aifn-compute/nn/training`'s `trainingLoop`), with the training NLL and, at checkpoints, the model density on a grid,
- * samples from fixed base draws, and the data after every coupling layer (from the data to the base).
+ * (`aifn-compute/nn/training`'s `trainingLoop`, gradients clipped to norm 50), with the training NLL and, at
+ * checkpoints, the model density on a grid, samples from fixed base draws, and the data after every coupling layer
+ * (from the data to the base). Snapshots hold typed arrays only, so they can cross to a worker or a page as they are.
  */
 
 import type { Params } from 'aifn-compute/foundation/pytree'
@@ -14,51 +15,96 @@ import { flowForward, flowLogDensity, flowLogDensityValues, flowSample, initReal
 
 /** Options of `realNvpRun`. */
 export interface RealNvpRunOptions {
+  /** Coupling layers (default `realNvp`'s 6). */
   layers?: number
+  /** Hidden widths of each conditioner (default `realNvp`'s `[32, 32]`). */
   hidden?: readonly number[]
-  /** Adam updates (default 2000), step size (default 1e-3), rows per step (default 128). */
+  /** Adam updates (default 2000). */
   steps?: number
+  /** Adam's step size (default 1e-3). */
   stepSize?: number
+  /** Rows per step (default 128, at most the number of data points). */
   batchSize?: number
+  /** The seed of the run's root stream (default 0): the run is deterministic in it. */
   seed?: number | string
+  /** Roughly how many checkpoints after the first (default 30): one every `round(steps / checkpoints)` steps. */
   checkpoints?: number
-  /** Samples drawn at each checkpoint (default 1000) and grid cells per side (default 48). */
+  /** Samples drawn at each checkpoint (default 1000). */
   samples?: number
+  /** Grid cells per side (default 48). */
   grid?: number
 }
 
 /** One checkpoint. */
 export interface RealNvpCheckpoint {
+  /** The updates applied when it was taken. */
   step: number
-  /** Model density p(x) on the grid, row-major in (y, x). */
+  /** Model density $p(\xvec)$ on the grid, row-major in $(y, x)$: $g^2$ values. */
   density: Float64Array
-  /** Samples from fixed base draws, [samples × 2]. */
+  /** Samples from the same base draws at every checkpoint, row-major $[\mathit{samples}, 2]$. */
   samples: Float64Array
-  /** 500 data points (an even stride) after each layer, [layers + 1][500 × 2]. */
+  /**
+   * The followed data points (up to 500, an even stride through the data) after each layer, from the data (entry 0)
+   * to the base (entry $K$): $K + 1$ arrays, each row-major $[m, 2]$ for the $m$ points followed.
+   */
   layers: Float64Array[]
 }
 
 /** A run so far. */
 export interface RealNvpRun {
+  /** The updates asked for. */
   steps: number
+  /** The updates applied so far. */
   done: number
+  /** Whether the run is over: all its steps taken, or stopped early because the loss diverged. */
   finished: boolean
+  /**
+   * The half-width $b$ of the grid's square $[-b, b]^2$: 1.2 times the data's largest $\lvert x_{ij} \rvert$, rounded
+   * up to a multiple of 0.5.
+   */
   box: number
+  /** The grid's cell centres along $x$ ($g$ values). */
   gridX: Float64Array
+  /** The grid's cell centres along $y$ ($g$ values). */
   gridY: Float64Array
   /** The true density on the grid when the data's density is known; else null. */
   trueDensity: Float64Array | null
+  /** The training data, row-major $[n, 2]$. */
   data: Float64Array
+  /** The data's labels, $n$ values (all 0 when the data has none). */
   labels: Int32Array
   /** The labels of the 500 points followed through the layers (an even stride through the data). */
   layerLabels: Int32Array
-  /** Negative log-likelihood per point on (the first 500 points of) the training data, by step; and the true density's (entropy), if known. */
+  /**
+   * The model's negative log-likelihood per point on the followed data points (up to 500, an even stride through the
+   * data), by step: at step 0, about every fiftieth of the run, and at the last step.
+   */
   nll: { step: number[]; value: number[] }
+  /**
+   * The true density's negative log-likelihood per point on all the training data (an estimate of its entropy, the
+   * floor of `nll`) when the data's density is known; else NaN.
+   */
   trueNll: number
+  /** The checkpoints so far, the first at step 0. */
   checkpoints: RealNvpCheckpoint[]
 }
 
-/** Train RealNVP on 2-d data { x, y?, meta? } and yield snapshots. Deterministic in `seed`. */
+/**
+ * Train RealNVP on 2-d data and yield snapshots: one before training, one every twentieth of the run, and the last.
+ * Stops early, finished, when the loss diverges. Deterministic in `seed`.
+ *
+ * @param data The dataset: `x`, the points $[n, 2]$; `y`, optional labels (for colouring); `meta.truth`, the data's
+ *   true density when known (see `knownDensity`), for `trueDensity` and `trueNll`.
+ * @param options The flow's shape, the training and what is recorded.
+ * @returns A generator of snapshots of the run so far; its return value is the last one.
+ *
+ * @example A short run on a shifted, narrow Gaussian: the training NLL falls
+ * const data = { x: normal(stream(1), 2, 0.5, { shape: [200, 2] }) }
+ * const options = { steps: 50, layers: 2, hidden: [8], stepSize: 0.02, samples: 10, grid: 8, checkpoints: 2 }
+ * const last = [...realNvpRun(data, options)].at(-1)
+ * print('steps done', last.done, ' checkpoints at', last.checkpoints.map((c) => c.step))
+ * for (const i of [0, 10, 25, 50]) print('step', last.nll.step[i], ' NLL', last.nll.value[i])
+ */
 export function* realNvpRun(
   data: { x: Tensor; y?: Tensor; meta?: { truth?: unknown } },
   options: RealNvpRunOptions = {},
