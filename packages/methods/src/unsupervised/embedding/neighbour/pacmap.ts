@@ -2,15 +2,20 @@
  * PaCMAP, lite (Wang, Huang, Rudin and Shaposhnik, 2021): an embedding fitted on three kinds of pairs with a loss whose
  * weights change in three phases.
  *
- * - Neighbour pairs: each row's `neighbours` nearest rows under the scaled distance d²ᵢⱼ/(σᵢσⱼ), σᵢ the mean distance
- *   to the 4th–6th nearest rows, chosen from its `neighbours` + 50 Euclidean nearest (exact search: the "lite" part).
- * - Mid-near pairs: for each row, ⌊ratio·neighbours⌉ times, the second nearest of six random rows.
- * - Further pairs: random rows that are not neighbours.
+ * - Neighbour pairs: each row's `neighbours` nearest rows under the scaled distance $d_{ij}^2/(\sigma_i\sigma_j)$,
+ *   $\sigma_i$ the mean distance to the 4th to 6th nearest rows, chosen from its `neighbours` $+ 50$ Euclidean nearest
+ *   (exact search: the "lite" part).
+ * - Mid-near pairs: for each row, round(`midNearRatio` $\cdot$ `neighbours`) times, the second nearest of six random
+ *   rows.
+ * - Further pairs: round(`furtherRatio` $\cdot$ `neighbours`) random rows per row that are not its neighbours.
  *
- * With d̃ = 1 + ‖yᵢ − yⱼ‖², the loss is w_NB Σ d̃/(10 + d̃) + w_MN Σ d̃/(10⁴ + d̃) + w_FP Σ 1/(1 + d̃), minimised by
- * Adam (step 1) from a PCA start scaled by 0.01. The weights (w_NB, w_MN, w_FP) go from (2, 1000 → 3, 1) over the
- * first 100 iterations to (3, 3, 1) for the next 100 and (1, 0, 1) for the rest, so mid-near pairs first fix the
- * global layout and neighbour pairs then refine the local one.
+ * With $\tilde{d}_{ij} = 1 + \lVert \yvec_i - \yvec_j \rVert^2$, the loss is the sum of
+ * $w_{\text{NB}} \sum \tilde{d}_{ij}/(10 + \tilde{d}_{ij})$ over neighbour pairs,
+ * $w_{\text{MN}} \sum \tilde{d}_{ij}/(10^4 + \tilde{d}_{ij})$ over mid-near pairs and
+ * $w_{\text{FP}} \sum 1/(1 + \tilde{d}_{ij})$ over further pairs, minimised by Adam (step 1) from a PCA start scaled
+ * by 0.01. The weights $(w_{\text{NB}}, w_{\text{MN}}, w_{\text{FP}})$ go from $(2, 1000, 1)$ to $(2, 3, 1)$ over the
+ * first 100 iterations, are $(3, 3, 1)$ for the next 100 and $(1, 0, 1)$ for the rest (the phases shrink for runs
+ * shorter than 450), so mid-near pairs first fix the global layout and neighbour pairs then refine the local one.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -25,14 +30,38 @@ import { int, real, space } from 'aifn-compute/foundation/space'
 import { squaredDistances } from '../neighbourhoods'
 import { mat, matrix, values } from '../util'
 
-/** The three pair sets of PaCMAP, as flat [i, j] index lists. */
+/**
+ * The three pair sets of PaCMAP, each a flat list of index pairs: pair $p$ is (entry $2p$, entry $2p + 1$), and the
+ * pairs of row $i$ are consecutive.
+ */
 export interface PacmapPairs {
+  /** Each row with its nearest rows under the scaled distance. */
   neighbour: Int32Array
+  /** Each row with rows a little further out, for the global layout. */
   midNear: Int32Array
+  /** Each row with random non-neighbours, pushed apart. */
   further: Int32Array
 }
 
-/** Build PaCMAP's pairs for the rows of x (see the module comment); random choices draw from `s`. */
+/**
+ * Build PaCMAP's pairs for the rows of `x` (see the file comment), with exact distances ($O(n^2)$). The number of
+ * neighbours is capped at $n - 1$, and a row gets fewer further pairs when $50$ tries per pair do not find them.
+ * Throws `ShapeError` when `x` is not a matrix.
+ *
+ * @param x The points ($n \times d$), one per row.
+ * @param s The stream the mid-near and further pairs are drawn from.
+ * @param params The numbers of pairs per row.
+ * @param params.neighbours The neighbour pairs per row, $k$ (default 10).
+ * @param params.midNearRatio Mid-near pairs per row, as a multiple of $k$ (default 0.5).
+ * @param params.furtherRatio Further pairs per row, as a multiple of $k$ (default 2).
+ * @returns The three pair lists.
+ *
+ * @example Eight points on a line, two neighbours each
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const pairs = pacmapPairs(x, stream(1), { neighbours: 2 })
+ * print('neighbour pairs of rows 0 and 3:', pairs.neighbour.slice(0, 4), pairs.neighbour.slice(12, 16))
+ * print('pairs of each kind:', pairs.neighbour.length / 2, pairs.midNear.length / 2, pairs.further.length / 2)
+ */
 export function pacmapPairs(
   x: Tensor,
   s: Stream,
@@ -90,7 +119,21 @@ export function pacmapPairs(
   return { neighbour: Int32Array.from(nb), midNear: Int32Array.from(mn), further: Int32Array.from(fp) }
 }
 
-/** The weights (w_NB, w_MN, w_FP) at iteration t of `iterations` (phases at 100 and 200, scaled when shorter). */
+/**
+ * The loss weights $(w_{\text{NB}}, w_{\text{MN}}, w_{\text{FP}})$ at an iteration: $w_{\text{MN}}$ falls linearly from
+ * 1000 to 3 in the first phase, with $w_{\text{NB}} = 2$; then $(3, 3, 1)$; then $(1, 0, 1)$. The phases change at
+ * iterations 100 and 200, or at $\text{iterations}/4.5$ and twice that when the run is shorter than 450.
+ *
+ * @param t The iteration, from 0.
+ * @param iterations The length of the run, which scales the phases when below 450.
+ * @returns The weights of the neighbour, mid-near and further pairs.
+ *
+ * @example The three phases of a default run
+ * for (const t of [0, 50, 100, 200]) {
+ *   const w = pacmapWeights(t)
+ *   print('iteration', t, ':', w.neighbour, w.midNear, w.further)
+ * }
+ */
 export function pacmapWeights(t: number, iterations = 450): { neighbour: number; midNear: number; further: number } {
   const unit = Math.min(100, iterations / 4.5)
   if (t < unit) return { neighbour: 2, midNear: 1000 * (1 - t / unit) + 3 * (t / unit), further: 1 }
@@ -100,17 +143,38 @@ export function pacmapWeights(t: number, iterations = 450): { neighbour: number;
 
 /** A state of `pacmapSteps`. */
 export interface PacmapState extends Status {
+  /** Adam steps done. */
   t: number
+  /** The embedding ($n \times$ `dims`). */
   embedding: Tensor
-  /** The loss at the start of the step, with that step's weights. */
+  /**
+   * The loss of the embedding the step that produced this state started from, with that step's weights (at the start,
+   * the initial embedding's).
+   */
   loss: number
   /** Adam's state. */
   optimiser: unknown
 }
 
 /**
- * PaCMAP's optimisation as a step-through algorithm (one Adam step per step, `iterations` default 450) on fixed
- * `pairs` for the rows of x; the start is x's top principal axes scaled by 0.01, or a given embedding.
+ * PaCMAP's optimisation as a step-through algorithm on fixed pairs: one Adam step (moments 0.9 and 0.999,
+ * $\epsilon = 10^{-7}$) per step with the weights of `pacmapWeights`, done after `iterations`. The start is the rows'
+ * projections onto their top `dims` principal axes, scaled by 0.01 (zero beyond $d$ axes), or a given `embedding`; no
+ * randomness is used. Throws `ShapeError` when `x` is not a matrix.
+ *
+ * @param x The points ($n \times d$), one per row; used for the start only.
+ * @param pairs The pairs to fit, as `pacmapPairs` returns them for `x`.
+ * @param params The settings of the optimisation.
+ * @param params.dims The dimension of the embedding (default 2).
+ * @param params.iterations The length of the run, which also places the phases (default 450).
+ * @param params.learningRate Adam's step size (default 1).
+ * @returns The algorithm, for `run` or `trace`; its states are `PacmapState`s.
+ *
+ * @example In the last phase the loss falls
+ * const x = concat([normals(stream(1), [10, 3]), add(normals(stream(2), [10, 3]), 10)], 0)
+ * const steps = pacmapSteps(x, pacmapPairs(x, stream(3), { neighbours: 5 }), { iterations: 100 })
+ * print('loss at step 50 =', run(steps, undefined, 50).loss)
+ * print('loss at step 100 =', run(steps, undefined, 100).loss)
  */
 export function pacmapSteps(
   x: Tensor,
@@ -189,17 +253,46 @@ export function pacmapSteps(
   }
 }
 
-/** A fitted PaCMAP embedding. */
+/** A fitted PaCMAP embedding, with its run (`training`). */
 export interface PacmapModel extends Trained<PacmapState> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** PaCMAP places the training rows only (no out-of-sample transform). */
   readonly transductive: true
+  /** The model's name. */
   readonly name: 'pacmap'
+  /** The coordinates of the training rows ($n \times$ `dims`). */
   readonly embedding: Tensor
+  /** The pairs the embedding was fitted on. */
   readonly pairs: PacmapPairs
 }
 
-/** PaCMAP of the rows of x (see `pacmapPairs`, `pacmapSteps`). */
+/**
+ * PaCMAP of the training rows (Wang, Huang, Rudin and Shaposhnik, 2021): the pairs of `pacmapPairs`, drawn from a
+ * child of the fit options' `stream` (or a fixed stream), fitted by `pacmapSteps`. The run is traced every 5
+ * iterations (or every `trace.every` of the fit options).
+ *
+ * @param params The settings of the estimator.
+ * @param params.neighbours The neighbour pairs per row, $k$ (default 10).
+ * @param params.midNearRatio Mid-near pairs per row, as a multiple of $k$ (default 0.5).
+ * @param params.furtherRatio Further pairs per row, as a multiple of $k$ (default 2).
+ * @param params.dims The dimension of the embedding (default 2).
+ * @param params.iterations The number of Adam steps (default 450).
+ * @param params.learningRate Adam's step size (default 1).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `PacmapModel`.
+ *
+ * @example Two well-separated blobs stay apart
+ * // Two blobs of 10 points in three dimensions, their centres 17 apart.
+ * const x = concat([normals(stream(1), [10, 3]), add(normals(stream(2), [10, 3]), 10)], 0)
+ * const model = pacmap({ neighbours: 5, iterations: 100 }).fit({ x }, { stream: stream(3) })
+ * const Y = toArray(model.embedding)
+ * const centre = (rows) => [0, 1].map((c) => rows.reduce((s, r) => s + r[c], 0) / rows.length)
+ * const blobs = [Y.slice(0, 10), Y.slice(10)]
+ * const [a, b] = blobs.map(centre)
+ * const radius = (rows, m) => Math.max(...rows.map((r) => Math.hypot(r[0] - m[0], r[1] - m[1])))
+ * print('distance between the blob centres =', Math.hypot(a[0] - b[0], a[1] - b[1]))
+ * print('largest distance of a point from its centre =', Math.max(radius(blobs[0], a), radius(blobs[1], b)))
+ */
 export function pacmap(
   params: {
     neighbours?: number

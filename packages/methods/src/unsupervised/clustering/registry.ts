@@ -1,4 +1,8 @@
-/** The registry of `aifn-methods/unsupervised/clustering`: the clustering procedures as traceable algorithms. */
+/**
+ * The registry of `aifn-methods/unsupervised/clustering`: the clustering procedures as traceable algorithms, and the
+ * functions of hierarchical and spectral clustering. The estimators register themselves beside their code, with
+ * `defineModel`.
+ */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as centroid from './centroid'
@@ -7,6 +11,7 @@ import * as hierarchical from './hierarchical'
 import * as mixture from './mixture'
 import * as spectral from './spectral'
 
+/** A registry table: entries keyed by name, each a function with its metadata of kind `I`. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'unsupervised/clustering')
 const fn = definer<FunctionInfo>('function', 'unsupervised/clustering')

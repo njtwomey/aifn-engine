@@ -1,4 +1,7 @@
-/** The registry of `aifn-methods/unsupervised/anomaly`: the anomaly detectors, their scores and thresholds. */
+/**
+ * The registry of `aifn-methods/unsupervised/anomaly`: the anomaly detectors, their scores and thresholds, as
+ * functions with their metadata.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as detectors from './detectors'

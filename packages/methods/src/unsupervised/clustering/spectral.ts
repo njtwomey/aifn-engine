@@ -1,7 +1,8 @@
 /**
  * Spectral clustering (Ng, Jordan and Weiss, 2002, "On spectral clustering: analysis and an algorithm"; von Luxburg,
- * 2007, "A tutorial on spectral clustering"): an affinity graph, the top eigenvectors of the normalised affinity
- * D^(−½) W D^(−½), rows scaled to unit length, and k-means on those rows.
+ * 2007, "A tutorial on spectral clustering"): an affinity graph $\Wmat$, the top $k$ eigenvectors of the normalised
+ * affinity $\Dmat^{-1/2} \Wmat \Dmat^{-1/2}$ ($\Dmat$ the diagonal matrix of degrees), rows scaled to unit length,
+ * and k-means on those rows. Everything is dense: the affinity and its eigendecomposition are $n \times n$.
  */
 
 import type { Dataset, Estimator, FitOptions } from 'aifn-compute/learning/estimators'
@@ -15,12 +16,26 @@ import { mat, matrix, pairwise, vec } from './util'
 import { defineModel } from 'aifn-compute/learning/estimators'
 import { bool, int, space } from 'aifn-compute/foundation/space'
 
-/** How affinities are built: a Gaussian (RBF) kernel of lengthscale ℓ, or a symmetric k-nearest-neighbour graph. */
+/**
+ * How affinities are built: a Gaussian (RBF) kernel of lengthscale $\ell$ (`lengthscale`), or a symmetric
+ * $k$-nearest-neighbour graph (`k` neighbours per point, itself excluded).
+ */
 export type Affinity = { kind: 'rbf'; lengthscale: number } | { kind: 'neighbours'; k: number }
 
 /**
- * The affinity matrix W [n, n] (zero diagonal) of the rows of x: exp(−‖xᵢ − xⱼ‖²/2ℓ²), or 1 where either point is
- * among the other's k nearest (the connectivity graph symmetrised as ½(A + Aᵀ), as scikit-learn).
+ * The affinity matrix $\Wmat$ (zero diagonal) of the rows of `x`: $W_{ij} = \exp(-\lVert \xvec_i - \xvec_j
+ * \rVert^2 / 2\ell^2)$, or the $k$-nearest-neighbour connectivity $\Amat$ ($A_{ij} = 1$ when $j$ is among the $k$
+ * nearest of $i$, ties to the lower index) symmetrised as $\frac{1}{2}(\Amat + \Amat^\top)$, as scikit-learn: 1
+ * where each point is among the other's $k$ nearest, $\frac{1}{2}$ where only one is.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param affinity The kernel and its lengthscale, or the number of neighbours.
+ * @returns $\Wmat$, $n \times n$ and symmetric.
+ *
+ * @example Nearest-neighbour affinity of three points on a line
+ * const x = tensor([[0], [1], [3]])
+ * print('1 neighbour', affinityMatrix(x, { kind: 'neighbours', k: 1 }))
+ * print('rbf', affinityMatrix(x, { kind: 'rbf', lengthscale: 1 }))
  */
 export function affinityMatrix(x: Tensor, affinity: Affinity): Tensor {
   const { n } = matrix(x, 'affinityMatrix')
@@ -51,19 +66,47 @@ export interface SpectralClusteringModel {
   readonly transductive: true
   /** The model's name. */
   readonly name: 'spectral-clustering'
+  /** The cluster of each training row, $n$ values (int32). */
   readonly labels: Tensor
+  /** The affinity matrix $\Wmat$, $n \times n$. */
   readonly affinity: Tensor
-  /** The rows fed to k-means [n, k]: top eigenvectors of D^(−½)WD^(−½), each row scaled to unit length. */
+  /**
+   * The rows fed to k-means, $n \times k$: top eigenvectors of $\Dmat^{-1/2} \Wmat \Dmat^{-1/2}$, each row scaled to
+   * unit length unless `normaliseRows` is false.
+   */
   readonly embedding: Tensor
-  /** The k largest eigenvalues of D^(−½)WD^(−½) (1 has multiplicity equal to the number of components). */
+  /**
+   * The $k$ largest eigenvalues of $\Dmat^{-1/2} \Wmat \Dmat^{-1/2}$ (1 has multiplicity equal to the number of
+   * components).
+   */
   readonly eigenvalues: Tensor
-  /** Connected components of the affinity graph (`aifn-compute/graph`): more than k of them means the embedding is degenerate. */
+  /**
+   * Connected components of the affinity graph (`aifn-compute/graph`): more than $k$ of them means the embedding is
+   * degenerate.
+   */
   readonly components: number
 }
 
 /**
- * Spectral clustering into k groups (Ng, Jordan and Weiss, 2002). k-means on the embedding uses `restarts` k-means++
- * runs (default 10) from the stream.
+ * Spectral clustering into $k$ groups (Ng, Jordan and Weiss, 2002). k-means on the embedding uses `restarts`
+ * k-means++ runs (default 10) from the fit's stream (`stream(0)` when none is given). A point with no affinity to any
+ * other (degree 0) gets a zero row in the embedding. The model is transductive: it labels the training rows only.
+ *
+ * @param params The hyperparameters.
+ * @param params.k The number of clusters, which is also the number of eigenvectors kept.
+ * @param params.affinity How the affinity graph is built (default an RBF kernel of lengthscale 1).
+ * @param params.restarts The k-means++ restarts of k-means on the embedding (default 10).
+ * @param params.normaliseRows Whether each row of the embedding is scaled to unit length before k-means (default
+ *   true, as Ng, Jordan and Weiss).
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example Two blobs from an RBF affinity
+ * const s = stream(0)
+ * const x = concat([normals(s, [6, 2], 0, 0.3), normals(s, [6, 2], 4, 0.3)])
+ * const model = spectralClustering({ k: 2 }).fit({ x }, { stream: stream(1) })
+ * print('labels', model.labels)
+ * print('eigenvalues', model.eigenvalues)
+ * print('graph components', model.components)
  */
 export function spectralClustering(params: {
   k: number

@@ -1,10 +1,14 @@
 /**
- * Diffusion maps (Coifman and Lafon, 2006): a Gaussian kernel K_ij = exp(−‖xᵢ − xⱼ‖²/ε) on the data, the α-normalised
- * kernel K⁽ᵅ⁾ = Q^{−α} K Q^{−α} (Q the kernel degrees; α = 1 removes the sampling density, α = ½ gives Fokker–Planck
- * diffusion, α = 0 the normalised graph Laplacian), and the random walk P = D⁻¹K⁽ᵅ⁾ on it. With the right eigenvectors
- * ψ_k of P (eigenvalues 1 = λ₀ > λ₁ ≥ …, normalised so Σᵢ πᵢ ψ_k(i)² = 1 under the stationary law π), the map
- * Ψ_t(i) = (λ_k^t ψ_k(i))_{k ≥ 1} turns the diffusion distance D_t(i, j)² = Σ_y (P^t_{iy} − P^t_{jy})² / π_y into
- * the Euclidean distance (exactly, with every k kept).
+ * Diffusion maps (Coifman and Lafon, 2006): a Gaussian kernel
+ * $K_{ij} = \exp(-\lVert \xvec_i - \xvec_j \rVert^2/\varepsilon)$ on the data, the $\alpha$-normalised kernel $\Kmat^{(\alpha)} = \Qmat^{-\alpha}\Kmat\Qmat^{-\alpha}$ ($\Qmat$ the
+ * diagonal of kernel degrees; $\alpha = 1$ removes the sampling density, $\alpha = \tfrac{1}{2}$ gives Fokker-Planck
+ * diffusion, $\alpha = 0$ the normalised graph Laplacian), and the random walk $\Pmat = \Dmat^{-1}\Kmat^{(\alpha)}$ on
+ * it.
+ *
+ * With the right eigenvectors $\psivec_k$ of $\Pmat$ (eigenvalues $1 = \lambda_0 > \lambda_1 \ge \dots$, normalised so
+ * $\sum_i \pi_i \psi_k(i)^2 = 1$ under the stationary law $\pivec$), the map
+ * $\Psi_t(i) = (\lambda_k^t \psi_k(i))_{k \ge 1}$ turns the diffusion distance
+ * $D_t(i, j)^2 = \sum_y (P^t_{iy} - P^t_{jy})^2 / \pi_y$ into the Euclidean distance (exactly, with every $k$ kept).
  */
 
 import { eigh } from 'aifn-compute/numerics/linalg'
@@ -19,26 +23,59 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A fitted diffusion map. */
 export interface DiffusionMapModel {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** The map places the training rows only (no out-of-sample extension). */
   readonly transductive: true
+  /** The model's name. */
   readonly name: 'diffusion-map'
-  /** Coordinates Ψ_t [n, dims]. */
+  /** Coordinates $\Psi_t$ ($n \times$ `dims`), each column signed so its largest-magnitude entry is positive. */
   readonly embedding: Tensor
-  /** Eigenvalues of P, descending, λ₀ = 1 first [dims + 1]. */
+  /** The `dims` + 1 largest eigenvalues of $\Pmat$, descending, $\lambda_0 = 1$ first. */
   readonly eigenvalues: Tensor
-  /** The random walk P [n, n] (rows sum to 1). */
+  /** The random walk $\Pmat$ ($n \times n$, rows sum to 1). */
   readonly transition: Tensor
-  /** Its stationary law π [n]. */
+  /** Its stationary law $\pivec$ ($n$ values), proportional to the degrees of $\Kmat^{(\alpha)}$. */
   readonly stationary: Tensor
-  /** The kernel bandwidth ε used. */
+  /** The kernel bandwidth $\varepsilon$ used. */
   readonly epsilon: number
 }
 
 /**
- * The diffusion map of the rows of x into `dims` dimensions (default 2) at diffusion time `time` (default 1), with
- * bandwidth `epsilon` (default the median squared pairwise distance) and normalisation `alpha` (default 1). Each
- * coordinate is signed so that its largest-magnitude entry is positive.
+ * The diffusion map of the training rows (Coifman and Lafon, 2006): the eigenvectors of the random walk on an
+ * $\alpha$-normalised Gaussian kernel, found through its symmetric conjugate
+ * $\Dmat^{-1/2}\Kmat^{(\alpha)}\Dmat^{-1/2}$ and scaled by $\lambda_k^t$. Each coordinate is signed so that its
+ * largest-magnitude entry is positive. Throws `DomainError` unless $1 \le$ `dims` $\le n - 1$, or when the bandwidth
+ * is not positive (as the median is when more than half the pairs of rows coincide).
+ *
+ * @param params The settings of the estimator.
+ * @param params.dims The number of coordinates, after the trivial one (default 2).
+ * @param params.time The diffusion time $t$, the power of the eigenvalues (default 1); larger times shrink the finer
+ *   coordinates.
+ * @param params.epsilon The kernel bandwidth $\varepsilon$, in squared distance units (default the median squared
+ *   distance between distinct pairs of rows).
+ * @param params.alpha The normalisation $\alpha$ of the kernel by its degrees (default 1).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `DiffusionMapModel`.
+ *
+ * @example Points along a half circle are ordered by the first coordinate
+ * const t = linspace(0, Math.PI, 10)
+ * const x = stack([cos(t), sin(t)], 1)
+ * const model = diffusionMap({ dims: 1, epsilon: 0.5 }).fit({ x })
+ * print('embedding =', model.embedding)
+ * print('eigenvalues =', model.eigenvalues)
+ *
+ * @example With every coordinate kept, map distance is diffusion distance
+ * const x = normals(stream(1), [5, 2])
+ * const model = diffusionMap({ dims: 4 }).fit({ x })
+ * const P = toArray(model.transition)
+ * const pi = toArray(model.stationary)
+ * const Y = toArray(model.embedding)
+ * let diffusion = 0
+ * for (let y = 0; y < 5; y++) diffusion += (P[0][y] - P[1][y]) ** 2 / pi[y]
+ * let euclidean = 0
+ * for (let c = 0; c < 4; c++) euclidean += (Y[0][c] - Y[1][c]) ** 2
+ * print('diffusion distance of rows 0 and 1 =', Math.sqrt(diffusion))
+ * print('their distance in the map =', Math.sqrt(euclidean))
  */
 export function diffusionMap(
   params: { dims?: number; time?: number; epsilon?: number; alpha?: number } = {},

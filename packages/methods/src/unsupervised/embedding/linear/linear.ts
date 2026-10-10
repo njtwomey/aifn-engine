@@ -1,12 +1,16 @@
 /**
- * Linear and kernel projections, and multidimensional scaling:
+ * Linear and kernel projections, and multidimensional scaling.
  *
- * - `pca`: principal component analysis by the SVD of the centred data (Pearson, 1901; Hotelling, 1933), with explained
- *   variance, whitening and reconstruction, as scikit-learn's `PCA` (same sign convention).
- * - `kernelPca`: kernel PCA (Schölkopf, Smola and Müller, 1998) on the double-centred kernel matrix.
- * - `classicalMds`: Torgerson–Gower scaling of a distance matrix.
- * - `smacofSteps`, `metricMds`: metric MDS by SMACOF, iterated Guttman transforms (de Leeuw, 1977; Borg and Groenen,
- *   2005, "Modern Multidimensional Scaling", §8.6).
+ * Principal component analysis is the SVD of the centred data, $\Xmat - \ones\bar{\xvec}^\top = \Umat\Smat\Vmat^\top$
+ * (Pearson, 1901; Hotelling, 1933), with explained variance, whitening and reconstruction as scikit-learn's `PCA`
+ * (same sign convention). Kernel PCA (Schölkopf, Smola and Müller, 1998) diagonalises the double-centred kernel
+ * matrix instead. Classical MDS (Torgerson, 1952; Gower, 1966) embeds a distance matrix through the top eigenpairs of
+ * $\Bmat = -\tfrac{1}{2}\Jmat\Dmat^{(2)}\Jmat$, and metric MDS minimises the raw stress
+ * $\sigma(\Ymat) = \sum_{i<j} (\lVert \yvec_i - \yvec_j \rVert - \delta_{ij})^2$ by SMACOF, iterated Guttman transforms
+ * (de Leeuw, 1977; Borg and Groenen, 2005, "Modern Multidimensional Scaling", §8.6).
+ *
+ * Data are matrices with one point per row. PCA and kernel PCA map new rows (`transform`); classical and metric MDS
+ * place the given points only.
  */
 
 import { gram, rbf, type Kernel } from 'aifn-compute/learning/kernels'
@@ -27,27 +31,67 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 
 /** A fitted PCA. */
 export interface PcaModel extends Transforms<Tensor, Tensor> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'pca'
-  /** Principal axes as rows [r, d], by decreasing variance; each signed so its largest-magnitude entry is positive. */
+  /**
+   * Principal axes as rows ($r \times d$), by decreasing variance; each signed so its largest-magnitude entry is
+   * positive (the first of equals).
+   */
   readonly components: Tensor
-  /** Variance along each axis [r] (divided by n − 1). */
+  /** Variance along each axis ($r$ values): $s_c^2 / (n - 1)$ for singular value $s_c$. */
   readonly explainedVariance: Tensor
-  /** Share of the total variance along each axis [r]. */
+  /** Share of the total variance along each axis ($r$ values), the total taken over all $\min(n, d)$ axes. */
   readonly explainedVarianceRatio: Tensor
+  /** The singular values of the centred data along the kept axes ($r$ values, descending). */
   readonly singularValues: Tensor
+  /** The mean of the training rows ($d$ values), subtracted before projecting. */
   readonly mean: Tensor
-  /** The mean of the discarded variances (0 when none are discarded): the noise level of probabilistic PCA. */
+  /**
+   * The mean variance of the $\min(n, d) - r$ discarded axes (0 when none are discarded): the noise level of
+   * probabilistic PCA.
+   */
   readonly noiseVariance: number
+  /** Whether scores are divided by the square root of their axis's variance, to unit variance. */
   readonly whiten: boolean
-  /** Scores (x − mean) Vᵣ [m, r], divided by √variance per axis when whitening. */
+  /**
+   * Scores $(\xvec - \bar{\xvec})^\top\Vmat_{r}$ of new rows ($m \times d$ in, $m \times r$ out), divided by
+   * $\sqrt{\text{variance}}$ per axis when whitening. Throws `ShapeError` for a different number of features.
+   */
   transform(x: Tensor): Tensor
-  /** Back from scores to the input space [m, d]. */
+  /** Back from scores ($m \times r$) to the input space ($m \times d$), undoing any whitening. */
   inverseTransform(z: Tensor): Tensor
 }
 
-/** PCA keeping `components` axes (default all, min(n, d)). */
+/**
+ * Principal component analysis by the SVD of the centred training rows (Pearson, 1901; Hotelling, 1933), as
+ * scikit-learn's `PCA` with the full SVD solver: the same variances (divided by $n - 1$), sign convention and noise
+ * variance. Throws `ShapeError` when the data are not a matrix.
+ *
+ * @param params The settings of the estimator.
+ * @param params.components The number of axes $r$ to keep (default all, $\min(n, d)$; more is cut to that).
+ * @param params.whiten Divide each score by the square root of its axis's variance, so the scores have unit variance
+ *   (default false).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `PcaModel`.
+ *
+ * @example Points along a line: the first axis is its direction
+ * // 20 points along the direction (0.6, 0.8), with a little noise across it.
+ * const t = normals(stream(1), [20, 1])
+ * const x = add(matmul(t, tensor([[3, 4]])), mul(normals(stream(2), [20, 2]), 0.1))
+ * const model = pca({ components: 1 }).fit({ x })
+ * print('direction =', model.components)
+ * print('explained variance =', model.explainedVariance)
+ * print('explained variance ratio =', model.explainedVarianceRatio)
+ * print('noise variance =', model.noiseVariance)
+ *
+ * @example Project onto one axis and back
+ * const x = tensor([[0, 0], [1, 1.2], [2, 1.8], [3, 3]])
+ * const model = pca({ components: 1 }).fit({ x })
+ * const z = model.transform(x)
+ * print('scores =', z)
+ * print('reconstruction =', model.inverseTransform(z))
+ */
 export function pca(params: { components?: number; whiten?: boolean } = {}): Estimator<Dataset<Tensor>, PcaModel> {
   const { whiten = false } = params
   return {
@@ -120,23 +164,47 @@ export function pca(params: { components?: number; whiten?: boolean } = {}): Est
 
 /** A fitted kernel PCA. */
 export interface KernelPcaModel extends Transforms<Tensor, Tensor> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'kernel-pca'
+  /** The kernel the model was fitted with. */
   readonly kernel: Kernel
-  /** Eigenvalues of the centred kernel matrix [r], descending. */
+  /** The top $r$ eigenvalues of the centred kernel matrix $\tilde{\Kmat}$, descending (not divided by $n$). */
   readonly eigenvalues: Tensor
-  /** Their eigenvectors as columns [n, r] (unit length). */
+  /** Their eigenvectors as columns ($n \times r$, unit length). */
   readonly eigenvectors: Tensor
-  /** The training rows' coordinates [n, r]: eigenvectors times √eigenvalue. */
+  /**
+   * The training rows' coordinates ($n \times r$): each eigenvector times the square root of its eigenvalue (0 for a
+   * negative one).
+   */
   readonly embedding: Tensor
-  /** Coordinates of new rows [m, r], from their centred kernel values against the training rows. */
+  /**
+   * Coordinates of new rows ($m \times r$), from their kernel values against the training rows, centred with the
+   * training means: $\tilde{\kvec}^\top\vvec_c / \sqrt{\lambda_c}$ (0 where $\lambda_c \le 0$). On the training rows
+   * this gives `embedding`. Throws `ShapeError` for a different number of features.
+   */
   transform(x: Tensor): Tensor
 }
 
 /**
- * Kernel PCA: eigendecomposition of the double-centred kernel matrix K̃ = K − 1K/n − K1/n + 1K1/n², keeping
- * `components` (default 2) axes. The kernel comes from `aifn-compute/learning/kernels` (e.g. `rbf({ lengthscale })`).
+ * Kernel PCA (Schölkopf, Smola and Müller, 1998): the eigendecomposition of the double-centred kernel matrix
+ * $\tilde{\Kmat} = \Kmat - \ones\ones^\top\Kmat/n - \Kmat\ones\ones^\top/n + \ones\ones^\top\Kmat\ones\ones^\top/n^2$
+ * of the training rows. The same eigenvalues as scikit-learn's `KernelPCA`, and the same coordinates up to the sign of
+ * each axis. Throws `ShapeError` when the data are not a matrix.
+ *
+ * @param params The settings of the estimator.
+ * @param params.kernel The kernel, from `aifn-compute/learning/kernels` (default `rbf({ lengthscale: 1 })`,
+ *   $k(\xvec, \xvec') = \exp(-\lVert \xvec - \xvec' \rVert^2 / 2)$, scikit-learn's `gamma=0.5`).
+ * @param params.components The number of axes $r$ to keep (default 2).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `KernelPcaModel`.
+ *
+ * @example Two groups of points come apart along the first axis
+ * const x = tensor([[0, 0], [1, 0], [0, 1], [3, 3], [4, 3]])
+ * const model = kernelPca({ components: 2 }).fit({ x })
+ * print('eigenvalues =', model.eigenvalues)
+ * print('embedding =', model.embedding)
+ * print('a new point near the second group:', model.transform(tensor([[3.5, 3]])))
  */
 export function kernelPca(
   params: { kernel?: Kernel; components?: number } = {},
@@ -197,13 +265,37 @@ export function kernelPca(
 
 /** A classical MDS result. */
 export interface ClassicalMds {
-  /** Coordinates [n, r]. */
+  /** Coordinates ($n \times r$), one point per row; a column whose eigenvalue is negative is zero. */
   embedding: Tensor
-  /** All eigenvalues of B = −½ J D² J, descending (negative ones mean D is not Euclidean). */
+  /**
+   * All $n$ eigenvalues of $\Bmat = -\tfrac{1}{2}\Jmat\Dmat^{(2)}\Jmat$, descending (negative ones mean the distances
+   * are not Euclidean).
+   */
   eigenvalues: Tensor
 }
 
-/** Classical (Torgerson–Gower) MDS of a distance matrix D [n, n] into `dims` dimensions (default 2). */
+/**
+ * Classical (Torgerson–Gower) MDS of a distance matrix: the coordinates $\Ymat = \Vmat_{r}\Lambdamat_{r}^{1/2}$ from
+ * the top eigenpairs of $\Bmat = -\tfrac{1}{2}\Jmat\Dmat^{(2)}\Jmat$, $\Jmat = \Imat - \ones\ones^\top/n$
+ * (Torgerson, 1952; Gower, 1966). Euclidean distances are recovered exactly, up to rotation and reflection, once `dims`
+ * covers their dimension. Throws `ShapeError` when `distances` is not square.
+ *
+ * @param distances The distances $\Dmat$ ($n \times n$, symmetric, zero diagonal); they are squared here.
+ * @param dims The number of coordinates $r$ to keep.
+ * @returns The coordinates and every eigenvalue of $\Bmat$.
+ *
+ * @example A 3-4-5 triangle is recovered from its distances
+ * const D = tensor([[0, 3, 4], [3, 0, 5], [4, 5, 0]])
+ * const { embedding, eigenvalues } = classicalMds(D)
+ * print('embedding =', embedding)
+ * print('eigenvalues =', eigenvalues)
+ * print('stress (0 when every distance is matched) =', stress(embedding, D))
+ *
+ * @example A negative eigenvalue says the distances are not Euclidean
+ * // d(0, 3) = 3 breaks the triangle inequality through point 1: d(0, 1) + d(1, 3) = 2.
+ * const D = tensor([[0, 1, 1, 3], [1, 0, 1, 1], [1, 1, 0, 1], [3, 1, 1, 0]])
+ * print('eigenvalues =', classicalMds(D).eigenvalues)
+ */
 export function classicalMds(distances: Tensor, dims = 2): ClassicalMds {
   const { n, v } = square(distances, 'classicalMds')
   const { Y, eigenvalues } = classicalCore(
@@ -214,7 +306,20 @@ export function classicalMds(distances: Tensor, dims = 2): ClassicalMds {
   return { embedding: mat(Y, n, dims), eigenvalues: vec(eigenvalues) }
 }
 
-/** Raw stress σ(Y) = Σ_{i<j} (‖yᵢ − yⱼ‖ − δᵢⱼ)² of a configuration Y [n, r] against dissimilarities δ [n, n]. */
+/**
+ * Raw stress $\sigma(\Ymat) = \sum_{i<j} (\lVert \yvec_i - \yvec_j \rVert - \delta_{ij})^2$ of a configuration
+ * against dissimilarities: what metric MDS minimises (Kruskal, 1964). Throws `ShapeError` for a non-matrix
+ * configuration or non-square dissimilarities.
+ *
+ * @param embedding The configuration $\Ymat$ ($n \times r$), one point per row.
+ * @param distances The dissimilarities $\delta_{ij}$ ($n \times n$); only the upper triangle is read.
+ * @returns The raw stress, 0 when every distance is matched.
+ *
+ * @example A right triangle against its own distances, and a squashed one
+ * const D = tensor([[0, 3, 4], [3, 0, 5], [4, 5, 0]])
+ * print('exact =', stress(tensor([[0, 0], [3, 0], [0, 4]]), D))
+ * print('squashed =', stress(tensor([[0, 0], [3, 0], [0, 3]]), D))
+ */
 export function stress(embedding: Tensor, distances: Tensor): number {
   const { n, d, v } = matrix(embedding, 'stress')
   const { v: delta } = square(distances, 'stress')
@@ -226,23 +331,41 @@ export function stress(embedding: Tensor, distances: Tensor): number {
 
 /** One SMACOF state. */
 export interface SmacofState extends Status {
-  /** The configuration [n, r]. */
+  /** The configuration ($n \times r$), one point per row. */
   embedding: Tensor
-  /** Raw stress at this configuration. */
+  /** Raw stress $\sigma$ at this configuration. */
   stress: number
-  /** Stress-1, √(σ / Σ δ²), a scale-free measure (Kruskal, 1964). */
+  /**
+   * $\sqrt{\sigma / \sum_{i<j} \delta_{ij}^2}$, a scale-free measure: Kruskal's (1964) stress-1 at a SMACOF fixed
+   * point.
+   */
   normalisedStress: number
   /** Guttman transforms done. */
   t: number
+  /** The last transform lowered the stress by at most `tolerance` times its previous value. */
   converged: boolean
 }
 
 /**
- * SMACOF as a traceable algorithm: each step is the Guttman transform Y ← (1/n) B(Y) Y, where B(Y) has off-diagonal
- * entries −δᵢⱼ/dᵢⱼ(Y) (0 where dᵢⱼ = 0) and rows summing to zero; the stress never rises (de Leeuw, 1977; Borg and
- * Groenen, 2005, "Modern Multidimensional Scaling", ch. 8). Converged when the stress falls by less than `tolerance`
- * (default 1e-9) relative to itself. `init` takes a configuration, or starts from classical MDS (`start:
- * 'classical'`, default) or Gaussian noise from the `init` stream (`start: 'random'`).
+ * SMACOF as a traceable algorithm: each step is the Guttman transform $\Ymat \leftarrow \tfrac{1}{n}\Bmat(\Ymat)\Ymat$,
+ * where $\Bmat(\Ymat)$ has off-diagonal entries $-\delta_{ij}/d_{ij}(\Ymat)$ (0 where $d_{ij} = 0$) and rows summing
+ * to zero; the stress never rises (de Leeuw, 1977; Borg and Groenen, 2005, "Modern Multidimensional Scaling", ch. 8).
+ * Converged when the stress falls by no more than `tolerance` relative to its previous value. `init` takes a
+ * configuration (`embedding`), or starts from classical MDS (`start: 'classical'`, default) or standard normal noise
+ * from the run's stream (`start: 'random'`). Throws `ShapeError` when `distances` is not square.
+ *
+ * @param distances The dissimilarities $\delta_{ij}$ to match ($n \times n$, symmetric, zero diagonal).
+ * @param params The settings of the algorithm.
+ * @param params.dims The dimension $r$ of the configuration (default 2).
+ * @param params.tolerance The relative fall in stress below which a step counts as converged (default 1e-9).
+ * @returns The algorithm, for `run` or `trace`; its states are `SmacofState`s.
+ *
+ * @example The stress of a random start falls with each transform
+ * const D = tensor([[0, 3, 4], [3, 0, 5], [4, 5, 0]])
+ * const smacof = smacofSteps(D)
+ * print('stress at the random start =', run(smacof, { start: 'random' }, 0, { stream: stream(1) }).stress)
+ * print('after 5 transforms =', run(smacof, { start: 'random' }, 5, { stream: stream(1) }).stress)
+ * print('after 20 transforms =', run(smacof, { start: 'random' }, 20, { stream: stream(1) }).stress)
  */
 export function smacofSteps(
   distances: Tensor,
@@ -298,18 +421,39 @@ export function smacofSteps(
   }
 }
 
-/** A fitted metric MDS. */
+/** A fitted metric MDS, with the SMACOF run that placed it (`training`). */
 export interface MetricMdsModel extends Trained<SmacofState> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** Metric MDS places the training rows only: it has no out-of-sample map. */
   readonly transductive: true
   /** The model's name. */
   readonly name: 'metric-mds'
+  /** The coordinates of the training rows ($n \times r$), from the last SMACOF state. */
   readonly embedding: Tensor
+  /** The raw stress of `embedding` against the rows' Euclidean distances. */
   readonly stress: number
 }
 
-/** Metric MDS of the rows of x (Euclidean dissimilarities) by SMACOF from classical MDS or a random start. */
+/**
+ * Metric MDS of the training rows: their Euclidean distances matched by SMACOF (`smacofSteps`), from classical MDS or a
+ * random start, until the stress stops falling or `maxSteps` run out. The run is traced (every step by default, or
+ * every `trace.every` of the fit options) and the random start draws from the fit options' `stream`. Transductive:
+ * there is no `transform`.
+ *
+ * @param params The settings of the estimator.
+ * @param params.dims The dimension $r$ of the embedding (default 2).
+ * @param params.start Where SMACOF starts: `'classical'` (classical MDS, default) or `'random'` (standard normal).
+ * @param params.maxSteps The most Guttman transforms to run (default 300).
+ * @param params.tolerance The relative fall in stress below which the run stops (default 1e-9).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `MetricMdsModel`.
+ *
+ * @example Six points in three dimensions, placed in two
+ * const x = normals(stream(3), [6, 3])
+ * const model = metricMds({ dims: 2 }).fit({ x })
+ * print('stress =', model.stress, 'after', model.training.final.t, 'transforms')
+ * print('normalised stress =', model.training.final.normalisedStress)
+ */
 export function metricMds(
   params: { dims?: number; start?: 'classical' | 'random'; maxSteps?: number; tolerance?: number } = {},
 ): Estimator<Dataset<Tensor>, MetricMdsModel> {

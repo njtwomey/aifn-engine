@@ -1,14 +1,18 @@
 /**
  * UMAP, simplified but faithful to McInnes, Healy and Melville (2018, "UMAP: Uniform Manifold Approximation and
- * Projection for dimension reduction", arXiv:1802.03426) and umap-learn's defaults: k-nearest neighbours (exact for
- * small n, by nearest-neighbour descent above `DESCENT_ABOVE` rows), a
- * fuzzy simplicial set (local connectivity ρᵢ, bandwidths σᵢ with Σⱼ exp(−(dᵢⱼ − ρᵢ)/σᵢ) = log₂ k, fuzzy union
- * w + wᵀ − w∘wᵀ), the output curve 1/(1 + a d^(2b)) fitted to `minDist` and `spread`, and a stochastic layout: each
- * epoch samples edges by weight (edge e every 1/wₑ·max w epochs), pulls their ends together and pushes each end away
- * from `negativeSamples` random points, with a learning rate falling linearly to 0.
+ * Projection for dimension reduction", arXiv:1802.03426) and umap-learn's defaults.
  *
- * Simplifications: random (not random-projection-tree) initial lists for the descent, and a Laplacian-eigenmap or
- * random start.
+ * The $k$ nearest neighbours of each point (itself included; exact for small $n$, by nearest-neighbour descent above
+ * `DESCENT_ABOVE` rows) give a fuzzy simplicial set: local connectivity $\rho_i$ (the nearest nonzero distance),
+ * memberships $w_{ij} = \exp(-\max(0, d_{ij} - \rho_i)/\sigma_i)$ with bandwidths $\sigma_i$ such that
+ * $\sum_j w_{ij} = \log_2 k$ over the other neighbours, and their fuzzy union $w_{ij} + w_{ji} - w_{ij}w_{ji}$. The
+ * output curve $1/(1 + a d^{2b})$ is fitted to `minDist` and `spread`, and the layout is stochastic: each epoch
+ * samples edges by weight (edge $e$ every $\max_{e'} w_{e'} / w_e$ epochs), pulls their ends together and pushes the
+ * edge's lower-indexed end away from `negativeSamples` random points, with a learning rate falling linearly to 0.
+ *
+ * Simplifications: random (not random-projection-tree) initial lists for the descent, a Laplacian-eigenmap or random
+ * start, each edge stored once (umap-learn holds both directions, so both ends get negative samples), and $\sigma_i$
+ * floored at $10^{-3}$ of the point's own mean neighbour distance.
  */
 
 import type { Dataset, Estimator, FitOptions, Trained } from 'aifn-compute/learning/estimators'
@@ -24,15 +28,15 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** The fuzzy graph of the data: per-point ρ and σ, and the symmetric membership strengths. */
+/** The fuzzy graph of the data: per-point $\rho$ and $\sigma$, and the symmetric membership strengths. */
 export interface FuzzyGraph {
-  /** Distance to the nearest neighbour (local connectivity 1) [n]. */
+  /** Distance to the nearest neighbour at a nonzero distance, 0 if none (local connectivity 1); $n$ values. */
   rho: Tensor
-  /** Bandwidth found by bisection [n]. */
+  /** Bandwidth found by bisection ($n$ values). */
   sigma: Tensor
-  /** The k nearest neighbours of each point, itself first [n, k] (int32). */
+  /** The $k$ nearest neighbours of each point, itself first ($n \times k$, int32). */
   neighbours: Tensor
-  /** Edges (i < j) with their membership strength after the fuzzy union. */
+  /** Edges ($i < j$, as parallel arrays) with their membership strength after the fuzzy union. */
   edges: { from: Int32Array; to: Int32Array; weight: Float64Array }
 }
 
@@ -44,15 +48,24 @@ export const DESCENT_ABOVE = 2000
 
 /** Options of {@link fuzzyGraph}. */
 export interface FuzzyGraphOptions {
-  /** Default 'auto'. */
+  /** How neighbours are found (default `'auto'`). */
   search?: NeighbourSearch
   /** Randomness of nearest-neighbour descent (default: a fixed stream). */
   stream?: Stream
 }
 
 /**
- * The k nearest neighbours of each row, itself first, and their distances, flat [n·k]: exact (all pairwise distances,
- * O(n²) memory) or by nearest-neighbour descent.
+ * The $k$ nearest neighbours of each row, itself first, and their distances: exact (all pairwise distances, $O(n^2)$
+ * memory; ties to the lower index) or by nearest-neighbour descent (`aifn-compute/numerics/neighbours`). Exact search
+ * is used for `'exact'`, for `'auto'` up to `DESCENT_ABOVE` rows, and whenever $k = 1$.
+ *
+ * @param v The points as a row-major array of $n \times d$ values.
+ * @param n The number of points.
+ * @param d The number of features.
+ * @param k The number of neighbours per point, itself included, at most $n$.
+ * @param options The search and the stream of the descent (default the fixed stream `'nearest-neighbour-descent'`).
+ * @returns `nb`, the neighbours' indices, and `dist`, their Euclidean distances, each a row-major $n \times k$ array
+ *   (row $i$ in entries `i * k` to `i * k + k - 1`, nearest first).
  */
 function neighbourLists(v: Float64Array, n: number, d: number, k: number, options: FuzzyGraphOptions) {
   const { search = 'auto' } = options
@@ -87,9 +100,24 @@ function neighbourLists(v: Float64Array, n: number, d: number, k: number, option
 }
 
 /**
- * The fuzzy simplicial set of the rows of x with `neighbours` k (default 15, itself included, as umap-learn):
- * wᵢⱼ = exp(−max(0, dᵢⱼ − ρᵢ)/σᵢ), then w + wᵀ − w∘wᵀ. Neighbours are exact up to `DESCENT_ABOVE` rows and found by
- * nearest-neighbour descent beyond (`options.search`).
+ * The fuzzy simplicial set of the rows of `x` (McInnes, Healy and Melville, 2018, §3): memberships
+ * $w_{ij} = \exp(-\max(0, d_{ij} - \rho_i)/\sigma_i)$ over each point's neighbours, then the fuzzy union
+ * $\Wmat + \Wmat^\top - \Wmat \circ \Wmat^\top$. Each $\sigma_i$ is found by bisection from 1 (tolerance $10^{-5}$, at
+ * most 64 steps) so that the memberships of the point's $k - 1$ other neighbours sum to $\log_2 k$, then floored at
+ * $10^{-3}$ of their mean distance. Throws `ShapeError` when `x` is not a matrix.
+ *
+ * @param x The points ($n \times d$), one per row.
+ * @param neighbours The number of neighbours $k$, the point itself included as in umap-learn; more than $n$ is cut to
+ *   $n$.
+ * @param options How neighbours are found: exact up to `DESCENT_ABOVE` rows and by nearest-neighbour descent beyond
+ *   (`search: 'auto'`, default), and the descent's stream.
+ * @returns The graph: $\rho$, $\sigma$, the neighbour lists and the symmetric edges.
+ *
+ * @example Four points on a line
+ * const g = fuzzyGraph(tensor([[0], [1], [3], [6]]), 3)
+ * print('rho =', g.rho, 'sigma =', g.sigma)
+ * print('neighbours =', g.neighbours)
+ * print('edges [i, j, weight] =', Array.from(g.edges.from, (i, e) => [i, g.edges.to[e], g.edges.weight[e]]))
  */
 export function fuzzyGraph(x: Tensor, neighbours = 15, options: FuzzyGraphOptions = {}): FuzzyGraph {
   const { n, d, v } = matrix(x, 'fuzzyGraph')
@@ -159,9 +187,17 @@ export function fuzzyGraph(x: Tensor, neighbours = 15, options: FuzzyGraphOption
 }
 
 /**
- * The output curve's parameters: a and b minimising the squared error of 1/(1 + a x^(2b)) against 1 for x < minDist
- * and exp(−(x − minDist)/spread) beyond, on 300 points of [0, 3·spread] (umap-learn's `find_ab_params`), by
- * Gauss–Newton with step halving.
+ * The output curve's parameters: $a$ and $b$ minimising the squared error of $1/(1 + a x^{2b})$ against 1 for
+ * $x <$ `minDist` and $\exp(-(x - \text{minDist})/\text{spread})$ beyond, on 300 points of $[0, 3 \cdot \text{spread}]$
+ * (umap-learn's `find_ab_params`), by Gauss-Newton with step halving from $a = b = 1$, keeping both positive.
+ *
+ * @param minDist The distance below which the curve should be flat at 1: how tightly points may pack.
+ * @param spread The scale of the curve's exponential decay beyond `minDist`.
+ * @returns The fitted $a$ and $b$.
+ *
+ * @example umap-learn's defaults give a = 1.577, b = 0.895
+ * print('minDist 0.1:', curveParameters())
+ * print('minDist 0.5:', curveParameters(0.5, 1))
  */
 export function curveParameters(minDist = 0.1, spread = 1): { a: number; b: number } {
   const xs = Array.from({ length: 300 }, (_, i) => (3 * spread * i) / 299)
@@ -207,12 +243,25 @@ export function curveParameters(minDist = 0.1, spread = 1): { a: number; b: numb
 export const DENSE_SPECTRAL_UP_TO = 500
 
 /**
- * The Laplacian eigenmap of a fuzzy graph, UMAP's spectral start: with W the symmetric edge weights and D their row
- * sums, the eigenvectors 2 … dims + 1 of M = D^(−½) W D^(−½) by descending eigenvalue (the smallest of the normalised
- * Laplacian I − M, skipping the trivial D^(½)1), each scaled to [0, 10], as rows [n · dims]. `method` 'lanczos' finds
- * them with `eigsh` on the sparse product M·v (O(edges) per product, so large n stays cheap); 'dense' builds the n × n
- * matrix and runs `eigh` (O(n³)). Each eigenvector's sign is fixed so that its entry of largest magnitude is positive,
- * so both methods give the same layout up to rounding when the eigenvalues are distinct.
+ * The Laplacian eigenmap of a fuzzy graph, UMAP's spectral start: with $\Wmat$ the symmetric edge weights and $\Dmat$
+ * their row sums, the eigenvectors $2, \dots,$ `dims` $+ 1$ of $\Mmat = \Dmat^{-1/2}\Wmat\Dmat^{-1/2}$ by descending
+ * eigenvalue (the smallest of the normalised Laplacian $\Imat - \Mmat$, skipping the trivial $\Dmat^{1/2}\ones$),
+ * each scaled to $[0, 10]$. `method` `'lanczos'` finds them with `eigsh` on the sparse product $\Mmat\vvec$
+ * ($O(\text{edges})$ per product, so large $n$ stays cheap); `'dense'` builds the $n \times n$ matrix and runs `eigh`
+ * ($O(n^3)$). Each eigenvector's sign is fixed so that its entry of largest magnitude is positive (before scaling), so
+ * both methods give the same layout up to rounding when the eigenvalues are distinct and no two entries tie for the
+ * largest magnitude (on symmetric data they can, and the two layouts may then be mirror images). Throws `DomainError`
+ * unless $n >$ `dims` $+ 1$.
+ *
+ * @param graph The fuzzy graph, as `fuzzyGraph` returns it.
+ * @param dims The dimension of the layout.
+ * @param options The eigensolver: `'lanczos'` (default) or `'dense'`.
+ * @returns The layout as a row-major array of $n \times$ `dims` values (a constant column is all 0).
+ *
+ * @example The dense and Lanczos solvers give the same start
+ * const g = fuzzyGraph(normals(stream(1), [12, 2]), 5)
+ * print('dense =', spectralLayout(g, 1, { method: 'dense' }))
+ * print('Lanczos =', spectralLayout(g, 1, { method: 'lanczos' }))
  */
 export function spectralLayout(
   graph: FuzzyGraph,
@@ -277,20 +326,44 @@ export function spectralLayout(
 
 /** One epoch of UMAP's layout. */
 export interface UmapState extends Status {
+  /** The layout ($n \times$ `dims`). */
   embedding: Tensor
   /** Epochs done. */
   t: number
-  /** The learning rate used in the epoch that produced this state. */
+  /** The learning rate used in the epoch that produced this state (`learningRate` at the start). */
   alpha: number
   /** Edge samples taken in that epoch. */
   samples: number
 }
 
 /**
- * UMAP's stochastic layout as a traceable algorithm (McInnes, Healy and Melville, 2018, arXiv:1802.03426; one step =
- * one epoch, `epochs` default 200). Each epoch's negative samples come from the step's stream. `init` takes an
- * embedding, or a spectral start (default: the Laplacian eigenmap of the fuzzy graph, scaled to [0, 10]) or a uniform
- * random one in [−10, 10]² from the `init` stream.
+ * UMAP's stochastic layout as a traceable algorithm (McInnes, Healy and Melville, 2018, arXiv:1802.03426), one step
+ * per epoch, done after `epochs`. In epoch $e$ each edge due by its weight pulls its two ends together along the
+ * gradient of $\log(1 + a d^{2b})$, and its lower-indexed end is pushed from `negativeSamples` random points (the
+ * step's stream), each gradient coordinate clipped to $[-4, 4]$ and scaled by the learning rate
+ * $\text{learningRate} \cdot (1 - (e - 1)/\text{epochs})$. Edges lighter than $\max_e w_e /$ `epochs` are never
+ * sampled. `init` takes an embedding, or a spectral start (`start: 'spectral'`, default; `spectralLayout`, dense up to
+ * `DENSE_SPECTRAL_UP_TO` rows) or a uniform random one in $[-10, 10]^{\text{dims}}$ from the run's stream
+ * (`start: 'random'`, also used when $n \le$ `dims` $+ 1$).
+ *
+ * @param graph The fuzzy graph to lay out, as `fuzzyGraph` returns it.
+ * @param params The settings of the layout.
+ * @param params.dims The dimension of the layout (default 2).
+ * @param params.epochs The number of epochs, which also sets the learning-rate schedule and the lightest edge sampled
+ *   (default 200).
+ * @param params.minDist How tightly points may pack (default 0.1), with `spread` setting the curve's $a$ and $b$.
+ * @param params.spread The scale of the curve's decay (default 1).
+ * @param params.negativeSamples The random points each sampled edge's end is pushed from (default 5).
+ * @param params.learningRate The initial learning rate (default 1).
+ * @returns The algorithm, for `run` or `trace`; its states are `UmapState`s.
+ *
+ * @example The learning rate falls to almost nothing over the epochs
+ * const x = concat([normals(stream(1), [10, 3]), add(normals(stream(2), [10, 3]), 10)], 0)
+ * const steps = umapSteps(fuzzyGraph(x, 5), { epochs: 50 })
+ * const first = run(steps, { start: 'random' }, 1, { stream: stream(3) })
+ * const last = run(steps, { start: 'random' }, 50, { stream: stream(3) })
+ * print('epoch 1: learning rate', first.alpha, 'edges sampled', first.samples)
+ * print('epoch 50: learning rate', last.alpha, 'edges sampled', last.samples)
  */
 export function umapSteps(
   graph: FuzzyGraph,
@@ -359,20 +432,53 @@ export function umapSteps(
   }
 }
 
-/** A fitted UMAP embedding. */
+/** A fitted UMAP embedding, with its run (`training`). */
 export interface UmapModel extends Trained<UmapState> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** This UMAP places the training rows only (no out-of-sample transform). */
   readonly transductive: true
   /** The model's name. */
   readonly name: 'umap'
+  /** The coordinates of the training rows ($n \times$ `dims`). */
   readonly embedding: Tensor
+  /** The fuzzy graph that was laid out. */
   readonly graph: FuzzyGraph
+  /** The output curve's $a$, from `curveParameters`. */
   readonly a: number
+  /** The output curve's $b$. */
   readonly b: number
 }
 
-/** UMAP of the rows of x (see `fuzzyGraph`, `umapSteps`). */
+/**
+ * UMAP of the training rows (McInnes, Healy and Melville, 2018): the fuzzy graph of `fuzzyGraph`, laid out by
+ * `umapSteps` for `epochs` epochs. The fit options' `stream` drives the layout's negative samples and random start,
+ * and a child of it the neighbour descent; the run is traced every 5 epochs (or every `trace.every` of the fit
+ * options).
+ *
+ * @param params The settings of the estimator.
+ * @param params.neighbours The number of neighbours $k$, each point itself included (default 15).
+ * @param params.dims The dimension of the embedding (default 2).
+ * @param params.epochs The number of layout epochs (default 200).
+ * @param params.minDist How tightly points may pack (default 0.1).
+ * @param params.spread The scale of the output curve's decay (default 1).
+ * @param params.negativeSamples The random points each sampled edge's end is pushed from (default 5).
+ * @param params.start The initial layout: `'spectral'` (default) or `'random'`.
+ * @param params.search How neighbours are found (default `'auto'`).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `UmapModel`.
+ *
+ * @example Two well-separated blobs stay apart
+ * // Two blobs of 10 points in three dimensions, their centres 17 apart.
+ * const x = concat([normals(stream(1), [10, 3]), add(normals(stream(2), [10, 3]), 10)], 0)
+ * const model = umap({ neighbours: 5, epochs: 50 }).fit({ x }, { stream: stream(3) })
+ * const Y = toArray(model.embedding)
+ * const centre = (rows) => [0, 1].map((c) => rows.reduce((s, r) => s + r[c], 0) / rows.length)
+ * const blobs = [Y.slice(0, 10), Y.slice(10)]
+ * const [a, b] = blobs.map(centre)
+ * const radius = (rows, m) => Math.max(...rows.map((r) => Math.hypot(r[0] - m[0], r[1] - m[1])))
+ * print('distance between the blob centres =', Math.hypot(a[0] - b[0], a[1] - b[1]))
+ * print('largest distance of a point from its centre =', Math.max(radius(blobs[0], a), radius(blobs[1], b)))
+ */
 export function umap(
   params: {
     neighbours?: number

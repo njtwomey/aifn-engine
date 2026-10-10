@@ -1,8 +1,14 @@
 /**
- * Exact t-SNE (van der Maaten and Hinton, 2008, "Visualizing data using t-SNE", JMLR 9), for small n: Gaussian input
+ * Exact t-SNE (van der Maaten and Hinton, 2008, "Visualizing data using t-SNE", JMLR 9), for small $n$: Gaussian input
  * affinities calibrated to a perplexity, a Student-t (one degree of freedom) output kernel, and gradient descent on
- * KL(P ‖ Q) with momentum, per-parameter gains and early exaggeration, as scikit-learn's `TSNE(method='exact')`.
- * Every iteration costs O(n²).
+ * $\KL(\Pmat \Vert \Qmat)$ with momentum, per-parameter gains and early exaggeration, as scikit-learn's
+ * `TSNE(method='exact', init='random')`. Every iteration costs $O(n^2)$.
+ *
+ * The joint affinities are $p_{ij} = (p_{j \mid i} + p_{i \mid j}) / 2n$ with
+ * $p_{j \mid i} \propto \exp(-\beta_i \lVert \xvec_i - \xvec_j \rVert^2)$, each $\beta_i$ set so the row's entropy is
+ * $\log(\text{perplexity})$. The output affinities are $q_{ij} = w_{ij} / \sum_{k \ne l} w_{kl}$ with
+ * $w_{ij} = (1 + \lVert \yvec_i - \yvec_j \rVert^2)^{-1}$, and the gradient is
+ * $\partial \KL / \partial \yvec_i = 4 \sum_j (p_{ij} - q_{ij}) w_{ij} (\yvec_i - \yvec_j)$.
  */
 
 import type { Dataset, Estimator, FitOptions, Trained } from 'aifn-compute/learning/estimators'
@@ -18,22 +24,36 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** The per-point calibration of the input affinities. */
 export interface PerplexityCalibration {
-  /** Conditional probabilities p_{j|i} [n, n] (rows sum to 1, zero diagonal). */
+  /** Conditional probabilities $p_{j \mid i}$ ($n \times n$; row $i$ sums to 1, zero diagonal). */
   conditional: Tensor
-  /** Precisions βᵢ = 1/(2σᵢ²) [n] found by the search. */
+  /** Precisions $\beta_i = 1/(2\sigma_i^2)$ ($n$ values) found by the search. */
   precisions: Tensor
-  /** Bandwidths σᵢ [n]. */
+  /** Bandwidths $\sigma_i$ ($n$ values). */
   sigmas: Tensor
-  /** Entropy of each row in nats [n]; the target is log(perplexity). */
+  /** Entropy of each row in nats ($n$ values); the target is $\log(\text{perplexity})$. */
   entropies: Tensor
-  /** Bisection steps each row used [n]. */
+  /** Bisection steps each row used ($n$ values; 101 when the 100-step limit ran out). */
   steps: Tensor
 }
 
 /**
- * Finds, for each row of the squared distances D² [n, n], the precision β with
- * H(p_{·|i}) = log(perplexity), p_{j|i} ∝ exp(−β D²ᵢⱼ), by bisection (tolerance 1e-5, at most 100 steps), as
- * scikit-learn's `_binary_search_perplexity`.
+ * Finds, for each row of the squared distances, the precision $\beta_i$ with
+ * $H(p_{\cdot \mid i}) = \log(\text{perplexity})$, $p_{j \mid i} \propto \exp(-\beta_i D_{ij}^2)$, by bisection from
+ * $\beta = 1$ (doubling or halving until bracketed; tolerance $10^{-5}$ nats, at most 100 steps), as scikit-learn's
+ * `_binary_search_perplexity`. A row that does not converge keeps its last $\beta$, and its entropy shows how far off
+ * it is. Throws `ShapeError` when `squared` is not square, and `DomainError` unless $0 <$ perplexity $< n$.
+ *
+ * @param squared The squared distances $D_{ij}^2$ ($n \times n$); the diagonal is ignored.
+ * @param perplexity The target perplexity, the effective number of neighbours of each point.
+ * @returns The conditional probabilities and, per row, the precision, bandwidth, entropy and steps the search ended on.
+ *
+ * @example Each row's entropy is matched to log 2
+ * // Four points at 0, 1, 2 and 3 on a line: the end points need wider kernels.
+ * const D2 = tensor([[0, 1, 4, 9], [1, 0, 1, 4], [4, 1, 0, 1], [9, 4, 1, 0]])
+ * const c = perplexityCalibration(D2, 2)
+ * print('entropies =', c.entropies, 'target =', Math.log(2))
+ * print('sigmas =', c.sigmas)
+ * print('p(j | 0) =', toArray(c.conditional)[0])
  */
 export function perplexityCalibration(squared: Tensor, perplexity: number): PerplexityCalibration {
   const { n, v: D2 } = square(squared, 'perplexityCalibration')
@@ -86,7 +106,21 @@ export function perplexityCalibration(squared: Tensor, perplexity: number): Perp
   }
 }
 
-/** The symmetric joint affinities pᵢⱼ = (p_{j|i} + p_{i|j}) / Σ, floored at machine ε as scikit-learn, [n, n]. */
+/**
+ * The symmetric joint affinities of t-SNE, $p_{ij} = (p_{j \mid i} + p_{i \mid j}) / 2n$ from the perplexity
+ * calibration of the squared Euclidean distances between rows, with the off-diagonal entries floored at machine
+ * $\varepsilon$ as scikit-learn's `_joint_probabilities`. Throws as `perplexityCalibration`, and `ShapeError` when `x`
+ * is not a matrix.
+ *
+ * @param x The points ($n \times d$), one per row.
+ * @param perplexity The target perplexity, in $(0, n)$.
+ * @returns $\Pmat$ ($n \times n$, symmetric, zero diagonal, summing to 1).
+ *
+ * @example Four points on a line: neighbours share the most mass
+ * const P = jointProbabilities(tensor([[0], [1], [2], [3]]), 2)
+ * print('P =', P)
+ * print('sum =', sum(P))
+ */
 export function jointProbabilities(x: Tensor, perplexity: number): Tensor {
   const { n, d, v } = matrix(x, 'jointProbabilities')
   const cond = values(perplexityCalibration(mat(squaredDistances(v, n, d), n, n), perplexity).conditional)
@@ -100,16 +134,20 @@ export function jointProbabilities(x: Tensor, perplexity: number): Tensor {
 
 /** One t-SNE state. */
 export interface TsneState extends Status {
-  /** The embedding [n, dims]. */
+  /** The embedding ($n \times$ `dims`). */
   embedding: Tensor
-  /** The last update (the momentum term) and the per-coordinate gains [n, dims]. */
+  /** The last update, carried as the momentum term ($n \times$ `dims`). */
   update: Tensor
+  /** The per-coordinate gains that scale the learning rate ($n \times$ `dims`, at least `minGain`). */
   gains: Tensor
-  /** KL(P ‖ Q) at this embedding (with the exaggerated P during early exaggeration). */
+  /**
+   * $\KL(\Pmat \Vert \Qmat)$ at this embedding, with $\Pmat$ multiplied by `earlyExaggeration` while the next step is
+   * still in the exaggeration phase (but not at the start, $t = 0$).
+   */
   kl: number
-  /** ‖∂KL/∂Y‖ at the previous embedding (NaN at the start). */
+  /** $\lVert \partial \KL / \partial \Ymat \rVert$ at the previous embedding (NaN at the start). */
   gradientNorm: number
-  /** The exaggeration applied to P in the step that produced this state. */
+  /** The exaggeration applied to $\Pmat$ in the step that produced this state (`earlyExaggeration` at the start). */
   exaggeration: number
   /** Gradient iterations done. */
   t: number
@@ -117,16 +155,31 @@ export interface TsneState extends Status {
 
 /** Options of t-SNE's optimisation (scikit-learn's defaults). */
 export interface TsneParams {
+  /** The dimension of the embedding (default 2). */
   dims?: number
-  /** Default `auto`: max(n / exaggeration / 4, 50). */
+  /** The step size $\eta$. Default `'auto'`: $\max(n / \text{earlyExaggeration} / 4, 50)$. */
   learningRate?: number | 'auto'
+  /** The factor $\Pmat$ is multiplied by in the first iterations (default 12). */
   earlyExaggeration?: number
   /** Iterations of early exaggeration and low momentum (default 250). */
   exaggerationSteps?: number
+  /** The momentum during and after early exaggeration (default `[0.5, 0.8]`). */
   momentum?: [number, number]
+  /** The floor of the per-coordinate gains (default 0.01). */
   minGain?: number
 }
 
+/**
+ * $\KL(\Pmat \Vert \Qmat)$ and its gradient for an embedding, with the Student-t output kernel; $q_{ij}$ and the
+ * logarithm's argument are floored at machine $\varepsilon$.
+ *
+ * @param P The joint affinities $\Pmat$ as a row-major array of $n^2$ values.
+ * @param Y The embedding as a row-major array of $n \times$ `dims` values.
+ * @param n The number of points.
+ * @param dims The dimension of the embedding.
+ * @param exaggeration The factor $\Pmat$ is multiplied by (1 for the plain divergence).
+ * @returns `kl`, the divergence, and `grad`, its gradient with respect to `Y` (row-major, $n \times$ `dims`).
+ */
 function klAndGradient(P: Float64Array, Y: Float64Array, n: number, dims: number, exaggeration: number) {
   const W = new Float64Array(n * n)
   let z = 0
@@ -155,9 +208,23 @@ function klAndGradient(P: Float64Array, Y: Float64Array, n: number, dims: number
 }
 
 /**
- * Exact t-SNE on joint affinities P [n, n] as a traceable algorithm; each step is one gradient iteration. `init` takes
- * an embedding, or draws one from N(0, 10⁻⁴) with the `init` stream (scikit-learn's random initialisation). Van der
- * Maaten and Hinton (2008), JMLR 9, with scikit-learn's gains and momentum schedule.
+ * Exact t-SNE on joint affinities as a traceable algorithm; each step is one gradient iteration (van der Maaten and
+ * Hinton, 2008), with scikit-learn's gains (Jacobs, 1988), momentum schedule and learning rate. Unlike scikit-learn,
+ * which restarts them, the update and gains carry over from the exaggeration phase into the rest of the run. `init`
+ * takes an embedding, or draws one from the run's stream, normal with standard deviation $10^{-4}$ (scikit-learn's
+ * `init='random'`). There is no convergence test: the run goes on for as many steps as it is given. Throws
+ * `ShapeError` when `joint` is not square.
+ *
+ * @param joint The joint affinities $\Pmat$ ($n \times n$, symmetric, summing to 1), as `jointProbabilities` returns.
+ * @param params The optimisation settings.
+ * @returns The algorithm, for `run` or `trace`; its states are `TsneState`s.
+ *
+ * @example The divergence falls once the exaggeration ends
+ * const x = concat([normals(stream(1), [5, 3]), add(normals(stream(2), [5, 3]), 10)], 0)
+ * const steps = tsneSteps(jointProbabilities(x, 3), { exaggerationSteps: 50 })
+ * print('KL at the start =', run(steps, {}, 0, { stream: stream(3) }).kl)
+ * print('after 100 iterations =', run(steps, {}, 100, { stream: stream(3) }).kl)
+ * print('after 200 iterations =', run(steps, {}, 200, { stream: stream(3) }).kl)
  */
 export function tsneSteps(joint: Tensor, params: TsneParams = {}): Algorithm<{ embedding?: Tensor }, TsneState> {
   const { n, v: P } = square(joint, 'tsneSteps')
@@ -214,21 +281,48 @@ export function tsneSteps(joint: Tensor, params: TsneParams = {}): Algorithm<{ e
   }
 }
 
-/** A fitted t-SNE embedding. */
+/** A fitted t-SNE embedding, with its run (`training`). */
 export interface TsneModel extends Trained<TsneState> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
   /** t-SNE places the training rows only: it has no out-of-sample map. */
   readonly transductive: true
   /** The model's name. */
   readonly name: 'tsne'
+  /** The coordinates of the training rows ($n \times$ `dims`). */
   readonly embedding: Tensor
+  /** The joint affinities $\Pmat$ ($n \times n$). */
   readonly joint: Tensor
+  /** The perplexity calibration of the input affinities. */
   readonly calibration: PerplexityCalibration
-  /** KL(P ‖ Q) of the final embedding (without exaggeration). */
+  /** $\KL(\Pmat \Vert \Qmat)$ of the final embedding (without exaggeration). */
   readonly kl: number
 }
 
-/** Exact t-SNE of the rows of x: perplexity (default 30, capped below n), `iterations` (default 1000). */
+/**
+ * Exact t-SNE of the training rows (van der Maaten and Hinton, 2008): the joint affinities at the given perplexity,
+ * then `iterations` gradient steps of `tsneSteps` from a random start drawn from the fit options' `stream`. The run is
+ * traced every 10 iterations (or every `trace.every` of the fit options). Distances between clusters in the result are
+ * not meaningful, only which points are together.
+ *
+ * @param params The optimisation settings of `TsneParams`, and:
+ * @param params.perplexity The effective number of neighbours (default 30), capped at $(n - 1)/3$.
+ * @param params.iterations The number of gradient iterations, early exaggeration included (default 1000).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `TsneModel`.
+ *
+ * @example Two well-separated blobs stay apart
+ * // Two blobs of 10 points in three dimensions, their centres 17 apart.
+ * const x = concat([normals(stream(1), [10, 3]), add(normals(stream(2), [10, 3]), 10)], 0)
+ * const model = tsne({ perplexity: 5, iterations: 300, exaggerationSteps: 100 }).fit({ x }, { stream: stream(3) })
+ * const Y = toArray(model.embedding)
+ * const centre = (rows) => [0, 1].map((c) => rows.reduce((s, r) => s + r[c], 0) / rows.length)
+ * const blobs = [Y.slice(0, 10), Y.slice(10)]
+ * const [a, b] = blobs.map(centre)
+ * const radius = (rows, m) => Math.max(...rows.map((r) => Math.hypot(r[0] - m[0], r[1] - m[1])))
+ * print('distance between the blob centres =', Math.hypot(a[0] - b[0], a[1] - b[1]))
+ * print('largest distance of a point from its centre =', Math.max(radius(blobs[0], a), radius(blobs[1], b)))
+ * print('KL =', model.kl)
+ */
 export function tsne(
   params: TsneParams & { perplexity?: number; iterations?: number } = {},
 ): Estimator<Dataset<Tensor>, TsneModel> {

@@ -1,5 +1,7 @@
 /**
- * k-means and relatives:
+ * k-means and relatives, which partition the rows $\xvec_1, \dots, \xvec_n$ into $k$ clusters around $k$ centres
+ * $\cvec_1, \dots, \cvec_k$, lowering the inertia $\sum_i \lVert \xvec_i - \cvec_{z_i} \rVert^2$ ($z_i$ the
+ * nearest centre of row $i$) or, for k-medoids, the sum of distances to centres that are rows of the data.
  *
  * - `kmeansSteps`, `kmeans`: Lloyd's algorithm (Lloyd, 1957/1982) with k-means++ seeding (Arthur and Vassilvitskii,
  *   2007) and restarts, as scikit-learn's `KMeans(algorithm='lloyd')`.
@@ -35,13 +37,13 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 export interface KMeansState extends Status {
   /** Lloyd iterations done. */
   t: number
-  /** Centroids [k, d]. */
+  /** Centroids, $k \times d$. */
   centroids: Tensor
-  /** The nearest centroid of each row [n] (int32). */
+  /** The nearest centroid of each row, $n$ values (int32). */
   labels: Tensor
-  /** Σᵢ ‖xᵢ − c_labelᵢ‖² at these centroids. */
+  /** The inertia $\sum_i \lVert \xvec_i - \cvec_{z_i} \rVert^2$ at these centroids ($z_i$ the label of row $i$). */
   inertia: number
-  /** Rows per cluster [k]. */
+  /** Rows per cluster, $k$ values. */
   sizes: Tensor
   /** Total squared movement of the centroids in the last update (0 at the start). */
   shift: number
@@ -51,23 +53,52 @@ export interface KMeansState extends Status {
   converged: boolean
 }
 
-/** How to start Lloyd's algorithm: given centroids [k, d], or a seeding drawn from the stream. */
+/** How to start Lloyd's algorithm: given centroids, or a seeding drawn from the stream. */
 export interface KMeansInit {
+  /** The starting centroids, $k \times d$; when given, `seeding` is ignored. */
   centroids?: Tensor
+  /**
+   * How to draw the centroids when none are given: `'k-means++'` (default) or `'random'`, $k$ distinct rows drawn
+   * uniformly.
+   */
   seeding?: 'k-means++' | 'random'
 }
 
-/** The nearest centroid of every row (core `assignNearest`, ties to the lower index) as plain arrays. */
+/**
+ * The nearest centroid of every row (core `assignNearest`, ties to the lower index) as plain arrays.
+ *
+ * @param v The rows, $n \times d$, row-major.
+ * @param n The number of rows.
+ * @param c The centroids, $k \times d$, row-major.
+ * @param k The number of centroids.
+ * @param d The number of columns of `v` and `c`.
+ * @returns `labels`, the nearest centroid of each row (int32, $n$ values); `sizes`, the rows per centroid ($k$
+ *   values); and `inertia`, the sum of squared distances to the nearest centroids.
+ */
 function assign(v: Float64Array, n: number, c: Float64Array, k: number, d: number) {
   const a = assignNearest(mat(v, n, d), mat(c, k, d))
   return { labels: Int32Array.from(values(a.labels)), sizes: Float64Array.from(values(a.sizes)), inertia: a.inertia }
 }
 
 /**
- * Lloyd's algorithm as a traceable algorithm on the rows of x [n, d]: each step moves every centroid to the mean of
- * its rows and reassigns every row to its nearest centroid (ties to the lower index). Converged when no label changes
- * or the centroids' total squared shift is at most `tolerance` (default 0). An empty cluster keeps its centroid and is
- * reported in `empty`. `init` takes centroids, or seeds them from the `init` stream (k-means++ by default).
+ * Lloyd's algorithm as a traceable algorithm on the rows of `x`: each step moves every centroid to the mean of its rows
+ * and reassigns every row to its nearest centroid (ties to the lower index). Converged when no label changes or the
+ * centroids' total squared shift is at most `tolerance` (default 0). An empty cluster keeps its centroid and is
+ * reported in `empty`. `init` takes centroids, or seeds them from the `init` stream (k-means++ by default). Given
+ * centroids of the wrong shape throw `ShapeError`.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param params The number of clusters `k`, and `tolerance`, the total squared shift of the centroids at or below
+ *   which a step counts as converged (default 0: only an unchanged assignment converges).
+ * @returns The algorithm, whose `init` takes a `KMeansInit` (empty for k-means++ seeding) and whose state is a
+ *   `KMeansState`.
+ *
+ * @example Lloyd's steps from two given centroids
+ * const x = tensor([[0, 0], [0, 1], [4, 0], [4, 1]])
+ * const final = run(kmeansSteps(x, { k: 2 }), { centroids: tensor([[0, 0], [1, 0]]) }, 10)
+ * print('centroids', final.centroids)
+ * print('labels', final.labels)
+ * print('steps', final.t, 'inertia', final.inertia)
  */
 export function kmeansSteps(x: Tensor, params: { k: number; tolerance?: number }): Algorithm<KMeansInit, KMeansState> {
   const { n, d, v } = matrix(x, 'kmeansSteps')
@@ -132,15 +163,28 @@ export interface KMeansModel
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'kmeans' | 'mini-batch-kmeans'
+  /** The fitted centroids, $k \times d$. */
   readonly centroids: Tensor
+  /** The inertia of the training rows at the fitted centroids. */
   readonly inertia: number
   /** Iterations (or batches) taken. */
   readonly steps: number
+  /** Whether the kept run of Lloyd's algorithm converged (always false for mini-batch k-means). */
   readonly converged: boolean
-  /** The inertia of every restart (k-means). */
+  /** The inertia of every restart (k-means); the one final inertia for mini-batch k-means. */
   readonly restarts: Tensor
 }
 
+/**
+ * The prediction methods shared by the k-means, mini-batch k-means and k-medoids models, from their centres. Every
+ * method throws `ShapeError` for queries without $d$ columns.
+ *
+ * @param centroids The centres, $k \times d$.
+ * @param d The number of features the model was fitted on.
+ * @returns `forward` and `score`, the negated squared distances to the centres ($m \times k$); `transform`, the
+ *   Euclidean distances ($m \times k$); and `decide`, the nearest centre of each query row (int32, ties to the lower
+ *   index).
+ */
 function centroidModel(centroids: Tensor, d: number) {
   const k = centroids.shape[0]
   const sqd = (q: Tensor) => {
@@ -185,7 +229,26 @@ function centroidModel(centroids: Tensor, d: number) {
  * k-means by Lloyd's algorithm: `restarts` runs (default 10) from k-means++ seedings, each traced on the root
  * `child(stream, 'restart', r)`, keeping the lowest inertia; or one run from given `centroids`. `decide` gives the
  * nearest centroid (training labels are `decide(x)`), `transform` the distances to the centroids, `score` their negated
- * squares. The best run is kept in `training`.
+ * squares. The best run is kept in `training`. The fit's stream defaults to `stream(0)`. As scikit-learn's
+ * `KMeans(algorithm='lloyd')`, except that `tolerance` is an absolute total squared shift.
+ *
+ * @param params The hyperparameters.
+ * @param params.k The number of clusters.
+ * @param params.restarts How many seedings to run, keeping the one of lowest inertia (default 10; 1 when `centroids`
+ *   is given).
+ * @param params.centroids Starting centroids, $k \times d$, for a single run without seeding.
+ * @param params.seeding How each restart draws its centroids: `'k-means++'` (default) or `'random'` distinct rows.
+ * @param params.maxSteps The most Lloyd steps per run (default 300).
+ * @param params.tolerance The total squared shift of the centroids at or below which a run stops (default 0).
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example Two blobs: the centres come back
+ * const s = stream(0)
+ * const x = concat([normals(s, [10, 2], 0, 0.3), normals(s, [10, 2], 5, 0.3)])
+ * const model = kmeans({ k: 2 }).fit({ x }, { stream: stream(1) })
+ * print('centroids', model.centroids)
+ * print('labels', model.decide(x))
+ * print('inertia of each restart', model.restarts)
  */
 export function kmeans(params: {
   k: number
@@ -242,10 +305,11 @@ export function kmeans(params: {
 export interface MiniBatchKMeansState extends Status {
   /** Batches done. */
   t: number
+  /** The centroids after this batch, $k \times d$. */
   centroids: Tensor
-  /** How many rows each centroid has absorbed so far [k] (its learning rate is 1/count). */
+  /** How many rows each centroid has absorbed so far, $k$ values (its learning rate is $1/\text{count}$). */
   counts: Tensor
-  /** The rows of the latest batch (int32). */
+  /** The row indices of the latest batch (int32; empty at the start). */
   batch: Tensor
   /** The inertia of the whole data at these centroids. */
   inertia: number
@@ -253,8 +317,22 @@ export interface MiniBatchKMeansState extends Status {
 
 /**
  * Mini-batch k-means (Sculley, 2010, Algorithm 1): each step draws `batchSize` rows uniformly with replacement from
- * the step's stream, assigns them to their nearest centroids, and moves each centroid towards each of its rows by the
- * per-centre rate 1/count. `init` takes centroids or seeds them by k-means++ from the `init` stream.
+ * the step's stream, assigns them to their nearest centroids (as they were before the batch), and moves each centroid
+ * towards each of its rows in turn by the per-centre rate $1/\text{count}$. `init` takes centroids or seeds them by
+ * k-means++ from `child(stream, 'seeding')` of the `init` stream. It never reports convergence: it runs for as many
+ * steps as it is given.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param params The number of clusters `k`, and `batchSize`, the rows drawn per step (default $\min(n, 64)$).
+ * @returns The algorithm, whose `init` takes a `KMeansInit` (its `seeding` is ignored) and whose state is a
+ *   `MiniBatchKMeansState`.
+ *
+ * @example Twenty batches of four rows
+ * const x = tensor([[0, 0], [0, 1], [1, 0], [5, 5], [5, 6], [6, 5]])
+ * const final = run(miniBatchKMeansSteps(x, { k: 2, batchSize: 4 }), {}, 20, { stream: stream(0) })
+ * print('centroids', final.centroids)
+ * print('rows absorbed', final.counts)
+ * print('inertia', final.inertia)
  */
 export function miniBatchKMeansSteps(
   x: Tensor,
@@ -299,7 +377,24 @@ export function miniBatchKMeansSteps(
   }
 }
 
-/** Mini-batch k-means for `steps` batches (default 100). */
+/**
+ * Mini-batch k-means for `steps` batches (default 100), with the prediction methods of `kmeans`. The fitted
+ * `inertia` is that of all training rows at the final centroids, and `converged` is always false.
+ *
+ * @param params The hyperparameters.
+ * @param params.k The number of clusters.
+ * @param params.batchSize The rows drawn per batch, with replacement (default $\min(n, 64)$).
+ * @param params.steps The number of batches (default 100).
+ * @param params.centroids Starting centroids, $k \times d$, instead of a k-means++ seeding.
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$, and its stream draws the seeding and the batches.
+ *
+ * @example Two blobs in batches of eight
+ * const s = stream(0)
+ * const x = concat([normals(s, [20, 2], 0, 0.3), normals(s, [20, 2], 5, 0.3)])
+ * const model = miniBatchKMeans({ k: 2, batchSize: 8, steps: 30 }).fit({ x }, { stream: stream(1) })
+ * print('centroids', model.centroids)
+ * print('inertia', model.inertia)
+ */
 export function miniBatchKMeans(params: {
   k: number
   batchSize?: number
@@ -338,19 +433,29 @@ export function miniBatchKMeans(params: {
 
 /** One PAM state. */
 export interface KMedoidsState extends Status {
-  /** Swaps tried. */
+  /** SWAP steps taken: each makes the best swap, and the last, which finds none, converges. */
   t: number
-  /** The medoids (row indices, int32 [k]). */
+  /** The medoids (row indices, int32, $k$ values). */
   medoids: Tensor
-  /** The nearest medoid's position in `medoids` for each row [n]. */
+  /** The nearest medoid's position in `medoids` for each row, $n$ values (int32). */
   labels: Tensor
-  /** Σᵢ distance to the nearest medoid. */
+  /** The cost $\sum_i$ (distance from row $i$ to its nearest medoid). */
   cost: number
   /** The swap made in this step, [medoid out, row in], or null. */
   swap: [number, number] | null
+  /** True once no swap lowers the cost. */
   converged: boolean
 }
 
+/**
+ * The PAM cost of a set of medoids: every row assigned to its nearest medoid (ties to the earlier one).
+ *
+ * @param D The distances, $n \times n$, row-major.
+ * @param n The number of points.
+ * @param medoids The medoids as row indices.
+ * @returns `labels`, each row's nearest medoid as a position in `medoids` (int32), and `cost`, the sum of the
+ *   distances to them.
+ */
 function medoidCost(D: Float64Array, n: number, medoids: readonly number[]) {
   const labels = new Int32Array(n)
   let cost = 0
@@ -368,9 +473,24 @@ function medoidCost(D: Float64Array, n: number, medoids: readonly number[]) {
 }
 
 /**
- * PAM as a traceable algorithm on a distance matrix [n, n]: `init` runs BUILD (greedily add the medoid that lowers
- * the cost most) unless medoids are given; each step makes the best cost-lowering swap of a medoid with a non-medoid,
- * and it is done when no swap lowers the cost.
+ * PAM as a traceable algorithm on a distance matrix: `init` runs BUILD (greedily add the medoid that lowers the cost
+ * most) unless medoids are given; each step makes the best cost-lowering swap of a medoid with a non-medoid, and it is
+ * done when no swap lowers the cost (by more than a relative $10^{-12}$). A matrix that is not square throws
+ * `ShapeError`. Deterministic: no stream is drawn.
+ *
+ * @param distances The pairwise distances, $n \times n$ (any dissimilarity; row $i$, column $j$ is read as the cost
+ *   of serving point $i$ by medoid $j$).
+ * @param params The number of medoids `k`.
+ * @returns The algorithm, whose `init` takes optional starting `medoids` (row indices) and whose state is a
+ *   `KMedoidsState`.
+ *
+ * @example PAM on five points of a line
+ * const x = tensor([[0], [1], [2], [10], [11]])
+ * const distances = abs(sub(x, transpose(x)))
+ * const final = run(kMedoidsSteps(distances, { k: 2 }), {}, 10)
+ * print('medoids', final.medoids)
+ * print('labels', final.labels)
+ * print('cost', final.cost)
  */
 export function kMedoidsSteps(
   distances: Tensor,
@@ -439,15 +559,29 @@ export interface KMedoidsModel
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'k-medoids'
-  /** Medoid row indices [k] and their coordinates [k, d]. */
+  /** The medoids as row indices of the training data, $k$ values (int32). */
   readonly medoids: Tensor
+  /** The medoids' coordinates, $k \times d$. */
   readonly centres: Tensor
+  /** The sum of the training rows' Euclidean distances to their nearest medoid. */
   readonly cost: number
 }
 
 /**
- * k-medoids by PAM on Euclidean distances between the rows of x. `decide` assigns new rows to the nearest medoid,
- * `transform` gives the distances to the medoids, `forward`/`score` their negated squares (as k-means).
+ * k-medoids by PAM on Euclidean distances between the rows of `x`. `decide` assigns new rows to the nearest medoid,
+ * `transform` gives the distances to the medoids, `forward`/`score` their negated squares (as k-means). The fit is
+ * deterministic (the fit's stream is not used); each SWAP step tries every swap at $O(kn)$ each, $O(k^2 n^2)$ in all,
+ * on the full $n \times n$ distance matrix.
+ *
+ * @param params The number of medoids `k`, and `maxSteps`, the most SWAP steps (default 100).
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example The medoids of two groups are rows of the data
+ * const x = tensor([[0, 0], [0, 1], [1, 0], [5, 5], [5, 6], [6, 5], [20, 20]])
+ * const model = kMedoids({ k: 2 }).fit({ x })
+ * print('medoid rows', model.medoids)
+ * print('centres', model.centres)
+ * print('labels', model.decide(x))
  */
 export function kMedoids(params: { k: number; maxSteps?: number }): Estimator<Dataset<Tensor>, KMedoidsModel> {
   const { k, maxSteps = 100 } = params

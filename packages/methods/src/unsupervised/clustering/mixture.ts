@@ -1,7 +1,8 @@
 /**
- * Gaussian mixture models fitted by expectation–maximisation (Dempster, Laird and Rubin, 1977; Bishop, 2006, "Pattern
- * Recognition and Machine Learning", §9.2), with full, diagonal or spherical covariances, as scikit-learn's
- * `GaussianMixture` (including its `reg_covar` added to every variance and its mean log-likelihood stopping rule).
+ * Gaussian mixture models $p(\xvec) = \sum_k \pi_k \Gauss(\xvec \mid \muvec_k, \Sigmamat_k)$ fitted by
+ * expectation-maximisation (Dempster, Laird and Rubin, 1977; Bishop, 2006, "Pattern Recognition and Machine
+ * Learning", §9.2), with full, diagonal or spherical covariances, as scikit-learn's `GaussianMixture` (including its
+ * `reg_covar` added to every variance and its mean log-likelihood stopping rule).
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -30,13 +31,19 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
 import { ShapeError } from 'aifn-compute/foundation/errors'
 
-/** The shape of each component's covariance. */
+/**
+ * The shape of each component's covariance: `'full'` any positive-definite matrix, `'diagonal'` independent variances
+ * per feature, `'spherical'` one variance shared by every feature ($\sigma_k^2 \Imat$).
+ */
 export type CovarianceType = 'full' | 'diagonal' | 'spherical'
 
-/** Mixture parameters: weights [k], means [k, d], covariances [k, d, d] (always stored full). */
+/** Mixture parameters, with the covariances always stored full. */
 export interface MixtureParameters {
+  /** The mixing weights $\pi_k$, $k$ values summing to 1. */
   weights: Tensor
+  /** The component means $\muvec_k$, $k \times d$. */
   means: Tensor
+  /** The component covariances $\Sigmamat_k$, $k \times d \times d$ (zeros off the diagonal unless `'full'`). */
   covariances: Tensor
 }
 
@@ -44,28 +51,46 @@ export interface MixtureParameters {
 export interface MixtureState extends MixtureParameters, Status {
   /** EM iterations done. */
   t: number
-  /** Responsibilities r_ik = P(component k | xᵢ) at these parameters [n, k]. */
+  /** Responsibilities $r_{ik} = P(\text{component } k \mid \xvec_i)$ at these parameters, $n \times k$. */
   responsibilities: Tensor
-  /** Mean log-likelihood (1/n) Σᵢ log p(xᵢ) at these parameters. */
+  /** Mean log-likelihood $\frac{1}{n} \sum_i \log p(\xvec_i)$ at these parameters. */
   logLikelihood: number
   /** Change in `logLikelihood` from the previous state (NaN at the start). */
   change: number
+  /** True when `change` is below the tolerance in absolute value (never at the start). */
   converged: boolean
-  /** Diagonal jitter needed to factor each covariance [k] (0 when positive definite). */
+  /** Diagonal jitter needed to factor each covariance, $k$ values (0 when positive definite). */
   jitter: Tensor
+  /** True when the mean log-likelihood is not finite. */
   diverged: boolean
 }
 
-/** Starting parameters, or none (seeded from the stream: k-means++ centres, then one M-step on the hard assignment). */
+/**
+ * Starting parameters, or none (seeded from the stream: k-means++ centres, then one M-step on the hard assignment).
+ * Unless all three are given, the parameters left out come from that M-step, with the hard assignment to the given
+ * `means` when there are some.
+ */
 export interface MixtureInit {
+  /** Starting weights, $k$ values. */
   weights?: Tensor
+  /** Starting means, $k \times d$. */
   means?: Tensor
+  /** Starting covariances, $k \times d \times d$. */
   covariances?: Tensor
 }
 
 /**
- * Per-component log-densities log N(xᵢ | μ_k, Σ_k) [n, k] (each component a `MultivariateNormal`, jitter allowed),
- * plus the jitter used to factor each Σ_k.
+ * Per-component log-densities $\log \Gauss(\xvec_i \mid \muvec_k, \Sigmamat_k)$ (each component a
+ * `MultivariateNormal`, jitter allowed), plus the jitter used to factor each $\Sigmamat_k$.
+ *
+ * @param v The points, $n \times d$, row-major.
+ * @param n The number of points.
+ * @param d The number of features.
+ * @param k The number of components.
+ * @param means The means, $k \times d$, row-major.
+ * @param covs The covariances, $k \times d \times d$, row-major.
+ * @returns `out`, the log-densities as a row-major $n \times k$ array, and `jitter`, the diagonal jitter of each
+ *   component ($k$ values).
  */
 function logDensities(v: Float64Array, n: number, d: number, k: number, means: Float64Array, covs: Float64Array) {
   const out = new Float64Array(n * k)
@@ -84,7 +109,19 @@ function logDensities(v: Float64Array, n: number, d: number, k: number, means: F
   return { out, jitter }
 }
 
-/** E-step: responsibilities and the mean log-likelihood. */
+/**
+ * E-step: responsibilities and the mean log-likelihood.
+ *
+ * @param v The points, $n \times d$, row-major.
+ * @param n The number of points.
+ * @param d The number of features.
+ * @param k The number of components.
+ * @param weights The mixing weights, $k$ values.
+ * @param means The means, $k \times d$, row-major.
+ * @param covs The covariances, $k \times d \times d$, row-major.
+ * @returns `resp`, the responsibilities as a row-major $n \times k$ array; `logLikelihood`, the mean log-likelihood;
+ *   and `jitter`, the diagonal jitter of each component.
+ */
 function expectation(
   v: Float64Array,
   n: number,
@@ -103,7 +140,20 @@ function expectation(
   return { resp, logLikelihood: total / n, jitter }
 }
 
-/** M-step from responsibilities (scikit-learn's estimators, with `reg` added to the variances). */
+/**
+ * M-step from responsibilities (scikit-learn's estimators, with `reg` added to the variances). Each component's total
+ * responsibility $n_k$ is raised by $10\varepsilon$ so that an empty component does not divide by zero.
+ *
+ * @param v The points, $n \times d$, row-major.
+ * @param n The number of points.
+ * @param d The number of features.
+ * @param k The number of components.
+ * @param resp The responsibilities, $n \times k$, row-major (rows summing to 1, or one-hot for a hard assignment).
+ * @param type The covariance shape: off-diagonal entries are zeroed unless `'full'`, and `'spherical'` sets every
+ *   variance to their mean.
+ * @param reg The value added to every variance.
+ * @returns `weights` ($k$), `means` ($k \times d$) and `covs` ($k \times d \times d$, full storage), row-major.
+ */
 function maximisation(
   v: Float64Array,
   n: number,
@@ -144,10 +194,30 @@ function maximisation(
 }
 
 /**
- * EM for a Gaussian mixture on the rows of x [n, d] as a traceable algorithm. State t holds the parameters after t
+ * EM for a Gaussian mixture on the rows of `x` as a traceable algorithm. State $t$ holds the parameters after $t$
  * M-steps and the responsibilities and mean log-likelihood at them; each step is an M-step followed by an E-step. It
- * has converged when the mean log-likelihood changes by less than `tolerance` (default 1e-3). Without starting
- * parameters, `init` seeds from the `init` stream (k-means++ centres, then one M-step on the hard assignment).
+ * has converged when the mean log-likelihood changes by less than `tolerance` (default $10^{-3}$). Without starting
+ * parameters, `init` seeds from the `init` stream (k-means++ centres, then one M-step on the hard assignment). A
+ * covariance that is not positive definite is factored with jitter, reported in `jitter`.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param params The hyperparameters.
+ * @param params.k The number of components.
+ * @param params.covariance The covariance shape (default `'full'`).
+ * @param params.regularisation The value added to every variance in each M-step (default $10^{-6}$, scikit-learn's
+ *   `reg_covar`).
+ * @param params.tolerance The change in mean log-likelihood below which a step counts as converged (default
+ *   $10^{-3}$).
+ * @returns The algorithm, whose `init` takes a `MixtureInit` (empty to seed from the stream) and whose state is a
+ *   `MixtureState`.
+ *
+ * @example EM from given parameters, on a line
+ * const x = tensor([[0], [0.2], [0.4], [3], [3.2], [3.4]])
+ * const start = { weights: tensor([0.5, 0.5]), means: tensor([[1], [2]]), covariances: tensor([[[1]], [[1]]]) }
+ * const final = run(gaussianMixtureSteps(x, { k: 2 }), start, 50)
+ * print('means', final.means)
+ * print('weights', final.weights)
+ * print('steps', final.t, 'mean log-likelihood', final.logLikelihood)
  */
 export function gaussianMixtureSteps(
   x: Tensor,
@@ -214,23 +284,47 @@ export interface GaussianMixtureModel
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'gaussian-mixture'
+  /** The covariance shape it was fitted with. */
   readonly covarianceType: CovarianceType
+  /** The mean log-likelihood of the training rows at the fitted parameters. */
   readonly logLikelihood: number
+  /** Whether EM converged within `maxSteps`. */
   readonly converged: boolean
   /** EM iterations taken. */
   readonly steps: number
-  /** Responsibilities P(component | x) [m, k]. */
+  /** Responsibilities $P(\text{component} \mid \xvec)$ of the rows of `x`, $m \times k$. */
   responsibilities(x: Tensor): Tensor
-  /** log p(x) under the mixture [m]. */
+  /** $\log p(\xvec)$ of each row of `x` under the mixture, $m$ values. */
   logDensity(x: Tensor): Tensor
-  /** n draws from the mixture: rows [n, d] and their components [n]. */
+  /**
+   * $n$ draws from the mixture, from `child` streams of `s`: rows ($n \times d$) and their components ($n$ values,
+   * int32).
+   */
   sampleMixture(s: Stream, n: number): { x: Tensor; components: Tensor }
 }
 
 /**
- * A Gaussian mixture fitted by EM (`gaussianMixtureSteps`), from given parameters or a k-means++ seeding. `forward`
- * and `score` give log p(x, component) [m, k]; `predictive` the responsibilities as a class law (Bernoulli for two
- * components, else Categorical); `decide` the most responsible component.
+ * A Gaussian mixture fitted by EM (`gaussianMixtureSteps`), from given parameters or a k-means++ seeding drawn from
+ * the fit's stream. `forward` and `score` give $\log p(\xvec, \text{component})$ ($m \times k$); `predictive` the
+ * responsibilities as a class law (Bernoulli for two components, else Categorical); `decide` the most responsible
+ * component. Queries without $d$ columns throw `ShapeError`.
+ *
+ * @param params The hyperparameters.
+ * @param params.k The number of components.
+ * @param params.covariance The covariance shape (default `'full'`).
+ * @param params.regularisation The value added to every variance in each M-step (default $10^{-6}$).
+ * @param params.tolerance The change in mean log-likelihood below which EM stops (default $10^{-3}$).
+ * @param params.maxSteps The most EM iterations (default 100).
+ * @param params.init Starting parameters; left out, EM starts from a k-means++ seeding.
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example Two blobs: weights, means and soft assignments
+ * const s = stream(0)
+ * const x = concat([normals(s, [30, 2], 0, 0.5), normals(s, [10, 2], 4, 0.5)])
+ * const model = gaussianMixture({ k: 2 }).fit({ x }, { stream: stream(1) })
+ * print('weights', model.weights)
+ * print('means', model.means)
+ * print('responsibilities at (2, 2)', model.responsibilities(tensor([[2, 2]])))
  */
 export function gaussianMixture(params: {
   k: number

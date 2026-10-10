@@ -1,14 +1,20 @@
 /**
- * Linear latent-variable models: x = Wz + μ + ε with z ~ N(0, I_q), so x ~ N(μ, WWᵀ + Ψ).
+ * Linear latent-variable models, $\xvec = \Wmat\zvec + \muvec + \epsilonvec$ with
+ * $\zvec \sim \Gauss(\zeros, \Imat_{q})$ so that $\xvec \sim \Gauss(\muvec, \Wmat\Wmat^\top + \Psimat)$, and
+ * independent component analysis.
  *
- * - `latentGaussianSteps`: EM for W and the noise (Rubin and Thayer, 1982; Ghahramani and Hinton, 1996), with diagonal
- *   noise Ψ (factor analysis) or isotropic noise σ²I (probabilistic PCA; Tipping and Bishop, 1999), as a step-through
- *   algorithm on the sample covariance; the log-likelihood never decreases.
- * - `factorAnalysis`: factor analysis by that EM.
- * - `probabilisticPca`: PPCA in closed form (W = U_q(Λ_q − σ²I)^{1/2}, σ² the mean discarded eigenvalue) or by EM.
- * - `fastIcaSteps`, `fastIca`: independent component analysis by FastICA (Hyvärinen, 1999; Hyvärinen and Oja, 2000):
- *   whitening, then the symmetric fixed-point iteration W ← (WWᵀ)^{−1/2} (E[g(Wx)xᵀ] − diag E[g′(Wx)] W) with the
- *   log-cosh contrast g = tanh, as scikit-learn's `FastICA(algorithm='parallel', whiten='unit-variance')`.
+ * The loadings $\Wmat$ ($d \times q$) and the noise are fitted by EM (Rubin and Thayer, 1982; Ghahramani and Hinton,
+ * 1996), with diagonal noise $\Psimat$ (factor analysis) or isotropic noise $\sigma^2\Imat$ (probabilistic PCA;
+ * Tipping and Bishop, 1999), as a step-through algorithm on the sample covariance whose log-likelihood never
+ * decreases. Probabilistic PCA also has a closed form, $\Wmat = \Umat_{q}(\Lambdamat_{q} - \sigma^2\Imat)^{1/2}$ with
+ * $\sigma^2$ the mean discarded eigenvalue. Scores are posterior means $\expect[\zvec \mid \xvec]$.
+ *
+ * FastICA (Hyvärinen, 1999; Hyvärinen and Oja, 2000) whitens the data to $\zvec$, then runs the symmetric fixed-point
+ * iteration
+ *
+ * $\Wmat \leftarrow (\Wmat\Wmat^\top)^{-1/2} (\expect[g(\Wmat\zvec)\zvec^\top] - \diag(\expect[g'(\Wmat\zvec)])\Wmat)$
+ *
+ * with the log-cosh contrast, $g = \tanh$, as scikit-learn's `FastICA(algorithm='parallel', whiten='unit-variance')`.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -25,7 +31,16 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 const { matMul, transpose } = dense
 const LOG_2PI = Math.log(2 * Math.PI)
 
-/** Column means and the sample covariance S = (1/n) Σ (x − x̄)(x − x̄)ᵀ (the maximum-likelihood one). */
+/**
+ * Column means and the sample covariance
+ * $\Smat = \tfrac{1}{n} \sum_i (\xvec_i - \bar{\xvec})(\xvec_i - \bar{\xvec})^\top$ (the maximum-likelihood one,
+ * divided by $n$).
+ *
+ * @param v The data as a row-major array of $n \times d$ values, one row per point (read, not modified).
+ * @param n The number of rows.
+ * @param d The number of features.
+ * @returns `mean`, the $d$ column means, and `S`, the covariance as a row-major array of $d^2$ values.
+ */
 function moments(v: Float64Array, n: number, d: number) {
   const mean = new Float64Array(d)
   for (let i = 0; i < n; i++) for (let j = 0; j < d; j++) mean[j] += v[i * d + j] / n
@@ -35,16 +50,43 @@ function moments(v: Float64Array, n: number, d: number) {
   return { mean, S }
 }
 
+/**
+ * The inverse of a small square matrix, by `inverse` of `aifn-compute/numerics/linalg` (which throws for a singular
+ * one).
+ *
+ * @param A The matrix as a row-major array of $q^2$ values.
+ * @param q Its number of rows and columns.
+ * @returns $\Amat^{-1}$ as a row-major array of $q^2$ values.
+ */
 const inv = (A: Float64Array, q: number) => values(inverse(mat(A, q, q)))
 
-/** The model covariance C = WWᵀ + diag(ψ) [d, d]. */
+/**
+ * The model covariance $\Cmat = \Wmat\Wmat^\top + \diag(\psivec)$.
+ *
+ * @param W The loadings $\Wmat$ as a row-major array of $d \times q$ values.
+ * @param psi The noise variances $\psivec$, $d$ values.
+ * @param d The number of features.
+ * @param q The number of latent factors.
+ * @returns $\Cmat$ as a row-major array of $d^2$ values.
+ */
 function modelCovariance(W: Float64Array, psi: Float64Array, d: number, q: number): Float64Array {
   const C = matMul(W, transpose(W, d, q), d, q, d)
   for (let i = 0; i < d; i++) C[i * d + i] += psi[i]
   return C
 }
 
-/** Average log-likelihood per row, −½ (d log 2π + log|C| + tr(C⁻¹S)). */
+/**
+ * The average log-likelihood per row of data with sample covariance $\Smat$ (about the model's mean) under
+ * $\Gauss(\muvec, \Cmat)$: $-\tfrac{1}{2}(d \log 2\pi + \log\det\Cmat + \trace(\Cmat^{-1}\Smat))$, with
+ * $\Cmat = \Wmat\Wmat^\top + \diag(\psivec)$.
+ *
+ * @param S The sample covariance $\Smat$ (divided by $n$) as a row-major array of $d^2$ values.
+ * @param W The loadings $\Wmat$ as a row-major array of $d \times q$ values.
+ * @param psi The noise variances $\psivec$, $d$ values.
+ * @param d The number of features.
+ * @param q The number of latent factors.
+ * @returns The average log-likelihood per row.
+ */
 function averageLogLikelihood(S: Float64Array, W: Float64Array, psi: Float64Array, d: number, q: number): number {
   const C = mat(modelCovariance(W, psi, d, q), d, d)
   const Ci = values(inverse(C))
@@ -58,21 +100,45 @@ export type LatentNoise = 'diagonal' | 'isotropic'
 
 /** A state of `latentGaussianSteps`. */
 export interface LatentGaussianState extends Status {
+  /** EM steps done. */
   t: number
-  /** Loadings W [d, q]. */
+  /** Loadings $\Wmat$ ($d \times q$). */
   loadings: Tensor
-  /** Noise variances ψ [d] (all equal for isotropic noise). */
+  /** Noise variances $\psivec$ ($d$ values; all equal for isotropic noise). */
   noise: Tensor
-  /** Average log-likelihood per row. */
+  /** Average log-likelihood per row of the training data. */
   logLikelihood: number
+  /** The last step raised the log-likelihood by less than `tolerance`. */
   converged: boolean
 }
 
 /**
- * EM for x = Wz + μ + ε on the rows of x [n, d] with `latent` = q factors. With M = I + WᵀΨ⁻¹W and β = M⁻¹WᵀΨ⁻¹ (so
- * E[z | x] = β(x − μ)), one step sets W ← Sβᵀ(M⁻¹ + βSβᵀ)⁻¹ and the noise to diag(S − WβS) (diagonal) or its mean
- * (isotropic). Converged when the log-likelihood rises by less than `tolerance` (default 1e-8). The initial loadings
- * are Gaussian (scale √(tr S / d) / q) from the `init` stream unless given; the initial noise is diag(S).
+ * EM for $\xvec = \Wmat\zvec + \muvec + \epsilonvec$ on the rows of `x`, as a step-through algorithm on their sample
+ * covariance $\Smat$ (Rubin and Thayer, 1982; Ghahramani and Hinton, 1996). With
+ * $\Mmat = \Imat + \Wmat^\top\Psimat^{-1}\Wmat$ and $\betavec = \Mmat^{-1}\Wmat^\top\Psimat^{-1}$ (so
+ * $\expect[\zvec \mid \xvec] = \betavec(\xvec - \muvec)$), one step sets
+ * $\Wmat \leftarrow \Smat\betavec^\top(\Mmat^{-1} + \betavec\Smat\betavec^\top)^{-1}$ and the noise to
+ * $\diag(\Smat - \Wmat\betavec\Smat)$ with the new $\Wmat$ (floored at $10^{-12}$), or its mean for isotropic noise.
+ * The log-likelihood never decreases. The initial loadings are normal with standard deviation
+ * $\sqrt{\trace(\Smat)/d}/q$, drawn from the run's stream, unless given; the initial noise is $\diag(\Smat)$ (its
+ * mean for isotropic noise). Throws `DomainError` unless `latent` is a whole number from 1 to $d - 1$.
+ *
+ * @param x The data ($n \times d$), one row per point.
+ * @param params The settings of the algorithm.
+ * @param params.latent The number of latent factors $q$.
+ * @param params.noise `'diagonal'` (default): one variance per feature, factor analysis. `'isotropic'`: one shared
+ *   variance, probabilistic PCA.
+ * @param params.tolerance The rise in average log-likelihood below which a step counts as converged (default 1e-8).
+ * @returns The algorithm, for `run` or `trace`; it starts from `{ loadings }` ($d \times q$) or from nothing.
+ *
+ * @example The log-likelihood rises with each EM step
+ * const z = normals(stream(1), [100, 1])
+ * const x = add(matmul(z, tensor([[2, 1, 0.5]])), mul(normals(stream(2), [100, 3]), 0.5))
+ * const em = latentGaussianSteps(x, { latent: 1 })
+ * print('at the start:', run(em, undefined, 0, { stream: stream(3) }).logLikelihood)
+ * print('after 1 step:', run(em, undefined, 1, { stream: stream(3) }).logLikelihood)
+ * print('after 5 steps:', run(em, undefined, 5, { stream: stream(3) }).logLikelihood)
+ * print('after 50 steps:', run(em, undefined, 50, { stream: stream(3) }).logLikelihood)
  */
 export function latentGaussianSteps(
   x: Tensor,
@@ -138,23 +204,46 @@ export function latentGaussianSteps(
 
 /** A fitted linear-Gaussian latent model (factor analysis or PPCA). */
 export interface LatentGaussianModel extends Transforms<Tensor, Tensor> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
+  /** The model's name. */
   readonly name: 'factor-analysis' | 'probabilistic-pca'
-  /** Loadings W [d, q]. */
+  /** Loadings $\Wmat$ ($d \times q$). */
   readonly loadings: Tensor
-  /** Noise variances ψ [d]. */
+  /** Noise variances $\psivec$ ($d$ values). */
   readonly noise: Tensor
+  /** The mean $\muvec$ of the training rows ($d$ values). */
   readonly mean: Tensor
   /** Average log-likelihood per training row. */
   readonly logLikelihood: number
-  /** The model covariance WWᵀ + Ψ [d, d]. */
+  /** The model covariance $\Wmat\Wmat^\top + \Psimat$ ($d \times d$). */
   readonly covariance: Tensor
-  /** Posterior means E[z | x] = (I + WᵀΨ⁻¹W)⁻¹WᵀΨ⁻¹(x − μ) [m, q]. */
+  /**
+   * Posterior means
+   * $\expect[\zvec \mid \xvec] = (\Imat + \Wmat^\top\Psimat^{-1}\Wmat)^{-1}\Wmat^\top\Psimat^{-1}(\xvec - \muvec)$
+   * of new rows ($m \times d$ in, $m \times q$ out). Throws `ShapeError` for a different number of features.
+   */
   transform(x: Tensor): Tensor
-  /** The average log-likelihood of new rows under the fitted Gaussian. */
+  /**
+   * The average log-likelihood per row of new rows ($m \times d$) under the fitted Gaussian. Throws `ShapeError` for a
+   * different number of features.
+   */
   averageLogLikelihood(x: Tensor): number
 }
 
+/**
+ * The fitted model of factor analysis or PPCA from its parameters: precomputes the posterior-mean map
+ * $\betavec = (\Imat + \Wmat^\top\Psimat^{-1}\Wmat)^{-1}\Wmat^\top\Psimat^{-1}$.
+ *
+ * @param name The model's name, also used in error messages.
+ * @param W The loadings $\Wmat$ as a row-major array of $d \times q$ values (kept by the model: not to be modified).
+ * @param psi The noise variances $\psivec$, $d$ positive values (kept by the model).
+ * @param mean The training mean $\muvec$, $d$ values (kept by the model).
+ * @param d The number of features.
+ * @param q The number of latent factors.
+ * @param logLikelihood The average log-likelihood per training row, reported as is.
+ * @returns The fitted model.
+ */
 function latentModel(
   name: LatentGaussianModel['name'],
   W: Float64Array,
@@ -194,12 +283,35 @@ function latentModel(
   }
 }
 
-/** A fitted factor analysis, with its EM trace. */
+/** A fitted factor analysis, with its EM trace (`training`). */
 export interface FactorAnalysisModel extends LatentGaussianModel, Trained<LatentGaussianState> {
+  /** The model's name. */
   readonly name: 'factor-analysis'
 }
 
-/** Factor analysis with `latent` factors (default 2) by EM (`latentGaussianSteps`, diagonal noise). */
+/**
+ * Factor analysis: a Gaussian with covariance $\Wmat\Wmat^\top + \Psimat$ ($\Psimat$ diagonal), fitted by EM
+ * (`latentGaussianSteps` with diagonal noise) until the log-likelihood stops rising or `maxSteps` run out. The run is
+ * traced (every step by default, or every `trace.every` of the fit options) and starts from random loadings drawn
+ * from the fit options' `stream`. The maximum-likelihood fit of scikit-learn's `FactorAnalysis`, which uses another
+ * algorithm; loadings agree up to the sign (or rotation) of the factors. Throws `DomainError` unless `latent` is a
+ * whole number from 1 to $d - 1$.
+ *
+ * @param params The settings of the estimator.
+ * @param params.latent The number of latent factors $q$ (default 2).
+ * @param params.maxSteps The most EM steps to run (default 1000).
+ * @param params.tolerance The rise in average log-likelihood below which the run stops (default 1e-8).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `FactorAnalysisModel`.
+ *
+ * @example One factor behind four features, each with its own noise
+ * const z = normals(stream(1), [200, 1])
+ * const noise = mul(normals(stream(2), [200, 4]), tensor([0.3, 0.5, 0.7, 0.9]))
+ * const x = add(matmul(z, tensor([[1, 1, 1, 1]])), noise)
+ * const model = factorAnalysis({ latent: 1 }).fit({ x }, { stream: stream(3) })
+ * print('loadings =', model.loadings)
+ * print('noise variances =', model.noise)
+ * print('log-likelihood per row =', model.logLikelihood, 'after', model.training.final.t, 'EM steps')
+ */
 export function factorAnalysis(
   params: { latent?: number; maxSteps?: number; tolerance?: number } = {},
 ): Estimator<Dataset<Tensor>, FactorAnalysisModel> {
@@ -231,15 +343,37 @@ export function factorAnalysis(
 
 /** A fitted probabilistic PCA. */
 export interface ProbabilisticPcaModel extends LatentGaussianModel {
+  /** The model's name. */
   readonly name: 'probabilistic-pca'
-  /** The shared noise variance σ². */
+  /** The shared noise variance $\sigma^2$. */
   readonly noiseVariance: number
 }
 
 /**
- * Probabilistic PCA with `latent` dimensions (default 2): the maximum-likelihood solution in closed form (default;
- * W = U_q(Λ_q − σ²I)^{1/2} from the eigendecomposition of the sample covariance, σ² the mean of the d − q discarded
- * eigenvalues; loadings signed so each column's largest-magnitude entry is positive), or by EM (isotropic noise).
+ * Probabilistic PCA (Tipping and Bishop, 1999): the maximum-likelihood solution in closed form,
+ * $\Wmat = \Umat_{q}(\Lambdamat_{q} - \sigma^2\Imat)^{1/2}$ from the eigendecomposition of the sample covariance
+ * (divided by $n$) with $\sigma^2$ the mean of the $d - q$ discarded eigenvalues, and each column of $\Wmat$ signed
+ * so its largest-magnitude entry is positive; or by EM (`latentGaussianSteps` with isotropic noise, from random
+ * loadings drawn from the fit options' `stream`), which reaches the same fit up to the sign or rotation of the loadings. The
+ * closed form is scikit-learn's `PCA` read as PPCA, with the variances divided by $n$ rather than $n - 1$. Throws
+ * `DomainError` unless $1 \le q \le d - 1$.
+ *
+ * @param params The settings of the estimator.
+ * @param params.latent The number of latent dimensions $q$ (default 2).
+ * @param params.method `'closed-form'` (default) or `'em'`.
+ * @param params.maxSteps The most EM steps to run (default 1000; EM only).
+ * @param params.tolerance The rise in average log-likelihood below which EM stops (default 1e-10; EM only).
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `ProbabilisticPcaModel` (with no
+ *   `training`: the EM run is not kept).
+ *
+ * @example The closed form and EM reach the same fit
+ * const z = normals(stream(1), [100, 1])
+ * const x = add(matmul(z, tensor([[2, 1, 0.5]])), mul(normals(stream(2), [100, 3]), 0.5))
+ * const closed = probabilisticPca({ latent: 1 }).fit({ x })
+ * const em = probabilisticPca({ latent: 1, method: 'em' }).fit({ x }, { stream: stream(3) })
+ * print('closed form: loadings =', closed.loadings, 'noise variance =', closed.noiseVariance)
+ * print('EM: loadings =', em.loadings, 'noise variance =', em.noiseVariance)
+ * print('log-likelihood per row:', closed.logLikelihood, em.logLikelihood)
  */
 export function probabilisticPca(
   params: { latent?: number; method?: 'closed-form' | 'em'; maxSteps?: number; tolerance?: number } = {},
@@ -283,13 +417,31 @@ export function probabilisticPca(
 
 // ── FastICA ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** (WWᵀ)^{−1/2} W for W [r, r]: the symmetric decorrelation that keeps the rows orthonormal. */
+/**
+ * The symmetric decorrelation $(\Wmat\Wmat^\top)^{-1/2}\Wmat$, which makes the rows of $\Wmat$ orthonormal while
+ * treating them alike.
+ *
+ * @param W The matrix $\Wmat$ as a row-major array of $r^2$ values (read, not modified).
+ * @param r Its number of rows and columns.
+ * @returns The decorrelated matrix as a new row-major array of $r^2$ values.
+ */
 function symmetricDecorrelation(W: Float64Array, r: number): Float64Array {
   const P = values(symmetricInverseSqrt(mat(matMul(W, transpose(W, r, r), r, r, r), r, r), { floor: Number.MIN_VALUE }))
   return matMul(P, W, r, r, r)
 }
 
-/** The whitening of FastICA: mean, and K [r, d] with K(x − x̄) of identity covariance (as scikit-learn's SVD solver). */
+/**
+ * The whitening of FastICA, as scikit-learn's SVD solver: the matrix $\Kmat$ ($r \times d$) whose rows are the top $r$
+ * eigenvectors of the sample covariance (divided by $n$), each divided by the square root of its eigenvalue and signed
+ * so its first entry is non-negative, so that $\Kmat(\xvec - \bar{\xvec})$ has identity covariance.
+ *
+ * @param v The data as a row-major array of $n \times d$ values (read, not modified).
+ * @param n The number of rows.
+ * @param d The number of features.
+ * @param r The number of whitened components to keep, at most $d$.
+ * @returns `mean` ($d$ values), `K` (row-major, $r \times d$) and `Z`, the whitened data as a row-major $r \times n$
+ *   array: one row per component, one column per point.
+ */
 function whitening(v: Float64Array, n: number, d: number, r: number) {
   const { mean, S } = moments(v, n, d)
   const e = eigh(mat(S, d, d))
@@ -309,18 +461,40 @@ function whitening(v: Float64Array, n: number, d: number, r: number) {
 
 /** A state of `fastIcaSteps`. */
 export interface FastIcaState extends Status {
+  /** Fixed-point steps done. */
   t: number
-  /** The unmixing matrix in whitened coordinates W [r, r] (orthonormal rows). */
+  /** The unmixing matrix $\Wmat$ in whitened coordinates ($r \times r$, orthonormal rows). */
   unmixing: Tensor
-  /** max_i | |⟨w_i, w_i^old⟩| − 1 | ∈ [0, 1]: 0 when every row has stopped turning (1 before the first step). */
+  /**
+   * $\max_i \lvert \lvert \langle \wvec_i, \wvec_i^{\text{old}} \rangle \rvert - 1 \rvert \in [0, 1]$: 0 when every row
+   * has stopped turning (1 before the first step).
+   */
   change: number
+  /** `change` is below `tolerance`. */
   converged: boolean
 }
 
 /**
- * FastICA's symmetric fixed-point iteration on the rows of x [n, d], recovering `components` sources (default d): x is
- * whitened to z, then each step sets W ← (WWᵀ)^{−1/2}(E[tanh(Wz) zᵀ] − diag(E[1 − tanh²(Wz)]) W). Converged when
- * `change` < `tolerance` (default 1e-4). The initial W is standard normal from the `init` stream, or given.
+ * FastICA's symmetric fixed-point iteration (Hyvärinen, 1999): the rows of `x` are whitened to $\zvec$, then each step
+ * sets $\Wmat \leftarrow (\Wmat\Wmat^\top)^{-1/2}\Wmat_{+}$ with
+ * $\Wmat_{+} = \expect[\tanh(\Wmat\zvec)\zvec^\top] - \diag(\expect[1 - \tanh^2(\Wmat\zvec)])\Wmat$, the
+ * expectations being means over the rows. Converged (and the run
+ * stops) when `change` is below `tolerance`. The initial $\Wmat$ is the one given (`{ unmixing }`, $r \times r$), or
+ * standard normal from the run's stream, decorrelated. Throws `ShapeError` when `x` is not a matrix.
+ *
+ * @param x The mixed signals ($n \times d$), one row per observation.
+ * @param params The settings of the algorithm.
+ * @param params.components The number of sources $r$ to recover (default $d$; more is cut to $d$).
+ * @param params.tolerance The `change` below which the iteration has converged (default 1e-4).
+ * @returns The algorithm, for `run` or `trace`; its states are `FastIcaState`s.
+ *
+ * @example The rows stop turning within a few steps
+ * const t = linspace(0, 8, 200)
+ * const x = matmul(stack([sin(mul(t, 2)), sign(sin(mul(t, 3)))], 1), tensor([[1, 0.5], [1, 2]]))
+ * const ica = fastIcaSteps(x)
+ * print('change after 1 step:', run(ica, undefined, 1, { stream: stream(1) }).change)
+ * print('after 2 steps:', run(ica, undefined, 2, { stream: stream(1) }).change)
+ * print('after 3 steps:', run(ica, undefined, 3, { stream: stream(1) }).change)
  */
 export function fastIcaSteps(
   x: Tensor,
@@ -364,24 +538,53 @@ export function fastIcaSteps(
   }
 }
 
-/** A fitted ICA. */
+/** A fitted ICA, with the run that found it (`training`). */
 export interface FastIcaModel extends Transforms<Tensor, Tensor>, Trained<FastIcaState> {
+  /** Marks a fitted model. */
   readonly kind: 'model'
+  /** The model's name. */
   readonly name: 'fast-ica'
-  /** The unmixing matrix [r, d]: sources s = A⁺… = components (x − mean), each source of unit variance. */
+  /**
+   * The unmixing matrix ($r \times d$), whitening included: the sources are
+   * $\svec = \text{components}(\xvec - \bar{\xvec})$, each of unit variance on the training rows.
+   */
   readonly components: Tensor
-  /** The mixing matrix [d, r], the pseudo-inverse of `components`. */
+  /** The mixing matrix ($d \times r$), the pseudo-inverse of `components`; its columns are the sources' directions. */
   readonly mixing: Tensor
+  /** The mean of the training rows ($d$ values). */
   readonly mean: Tensor
-  /** Estimated sources of new rows [m, r]. */
+  /**
+   * Estimated sources of new rows ($m \times d$ in, $m \times r$ out). Throws `ShapeError` for a different number of
+   * features.
+   */
   transform(x: Tensor): Tensor
-  /** Back from sources to the input space [m, d]. */
+  /** Back from sources ($m \times r$) to the input space ($m \times d$): $\text{mixing} \cdot \svec + \bar{\xvec}$. */
   inverseTransform(s: Tensor): Tensor
 }
 
 /**
- * FastICA with `components` sources (default all), by `fastIcaSteps` to convergence or `maxSteps` (default 200), from
- * the unmixing matrix `init` [r, r] or a standard normal one.
+ * Independent component analysis by FastICA (Hyvärinen and Oja, 2000): `fastIcaSteps` to convergence or `maxSteps`,
+ * then each source scaled to unit variance, as scikit-learn's `FastICA(algorithm='parallel',
+ * whiten='unit-variance')`. The sources come back in an arbitrary order and sign. The run is traced (every step by
+ * default, or every `trace.every` of the fit options) and a random start draws from the fit options' `stream`.
+ *
+ * @param params The settings of the estimator.
+ * @param params.components The number of sources $r$ (default all $d$).
+ * @param params.maxSteps The most fixed-point steps to run (default 200).
+ * @param params.tolerance The `change` below which the run stops (default 1e-4).
+ * @param params.init The starting unmixing matrix in whitened coordinates ($r \times r$); left out, a standard normal
+ *   one.
+ * @returns The estimator: `fit({ x })` on an $n \times d$ matrix returns a `FastIcaModel`.
+ *
+ * @example A sine and a square wave are unmixed
+ * const t = linspace(0, 8, 200)
+ * const sources = stack([sin(mul(t, 2)), sign(sin(mul(t, 3)))], 1)
+ * const mixing = tensor([[1, 0.5], [1, 2]])
+ * const x = matmul(sources, mixing)
+ * const model = fastIca().fit({ x }, { stream: stream(1) })
+ * print('converged after', model.training.final.t, 'steps')
+ * // Unmixing after mixing: one large entry in each row and column.
+ * print('mixing then unmixing =', matmul(mixing, transpose(model.components)))
  */
 export function fastIca(
   params: { components?: number; maxSteps?: number; tolerance?: number; init?: Tensor } = {},

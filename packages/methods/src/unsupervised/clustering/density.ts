@@ -1,9 +1,11 @@
 /**
- * Density-based and mode-seeking clustering:
+ * Density-based and mode-seeking clustering, all on Euclidean distances between the rows of the data, with the full
+ * $n \times n$ distance matrix held for DBSCAN and OPTICS:
  *
  * - `dbscan`: DBSCAN (Ester, Kriegel, Sander and Xu, 1996) with core, border and noise points, as scikit-learn.
  * - `optics`: OPTICS (Ankerst, Breunig, Kriegel and Sander, 1999): the ordering, reachability and core distances, as
- *   scikit-learn's `OPTICS(max_eps=inf)`, and `opticsClusters` extracting DBSCAN-like clusters at any ε.
+ *   scikit-learn's `OPTICS(max_eps=inf)`, and the model's `clustersAt` extracting DBSCAN-like clusters at any
+ *   $\varepsilon$.
  * - `meanShiftSteps`, `meanShift`: mean shift (Fukunaga and Hostetler, 1975; Comaniciu and Meer, 2002) with a flat or
  *   Gaussian kernel, every point a seed, as scikit-learn's `MeanShift` for the flat kernel.
  */
@@ -20,9 +22,11 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 // ── DBSCAN ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** A point's role in DBSCAN: 0 core, 1 border, 2 noise. */
+/** A point's role in DBSCAN: 0 core, 1 border, 2 noise. This is the core role. */
 export const CORE = 0
+/** The DBSCAN role of a point within `eps` of a core point but not core itself. */
 export const BORDER = 1
+/** The DBSCAN role of a point in no cluster. */
 export const NOISE = 2
 
 /** A fitted DBSCAN. */
@@ -30,22 +34,38 @@ export interface DbscanModel extends Decides<Tensor, Tensor> {
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'dbscan'
+  /** The neighbourhood radius $\varepsilon$ it was fitted with. */
   readonly eps: number
+  /** The neighbours (itself included) that make a point core. */
   readonly minSamples: number
-  /** Cluster labels 0, 1, … in order of discovery, −1 for noise [n]. */
+  /** Cluster labels $0, 1, \dots$ in order of discovery, $-1$ for noise, $n$ values (int32). */
   readonly labels: Tensor
-  /** The role of each point: `CORE`, `BORDER` or `NOISE` [n]. */
+  /** The role of each point: `CORE`, `BORDER` or `NOISE`, $n$ values (int32). */
   readonly roles: Tensor
-  /** Number of ε-neighbours of each point, itself included [n]. */
+  /** Number of $\varepsilon$-neighbours of each point, itself included, $n$ values (int32). */
   readonly neighbourCounts: Tensor
+  /** The number of clusters found. */
   readonly clusters: number
 }
 
 /**
  * DBSCAN: a core point has at least `minSamples` points (itself included) within distance `eps`; clusters are the
- * connected components of core points under ε-adjacency, plus the border points within ε of them. Rows are scanned in
- * order, so a border point near two clusters joins the first one found (as scikit-learn). `decide` gives a new point
- * the label of its nearest core point within ε, else −1.
+ * connected components of core points under $\varepsilon$-adjacency, plus the border points within $\varepsilon$ of
+ * them. Rows are scanned in order, so a border point near two clusters joins the first one found (as scikit-learn).
+ * `decide` gives a new point the label of its nearest core point within $\varepsilon$, else $-1$. The fit is
+ * deterministic and holds all $n^2$ distances.
+ *
+ * @param params The hyperparameters.
+ * @param params.eps The neighbourhood radius $\varepsilon$: points at Euclidean distance at most `eps` are neighbours.
+ * @param params.minSamples The neighbours, the point itself included, that make a point core (default 5).
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example A tight group and one outlier, which is noise
+ * const x = concat([normals(stream(0), [8, 2], 0, 0.3), tensor([[4, 4]])])
+ * const model = dbscan({ eps: 1, minSamples: 3 }).fit({ x })
+ * print('labels', model.labels)
+ * print('roles (0 core, 1 border, 2 noise)', model.roles)
+ * print('new points', model.decide(tensor([[0.2, 0.1], [3, 3]])))
  */
 export function dbscan(params: { eps: number; minSamples?: number }): Estimator<Dataset<Tensor>, DbscanModel> {
   const { eps, minSamples = 5 } = params
@@ -121,23 +141,43 @@ export interface OpticsModel {
   readonly transductive: true
   /** The model's name. */
   readonly name: 'optics'
+  /** The neighbours, the point itself included, that define the core distance. */
   readonly minSamples: number
-  /** The processing order of the points [n]. */
+  /** The processing order of the points, $n$ indices (int32). */
   readonly ordering: Tensor
-  /** Reachability distance of each point (indexed by point, ∞ for the first of each component) [n]. */
+  /**
+   * Reachability distance of each point, indexed by point, $n$ values: $\infty$ for the first point processed, which
+   * with unbounded $\varepsilon$ is the only one reached from none.
+   */
   readonly reachability: Tensor
-  /** Core distance of each point: distance to its `minSamples`-th nearest point, itself included [n]. */
+  /** Core distance of each point: distance to its `minSamples`-th nearest point, itself included, $n$ values. */
   readonly coreDistances: Tensor
-  /** The point each was reached from (−1 when none) [n]. */
+  /** The point each was reached from ($-1$ when none), $n$ values (int32). */
   readonly predecessor: Tensor
-  /** DBSCAN-like clusters at ε (scikit-learn's `cluster_optics_dbscan`). */
+  /**
+   * DBSCAN-like clusters at radius `eps` (scikit-learn's `cluster_optics_dbscan`): labels $0, 1, \dots$ along the
+   * ordering, $-1$ for noise.
+   */
   clustersAt(eps: number): Tensor
 }
 
 /**
- * OPTICS with unbounded ε: repeatedly take the unprocessed point of smallest reachability (the lowest index among
- * ties; ∞ for all at the start of a component) and lower its neighbours' reachability to max(core distance,
- * distance).
+ * OPTICS with unbounded $\varepsilon$: repeatedly take the unprocessed point $p$ of smallest reachability (the lowest
+ * index among ties, so point 0 first) and lower every unprocessed point $q$'s reachability to
+ * $\max(\text{core}(p), d(p, q))$ when that is smaller. Throws `DomainError` when `minSamples` exceeds $n$. The fit is
+ * deterministic and holds all $n^2$ distances; the model is transductive (it has no `decide`).
+ *
+ * @param params The hyperparameters: `minSamples`, the neighbours (the point itself included) whose farthest sets a
+ *   point's core distance (default 5).
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example Two groups on a line, read off at two radii
+ * const x = tensor([[0], [0.1], [0.3], [5], [5.2], [5.3], [9]])
+ * const model = optics({ minSamples: 2 }).fit({ x })
+ * print('ordering', model.ordering)
+ * print('reachability', model.reachability)
+ * print('clusters at 1', model.clustersAt(1))
+ * print('clusters at 5', model.clustersAt(5))
  */
 export function optics(params: { minSamples?: number } = {}): Estimator<Dataset<Tensor>, OpticsModel> {
   const { minSamples = 5 } = params
@@ -204,19 +244,33 @@ export function optics(params: { minSamples?: number } = {}): Estimator<Dataset<
 export interface MeanShiftState extends Status {
   /** Steps taken. */
   t: number
-  /** Seed positions [s, d]. */
+  /** Seed positions, $s \times d$. */
   seeds: Tensor
-  /** Which seeds have stopped moving [s]. */
+  /** Which seeds have stopped moving, $s$ flags (int32, 1 when settled). */
   settled: Tensor
-  /** Largest shift of any seed in the last step. */
+  /** Largest shift of any seed in the last step ($\infty$ at the start). */
   shift: number
+  /** True once every seed has settled. */
   converged: boolean
 }
 
 /**
  * Mean shift as a traceable algorithm: every seed moves to the (kernel-weighted) mean of the data within its window,
- * until it moves less than 10⁻³ × bandwidth. `flat` uses the points within distance `bandwidth` (scikit-learn);
- * `gaussian` weights every point by exp(−‖x − s‖² / 2h²). Seeds default to the data points.
+ * and settles once a step moves it at most $10^{-3} h$ ($h$ the bandwidth), or when its window holds no point. `flat`
+ * uses the points within distance $h$ (scikit-learn); `gaussian` weights every point by
+ * $\exp(-\lVert \xvec - \svec \rVert^2 / 2h^2)$ for a seed at $\svec$. Seeds default to the data points.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param params The hyperparameters: `bandwidth`, the window radius (flat) or standard deviation (Gaussian) $h$; and
+ *   `kernel`, `'flat'` (default) or `'gaussian'`.
+ * @returns The algorithm, whose `init` takes optional starting `seeds` ($s \times d$; the rows of `x` when left out)
+ *   and whose state is a `MeanShiftState`.
+ *
+ * @example Five seeds climb to two modes
+ * const x = tensor([[0], [0.5], [1], [6], [6.5]])
+ * const final = run(meanShiftSteps(x, { bandwidth: 1 }), {}, 20)
+ * print('seeds', final.seeds)
+ * print('steps', final.t, 'converged', final.converged)
  */
 export function meanShiftSteps(
   x: Tensor,
@@ -286,14 +340,30 @@ export interface MeanShiftModel extends Decides<Tensor, Tensor>, Transforms<Tens
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'mean-shift'
-  /** The modes found [c, d], by decreasing number of points within the bandwidth. */
+  /** The modes found, $c \times d$, by decreasing number of points within the bandwidth. */
   readonly centres: Tensor
 }
 
 /**
- * Mean shift: runs every seed to a mode (`meanShiftSteps`), merges modes closer than the bandwidth (keeping the one
- * with more points within the bandwidth, as scikit-learn). `decide` labels a point by its nearest mode (training labels
- * are `decide(x)`), `transform` gives its distances to the modes.
+ * Mean shift: runs every seed to a mode (`meanShiftSteps`), merges modes within the bandwidth of each other (keeping
+ * the one with more points within the bandwidth, as scikit-learn), and drops modes with no point within it. `decide`
+ * labels a point by its nearest mode (training labels are `decide(x)`), `transform` gives its distances to the modes.
+ * The fit is deterministic (the fit's stream is not used). For the Gaussian kernel, too, a mode's count of points is
+ * taken within the flat window of radius `bandwidth`.
+ *
+ * @param params The hyperparameters.
+ * @param params.bandwidth The window radius (flat) or standard deviation (Gaussian) $h$, also the distance within
+ *   which two modes merge.
+ * @param params.kernel `'flat'` (default) or `'gaussian'`.
+ * @param params.maxSteps The most mean-shift steps (default 300).
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example Two blobs, two modes
+ * const s = stream(0)
+ * const x = concat([normals(s, [10, 2], 0, 0.3), normals(s, [10, 2], 4, 0.3)])
+ * const model = meanShift({ bandwidth: 1 }).fit({ x })
+ * print('modes', model.centres)
+ * print('labels', model.decide(x))
  */
 export function meanShift(params: {
   bandwidth: number

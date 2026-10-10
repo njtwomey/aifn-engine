@@ -1,13 +1,25 @@
 /**
  * Shared by the embeddings of `aifn-methods/unsupervised/embedding`: double centring and the classical-MDS core.
+ *
+ * Squared distances $\Dmat^{(2)}$ become the Gram matrix $\Bmat = -\tfrac{1}{2}\Jmat\Dmat^{(2)}\Jmat$ with
+ * $\Jmat = \Imat - \ones\ones^\top/n$, whose top eigenpairs give the coordinates (Torgerson, 1952; Gower, 1966).
+ * `classicalMds` and `isomap` both embed through it.
  */
 
 import { eigh } from 'aifn-compute/numerics/linalg'
 import { fromData } from 'aifn-compute/foundation/tensor'
 
 /**
- * Classical MDS on squared distances D² [n, n] (Torgerson, 1952; Gower, 1966): B = −½ J D² J with J = I − 11ᵀ/n,
- * and the coordinates Y = V_r Λ_r^½ from B's top r eigenpairs (negative eigenvalues give zero columns).
+ * Classical MDS on squared distances (Torgerson, 1952; Gower, 1966): double-centre them into
+ * $\Bmat = -\tfrac{1}{2}\Jmat\Dmat^{(2)}\Jmat$ with $\Jmat = \Imat - \ones\ones^\top/n$, and take the coordinates
+ * $\Ymat = \Vmat_{r}\Lambdamat_{r}^{1/2}$ from $\Bmat$'s top $r$ eigenpairs. A negative eigenvalue among the top $r$
+ * gives a zero column.
+ *
+ * @param D2 The squared distances $D_{ij}^2$ as a row-major array of $n^2$ values (read, not modified).
+ * @param n The number of points.
+ * @param r The number of coordinates to keep, at most $n$.
+ * @returns `Y`, the coordinates as a row-major array of $n \times r$ values (point `i` in entries `i * r` to
+ *   `i * r + r - 1`), and `eigenvalues`, all $n$ eigenvalues of $\Bmat$ in descending order.
  */
 export function classicalCore(D2: Float64Array, n: number, r: number) {
   const B = new Float64Array(n * n)

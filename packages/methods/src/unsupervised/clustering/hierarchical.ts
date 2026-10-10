@@ -5,8 +5,10 @@
  * `dendrogram` lays it out.
  *
  * Cluster distances are computed from the current partition at each step: single, complete and average linkage from
- * the point distances, Ward's from sizes and centroids, d(A, B) = √(2|A||B|/(|A| + |B|)) ‖c_A − c_B‖ (the height
- * SciPy reports; Ward, 1963). Each step costs O(n²).
+ * the point distances, Ward's from sizes and centroids,
+ * $d(A, B) = \sqrt{2\lvert A \rvert \lvert B \rvert / (\lvert A \rvert + \lvert B \rvert)}
+ * \, \lVert \cvec_A - \cvec_B \rVert$ (the height SciPy reports; Ward, 1963). Each step costs $O(n^2)$, so the
+ * whole hierarchy $O(n^3)$.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -19,16 +21,22 @@ import { canonical, ints, matrix } from './util'
 import { defineModel } from 'aifn-compute/learning/estimators'
 import { int, oneOf, space } from 'aifn-compute/foundation/space'
 
-/** How the distance between two clusters is measured. */
+/**
+ * How the distance between two clusters is measured: `'single'` the closest pair of their points, `'complete'` the
+ * farthest pair, `'average'` the mean over all pairs (UPGMA), `'ward'` Ward's distance between their centroids.
+ */
 export type Linkage = 'single' | 'complete' | 'average' | 'ward'
 
 /** One state of agglomeration. */
 export interface AgglomerationState extends Status {
-  /** The cluster id of each point [n]: point i starts in cluster i; merge r creates cluster n + r (SciPy's ids). */
+  /**
+   * The cluster id of each point, $n$ values (int32): point $i$ starts in cluster $i$; merge $r$ creates cluster
+   * $n + r$ (SciPy's ids).
+   */
   labels: Tensor
   /** The ids of the clusters that remain. */
   active: number[]
-  /** Merges so far [r, 4]: the two ids (smaller first), the height and the new cluster's size. */
+  /** Merges so far, $r \times 4$: the two ids (smaller first), the height and the new cluster's size. */
   merges: Tensor
   /** The merge made in this step ([a, b, height]), or null at the start. */
   last: [number, number, number] | null
@@ -37,8 +45,19 @@ export interface AgglomerationState extends Status {
 }
 
 /**
- * Agglomeration as a traceable algorithm on the rows of x [n, d]: each step merges the closest pair of active clusters
- * (ties to the smallest pair of ids). It is done after n − 1 merges.
+ * Agglomeration as a traceable algorithm on the rows of `x`: each step merges the closest pair of active clusters
+ * (ties to the smallest pair of ids). It is done after $n - 1$ merges; a step after that returns the state unchanged.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param params The `linkage` (default `'ward'`).
+ * @returns The algorithm, whose `init` takes nothing and whose state is an `AgglomerationState`.
+ *
+ * @example Two single-linkage merges on a line
+ * const x = tensor([[0], [1], [3], [7]])
+ * const state = run(agglomerativeSteps(x, { linkage: 'single' }), undefined, 2)
+ * print('cluster ids', state.labels)
+ * print('active', state.active)
+ * print('merges', state.merges)
  */
 export function agglomerativeSteps(x: Tensor, params: { linkage?: Linkage } = {}): Algorithm<void, AgglomerationState> {
   const { n, d, v } = matrix(x, 'agglomerativeSteps')
@@ -129,17 +148,30 @@ export function agglomerativeSteps(x: Tensor, params: { linkage?: Linkage } = {}
 
 /** What a merge-tree node records: the number of points below it (the height is the tree node's `height`). */
 export interface MergeData {
+  /** The number of points below the node (1 for a point). */
   size: number
 }
 
 /**
- * A merge tree: an `aifn-compute/graph` binary `Tree` with SciPy's ids (nodes 0 … n − 1 are the points, node n + r is merge
- * r; the root is last). Each node's `height` is its merge distance (0 for points), its children are the merged pair
- * (smaller id first), and each edge's `weight` is the branch length (parent height − child height).
+ * A merge tree: an `aifn-compute/graph` binary `Tree` with SciPy's ids (nodes $0, \dots, n - 1$ are the points, node
+ * $n + r$ is merge $r$; the root is last). Each node's `height` is its merge distance (0 for points), its children are
+ * the merged pair (smaller id first), and each edge's `weight` is the branch length (parent height minus child
+ * height).
  */
 export type MergeTree = Tree<MergeData>
 
-/** The merge tree of a linkage matrix [n − 1, 4]. */
+/**
+ * The merge tree of a linkage matrix. Points are labelled by their ids; merge nodes are unlabelled.
+ *
+ * @param merges The linkage matrix, $(n - 1) \times 4$ in SciPy's format, as `linkage` returns it (float64).
+ * @returns The `MergeTree` of $2n - 1$ nodes, rooted at the last merge.
+ *
+ * @example The tree of three points
+ * const tree = mergeTree(linkage(tensor([[0], [1], [5]]), 'single'))
+ * print('heights', tree.nodes.map((node) => node.height))
+ * print('children of the root', tree.nodes[tree.root].children)
+ * print('branch lengths', tree.edges.map((e) => (e ? e.weight : null)))
+ */
 export function mergeTree(merges: Tensor): MergeTree {
   const r = merges.shape[0]
   const n = r + 1
@@ -167,7 +199,20 @@ export function mergeTree(merges: Tensor): MergeTree {
   return { kind: 'tree', nodes, root: nodes.length - 1, edges, arity: 2 }
 }
 
-/** Flat clusters from a linkage matrix: cut into `clusters` groups, or at `height` (merges above it are undone). */
+/**
+ * Flat clusters from a linkage matrix: cut into `clusters` groups, or at `height` (merges above it are undone). The
+ * merges are taken to be in order of height, as the linkages here produce them.
+ *
+ * @param merges The linkage matrix, $(n - 1) \times 4$ in SciPy's format (float64).
+ * @param cut Where to cut: `clusters`, the number of groups (clamped to $1, \dots, n$), or `height`, keeping the
+ *   merges at or below that height.
+ * @returns The label of each point, $n$ values (int32), numbered $0, 1, \dots$ in order of first appearance.
+ *
+ * @example Two clusters, or a cut at height 1.5
+ * const merges = linkage(tensor([[0], [1], [3], [7]]), 'single')
+ * print('2 clusters', cutTree(merges, { clusters: 2 }))
+ * print('height 1.5', cutTree(merges, { height: 1.5 }))
+ */
 export function cutTree(merges: Tensor, cut: { clusters: number } | { height: number }): Tensor {
   const r = merges.shape[0]
   const n = r + 1
@@ -188,18 +233,37 @@ export function cutTree(merges: Tensor, cut: { clusters: number } | { height: nu
   return fromData(canonical(label), [n])
 }
 
-/** A dendrogram layout: leaf order and, for every merge, the ⊓-shaped link as x and y coordinates. */
+/** A dendrogram layout: leaf order and, for every merge, the bracket-shaped link as $x$ and $y$ coordinates. */
 export interface Dendrogram {
-  /** Point ids from left to right (SciPy's `leaves`). */
+  /** Point ids from left to right (SciPy's `leaves`), $n$ values (int32). */
   order: Tensor
-  /** x position of every node (leaves at 0, 1, …; a merge at the mean of its children's). */
+  /**
+   * The $x$ position of every node, $2n - 1$ values indexed by id (leaves at $0, 1, \dots$ in `order`; a merge at the
+   * mean of its children's).
+   */
   x: Tensor
-  /** Per merge, the four corners of its link [r, 4, 2]: (x_a, h_a), (x_a, h), (x_b, h), (x_b, h_b). */
+  /**
+   * Per merge, the four corners of its link, $r \times 4 \times 2$: $(x_a, h_a)$, $(x_a, h)$, $(x_b, h)$, $(x_b, h_b)$,
+   * for children $a$ and $b$ and merge height $h$.
+   */
   links: Tensor
+  /** The merge tree laid out. */
   tree: MergeTree
 }
 
-/** Lays out a dendrogram: the left child of each merge is its first id, as SciPy's `dendrogram`. */
+/**
+ * Lays out a dendrogram: the left child of each merge is its first id, as SciPy's `dendrogram` (whose leaves sit at
+ * $5, 15, 25, \dots$ rather than $0, 1, 2, \dots$).
+ *
+ * @param merges The linkage matrix, $(n - 1) \times 4$ in SciPy's format (float64).
+ * @returns The layout: leaf `order`, node positions `x`, the `links` to draw and the `tree`.
+ *
+ * @example The layout of four points
+ * const layout = dendrogram(linkage(tensor([[0], [1], [3], [7]]), 'single'))
+ * print('leaves', layout.order)
+ * print('x', layout.x)
+ * print('last link', toArray(layout.links)[2])
+ */
 export function dendrogram(merges: Tensor): Dendrogram {
   const tree = mergeTree(merges)
   const n = merges.shape[0] + 1
@@ -234,18 +298,34 @@ export interface AgglomerativeModel extends Trained<AgglomerationState> {
   readonly transductive: true
   /** The model's name. */
   readonly name: 'agglomerative'
+  /** The linkage it was fitted with. */
   readonly linkage: Linkage
-  /** The linkage matrix [n − 1, 4] in SciPy's format. */
+  /** The linkage matrix, $(n - 1) \times 4$, in SciPy's format. */
   readonly merges: Tensor
+  /** The merge tree of `merges`. */
   readonly tree: MergeTree
   /** Flat labels of the training rows from the cut given to the estimator (or a single cluster). */
   readonly labels: Tensor
+  /** Flat labels of the training rows from another cut (`cutTree` on `merges`). */
   cut(at: { clusters: number } | { height: number }): Tensor
 }
 
 /**
  * Agglomerative clustering: the full merge sequence, kept as a trace (one merge per step), with flat labels from
- * `clusters` or `height` if given.
+ * `clusters` or `height` if given. The fit is deterministic and transductive: `cut` relabels the training rows, but
+ * new rows cannot be placed.
+ *
+ * @param params The hyperparameters.
+ * @param params.linkage How cluster distances are measured (default `'ward'`).
+ * @param params.clusters The number of flat clusters for `labels`; takes precedence over `height`.
+ * @param params.height The height at which to cut for `labels`; with neither, `labels` is one cluster.
+ * @returns The estimator; `fit({ x })` takes the data, $n \times d$.
+ *
+ * @example Merge heights of four points, and two clusters
+ * const x = tensor([[0, 0], [0, 1], [4, 0], [4, 3]])
+ * const model = agglomerative({ linkage: 'average', clusters: 2 }).fit({ x })
+ * print('merges (a, b, height, size)', model.merges)
+ * print('labels', model.labels)
  */
 export function agglomerative(
   params: { linkage?: Linkage; clusters?: number; height?: number } = {},
@@ -283,11 +363,29 @@ export function agglomerative(
   }
 }
 
+/**
+ * The linkage matrix of a finished agglomeration.
+ *
+ * @param t The trace of `agglomerativeSteps` run to the end.
+ * @returns The merges of its final state, $(n - 1) \times 4$.
+ */
 function linkageFromTrace(t: Trace<AgglomerationState>): Tensor {
   return t.final.merges
 }
 
-/** The linkage matrix [n − 1, 4] of the rows of x (SciPy's `linkage(x, method)` format). */
+/**
+ * The linkage matrix of the rows of `x` (SciPy's `linkage(x, method)` format): row $r$ holds the ids merged (smaller
+ * first), the merge height and the new cluster's size.
+ *
+ * @param x The data, $n \times d$, one point per row.
+ * @param method The linkage.
+ * @returns The merges, $(n - 1) \times 4$ (float64).
+ *
+ * @example Single and Ward linkage of four points
+ * const x = tensor([[0, 0], [0, 1], [4, 0], [4, 3]])
+ * print('single', linkage(x, 'single'))
+ * print('ward', linkage(x))
+ */
 export function linkage(x: Tensor, method: Linkage = 'ward'): Tensor {
   return run(agglomerativeSteps(x, { linkage: method }), undefined, x.shape[0]).merges
 }
