@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { gradCheck } from 'aifn-compute/foundation/autodiff'
+import { ShapeError } from 'aifn-compute/foundation/errors'
 import { stream } from 'aifn-compute/foundation/random'
 import { fromData, sum, toFlat, unwrap, type Tensor } from 'aifn-compute/foundation/tensor'
 import { run, trace } from 'aifn-compute/foundation/trace'
@@ -55,6 +56,17 @@ describe('Kneser–Ney n-gram model', () => {
     const m = kneserNey({ order: 6 }).fit(corpus)
     const s = run(greedyDecoding(m.logits, { prompt: encodeChars(corpus, 'humpty d'), maxTokens: 5 }), undefined, 5)
     expect(decodeChars(corpus, s.tokens)).toBe('humpty dumpty')
+  })
+
+  it('score reads a 1-D tensor of N ids as N one-token contexts, and rejects other ranks', () => {
+    const m = kneserNey({ order: 3 }).fit(corpus)
+    const ids = encodeChars(corpus, 'hum')
+    const flat = toFlat(m.score(fromData(Int32Array.from(ids), [3])))
+    const rows = toFlat(m.score(fromData(Int32Array.from(ids), [3, 1])))
+    expect(Array.from(flat)).toEqual(Array.from(rows))
+    const V = corpus.vocabulary.tokens.length
+    m.distribution([ids[1]]).forEach((p, w) => expect(flat[V + w]).toBeCloseTo(Math.log(p), 14))
+    expect(() => m.score(fromData(Int32Array.from(ids), [1, 3, 1]))).toThrow(ShapeError)
   })
 })
 

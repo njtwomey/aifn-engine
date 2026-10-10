@@ -354,6 +354,11 @@ describe('integer programming', () => {
       expect(a[0] * 1 + a[1] * 2).toBeLessThanOrEqual(cut.b + 1e-9)
     }
   })
+
+  it('Gomory handles an infeasible relaxation without crashing', () => {
+    const s = run(gomory({ c: [1, 1], A_ub: [[1, 1]], b_ub: [-1] }), {}, 10)
+    expect(s.status).toBe('infeasible')
+  })
 })
 
 describe('integer programming protocol', () => {

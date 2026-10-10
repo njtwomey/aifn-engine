@@ -513,7 +513,7 @@ export const debiasedSquaredCalibrationError = defineMetric(
 /**
  * $\mathrm{ECE}_{\mathrm{sweep}}$ (Roelofs et al., 2022): equal-mass bins, with the largest number of bins (up to
  * `maxBins`, default $n$) for which the bin frequencies are still non-decreasing. The bin counts are tried in turn
- * from 1, so the cost grows with $n^2 \log n$.
+ * from 1, on predictions sorted once: $O(n \log n + M^2)$ for $M$ bin counts tried.
  *
  * @param yTrue The true labels.
  * @param probabilities $\pr(\text{positive})$ per case, each in $[0, 1]$.
@@ -529,11 +529,24 @@ export const sweepCalibrationError = defineMetric(
   calibrationInfo('sweepCalibrationError', 'ECE sweep', 'estimating-calibration-error'),
   (yTrue: Labels, probabilities: Data, options: { positive?: Label; maxBins?: number } = {}): number => {
     const { y, p } = binaryInputs(yTrue, probabilities, options.positive, 'sweepCalibrationError')
+    const n = p.length
+    // Sort once, in the order `binAssignments` uses for equal-mass bins; then bin k of m holds the ranks r with
+    // floor(rm/n) = k, from ceil(kn/m) up to ceil((k + 1)n/m), and its frequency comes from prefix sums of the outcomes.
+    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => p[a] - p[b] || a - b)
+    const positives = new Float64Array(n + 1)
+    for (let r = 0; r < n; r++) positives[r + 1] = positives[r] + y[order[r]]
     let best = 1
-    for (let m = 1; m <= (options.maxBins ?? p.length); m++) {
-      const s = binStatistics(y, p, m, 'quantile')
+    for (let m = 1; m <= (options.maxBins ?? n); m++) {
       let monotone = true
-      for (let k = 1; k < m; k++) if (s.freq[k] < s.freq[k - 1]) monotone = false
+      let previous = NaN
+      for (let k = 0, start = 0; k < m && monotone; k++) {
+        const end = Math.ceil(((k + 1) * n) / m)
+        // An empty bin's frequency is NaN, which (as in the comparison of `binStatistics` frequencies) breaks nothing.
+        const freq = end > start ? (positives[end] - positives[start]) / (end - start) : NaN
+        if (freq < previous) monotone = false
+        previous = freq
+        start = end
+      }
       if (!monotone) break
       best = m
     }
@@ -862,7 +875,7 @@ export const crpsGaussian = defineMetric(
  * cases. `samples` is an $n \times m$ matrix ($m$ draws per case) or, for one case, a vector. The plug-in form divides
  * the spread term by $m^2$; `fair: true` divides by $m(m - 1)$, which is unbiased for the underlying distribution.
  * Computed in $O(m \log m)$ per case from the sorted draws. A row count other than the number of observations throws
- * `ShapeError`.
+ * `ShapeError`; no cases, no draws, or a single draw with `fair` throws `DomainError`.
  *
  * @param yTrue The observations, one per case, or a single number for one case.
  * @param samples The draws: an $n \times m$ matrix with a row per case, or a vector of $m$ draws for one case.
@@ -894,7 +907,13 @@ export const crpsEnsemble = defineMetric(
       : { rows: 1, cols: values(samples as Data).length, data: values(samples as Data) }
     if (S.rows !== y.length)
       throw new ShapeError('metrics', `metrics: crpsEnsemble: ${S.rows} ensembles for ${y.length} observations`)
+    nonEmpty(y.length, 'crpsEnsemble')
     const m = S.cols
+    if (m < (options.fair ? 2 : 1))
+      throw new DomainError(
+        'crpsEnsemble',
+        `crpsEnsemble: ${options.fair ? 'the fair score needs at least two draws' : 'needs at least one draw'} per case, got ${m}`,
+      )
     let total = 0
     for (let i = 0; i < y.length; i++) {
       const x = Float64Array.from(S.data.subarray(i * m, (i + 1) * m)).sort()

@@ -332,8 +332,13 @@ function prepare(problem: TreeProblem, where: string): Prepared {
   const y = values(problem.y)
   if (y.length !== n) throw new ShapeError(where, `${where}: ${n} rows but ${y.length} targets`)
   const w = problem.weights ? values(problem.weights) : new Float64Array(n).fill(1)
+  if (w.length !== n) throw new ShapeError(where, `${where}: ${n} rows but ${w.length} weights`)
   let totalWeight = 0
-  for (const u of w) totalWeight += u
+  for (const u of w) {
+    if (!Number.isFinite(u) || u < 0)
+      throw new DomainError(where, `${where}: weights must be non-negative finite numbers`)
+    totalWeight += u
+  }
   const p = problem.params ?? {}
   const criterion = p.criterion ?? (problem.task === 'classification' ? 'gini' : 'squared')
   if ((criterion === 'squared') !== (problem.task === 'regression')) {
@@ -691,26 +696,27 @@ export function treeGrowthSteps(problem: TreeProblem): Algorithm<void, TreeGrowt
   const p = prepare(problem, 'treeGrowthSteps')
   return {
     name: 'cart-growth',
-    init: () => ({
-      t: 0,
-      tree: asTree([], p),
-      pending: [
-        {
-          rows: fromData(
-            Int32Array.from({ length: p.n }, (_, i) => i),
-            [p.n],
-          ),
-          depth: 0,
-          parent: -1,
-          side: 0,
-        },
-      ],
-      current: -1,
-      rows: fromData(new Int32Array(0), [0]),
-      search: null,
-      stop: null,
-      done: false,
-    }),
+    init: () => {
+      const active = Array.from({ length: p.n }, (_, i) => i).filter((i) => p.w[i] > 0)
+      const rootRows = active.length > 0 ? active : Array.from({ length: p.n }, (_, i) => i)
+      return {
+        t: 0,
+        tree: asTree([], p),
+        pending: [
+          {
+            rows: fromData(Int32Array.from(rootRows), [rootRows.length]),
+            depth: 0,
+            parent: -1,
+            side: 0,
+          },
+        ],
+        current: -1,
+        rows: fromData(new Int32Array(0), [0]),
+        search: null,
+        stop: null,
+        done: false,
+      }
+    },
     step: (state, ctx) => {
       if (state.pending.length === 0) return { ...state, t: state.t + 1, done: true }
       const pending = state.pending.slice()

@@ -381,8 +381,8 @@ function elementwiseOf(x: Value, f: (v: number) => number, where: string): Value
  * statistics whose null laws are not families (Kolmogorov's $D_n$, a Bonferroni bound on a maximum). The density is
  * the central difference of the cdf; mean and variance are integrals of the survival function by Simpson's rule on a
  * finite support (they throw on an infinite one); entropy and mode throw. Quantiles invert the cdf numerically, and
- * draws invert uniforms through them. The density's step is relative to the support's width, so the support should be
- * finite.
+ * draws invert uniforms through them. The density's step is $10^{-6}$ relative to the largest of 1, $\lvert x \rvert$
+ * and the support's width (left out when it is infinite).
  *
  * @param spec The law: `name` and `params` (shown when the law is printed), the support's ends `lower` and `upper`,
  *   its `cdf`, and optionally its `survival` function (default $1 - \text{cdf}$). Both are called only inside the
@@ -407,7 +407,8 @@ export function continuousLaw(spec: {
   const sf = (x: number) => (x <= lower ? 1 : x >= upper ? 0 : spec.survival ? spec.survival(x) : 1 - spec.cdf(x))
   const density = (x: number) => {
     if (!(x > lower && x < upper)) return 0
-    const h = 1e-6 * Math.max(1, Math.abs(x), upper - lower)
+    const width = upper - lower
+    const h = 1e-6 * Math.max(1, Math.abs(x), Number.isFinite(width) ? width : 0)
     const a = Math.max(lower, x - h)
     const b = Math.min(upper, x + h)
     return Math.max(0, (cdf(b) - cdf(a)) / (b - a))

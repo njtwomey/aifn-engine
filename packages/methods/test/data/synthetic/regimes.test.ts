@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { stream } from 'aifn-compute/foundation/random'
 import { tensor, toFlat, toRows, type Tensor } from 'aifn-compute/foundation/tensor'
 import { datasetRegistry, generate, type RegimeTruth } from 'aifn-methods/data'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import {
   interleavedFunctions,
   piecewiseLinear,
@@ -132,5 +133,11 @@ describe('regime generators', () => {
       expect(d.x.shape[0]).toBe(30)
       expect(d.regime.shape).toEqual([30])
     }
+  })
+
+  it('interleavedFunctions validates bands', () => {
+    expect(() => interleavedFunctions(stream('b'), { bands: 0 })).toThrow(DomainError)
+    expect(() => interleavedFunctions(stream('b'), { bands: -2 })).toThrow(DomainError)
+    expect(() => interleavedFunctions(stream('b'), { bands: 1.5 })).toThrow(DomainError)
   })
 })

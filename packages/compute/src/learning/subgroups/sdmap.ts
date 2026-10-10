@@ -135,10 +135,14 @@ function joins(pattern: readonly Selector[], s: Selector): boolean {
 export function sdMap(language: SelectorLanguage, measure: CountMeasure, options: SdMapOptions = {}): Subgroup[] {
   if (language.discretisation === 'on-the-fly')
     throw new DomainError('sdMap', 'sdMap: needs a fixed discretisation (equal-frequency or equal-width)')
-  const minSupport = Math.max(1, options.minSupport ?? 1)
+  const minSupport = Math.max(1, options.minSupport ?? measure.minSupport ?? 1)
+  const m =
+    'withMinSupport' in measure && typeof measure.withMinSupport === 'function'
+      ? measure.withMinSupport(minSupport)
+      : measure
   const maxDepth = options.maxDepth ?? 3
   const k = options.k ?? 10
-  const prune = options.prune ?? measure.boundFromCounts !== undefined
+  const prune = options.prune ?? m.boundFromCounts !== undefined
   const minQuality = options.minQuality ?? -Infinity
   const n = language.rows
   // Frequent items, most frequent first (ties by language order): the tree's item order.
@@ -150,7 +154,7 @@ export function sdMap(language: SelectorLanguage, measure: CountMeasure, options
   for (let r = 0; r < n; r++) {
     const path: number[] = []
     for (let j = 0; j < covers.length; j++) if (bitsetHas(covers[j], r)) path.push(j)
-    if (path.length) insert(tree, path, 1, bitsetHas(measure.target, r) ? 1 : 0)
+    if (path.length) insert(tree, path, 1, bitsetHas(m.target, r) ? 1 : 0)
   }
   let results: readonly SearchVisit<Description>[] = []
   let id = 0
@@ -172,7 +176,7 @@ export function sdMap(language: SelectorLanguage, measure: CountMeasure, options
       if (!joins(sels, selector[it])) continue
       const pattern = [...suffix, it]
       const description = language.canonical(pattern.map((j) => selector[j]))
-      const q = measure.fromCounts(cnt, pos)
+      const q = m.fromCounts(cnt, pos)
       const visit: SearchVisit<Description> = {
         id: id++,
         parent: -1,
@@ -180,7 +184,7 @@ export function sdMap(language: SelectorLanguage, measure: CountMeasure, options
         node: description,
         key: descriptionKey(description),
         quality: q,
-        bound: measure.boundFromCounts?.(cnt, pos) ?? Infinity,
+        bound: m.boundFromCounts?.(cnt, pos) ?? Infinity,
         fate: 'leaf',
       }
       results = offerResult(results, visit, k, { minQuality })

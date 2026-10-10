@@ -22,6 +22,7 @@ import { leaves, preOrder } from 'aifn-compute/graph'
 import { stream } from 'aifn-compute/foundation/random'
 import { tensor, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { dataset } from 'aifn-compute/learning/estimators'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import { expectProtocol } from '../../protocol'
 import { close, fx, sameTree, X3, XQ, Y3 } from '../shared'
 
@@ -67,6 +68,14 @@ describe('trees', () => {
     const w = tensor(fx.y3.map((_, i) => (i % 3) + 1))
     const t1 = growTree(undefined, { x: X3, y: Y3, weights: w, task: 'classification' })
     expect(t1.nodes[0].weight).toBe(fx.y3.reduce((a, _, i) => a + (i % 3) + 1, 0))
+  })
+  it('zero-weight rows do not enter tree nodes or count toward leaf samples', () => {
+    const x = tensor([[0], [1], [2], [3]])
+    const y = tensor([0, 1, 0, 1])
+    const w = tensor([1, 1, 0, 0])
+    const t = growTree(undefined, { x, y, weights: w, task: 'classification' })
+    expect(t.nodes[0].count).toBe(2)
+    expect(Array.from(t.nodes[0].rows)).toEqual([0, 1])
   })
   it('a random feature subset without a valid split draws further features, as scikit-learn', () => {
     // Only feature 0 varies; with maxFeatures 1 most nodes first draw a constant feature. Every leaf must still be pure.
@@ -196,6 +205,24 @@ describe('trees', () => {
       })
       expect(best.some((t, i) => impurity(t) < impurity(breadth[i]) - 1e-9)).toBe(true)
       expect(best[0].nodes.some((n) => n.stop === 'max-leaves')).toBe(true)
+    })
+    it('validates sample weights length and finiteness', () => {
+      expect(() =>
+        growTree(undefined, {
+          x: tensor([[1], [2], [3]]),
+          y: tensor([0, 1, 0]),
+          weights: tensor([1, 1]),
+          task: 'classification',
+        }),
+      ).toThrow(ShapeError)
+      expect(() =>
+        growTree(undefined, {
+          x: tensor([[1], [2], [3]]),
+          y: tensor([0, 1, 0]),
+          weights: tensor([1, -1, 1]),
+          task: 'classification',
+        }),
+      ).toThrow(DomainError)
     })
   })
 })

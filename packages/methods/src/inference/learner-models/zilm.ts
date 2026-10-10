@@ -164,8 +164,8 @@ export interface LearnerModelFit {
 
 /**
  * The observed (training) responses as a list: student and item of each, and the answer. The likelihood is evaluated
- * on these pairs only, not on the whole $P \times I$ matrix. Throws `DomainError` (naming `fitLearnerModel`) for a
- * finite response other than 0 or 1.
+ * on these pairs only, not on the whole $P \times I$ matrix. Throws `DomainError` for a finite response other than 0
+ * or 1, naming `learnerObjective`, its only caller.
  *
  * @param responses The $P \times I$ responses: 0, 1, or NaN for not attempted.
  * @param train A row-major mask over the responses: only those with a non-zero entry are kept. All observed ones when
@@ -182,7 +182,7 @@ function observed(responses: Tensor, train?: Uint8Array) {
   for (let k = 0; k < raw.length; k++)
     if (Number.isFinite(raw[k]) && (!train || train[k])) {
       if (raw[k] !== 0 && raw[k] !== 1)
-        throw new DomainError('fitLearnerModel', 'fitLearnerModel: responses are 0 or 1')
+        throw new DomainError('learnerObjective', `learnerObjective: responses are 0, 1 or NaN, got ${raw[k]}`)
       student.push(Math.floor(k / I))
       item.push(k % I)
       y.push(raw[k])

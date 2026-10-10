@@ -49,7 +49,7 @@ export interface TwoViewOptions {
   kind?: 'plane' | 'depth'
   /**
    * The angle $\theta$, in radians, of the second camera's turn about the vertical ($Y$) axis: $\Rmat$ is the rotation
-   * by $-\theta$. Default 0.25.
+   * by $\theta$. Default 0.25.
    */
   rotation?: number
   /** The second camera's sideways offset: its centre is at $(b, 0, 0)$. Default 1. */
@@ -101,9 +101,8 @@ const mat3 = (m: Tensor) => dense.data(m)
 
 /**
  * A synthetic two-view scene. Camera 1 is at the origin looking down $+Z$; camera 2 is moved sideways to $(b, 0, 0)$
- * ($b$ the `baseline`) and turned about the vertical axis, $\Rmat$ being the rotation by $-\theta$ ($\theta$ the
- * `rotation`). With positive $b$ and $\theta$ that turns its optical axis towards $+X$, away from the scene, so the
- * second view is shifted left and part of it can fall outside the image: coordinates are not clipped. The scene points
+ * ($b$ the `baseline`) and turned about the vertical axis, $\Rmat$ being the rotation by $\theta$ ($\theta$ the
+ * `rotation`), turning its optical axis inwards towards the scene. The scene points
  * have $X, Y$ uniform on $[-2.2, 2.2]$ and lie on the plane $Z = 6.5 + 0.4X - 0.3Y$ (that is,
  * $\nvec^\top\mathbf{X} = d$ with $\nvec = (-0.4, 0.3, 1)$, $d = 6.5$) or have $Z$ uniform on $[5, 8]$. They are
  * projected into both views, Gaussian noise is added to every coordinate, and a fraction of the second-view points are
@@ -145,7 +144,7 @@ export function twoViewScene(s: Stream, options: TwoViewOptions = {}): TwoViewSc
     [0, 1, 0],
     [0, 0, 1],
   ]
-  const R = rotationMatrix([0, 1, 0], -(options.rotation ?? 0.25))
+  const R = rotationMatrix([0, 1, 0], options.rotation ?? 0.25)
   const C2 = [options.baseline ?? 1, 0, 0]
   // t = −R C for a camera at C.
   const r = mat3(R)

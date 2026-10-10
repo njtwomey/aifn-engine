@@ -10,7 +10,7 @@
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
-import { AifnError } from 'aifn-compute/foundation/errors'
+import { AifnError, DomainError } from 'aifn-compute/foundation/errors'
 import {
   div,
   exp,
@@ -111,6 +111,22 @@ const raw = (x: Value): Tensor => {
 }
 
 /**
+ * Throws `DomainError` unless every entry of `destination` is a node: an integer in $0, \dots, V - 1$.
+ *
+ * @param where The public function's name, for the error message.
+ * @param destination The destination node of each edge.
+ * @param nodes The number of nodes $V$.
+ */
+function checkDestinations(where: string, destination: Int32Array, nodes: Size): void {
+  for (let k = 0; k < destination.length; k++)
+    if (!(destination[k] >= 0 && destination[k] < nodes))
+      throw new DomainError(
+        where,
+        `${where}: edge ${k}'s destination ${destination[k]} is not a node of 0…${nodes - 1}`,
+      )
+}
+
+/**
  * Flat indices of rows `rows` of a row-major matrix with `width` columns: the entries of each listed row in turn.
  *
  * @param rows The row numbers, in the order wanted; a row may repeat.
@@ -129,7 +145,7 @@ function rowIndices(rows: Int32Array, width: Size): Int32Array {
  * incoming edges) or `max` (each feature's largest; its gradient goes to that row only, ties to the first edge). A
  * node with no incoming edge gets zeros. The segment reduction behind {@link propagate}, attention and pooling.
  * Differentiable in `messages`. Throws `AifnError` unless `messages` is a matrix with one row per entry of
- * `destination`.
+ * `destination`, and `DomainError` when a destination is not a node.
  *
  * @param messages The per-edge rows $\mvec_k$, an $E \times G$ matrix (traced or not).
  * @param destination The destination node of each row, $E$ entries in $0, \dots, V - 1$.
@@ -159,6 +175,7 @@ export function aggregateEdges(
   const mShape = shapeOfValue(messages)
   if (mShape.length !== 2 || mShape[0] !== destination.length)
     throw new AifnError('aggregateEdges', 'aggregateEdges: messages must have one row per edge')
+  checkDestinations('aggregateEdges', destination, nodes)
   const V = nodes
   const G = mShape[1]
   const m = messages
@@ -183,19 +200,18 @@ export function aggregateEdges(
       const at = destination[k] * G + j
       if (best[at] < 0 || values[k * G + j] > values[best[at]]) best[at] = k * G + j
     }
-  const empty = best.map((b) => (b < 0 ? 1 : 0))
-  if (!empty.some((x) => x === 1)) return gather(m, best, [V, G])
-  const picked = gather(
-    m,
-    best.map((b) => Math.max(b, 0)),
-    [V, G],
-  )
-  return mul(
-    picked,
-    fromData(
-      Float64Array.from(empty, (x) => 1 - x),
-      [V, G],
+  if (best.every((b) => b >= 0)) return gather(m, best, [V, G])
+  // Some node receives nothing: gather only the filled slots and scatter them into zeros (masking by multiplying would
+  // turn an infinite message into NaN at the empty slots).
+  const filled = Int32Array.from(best.keys()).filter((at) => best[at] >= 0)
+  return scatterAdd(
+    gather(
+      m,
+      Int32Array.from(filled, (at) => best[at]),
+      [filled.length],
     ),
+    filled,
+    [V, G],
   )
 }
 
@@ -203,7 +219,8 @@ export function aggregateEdges(
  * The softmax of edge scores ($E \times H$, one column per head) over each destination's incoming edges:
  * $\alpha_k = \exp(e_k) / \sum_{k' : d_{k'} = d_k} \exp(e_{k'})$, $d_k$ the destination of edge $k$. The
  * per-destination maximum is subtracted first (a constant, so gradients are unchanged). Differentiable in the scores.
- * Throws `AifnError` unless `scores` is a matrix with one row per entry of `destination`.
+ * Throws `AifnError` unless `scores` is a matrix with one row per entry of `destination`, and `DomainError` when a
+ * destination is not a node.
  *
  * @param scores The edge scores $e_k$, an $E \times H$ matrix with a column per attention head (traced or not).
  * @param destination The destination node of each edge, $E$ entries in $0, \dots, V - 1$.
@@ -219,6 +236,7 @@ export function edgeSoftmax(scores: Value, destination: Int32Array, nodes: Size)
   const shape = shapeOfValue(scores)
   if (shape.length !== 2 || shape[0] !== destination.length)
     throw new AifnError('edgeSoftmax', 'edgeSoftmax: scores must have one row per edge')
+  checkDestinations('edgeSoftmax', destination, nodes)
   const H = shape[1]
   const e = toFlat(raw(scores))
   const top = new Float64Array(nodes * H).fill(-Infinity)

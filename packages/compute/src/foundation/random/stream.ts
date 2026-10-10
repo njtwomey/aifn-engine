@@ -93,7 +93,8 @@ export function stream(seed: number | string): Stream {
  *
  * @param s The parent: a stream, or just its key (its position is ignored either way).
  * @param path The parts naming the child: strings or finite numbers.
- * @returns A new stream at position 0 whose key path is the parent's, then `/`, then the parts joined by `:`.
+ * @returns A new stream at position 0 whose key path is the parent's, then `/`, then the parts joined by `:` (a lone
+ *   `%` when there are no parts, so that it differs from the path of one empty part).
  *
  * @example A child's draws do not depend on its parent's
  * const s = stream(7)
@@ -113,7 +114,9 @@ export function child(s: Stream | Key, ...path: (string | number)[]): Stream {
   const key = 'key' in s ? s.key : s
   const parts = path.map(partName)
   const hash = absorb(key.hash, encodeLevel(LEVEL, parts))
-  return { key: { path: `${key.path}/${parts.map(escapePart).join(':')}`, hash }, position: 0 }
+  // No parts shows as a lone `%`, which no escaped name contains, so `child(s)` and `child(s, '')` differ in path.
+  const level = parts.length === 0 ? '%' : parts.map(escapePart).join(':')
+  return { key: { path: `${key.path}/${level}`, hash }, position: 0 }
 }
 
 /**

@@ -80,6 +80,12 @@ describe('the replay buffer', () => {
     expect(m.observations[2 * 7 + 1]).toBe(-i[7])
     expect(() => sampleIndices(replayBuffer(2, 10), 1, stream(0))).toThrow(DomainError)
   })
+
+  it('gathers real-valued (DDPG) actions without truncating them to integers', () => {
+    let b = replayBuffer(1, 10)
+    for (const a of [0.75, -1.5, 2]) b = pushTransition(b, [0], a, 0, [0], false)
+    expect(Array.from(gatherMinibatch(b, [0, 1, 2]).actions)).toEqual([0.75, -1.5, 2])
+  })
 })
 
 describe('TD targets', () => {

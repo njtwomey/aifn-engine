@@ -16,6 +16,7 @@ import {
   gradientImage,
   linearRegressionData,
   moons,
+  motifSeries,
   randomWalk,
   ratings,
   regression1d,
@@ -33,6 +34,7 @@ import {
 import { type Dataset } from 'aifn-methods/data'
 import { stream } from 'aifn-compute/foundation/random'
 import { toFlat } from 'aifn-compute/foundation/tensor'
+import { DomainError } from 'aifn-compute/foundation/errors'
 
 const generators: [string, (s: ReturnType<typeof stream>) => Dataset, number, number][] = [
   ['blobs', (s) => blobs(s, { n: 90 }), 90, 2],
@@ -140,6 +142,12 @@ describe('sequences', () => {
     expect(arSeries(stream(7), { coefficients: [1.5], n: 3000, burn: 0 }).diverged).toBe(true)
     expect(seasonalSeries(stream(8)).y.shape).toEqual([120])
     expect(randomWalk(stream(9), { n: 5 }).y.shape).toEqual([5])
+
+    const c0 = casino(stream(10), { toLoaded: 0, toFair: 0 })
+    expect(Array.from(toFlat(c0.model.initial))).toEqual([0.5, 0.5])
+    expect(() => seasonalSeries(stream(8), { persistence: 1 })).toThrow(DomainError)
+    expect(() => seasonalSeries(stream(8), { persistence: -1.5 })).toThrow(DomainError)
+    expect(() => motifSeries(stream(8), { m: 1 })).toThrow(DomainError)
   })
 })
 

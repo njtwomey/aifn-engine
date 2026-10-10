@@ -321,15 +321,19 @@ export interface ModelEpState extends Status {
    * Interval updates skipped in the last sweep because a cavity was improper or the tilted moments were not usable.
    */
   skipped: number
-  /** Whether the last sweep moved no site parameter by more than `tolerance` (true at once with no factors). */
+  /**
+   * Whether the last sweep moved no site parameter by more than `tolerance` and skipped none (true at once with no
+   * factors).
+   */
   converged: boolean
 }
 
 /**
  * EP over a linear-Gaussian model with interval and Gaussian evidence (see the file comment), as a traceable
- * algorithm: one sweep per step, `converged` when a sweep moves no site by more than `tolerance`. The marginals are
- * `means` and `variances`, in the order of `keys`. No start. The model is compiled by `compileGaussianModel` when the
- * algorithm is made, so a model it cannot handle throws `DomainError` then, as does a `damping` outside $[0, 1)$.
+ * algorithm: one sweep per step, `converged` when a sweep moves no site by more than `tolerance` and skips none. The
+ * marginals are `means` and `variances`, in the order of `keys`. No start. The model is compiled by
+ * `compileGaussianModel` when the algorithm is made, so a model it cannot handle throws `DomainError` then, as does a
+ * `damping` outside $[0, 1)$.
  *
  * @param m The model, or one already expanded by `expandModel`.
  * @param bindings The sizes, constants and data (default none); evidence is the observed nodes with data.
@@ -462,7 +466,7 @@ export function modelExpectationPropagation(
           nu[o + j] = n
         })
       }
-      return stateOf(s.t + 1, tau, nu, change, skipped, change < tolerance)
+      return stateOf(s.t + 1, tau, nu, change, skipped, change < tolerance && skipped === 0)
     },
   }
 }

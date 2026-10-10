@@ -25,6 +25,7 @@ import {
 } from 'aifn-methods/learning/preprocessing'
 import { normals, stream } from 'aifn-compute/foundation/random'
 import { matmul, tensor, toFlat, toRows, transpose, type Tensor } from 'aifn-compute/foundation/tensor'
+import { DomainError } from 'aifn-compute/foundation/errors'
 
 const close = (a: ArrayLike<number>, b: ArrayLike<number>, tol: number) => {
   expect(a.length).toBe(b.length)
@@ -190,6 +191,9 @@ describe('whitening', () => {
       close(toFlat(w.inverseTransform(z)), toFlat(x), 1e-10)
       expect(w.singular).toBe(false)
     }
+    expect(() => whitening({ components: 0 }).fit({ x })).toThrow(DomainError)
+    expect(() => whitening({ components: 4 }).fit({ x })).toThrow(DomainError)
+    expect(() => whitening({ components: 1.5 }).fit({ x })).toThrow(DomainError)
   })
 })
 

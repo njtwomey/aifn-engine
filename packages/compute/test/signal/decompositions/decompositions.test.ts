@@ -37,6 +37,7 @@ describe('empirical mode decomposition', () => {
     const one = siftImf(x, { rule: { kind: 'fixed', sifts: 6 } })
     expect(one.sifts).toBe(6)
     expect(toFlat(one.imf)).toEqual(toFlat(t.final.h))
+    expect(siftImf(x, { maxSteps: 1 }).sifts).toBe(1)
   })
 
   it('extrema counts maxima, minima and zero crossings', () => {

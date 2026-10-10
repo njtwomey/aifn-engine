@@ -15,7 +15,7 @@ import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import type { Algorithm } from 'aifn-compute/foundation/trace'
 import type { Decomposition, Scalar, Size, Status } from 'aifn-compute/foundation/contracts'
 import { readSamples, type Samples, type SignalInput } from '../signal'
-import { emd as emdCore, findExtrema, sift, siftStep, stopTest, type StopRule } from './emd-core'
+import { emd as emdCore, findExtrema, sift, siftStep, stopTest, type EmdArrays, type StopRule } from './emd-core'
 
 export type { StopRule }
 
@@ -220,12 +220,12 @@ export function siftSteps(x: SignalInput, options: SiftOptions = {}): Algorithm<
 }
 
 /**
- * Sift one IMF out of $x$: the result of `siftSteps` run to the end. The sifting stops after at most `maxSteps` $- 1$
- * sifts (default 1000), as the loop it shares with `emd` counts from 1.
+ * Sift one IMF out of $x$: the result of `siftSteps` run to the end. The sifting stops after at most `maxSteps`
+ * sifts (default 1000).
  *
  * @param x The signal: a single-channel `Signal` or its samples.
- * @param options The stopping rule, whether to mirror extrema at the ends, and `maxSteps`, one more than the most
- *   sifts made (default 1000).
+ * @param options The stopping rule, whether to mirror extrema at the ends, and `maxSteps`, the most sifts made
+ *   (default 1000).
  * @returns The sifted `imf`, the number of `sifts` made, and `oscillating`, false when $x$ (or a sifted candidate) had
  *   too few extrema to sift, so that `imf` is a residue rather than an IMF.
  *
@@ -263,10 +263,10 @@ export function siftImf(
  * @param options The ensemble and the decomposition of each trial.
  * @param options.trials The number of noise realisations $I$ (default 50).
  * @param options.epsilon The noise amplitude $\varepsilon$, relative to $\sigma_x$ (default 0.2).
- * @param options.maxImfs The most IMFs per trial, and the number of components returned. Required, as the slots must
- *   line up across trials; it must be non-negative.
+ * @param options.maxImfs The most IMFs per trial, and the number of components returned (default −1: no limit, and
+ *   as many components as the trial with the most IMFs).
  * @param options.rule When to stop sifting one IMF (default 10 fixed sifts, as Wu and Huang).
- * @returns `maxImfs` averaged IMFs as components `imf 1`, `imf 2`, and so on, with the averaged residue.
+ * @returns The averaged IMFs as components `imf 1`, `imf 2`, and so on, with the averaged residue.
  *
  * @example Twenty noisy copies: the tones separate, and the sum carries the averaged noise
  * const x = Array.from({ length: 256 }, (_, t) => Math.cos((2 * Math.PI * t) / 8) + Math.cos((2 * Math.PI * t) / 32))
@@ -278,9 +278,9 @@ export function siftImf(
 export function eemd(
   s: Stream,
   x: SignalInput,
-  options: { trials?: Size; epsilon?: Scalar; maxImfs: Size; rule?: StopRule },
+  options: { trials?: Size; epsilon?: Scalar; maxImfs?: Size; rule?: StopRule } = {},
 ): Decomposition {
-  const { trials = 50, epsilon = 0.2, maxImfs, rule = { kind: 'fixed', sifts: 10 } } = options
+  const { trials = 50, epsilon = 0.2, maxImfs = -1, rule = { kind: 'fixed', sifts: 10 } } = options
   const input = readSamples(x, 'eemd')
   const v = input.values
   const n = v.length
@@ -289,12 +289,18 @@ export function eemd(
   let sd = 0
   for (const u of v) sd += (u - mean) ** 2 / n
   const scale = epsilon * Math.sqrt(sd)
-  const imfs = Array.from({ length: maxImfs }, () => new Float64Array(n))
-  const residue = new Float64Array(n)
+  const trialResults: EmdArrays[] = []
+  let kMax = maxImfs >= 0 ? maxImfs : 0
   for (let trial = 0; trial < trials; trial++) {
     const w = dense.data(normals(child(s, 'trial', trial), [n]))
     const y = v.map((u, i) => u + scale * w[i])
     const d = emdCore(y, { maxImfs, rule })
+    trialResults.push(d)
+    if (d.imfs.length > kMax) kMax = d.imfs.length
+  }
+  const imfs = Array.from({ length: kMax }, () => new Float64Array(n))
+  const residue = new Float64Array(n)
+  for (const d of trialResults) {
     d.imfs.forEach((imf, j) => {
       for (let i = 0; i < n; i++) imfs[j][i] += imf[i] / trials
     })

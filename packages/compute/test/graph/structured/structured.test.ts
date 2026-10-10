@@ -5,8 +5,10 @@ import {
   latticeTemplate,
   markovBlanket,
   nodesWithRole,
+  repeatedSlices,
   shape,
   structured,
+  structuredGraph,
   toDiagram,
   treeTemplate,
   unroll,
@@ -49,5 +51,20 @@ describe('templates and unrolling', () => {
     const d = toDiagram(m)
     expect(JSON.parse(JSON.stringify(d))).toEqual(d)
     expect(d.groups.length).toBe(1)
+  })
+})
+
+describe('structuredGraph and repeatedSlices', () => {
+  it('rejects groups whose parents nest in a cycle instead of hanging', () => {
+    const plate = (name: string, parent: string) => ({ name, kind: 'plate' as const, size: 2, index: ['n'], parent })
+    expect(() => structuredGraph({ nodes: [], groups: [plate('a', 'b'), plate('b', 'a')] })).toThrow(/cycle/)
+    expect(() => structuredGraph({ nodes: [], groups: [plate('a', 'a')] })).toThrow(/cycle/)
+  })
+  it('repeatedSlices lists a size name once when the slice already has it', () => {
+    const slice = structured('s', (b) => {
+      b.size('T')
+      b.latent('z')
+    })
+    expect(repeatedSlices(slice, 'T', [['z', 'z']]).sizes).toEqual(['T'])
   })
 })

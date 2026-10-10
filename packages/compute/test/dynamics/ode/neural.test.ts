@@ -25,6 +25,7 @@ import {
 import { dormandPrince, type OdeSolveInfo } from 'aifn-compute/dynamics/ode'
 import { augmentedDynamics, jacobianTrace, odeFlow, traceProbe } from 'aifn-compute/dynamics/ode'
 import { run } from 'aifn-compute/foundation/trace'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { fixture } from '../../fixtures'
 
 const flat = (v: unknown): number[] => (typeof v === 'number' ? [v] : Array.from(toFlat(unwrap(v as Value) as Tensor)))
@@ -90,6 +91,10 @@ describe('odeFlow', () => {
       ['forward', 10, 40],
       ['forward', 10, 40],
     ])
+  })
+
+  it('rejects a first time that is not finite', () => {
+    for (const t0 of [NaN, -Infinity]) expect(() => odeFlow((_t, x) => neg(x), [t0, 1])).toThrow(DomainError)
   })
 
   it('the adjoint reports its backward solves; checkpoints shrink the reconstruction error of x₀', () => {

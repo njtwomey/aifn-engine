@@ -89,9 +89,9 @@ function build(
 /**
  * The Rosenbrock function (Rosenbrock, 1960), generalised to $n \ge 2$ dimensions as
  * $f(\xvec) = \sum_{i=1}^{n-1} b(x_{i+1} - x_i^2)^2 + (a - x_i)^2$, with a curved, flat-bottomed valley. In two
- * dimensions the minimum is 0 at $(a, a^2)$; in more, with $a = 1$, it is 0 at $(1, \dots, 1)$, and for other $a$ no
- * minimiser is listed. The start is $(-1.2, 1, -1.2, 1, \dots)$ and the plotting box $[-2, 3]^n$. Throws
- * `DomainError` when $n < 2$.
+ * dimensions the minimum is 0 at $(a, a^2)$; in more, with $a = 1$ it is 0 at $(1, \dots, 1)$, with $a = 0$
+ * it is 0 at $(0, \dots, 0)$, and for other $a$ the minimum is positive and no minimiser is listed. The start is
+ * $(-1.2, 1, -1.2, 1, \dots)$ and the plotting box $[-2, 3]^n$. Throws `DomainError` when $n < 2$.
  *
  * @param options The shape parameters and the dimension.
  * @param options.a The valley's offset $a$: the minimiser's first coordinate.
@@ -132,11 +132,13 @@ export function rosenbrock({ a = 1, b = 100, n = 2 }: { a?: number; b?: number; 
       return H
     },
   }
-  // The minimiser (a, a², a⁴…) is exact only for a = 1 when n > 2; for n = 2 it is (a, a²).
-  const minimum = n === 2 ? [a, a * a] : Array.from({ length: n }, () => a)
+  // The global minimum value is 0 for n = 2 (at (a, a²)), for a = 1 (at (1…1)), and for a = 0 (at the origin).
+  const knownZero = n === 2 || a === 1 || a === 0
+  const minimum =
+    n === 2 ? [a, a * a] : a === 1 ? Array.from({ length: n }, () => 1) : Array.from({ length: n }, () => 0)
   return build('rosenbrock', n, kernel, {
-    minima: n === 2 || a === 1 ? [minimum] : [],
-    minimumValue: 0,
+    minima: knownZero ? [minimum] : [],
+    minimumValue: knownZero ? 0 : NaN,
     start: Array.from({ length: n }, (_, i) => (i % 2 === 0 ? -1.2 : 1)),
     lo: Array.from({ length: n }, () => -2),
     hi: Array.from({ length: n }, () => 3),
@@ -249,8 +251,8 @@ export function beale(): TestFunction {
  *   smallest.
  * @param options.n The dimension $n$.
  * @param options.angle The rotation of the eigenvectors, in radians (two dimensions only; ignored otherwise).
- * @param options.center The minimiser $\cvec$, $n$ values (default the origin). Its length is not checked against
- *   `n`.
+ * @param options.center The minimiser $\cvec$, $n$ values (default the origin). Throws `ShapeError` if its length
+ *   does not match `n`.
  * @returns The test function.
  *
  * @example The Hessian holds the eigenvalues 1 and the condition number
@@ -264,6 +266,11 @@ export function quadraticBowl({
   angle = 0,
   center,
 }: { condition?: number; n?: number; angle?: number; center?: readonly number[] } = {}): TestFunction {
+  if (center && center.length !== n)
+    throw new ShapeError(
+      'quadraticBowl',
+      `quadraticBowl: center length (${center.length}) must match dimension n (${n})`,
+    )
   const eig = Array.from({ length: n }, (_, i) => (n === 1 ? 1 : condition ** (i / (n - 1))))
   const A = new Float64Array(n * n)
   if (n === 2) {

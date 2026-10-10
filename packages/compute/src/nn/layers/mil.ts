@@ -109,8 +109,8 @@ function attend(p: NonNullable<MilPoolingParams['attention']>, z: Value): Value 
 
 /**
  * Pool bags of instance embeddings $\Zmat$, `[B, t, d]`, into bag logits by one of the five methods of the file notes,
- * with the instance-level interpretation. Differentiable. Throws `ShapeError` when `z` is not rank 3 or the mask's
- * leading axes are not `[B, t]`, and `DomainError` when an attention kind is given no attention head.
+ * with the instance-level interpretation. Differentiable. Throws `ShapeError` when `z` is not rank 3 or the mask is
+ * not `[B, t]`, and `DomainError` when an attention kind is given no attention head.
  *
  * @param kind The pooling method.
  * @param params The classifier and, for the attention kinds, the attention head, as `MilPooling` draws them.
@@ -135,8 +135,11 @@ export function milPool(kind: MilPoolingKind, params: MilPoolingParams, z: Value
   const shape = shapeOfValue(z)
   if (shape.length !== 3)
     throw new ShapeError('milPool', `milPool: embeddings must be [B, t, d], got [${shape.join(', ')}]`)
-  if (mask && (mask.shape[0] !== shape[0] || mask.shape[1] !== shape[1]))
-    throw new ShapeError('milPool', 'milPool: the mask must be [B, t]')
+  if (mask && (mask.shape.length !== 2 || mask.shape[0] !== shape[0] || mask.shape[1] !== shape[1]))
+    throw new ShapeError(
+      'milPool',
+      `milPool: the mask must be [${shape[0]}, ${shape[1]}], got [${mask.shape.join(', ')}]`,
+    )
   const psi = (x: Value) => linear(x, params.classifier.weight, params.classifier.bias)
   if (usesAttention(kind) && !params.attention)
     throw new DomainError('milPool', `milPool: ${kind} pooling needs the attention head's parameters`)

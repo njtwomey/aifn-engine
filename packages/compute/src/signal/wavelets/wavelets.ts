@@ -403,9 +403,7 @@ export type Cwt = TimeFrequency & {
  * $W(a, b) = \frac{1}{\sqrt{a}} \int x(t)\, \psi^*\!\left(\frac{t - b}{a}\right) dt$ at the given frequencies,
  * with $a = \omega_0 / (2\pi f)$. Computed per scale in the frequency domain, where the analytic Morlet is a Gaussian
  * at $\omega_0 / a$ (negative frequencies are dropped); the signal is zero-padded to a power of two at least twice its
- * length to avoid wrap-around. The coefficients (and so the magnitudes) are then divided by $\sqrt{f_s}$, so for a
- * signal of fixed duration they scale as $f_s^{-1/2}$. $f_s$ comes from the signal (or the `fs` option); frequencies
- * are in Hz.
+ * length to avoid wrap-around. $f_s$ comes from the signal (or the `fs` option); frequencies are in Hz.
  *
  * @param x The single-channel signal (a `Signal`, or bare samples at the `fs` option's rate).
  * @param frequencies The analysis frequencies $f$ in Hz, each positive; one row of the result per frequency, in the
@@ -450,14 +448,13 @@ export function cwt(x: SignalInput, frequencies: VectorLike, options: { fs?: Sca
   })
   if (freqs.length > 0) {
     const W = ifft(fromData(filtered, [freqs.length, size], 'complex128')).data as Float64Array
-    const norm = Math.sqrt(fs)
     for (let row = 0; row < freqs.length; row++)
       for (let i = 0; i < n; i++) {
         const re = W[2 * (row * size + i)]
         const im = W[2 * (row * size + i) + 1]
-        outRe[row * n + i] = re / norm
-        outIm[row * n + i] = im / norm
-        mag[row * n + i] = Math.hypot(re, im) / norm
+        outRe[row * n + i] = re
+        outIm[row * n + i] = im
+        mag[row * n + i] = Math.hypot(re, im)
       }
   }
   return {

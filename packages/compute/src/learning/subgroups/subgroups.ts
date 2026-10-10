@@ -134,13 +134,17 @@ export function subgroupSpace(
   measure: QualityMeasure,
   options: { minSupport?: number } = {},
 ): SearchSpace<Description> {
-  const minSupport = Math.max(1, options.minSupport ?? 1)
+  const minSupport = Math.max(1, options.minSupport ?? measure.minSupport ?? 1)
+  const m =
+    'withMinSupport' in measure && typeof (measure as any).withMinSupport === 'function'
+      ? (measure as any).withMinSupport(minSupport)
+      : measure
   const big = (d: Description) => bitsetCount(language.cover(d)) >= minSupport
   return {
     root: [],
     refine: (d) => language.refinements(d),
-    quality: (d) => (big(d) ? measure.quality(language.cover(d)) : -Infinity),
-    ...(measure.bound ? { bound: (d: Description) => (big(d) ? measure.bound!(language.cover(d)) : -Infinity) } : {}),
+    quality: (d) => (big(d) ? m.quality(language.cover(d)) : -Infinity),
+    ...(m.bound ? { bound: (d: Description) => (big(d) ? m.bound!(language.cover(d)) : -Infinity) } : {}),
     key: descriptionKey,
     expandable: big,
   }
@@ -193,9 +197,14 @@ export function subgroupDiscoverySteps(
   measure: QualityMeasure,
   options: SubgroupOptions = {},
 ): Algorithm<undefined, SearchState<Description>> {
+  const minSupport = Math.max(1, options.minSupport ?? measure.minSupport ?? 1)
+  const m =
+    'withMinSupport' in measure && typeof (measure as any).withMinSupport === 'function'
+      ? (measure as any).withMinSupport(minSupport)
+      : measure
   return refinementSearchSteps(
-    subgroupSpace(language, measure, { minSupport: options.minSupport }),
-    searchOptions(language, options),
+    subgroupSpace(language, m, { minSupport }),
+    searchOptions(language, { ...options, minSupport }),
   )
 }
 
@@ -255,9 +264,14 @@ export function subgroupDiscovery(
   measure: QualityMeasure,
   options: SubgroupOptions = {},
 ): Subgroup[] {
+  const minSupport = Math.max(1, options.minSupport ?? measure.minSupport ?? 1)
+  const m =
+    'withMinSupport' in measure && typeof (measure as any).withMinSupport === 'function'
+      ? (measure as any).withMinSupport(minSupport)
+      : measure
   const final = refinementSearch(
-    subgroupSpace(language, measure, { minSupport: options.minSupport }),
-    searchOptions(language, options),
+    subgroupSpace(language, m, { minSupport }),
+    searchOptions(language, { ...options, minSupport }),
   )
-  return final.results.map((v) => ({ ...subgroupOf(language, measure, v.node), quality: v.quality }))
+  return final.results.map((v) => ({ ...subgroupOf(language, m, v.node), quality: v.quality }))
 }

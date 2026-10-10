@@ -147,10 +147,10 @@ export function ssmKernel(A: Value, B: Value, C: Value, length: Size): Value {
 /**
  * The causal convolution $y_t = \sum_{k \le t} K_k u_{t-k}$ of inputs $u$ with a kernel $K$: a lower-triangular
  * Toeplitz matrix gathered from $K$, times $u$. Differentiable in $K$ and $u$. This is the convolutional mode of a
- * state-space layer. The kernel must have exactly as many taps as $u$ has steps: a longer one leaks its tap $L$ into
- * the upper triangle.
+ * state-space layer. The kernel may have any number of taps $n$: taps past $u$'s length $L$ are unused, and a shorter
+ * kernel is read as zero past its last tap ($K_k = 0$ for $k \ge n$).
  *
- * @param kernel The taps $K_0, \dots, K_{L-1}$: a vector of $L$, or $[L, \dots]$ with one kernel per channel.
+ * @param kernel The taps $K_0, \dots, K_{n-1}$: a vector of $n$, or $[n, \dots]$ with one kernel per channel.
  * @param u The input, time first: a vector of $L$ for a vector kernel, or $[L, \dots]$ with the kernel's trailing shape
  *   (each channel convolved with its own kernel).
  * @returns The output $y$, with the shape of `u`.
@@ -167,13 +167,15 @@ export function ssmKernel(A: Value, B: Value, C: Value, length: Size): Value {
 export function causalConvolution(kernel: Value, u: Value): Value {
   const L = shapeOfValue(u)[0]
   const ks = shapeOfValue(kernel)
+  const n = ks[0]
   const rest = ks.slice(1)
   const w = rest.reduce((p, q) => p * q, 1)
-  // T[t, s] = K[t − s] for s ≤ t, else a padded zero row (index L).
+  // T[t, s] = K[t − s] for 0 ≤ t − s < n, else the padded zero row (index n, after the kernel's own taps).
   const padded = concat([kernel, zeros([1, ...rest])], 0)
   const ids = new Int32Array(L * L * w)
   for (let t = 0; t < L; t++)
-    for (let s = 0; s < L; s++) for (let j = 0; j < w; j++) ids[(t * L + s) * w + j] = (s <= t ? t - s : L) * w + j
+    for (let s = 0; s < L; s++)
+      for (let j = 0; j < w; j++) ids[(t * L + s) * w + j] = (s <= t && t - s < n ? t - s : n) * w + j
   const toeplitz = gather(reshape(padded, [-1]), ids, [L, L, ...rest])
   if (rest.length === 0) return squeeze(matmul(toeplitz, expandDims(u, 1)), 1)
   // Per channel: y[t, …] = Σ_s T[t, s, …] u[s, …].

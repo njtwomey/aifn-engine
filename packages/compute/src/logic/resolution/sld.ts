@@ -281,7 +281,7 @@ class PrologError extends Error {}
  * `truncate`; binary `+`, `-`, `*`, `/`, `//`, `mod`, `rem`, `min`, `max`, `**` and `^`. `//`, `mod` and `rem` need
  * integers; `//` truncates towards zero, and `mod` takes the sign of the divisor and `rem` that of the dividend.
  * Throws `PrologError` for an unbound variable, an atom that is not a constant, a non-integer where an integer is
- * needed, division by zero with `/`, `//` or `mod`, and an unknown function.
+ * needed, division by zero with `/`, `//`, `mod` or `rem`, and an unknown function.
  *
  * @param t The expression; every variable in it must be bound.
  * @returns Its value.
@@ -349,8 +349,10 @@ function evaluate(t: Term): number {
             const m = int(a[0]) % a[1]
             return m !== 0 && Math.sign(m) !== Math.sign(a[1]) ? m + a[1] : m
           }
-          case 'rem':
-            return int(a[0]) % int(a[1])
+          case 'rem': {
+            if (int(a[1]) === 0) throw new PrologError('evaluation error: division by zero')
+            return int(a[0]) % a[1]
+          }
           case 'min':
             return Math.min(a[0], a[1])
           case 'max':

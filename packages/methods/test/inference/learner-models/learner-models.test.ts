@@ -266,4 +266,23 @@ describe('streamed runs', () => {
     expect(r.value.points.map((p) => p.rate)).toEqual(rates)
     expect(r.value.points[1].structuralShare.with).toBeGreaterThan(r.value.points[0].structuralShare.with)
   })
+
+  it('learnerEquitySweep throws ShapeError unless there is one rate per dataset', () => {
+    const data = learnerResponses(stream('zilm/sweep'), { students: 10, items: 4, attempts: 4 })
+    expect(() => learnerEquitySweep([data, data], [0.1]).next()).toThrow(
+      expect.objectContaining({ name: 'ShapeError', message: expect.stringMatching(/^learnerEquitySweep: /) }),
+    )
+  })
+})
+
+describe('response validation', () => {
+  it('learnerObjective names itself for a response that is not 0, 1 or NaN', () => {
+    expect(() => learnerObjective(tensor([[1, 2]]), { model: 'irt' })).toThrow(
+      expect.objectContaining({
+        name: 'DomainError',
+        op: 'learnerObjective',
+        message: expect.stringMatching(/^learnerObjective: /),
+      }),
+    )
+  })
 })

@@ -74,24 +74,33 @@ const constantName = (t: Term): string => {
 }
 
 /**
- * Ground atoms from text (facts separated by full stops) or terms. Throws `DomainError` when one has a variable.
+ * Ground atoms from text (facts separated by full stops) or terms. Throws `DomainError` when one has a variable, or
+ * when the text holds a rule (a clause with a body).
  *
- * @param x Prolog text, of which the head of each clause is taken (a body is ignored), or the terms themselves.
+ * @param x Prolog text of facts, or the terms themselves.
  * @param what What they are, for the error message.
  * @returns The atoms.
  */
 const groundAtoms = (x: string | readonly Term[], what: string): Term[] => {
-  const terms = typeof x === 'string' ? parseProgram(x).clauses.map((c) => c.head) : [...x]
-  for (const t of terms) if (!isGround(t)) throw new DomainError('foilProblem', `foilProblem: ${what} must be ground`)
-  return terms
+  if (typeof x === 'string') {
+    const { clauses } = parseProgram(x)
+    for (const c of clauses)
+      if (c.body.length > 0)
+        throw new DomainError('foilProblem', `foilProblem: ${what} must be facts, not rules (line ${c.line})`)
+    const terms = clauses.map((c) => c.head)
+    for (const t of terms) if (!isGround(t)) throw new DomainError('foilProblem', `foilProblem: ${what} must be ground`)
+    return terms
+  }
+  for (const t of x) if (!isGround(t)) throw new DomainError('foilProblem', `foilProblem: ${what} must be ground`)
+  return [...x]
 }
 
 /**
  * A FOIL problem from ground background facts and examples (Prolog text or terms). Without `negatives`, the closed
  * world assumption gives every tuple of the problem's constants (those of the background facts and of the examples)
  * that is not positive. The target is the predicate of the positives. Throws `DomainError` when there is no positive,
- * an example is of another predicate, a background fact is of the target, an argument is not a constant, or the closed
- * world has more than 200 000 tuples.
+ * an example is of another predicate, a background fact is of the target, an argument is not a constant, the text holds
+ * a rule rather than a fact, or the closed world has more than 200 000 tuples.
  *
  * @param background The background facts: ground atoms, as Prolog text (`parent(ann, bob). ...`) or terms.
  * @param positives The positive examples of the target, ground atoms of one predicate.

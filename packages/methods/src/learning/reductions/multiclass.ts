@@ -487,7 +487,8 @@ export function exhaustiveCode(K: number): Tensor {
 /**
  * A random dense ($\pm 1$ with probability $\tfrac12$ each) or sparse ($0$ with probability $\tfrac12$, else
  * $\pm 1$ equally) code with $L$ columns (Allwein, Schapire and Singer, 2000); a column without both signs is
- * redrawn, so $K$ must be at least 2 (with $K = 1$ it never ends). Column $l$ draws from `child(s, 'column', l)`.
+ * redrawn, so $K$ must be at least 2. Column $l$ draws from `child(s, 'column', l)`. Throws `DomainError` unless $K$
+ * is an integer of at least 2 and $L$ a non-negative integer.
  *
  * @param s The random stream.
  * @param K The number of classes (rows).
@@ -500,6 +501,10 @@ export function exhaustiveCode(K: number): Tensor {
  * print(randomCode(stream(0), 4, 5, { sparse: true }))
  */
 export function randomCode(s: Stream, K: number, L: number, params: { sparse?: boolean } = {}): Tensor {
+  if (!Number.isInteger(K) || K < 2)
+    throw new DomainError('randomCode', `randomCode: K must be an integer of at least 2, got ${K}`)
+  if (!Number.isInteger(L) || L < 0)
+    throw new DomainError('randomCode', `randomCode: L must be a non-negative integer, got ${L}`)
   const out = new Float64Array(K * L)
   for (let l = 0; l < L; l++) {
     const cs = child(s, 'column', l)
@@ -554,6 +559,7 @@ export type Dichotomy = number | [Dichotomy, Dichotomy]
 /**
  * A class tree: `balanced` (halve the sorted classes recursively, the smaller half on the left) or `chain` (peel off
  * one class at a time: 0 versus the rest, then 1 versus the rest, and so on). `randomDichotomyTree` draws a random one.
+ * Throws `DomainError` unless $K$ is an integer of at least 1.
  *
  * @param K The number of classes, at least 1.
  * @param shape The shape of the tree: `'balanced'` or `'chain'`.
@@ -564,12 +570,13 @@ export type Dichotomy = number | [Dichotomy, Dichotomy]
  * print('chain:', dichotomyTree(5, 'chain'))
  */
 export function dichotomyTree(K: number, shape: 'balanced' | 'chain' = 'balanced'): Dichotomy {
-  return buildDichotomy(K, shape, undefined)
+  return buildDichotomy(K, shape, undefined, 'dichotomyTree')
 }
 
 /**
  * A random class tree: at every node the classes are shuffled and cut at a uniform point into two non-empty groups.
  * The node at `path` (`''` for the root, then `'L'` and `'R'` for each step down) draws from `child(s, 'node', path)`.
+ * Throws `DomainError` unless $K$ is an integer of at least 1.
  *
  * @param s The random stream.
  * @param K The number of classes, at least 1.
@@ -580,7 +587,7 @@ export function dichotomyTree(K: number, shape: 'balanced' | 'chain' = 'balanced
  * print(randomDichotomyTree(stream(1), 5))
  */
 export function randomDichotomyTree(s: Stream, K: number): Dichotomy {
-  return buildDichotomy(K, 'random', s)
+  return buildDichotomy(K, 'random', s, 'randomDichotomyTree')
 }
 
 /**
@@ -589,9 +596,17 @@ export function randomDichotomyTree(s: Stream, K: number): Dichotomy {
  * @param K The number of classes.
  * @param shape `'balanced'`, `'chain'` or `'random'`.
  * @param s The random stream of a `'random'` tree (unused otherwise).
+ * @param where The public function, named in the `DomainError` thrown unless $K$ is an integer of at least 1.
  * @returns The tree over the classes $0, \dots, K - 1$.
  */
-function buildDichotomy(K: number, shape: 'balanced' | 'chain' | 'random', s: Stream | undefined): Dichotomy {
+function buildDichotomy(
+  K: number,
+  shape: 'balanced' | 'chain' | 'random',
+  s: Stream | undefined,
+  where: string,
+): Dichotomy {
+  if (!Number.isInteger(K) || K < 1)
+    throw new DomainError(where, `${where}: K must be an integer of at least 1, got ${K}`)
   const build = (classes: number[], path: string): Dichotomy => {
     if (classes.length === 1) return classes[0]
     let cut = Math.floor(classes.length / 2)

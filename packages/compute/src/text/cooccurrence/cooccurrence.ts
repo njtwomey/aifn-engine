@@ -136,7 +136,7 @@ function pmiOf(counts: MatrixLike, op: string, { alpha = 1, base = Math.E }: Pmi
     }
   if (!(total > 0)) throw new DomainError(op, `${op}: the matrix has no counts`)
   let smoothed = 0
-  for (const c of col) smoothed += c ** alpha
+  for (const c of col) if (c > 0) smoothed += c ** alpha
   const lb = Math.log(base)
   const out = new Float64Array(m * n)
   for (let i = 0; i < m; i++)

@@ -72,7 +72,7 @@ function boundaries(s: Stream, options: SegmentOptions): { n: number; starts: nu
     if (!Number.isInteger(c) || c <= 0 || c >= n || (i > 0 && c <= cps[i - 1]))
       throw new DomainError('changepoints', `changepoints: ${c} is not an ascending index in (0, ${n})`)
   })
-  return { n, starts: [0, ...cps] }
+  return { n, starts: n === 0 ? [] : [0, ...cps] }
 }
 
 /**
@@ -396,15 +396,19 @@ export interface ArRegimeOptions extends SegmentOptions {
 function stationaryVariance(a: readonly number[], sd: number): number {
   const psi = [1]
   let total = 1
+  let converged = false
   for (let j = 1; j < 100000; j++) {
     let v = 0
     for (let k = 0; k < a.length; k++) if (j - k - 1 >= 0) v += a[k] * psi[j - k - 1]
     psi.push(v)
     total += v * v
     if (!Number.isFinite(total) || total > 1e12) return Infinity
-    if (j > a.length && psi.slice(-a.length - 1).every((u) => u * u < 1e-20)) break
+    if (j > a.length && psi.slice(-a.length - 1).every((u) => u * u < 1e-20)) {
+      converged = true
+      break
+    }
   }
-  return sd * sd * total
+  return converged ? sd * sd * total : Infinity
 }
 
 /**

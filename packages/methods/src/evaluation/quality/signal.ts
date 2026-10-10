@@ -70,7 +70,7 @@ export const psnr = defineMetric(
     name: 'Peak signal-to-noise ratio',
     inputs: 'images',
     direction: 'higher',
-    range: [0, Infinity],
+    range: [-Infinity, Infinity],
     notes: ['peak-signal-to-noise-ratio'],
     capability: 'decide',
   },

@@ -37,6 +37,13 @@ describe('ensembles', () => {
     close(k.predictive(XQ), fx.gbm.proba)
     expect(k.training.series.loss.data[4]).toBeLessThan(k.training.series.loss.data[0])
   })
+  it('gradient boosting with all labels one class starts with finite log-odds', () => {
+    const x = tensor([[1], [2], [3], [4]])
+    const y = tensor([1, 1, 1, 1])
+    const b = gradientBoosting({ loss: 'logistic', stages: 2 }).fit(dataset(x, y))
+    expect(Number.isFinite(b.initial[0])).toBe(true)
+    expect(Number.isFinite(b.training.final.loss)).toBe(true)
+  })
 })
 
 describe('trace protocol', () => {

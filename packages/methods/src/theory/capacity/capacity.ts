@@ -44,7 +44,7 @@ export type ShatterClass = 'half-planes' | 'rectangles' | 'intervals'
  * print('one corner by half-planes:', realisable(square, [1, -1, -1, -1], 'half-planes'))
  */
 export function realisable(points: MatrixLike, labels: ArrayLike<number>, family: ShatterClass): boolean {
-  const { data: X, m: n } = dense.toMatrixF64(points, 'realisable')
+  const { data: X, m: n, n: d } = dense.toMatrixF64(points, 'realisable')
   const pos = Array.from({ length: n }, (_, i) => i).filter((i) => labels[i] > 0)
   const neg = Array.from({ length: n }, (_, i) => i).filter((i) => labels[i] <= 0)
   if (family === 'half-planes') {
@@ -52,7 +52,7 @@ export function realisable(points: MatrixLike, labels: ArrayLike<number>, family
     // Variables (w₁, w₂, b), free; constraints −yᵢ(w·xᵢ + b) ≤ −1; objective 0 (feasibility).
     const A = Array.from({ length: n }, (_, i) => {
       const y = labels[i] > 0 ? 1 : -1
-      return [-y * X[2 * i], -y * X[2 * i + 1], -y]
+      return [-y * X[d * i], -y * X[d * i + 1], -y]
     })
     const r = linprog({ c: [0, 0, 0], A_ub: A, b_ub: new Array<number>(n).fill(-1), bounds: [null, null] })
     return r.status === 'optimal'
@@ -63,11 +63,11 @@ export function realisable(points: MatrixLike, labels: ArrayLike<number>, family
   const hi = [-Infinity, -Infinity]
   for (const i of pos)
     for (let k = 0; k < dims; k++) {
-      lo[k] = Math.min(lo[k], X[2 * i + k])
-      hi[k] = Math.max(hi[k], X[2 * i + k])
+      lo[k] = Math.min(lo[k], X[d * i + k])
+      hi[k] = Math.max(hi[k], X[d * i + k])
     }
   return !neg.some((i) => {
-    for (let k = 0; k < dims; k++) if (X[2 * i + k] < lo[k] || X[2 * i + k] > hi[k]) return false
+    for (let k = 0; k < dims; k++) if (X[d * i + k] < lo[k] || X[d * i + k] > hi[k]) return false
     return true
   })
 }

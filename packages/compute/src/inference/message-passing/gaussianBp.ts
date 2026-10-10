@@ -18,6 +18,7 @@ import type { MatrixLike, Size, Status, VectorLike } from 'aifn-compute/foundati
 import { adjacency, fromEdges, type Graph } from 'aifn-compute/graph'
 import { fromData, isTensor, toFlat, toRows, type Tensor } from 'aifn-compute/foundation/tensor'
 import { run, type Algorithm } from 'aifn-compute/foundation/trace'
+import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** Options of {@link gaussianBeliefPropagationSteps}. */
 export interface GaussianBpOptions {
@@ -26,7 +27,7 @@ export interface GaussianBpOptions {
    * from the newest messages).
    */
   schedule?: 'flooding' | 'sequential'
-  /** Weight of the old message in each update, in $[0, 1)$ (not checked). Default 0. */
+  /** Weight of the old message in each update, in $[0, 1)$. Default 0; outside $[0, 1)$ throws `DomainError`. */
   damping?: number
   /** A sweep that moves no message precision or potential by more than this has converged. Default 1e-10. */
   tolerance?: number
@@ -105,7 +106,8 @@ function marginals(s: Pick<GaussianBpState, 'n' | 'J' | 'h' | 'to'>, lambda: Flo
  * are the graph's edges) and the potential $\hvec = \Jmat \muvec$ (length $n$); each step is one sweep over every
  * directed edge. Messages start at zero ($\Lambda = \eta = 0$), so the first means are $h_i / J_{ii}$. The run
  * converges when no message moves by more than `tolerance`, and stops as `diverged` when a cavity precision
- * $\hat{\Lambda}$ is not positive or a message is not finite.
+ * $\hat{\Lambda}$ is not positive or a message is not finite. Throws `DomainError` at `init` when `damping` is not in
+ * $[0, 1)$.
  *
  * @param precision The precision matrix $\Jmat$ ($n \times n$, symmetric, as a tensor or rows); the edges are the
  *   non-zero entries above the diagonal.
@@ -135,6 +137,9 @@ export function gaussianBeliefPropagationSteps(
   return {
     name: 'gaussian-belief-propagation',
     init: () => {
+      const damping = o.damping ?? 0
+      if (!(damping >= 0 && damping < 1))
+        throw new DomainError('gaussianBeliefPropagation', 'gaussianBeliefPropagation: damping must be in [0, 1)')
       const J = isTensor(precision) ? toRows(precision) : Array.from(precision, (r) => Array.from(r))
       const h = isTensor(shift) ? toFlat(shift) : Array.from(shift)
       const n = J.length
@@ -160,7 +165,7 @@ export function gaussianBeliefPropagationSteps(
         from,
         to,
         schedule: o.schedule ?? 'flooding',
-        damping: o.damping ?? 0,
+        damping,
         tolerance: o.tolerance ?? 1e-10,
         messagePrecision: fromData(lambda, [lambda.length]),
         messageShift: fromData(eta, [eta.length]),
@@ -219,7 +224,8 @@ export function gaussianBeliefPropagationSteps(
 
 /**
  * Run Gaussian BP for at most `maxSteps` sweeps (default 500): marginal means and variances, and the flags. On a tree
- * both are exact once converged; on a graph with loops the means are exact and the variances approximate.
+ * both are exact once converged; on a graph with loops the means are exact and the variances approximate. Throws
+ * `DomainError` when `damping` is not in $[0, 1)$.
  *
  * @param precision The precision matrix $\Jmat$ ($n \times n$, symmetric, as a tensor or rows).
  * @param shift The potential $\hvec$ (length $n$), with $\Jmat \muvec = \hvec$.

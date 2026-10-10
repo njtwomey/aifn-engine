@@ -423,7 +423,7 @@ function targetWeights(target: number | readonly number[], k: number, what: stri
  */
 function resample(s: Stream, d: Dataset, options: PrevalenceOptions, op: string) {
   const { method = 'subsample' } = options
-  const target = options.weights ?? options.prevalence
+  const target = options.weights ?? options.prevalence ?? (options as any).target
   if (target === undefined) throw new DomainError(op, `${op}: give a prevalence or class weights`)
   const y = intLabels(d, op)
   const k = classCount(d, y)
@@ -484,7 +484,17 @@ function resample(s: Stream, d: Dataset, options: PrevalenceOptions, op: string)
     truth = remodel(t, { ops: [...t.model.ops, { kind: 'weights', weights: w }], reference })
   }
   const sentence = `Resampled (${method}) to class shares ${pi.map((p) => percent(p)).join(' : ')}.`
-  return { ...out, meta: step(out, op, { target: pi, method, n: index.length }, sentence, { truth }) }
+  const recordedParams: Record<string, unknown> = {
+    method,
+    ...(options.prevalence !== undefined
+      ? { prevalence: options.prevalence }
+      : options.weights !== undefined
+        ? { weights: Array.from(options.weights) }
+        : pi.length === 2
+          ? { prevalence: pi[1] }
+          : { weights: pi }),
+  }
+  return { ...out, meta: step(out, op, recordedParams, sentence, { truth }) }
 }
 
 /**
@@ -748,7 +758,7 @@ export function withNuisanceFeatures(s: Stream, d: Dataset, options: NuisanceOpt
   }
   if (d.meta.missing) {
     const mask = values(d.meta.missing)
-    extra.missing = labels(widen(mask, () => 0))
+    extra.missing = fromData(Int32Array.from(widen(mask, () => 0)), [n, d1])
   }
   if (d.meta.complete)
     extra.complete = matrix(
@@ -965,7 +975,11 @@ export function withTransform(d: Dataset, options: TransformOptions): Dataset {
     featureNames: m === d0 ? d.meta.featureNames : Array.from({ length: m }, (_, r) => `z${r + 1}`),
   }
   if (d.meta.complete) extra.complete = matrix(apply(values(d.meta.complete)), n, m)
-  if (d.meta.missing) extra.missing = labels(Int32Array.from(x, (v) => (Number.isNaN(v) ? 1 : 0)))
+  if (d.meta.missing)
+    extra.missing = fromData(
+      Int32Array.from(x, (v) => (Number.isNaN(v) ? 1 : 0)),
+      [n, m],
+    )
   const sentence = inv ? 'Mapped by an invertible linear transform.' : 'Mapped by a linear transform (truth dropped).'
   return {
     ...d,
@@ -998,10 +1012,10 @@ export interface MissingOptions {
 }
 
 /**
- * Remove entries of `x` (set them to NaN). `meta.missing` marks them (int32, 1 = missing; stored as a flat row-major
- * vector of $nd$ entries) and `meta.complete` keeps the values before removal, so a figure can show where the missing
- * values were. Applied again, it adds to the earlier missing entries, and standardises by the complete values. The
- * truth describes the complete data and is unchanged. Throws `DomainError` unless the rate is in $[0, 1]$, or for `mar` with fewer than two features.
+ * Remove entries of `x` (set them to NaN). `meta.missing` marks them (int32, 1 = missing; stored as an $n \times d$
+ * matrix) and `meta.complete` keeps the values before removal, so a figure can show where the missing values were.
+ * Applied again, it adds to the earlier missing entries, and standardises by the complete values. The truth describes
+ * the complete data and is unchanged. Throws `DomainError` unless the rate is in $[0, 1]$, or for `mar` with fewer than two features.
  *
  * @param s The random stream; feature $c$'s entries are drawn from its child `feature` $c$.
  * @param d The dataset; not modified.
@@ -1057,7 +1071,7 @@ export function withMissing(s: Stream, d: Dataset, options: MissingOptions): Dat
       'withMissing',
       { rate, mechanism, strength, observed },
       `${removed} entries missing ${names[mechanism]} (${mechanism.toUpperCase()}).`,
-      { missing: labels(mask), complete },
+      { missing: fromData(mask, [n, dim]), complete },
     ),
   }
 }

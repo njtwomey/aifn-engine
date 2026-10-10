@@ -370,7 +370,7 @@ export interface Query {
   readonly goals: readonly Term[]
   /** Variable names by id. */
   readonly variableNames: readonly string[]
-  /** Where the query starts in the source (1-based); 1 for `parseQuery`. */
+  /** Where the query starts in the source (1-based): the line of its first token. */
   readonly line: number
 }
 
@@ -472,17 +472,18 @@ export function parseProgram(source: string): { clauses: Clause[]; queries: Quer
  * print('variables:', q.variableNames.join(', '))
  */
 export function parseQuery(source: string): Query {
-  let text = source.trim()
-  if (text.startsWith('?-')) text = text.slice(2)
+  // The `?-` is blanked rather than cut, and the text is not trimmed, so lines and columns are those of `source`.
+  let text = source.replace(/^(\s*)\?-/, '$1  ')
   if (!/\.\s*$/.test(text)) text += ' .'
   const tokens = tokenize(text)
   const parser = new Parser(tokens, new Scope())
   if (parser.peek.kind === 'eof') parser.fail('empty query')
+  const first = parser.peek
   const [term] = parser.parse(1200)
   parser.expect('end')
   if (parser.peek.kind !== 'eof') parser.fail('a query is one term ending in a full stop')
   const scope = parser.resetScope()
-  return { goals: conjuncts(term), variableNames: scope.names, line: 1 }
+  return { goals: conjuncts(term), variableNames: scope.names, line: first.line }
 }
 
 /**

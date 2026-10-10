@@ -397,7 +397,8 @@ export function precisionRecallCurve(
  * @param yTrue The true labels.
  * @param scores A score per case (binary), or an $n \times K$ matrix with a column of scores per class.
  * @param options `positive`, the positive class (binary); `average`, `macro` or `weighted` (matrix); and `labels`,
- *   the classes in the order of the columns (default the sorted labels of `yTrue`; the column count is not checked).
+ *   the classes in the order of the columns (default the sorted labels of `yTrue`). A column count other than the
+ *   number of classes, or a row count other than the number of cases, throws `ShapeError`.
  * @returns The average precision, in $[0, 1]$.
  *
  * @example Binary scores (the scikit-learn example)
@@ -426,7 +427,13 @@ export const averagePrecision = defineMetric(
     if (!isMatrixLike(scores)) return precisionRecallCurve(yTrue, scores as Data, options).area
     const t = labelList(yTrue)
     const S = dense(scores as Rows, 'averagePrecision scores')
+    sameLength(t, { length: S.rows }, 'averagePrecision')
     const classes = options.labels ? [...options.labels] : classesOf(t)
+    if (classes.length !== S.cols)
+      throw new ShapeError(
+        'metrics',
+        `metrics: averagePrecision: ${S.cols} score columns for ${classes.length} classes`,
+      )
     let s = 0
     let w = 0
     for (let k = 0; k < classes.length; k++) {
@@ -642,16 +649,22 @@ export function youdenPoint(
   options: { positive?: Label } = {},
 ): OperatingPoint & { j: number } {
   const sw = sweep(yTrue, scores, options.positive)
+  const P = sw.positives
+  const N = sw.negatives
+  // Compare J PN = TP N - FP P, exact in integers, so that equal J are equal and the first maximum is kept (TP/P - FP/N
+  // in floating point can differ in the last bit between equal values).
+  if (!(P > 0 && N > 0)) return { ...pointAt(sw, 0), j: -Infinity }
   let best = 0
-  let bestJ = -Infinity
+  let bestKey = -Infinity
   for (let i = 0; i < sw.thresholds.length; i++) {
-    const p = pointAt(sw, i)
-    if (p.tpr - p.fpr > bestJ) {
-      bestJ = p.tpr - p.fpr
+    const key = sw.tps[i] * N - sw.fps[i] * P
+    if (key > bestKey) {
+      bestKey = key
       best = i
     }
   }
-  return { ...pointAt(sw, best), j: bestJ }
+  const point = pointAt(sw, best)
+  return { ...point, j: point.tpr - point.fpr }
 }
 
 /**

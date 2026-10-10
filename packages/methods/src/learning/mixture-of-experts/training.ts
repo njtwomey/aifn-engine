@@ -249,7 +249,7 @@ export function* mixtureOfExpertsRun(options: MoeRunOptions): Generator<MoeSnaps
       history.agreement.push(adjustedRandIndex(regime, assignment))
     } else history.agreement.push(NaN)
   }
-  // A run that stops early (converged L-BFGS) reports its last step as the total.
+  // A run that stops early (diverged, or converged L-BFGS) reports its last step as the total.
   let total = steps
   const snapshot = (t: Size, done: boolean): MoeSnapshot => ({
     step: t,
@@ -283,12 +283,15 @@ export function* mixtureOfExpertsRun(options: MoeRunOptions): Generator<MoeSnaps
     for (let t = 0; t < steps; t++) {
       state = alg.step(state, { t, stream: child(root, 'step', t) })
       const k = t + 1
-      if (k % recordEvery === 0 || k === steps) record(k, state.params)
-      if (k % every === 0 || k === steps) {
+      // A diverged run ends here, with its last step recorded and a final snapshot.
+      const last = k === steps || Boolean(state.diverged)
+      if (state.diverged) total = k
+      if (k % recordEvery === 0 || last) record(k, state.params)
+      if (k % every === 0 || last) {
         checkpoints.push({ step: k, params: state.params })
-        yield snapshot(k, k === steps)
+        yield snapshot(k, last)
       }
-      if (state.diverged) break
+      if (last) break
     }
     return
   }
@@ -307,19 +310,15 @@ export function* mixtureOfExpertsRun(options: MoeRunOptions): Generator<MoeSnaps
   for (let t = 0; t < steps; t++) {
     state = alg.step(state, { t, stream: child(root, 'step', t) })
     const k = t + 1
-    if (k % recordEvery === 0 || k === steps) record(k, state.params)
-    if (k % every === 0 || k === steps) {
+    // A run that diverges or stops ends here, with its last step recorded and a final snapshot.
+    const early = state.diverged || state.stopped
+    const last = k === steps || early
+    if (early) total = k
+    if (k % recordEvery === 0 || last) record(k, state.params)
+    if (k % every === 0 || last) {
       checkpoints.push({ step: k, params: state.params })
-      yield snapshot(k, k === steps)
+      yield snapshot(k, last)
     }
-    if (state.diverged || state.stopped) {
-      total = k
-      if (k % every !== 0 && k !== steps) {
-        if (k % recordEvery !== 0) record(k, state.params)
-        checkpoints.push({ step: k, params: state.params })
-        yield snapshot(k, true)
-      }
-      break
-    }
+    if (last) break
   }
 }

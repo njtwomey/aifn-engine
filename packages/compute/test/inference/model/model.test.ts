@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  cardinalityOf,
   discreteFactor,
   dist,
   expandModel,
@@ -17,7 +18,7 @@ import {
 } from 'aifn-compute/inference/model'
 import { shape } from 'aifn-compute/graph/structured'
 import { stream } from 'aifn-compute/foundation/random'
-import { toFlat } from 'aifn-compute/foundation/tensor'
+import { tensor, toFlat, transpose } from 'aifn-compute/foundation/tensor'
 import { casino, sprinkler } from '../graphs'
 
 describe('factor algebra', () => {
@@ -30,6 +31,19 @@ describe('factor algebra', () => {
     expect(toFlat(ab.table)).toEqual([1, 2, 3, 8, 10, 12])
     expect(toFlat(factorMarginalise(ab, [0]).table)).toEqual([9, 12, 15])
     expect(toFlat(factorMarginalise(ab, [1], 'max').table)).toEqual([3, 12])
+  })
+
+  it('reads a transposed table by its strides', () => {
+    const f = {
+      scope: [0, 1],
+      table: transpose(
+        tensor([
+          [1, 2],
+          [3, 4],
+        ]),
+      ),
+    }
+    expect(toFlat(factorMarginalise(f, [1]).table)).toEqual([4, 6])
   })
 })
 
@@ -128,5 +142,22 @@ describe('factor-graph labels', () => {
     expect(labels).toContain('{\\theta_d}_{0}')
     expect(labels).toContain('$\\mu_{1}$')
     expect(labels.some((l) => /_[^{]*_\{/.test(l ?? '') && !l!.startsWith('{'))).toBe(false)
+  })
+})
+
+describe('cardinalityOf', () => {
+  const mixture = model('mixture', (m) => {
+    const w = m.variable('w', dist.Dirichlet(1, m.size('K')))
+    m.variable('z', dist.Categorical(w))
+  })
+
+  it('reads a Dirichlet dimension from a named size', () => {
+    const em = expandModel(mixture, { sizes: { K: 3 } })
+    expect(cardinalityOf(em, em.byKey.get('z')!)).toBe(3)
+  })
+
+  it('is null when the named size is bound per plate index', () => {
+    const em = expandModel(mixture, { sizes: { K: [2, 3] } })
+    expect(cardinalityOf(em, em.byKey.get('z')!)).toBeNull()
   })
 })

@@ -133,6 +133,7 @@ const flat = (t: Tensor | number) => (typeof t === 'number' ? Float64Array.of(t)
  * @returns The deviance.
  *
  * @example Poisson deviance of three counts, and the saturated model's
+ * import { poissonFamily } from 'aifn-compute/probability/likelihoods'
  * const y = tensor([0, 1, 5])
  * print('D at mu = 1, 2, 3:', deviance(poissonFamily(), y, tensor([1, 2, 3])))
  * print('D at mu = y:', deviance(poissonFamily(), y, tensor([0, 1, 5])))
@@ -257,6 +258,7 @@ function matVec(X: Float64Array, n: number, p: number, beta: Float64Array, o: Fl
  * @returns The algorithm, for `run` or `trace`; its start is `{}` or `{ coefficients }`.
  *
  * @example A Poisson GLM in two groups converges in a few steps to the logs of the group means
+ * import { link, poissonFamily } from 'aifn-compute/probability/likelihoods'
  * // Columns: group indicator, intercept. Group means 2 and 7.
  * const design = tensor([[0, 1], [0, 1], [0, 1], [0, 1], [1, 1], [1, 1], [1, 1], [1, 1]])
  * const y = tensor([1, 3, 0, 4, 6, 9, 2, 11])

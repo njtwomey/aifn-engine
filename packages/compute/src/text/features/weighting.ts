@@ -8,7 +8,7 @@
  * the number of documents.
  */
 
-import { DomainError } from 'aifn-compute/foundation/errors'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import { dense, fromData, type MatrixLike, type Tensor, type VectorLike } from 'aifn-compute/foundation/tensor'
 
 /**
@@ -19,6 +19,9 @@ import { dense, fromData, type MatrixLike, type Tensor, type VectorLike } from '
  * terms.
  */
 export type TfScheme = 'raw' | 'binary' | 'log' | 'augmented' | 'logAverage'
+
+/** The term-frequency schemes, to check a name against. */
+const TF_SCHEMES: readonly string[] = ['raw', 'binary', 'log', 'augmented', 'logAverage'] satisfies TfScheme[]
 
 /**
  * A document-frequency function $g(\mathrm{df})$ over $N$ documents: `none` 1; `standard` $\log(N / \mathrm{df})$;
@@ -150,10 +153,11 @@ export function inverseDocumentFrequency(
 }
 
 /**
- * The term-frequency factor $f(\mathrm{tf})$ of every cell (float64 [D, V]), zero where $\mathrm{tf} = 0$.
+ * The term-frequency factor $f(\mathrm{tf})$ of every cell (float64 [D, V]), zero where $\mathrm{tf} = 0$. Throws
+ * `DomainError` for an unknown scheme.
  *
  * @param counts The count matrix, documents $\times$ terms.
- * @param scheme The term-frequency function; see {@link TfScheme}. An unknown name is read as `logAverage`.
+ * @param scheme The term-frequency function; see {@link TfScheme}.
  * @param options The base of the logarithm.
  * @param options.logBase The base (default $e$).
  * @returns The factors, with the shape of `counts`.
@@ -169,6 +173,8 @@ export function termFrequency(
   scheme: TfScheme = 'raw',
   options: { logBase?: number } = {},
 ): Tensor {
+  if (!TF_SCHEMES.includes(scheme))
+    throw new DomainError('termFrequency', `termFrequency: unknown scheme '${String(scheme)}'`)
   const { data, m, n } = matrix(counts, 'termFrequency')
   const log = logIn(options.logBase ?? Math.E)
   const out = new Float64Array(m * n)
@@ -220,7 +226,7 @@ function normaliseRows(w: Float64Array, m: number, n: number, norm: NormScheme):
 /**
  * TF-IDF weights $w_{t,d} = f(\mathrm{tf}_{t,d}) \cdot g(\mathrm{df}_t)$, each row then normalised, from a count matrix
  * (documents $\times$ terms; float64 [D, V]). The defaults (raw tf, smooth idf, l2) equal scikit-learn's
- * `TfidfVectorizer`; `tf: 'log'` is its `sublinear_tf`. Throws `DomainError` for an unknown IDF scheme.
+ * `TfidfVectorizer`; `tf: 'log'` is its `sublinear_tf`. Throws `DomainError` for an unknown TF or IDF scheme.
  *
  * @param counts The count matrix, documents $\times$ terms.
  * @param options The term-frequency and document-frequency functions, the normalisation and the base of the logarithm;
@@ -295,7 +301,8 @@ export interface Bm25Options {
  * The BM25 weight of every term in every document (float64 [D, V]):
  * $w_{d,t} = \mathrm{idf}_t \cdot (\mathrm{tf}\,(k_1 + 1) / (\mathrm{tf} + k_1 (1 - b + b L_d / \bar L)) + \delta)$
  * where $\mathrm{tf} > 0$, and 0 elsewhere, with $\bar L$ the mean document length. A query's score is the sum of its
- * terms' columns ({@link bm25}). Throws `DomainError` unless $k_1 \ge 0$ and $0 \le b \le 1$.
+ * terms' columns ({@link bm25}). Throws `DomainError` unless $k_1 \ge 0$ and $0 \le b \le 1$, and `ShapeError` when
+ * `lengths` does not give one length per document.
  *
  * @param counts The count matrix, documents $\times$ terms.
  * @param options The parameters $k_1$, $b$ and $\delta$, the IDF and the document lengths; see {@link Bm25Options}.
@@ -314,6 +321,11 @@ export function bm25Weights(counts: MatrixLike, options: Bm25Options = {}): Tens
   const lengths = options.lengths
     ? dense.toF64(options.lengths, 'bm25Weights')
     : Float64Array.from({ length: m }, (_, d) => data.subarray(d * n, (d + 1) * n).reduce((s, x) => s + x, 0))
+  if (lengths.length !== m)
+    throw new ShapeError('bm25Weights', `bm25Weights: ${lengths.length} lengths for ${m} documents`, [
+      [lengths.length],
+      [m, n],
+    ])
   const avg = lengths.reduce((s, x) => s + x, 0) / m
   const g = idfOf(documentFrequency(counts).data, m, idf, Math.log)
   const w = new Float64Array(m * n)

@@ -181,10 +181,11 @@ function averagedMetric(
 
 /**
  * Accuracy, or subset accuracy for multi-label rows (a case counts when every label is right; any non-zero entry is
- * 1). Single-label inputs of different lengths throw `ShapeError` and an empty one `DomainError`.
+ * 1). Inputs of different lengths, or multi-label rows of different shapes, throw `ShapeError`; an empty
+ * single-label input throws `DomainError`.
  *
  * @param yTrue The true labels, or multi-label rows.
- * @param yPred The predicted labels, or multi-label rows of the same shape (not checked).
+ * @param yPred The predicted labels, or multi-label rows of the same shape.
  * @param sampleWeight A weight per case; left out, every case has weight 1.
  * @returns The weighted fraction of cases predicted right (NaN for empty multi-label input).
  */
@@ -193,6 +194,11 @@ function accuracyOf(yTrue: ClassificationInput, yPred: ClassificationInput, samp
     // Multi-label accuracy is subset accuracy: a case counts only when every label is right.
     const t = dense(yTrue as Rows, 'accuracy')
     const p = dense(yPred as Rows, 'accuracy')
+    if (t.rows !== p.rows || t.cols !== p.cols)
+      throw new ShapeError(
+        'metrics',
+        `metrics: multi-label inputs have shapes ${t.rows}×${t.cols} and ${p.rows}×${p.cols}`,
+      )
     const w = caseWeights(sampleWeight, t.rows, 'accuracy')
     let hit = 0
     let total = 0

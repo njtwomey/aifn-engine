@@ -110,7 +110,7 @@ export type GamSpec = {
 }
 
 /** The model matrix, penalties and fixed data of a GAM (a `PenalisedDesign` with its terms). */
-export type GamDesign = PenalisedDesign & {
+export type GamDesign = Omit<PenalisedDesign, 'penalties'> & {
   /** The built terms, in model order. */
   terms: BuiltTerm[]
   /** Column offset of each term's block (column 0 is the intercept). */

@@ -440,12 +440,15 @@ export type Tallies = {
   tn: Float64Array
   /** The true cases of each class, $\mathrm{TP} + \mathrm{FN}$. */
   support: Float64Array
-  /** Number of cases (sum of weights for weighted single-label data). */
+  /** Number of cases (the sum of the case weights when `sampleWeight` is given). */
   n: number
   /** True when the input was multi-label rows. */
   multilabel: boolean
-  /** Multi-label only: per-case TP, FP, FN, TN over the labels. */
-  cases?: { tp: Float64Array; fp: Float64Array; fn: Float64Array; tn: Float64Array }
+  /**
+   * Multi-label only: per-case TP, FP, FN, TN over the labels (unweighted counts), and each case's weight in the
+   * `samples` average.
+   */
+  cases?: { tp: Float64Array; fp: Float64Array; fn: Float64Array; tn: Float64Array; weight: Float64Array }
 }
 
 /**
@@ -484,7 +487,7 @@ function talliesFromMatrix(cm: ConfusionMatrix): Tallies {
  * Tallies of single-label predictions (vectors of labels) or multi-label predictions ($n \times L$ matrices of 0/1,
  * rows as cases and columns as labels). Input is multi-label when either argument is a matrix; any non-zero entry
  * counts as 1. Multi-label inputs of different shapes throw `ShapeError`. The per-case counts in `cases` are
- * unweighted.
+ * unweighted; each case's weight is kept beside them, in `cases.weight`, for the `samples` average.
  *
  * @param yTrue The true labels, or the $n \times L$ matrix of true label sets.
  * @param yPred The predicted labels or label sets, matching `yTrue`.
@@ -527,9 +530,12 @@ export function tallies(
       fp: new Float64Array(t.rows),
       fn: new Float64Array(t.rows),
       tn: new Float64Array(t.rows),
+      weight: w ? Float64Array.from(w) : new Float64Array(t.rows).fill(1),
     }
+    let n = 0
     for (let i = 0; i < t.rows; i++) {
       const wi = w ? w[i] : 1
+      n += wi
       for (let l = 0; l < L; l++) {
         const a = t.data[i * L + l] !== 0
         const b = p.data[i * L + l] !== 0
@@ -540,7 +546,7 @@ export function tallies(
     }
     const support = Float64Array.from(tp, (v, l) => v + fn[l])
     const classes = Array.from({ length: L }, (_, l) => l)
-    return { classes, tp, fp, fn, tn, support, n: t.rows, multilabel: true, cases }
+    return { classes, tp, fp, fn, tn, support, n, multilabel: true, cases }
   }
   return talliesFromMatrix(
     confusionMatrix(yTrue as Labels, yPred as Labels, { labels: options.labels, sampleWeight: options.sampleWeight }),
@@ -628,10 +634,16 @@ export function averaged(stat: CountStatistic, t: Tallies, options: AverageOptio
     }
     case 'samples': {
       if (!t.cases) throw new DomainError('metrics', "metrics: 'samples' averaging needs multi-label input")
+      // Each case's score is weighted by its case weight, as scikit-learn's `average='samples'` with `sample_weight`.
       const c = t.cases
       let s = 0
-      for (let i = 0; i < t.n; i++) s += stat(c.tp[i], c.fp[i], c.fn[i], c.tn[i], zero)
-      return divide(s, t.n)
+      let w = 0
+      for (let i = 0; i < c.tp.length; i++) {
+        if (c.weight[i] === 0) continue
+        s += c.weight[i] * stat(c.tp[i], c.fp[i], c.fn[i], c.tn[i], zero)
+        w += c.weight[i]
+      }
+      return divide(s, w)
     }
   }
 }

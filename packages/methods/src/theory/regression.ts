@@ -68,7 +68,7 @@ export function drawTrainingSet(
 }
 
 /**
- * An even grid of $m$ points on $[-1, 1]$, both ends included ($m \ge 2$; a single point is NaN).
+ * An even grid of $m$ points on $[-1, 1]$, both ends included ($m \ge 2$; a single point is 0).
  *
  * @param m The number of points.
  * @returns The grid, increasing.
@@ -76,7 +76,8 @@ export function drawTrainingSet(
  * @example Five points
  * print(unitGrid(5))
  */
-export const unitGrid = (m: number): Float64Array => Float64Array.from({ length: m }, (_, i) => -1 + (2 * i) / (m - 1))
+export const unitGrid = (m: number): Float64Array =>
+  m === 1 ? new Float64Array([0]) : Float64Array.from({ length: m }, (_, i) => -1 + (2 * i) / (m - 1))
 
 /**
  * Least-squares weights of the design $\Phimat$ $[n, p]$ (row-major) for targets $\yvec$: the minimum-norm solution

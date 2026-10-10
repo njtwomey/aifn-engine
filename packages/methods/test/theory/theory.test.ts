@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { child, stream } from 'aifn-compute/foundation/random'
 import { biasVariance, biasVarianceSweep, fitAndPredict } from 'aifn-methods/theory/bias-variance'
-import { empiricalRademacher, shatteringTable } from 'aifn-methods/theory/capacity'
+import { empiricalRademacher, realisable, shatteringTable } from 'aifn-methods/theory/capacity'
 import { concentrationStudy, mcdiarmidStudy, runningMeans, standardisedSums } from 'aifn-methods/theory/concentration'
 import { doubleDescent } from 'aifn-methods/theory/double-descent'
-import { drawTrainingSet, targetFunction } from 'aifn-methods/theory'
+import { drawTrainingSet, targetFunction, unitGrid } from 'aifn-methods/theory'
 
 describe('bias–variance by resampling', () => {
   it('adds up to the Monte Carlo test error', () => {
@@ -130,6 +130,13 @@ describe('capacity', () => {
         'intervals',
       ).count,
     ).toBe(7)
+    // Intervals with 1-D points (n x 1 matrix)
+    expect(realisable([[0], [1], [2]], [1, -1, 1], 'intervals')).toBe(false)
+    expect(realisable([[0], [1], [2]], [1, 1, -1], 'intervals')).toBe(true)
+    expect(shatteringTable([[0], [1], [2]], 'intervals').count).toBe(7)
+  })
+  it('unitGrid handles m = 1 cleanly', () => {
+    expect(Array.from(unitGrid(1))).toEqual([0])
   })
   it('estimates Rademacher complexity: 1 for all labellings, 0 for one hypothesis', () => {
     const all = shatteringTable(

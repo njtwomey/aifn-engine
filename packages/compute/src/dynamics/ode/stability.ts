@@ -57,8 +57,9 @@ const BDF: Record<string, { a: number[]; beta: number }> = {
 
 /**
  * The stability function $R(z) = 1 + z \bvec^\top (\Imat - z\Amat)^{-1} \ones$ of a Runge–Kutta tableau (explicit
- * or implicit), evaluated in complex arithmetic by Gaussian elimination without pivoting, which for a lower-triangular
- * $\Amat$ is forward substitution. A zero pivot gives infinite or NaN parts.
+ * or implicit), evaluated in complex arithmetic by Gaussian elimination: forward substitution for a lower-triangular
+ * $\Amat$ (explicit and diagonally implicit methods), with partial pivoting otherwise. Only a singular
+ * $\Imat - z\Amat$ (a pole of $R$) gives infinite or NaN parts.
  *
  * @param tab The tableau: its `a` gives $\Amat$ (missing entries are 0, so rows may be short) and its `b` gives
  *   $\bvec$ and the number of stages.
@@ -75,7 +76,19 @@ function rkStability(tab: ButcherTableau, z: C): C {
     }),
   )
   const k: C[] = Array.from({ length: s }, (): C => [1, 0])
+  // A lower-triangular I − zA is solved by forward substitution as it stands; a full one (an implicit tableau) can
+  // have a zero pivot where I − zA is not singular, so its rows are swapped for the largest pivot in each column.
+  const lower = tab.a.every((row, i) => row.every((v, j) => j <= i || v === 0))
+  const abs = (v: C) => Math.hypot(v[0], v[1])
   for (let c = 0; c < s; c++) {
+    if (!lower) {
+      let best = c
+      for (let r = c + 1; r < s; r++) if (abs(M[r][c]) > abs(M[best][c])) best = r
+      if (best !== c) {
+        ;[M[c], M[best]] = [M[best], M[c]]
+        ;[k[c], k[best]] = [k[best], k[c]]
+      }
+    }
     for (let r = c + 1; r < s; r++) {
       if (M[r][c][0] === 0 && M[r][c][1] === 0) continue
       const f = cdiv(M[r][c], M[c][c])
@@ -261,7 +274,7 @@ export function stabilityRegion(
  *
  * @param method The BDF method, of order 1, 2 or 3.
  * @param n The number of points, at $\theta$ evenly spaced from 0 to $2\pi$ inclusive, so the last repeats the first
- *   and closes the curve. At least 2 (a single point is NaN).
+ *   and closes the curve. An integer of at least 2; anything else throws `DomainError`.
  * @returns The real and imaginary parts of the points of the curve (length `n` each).
  *
  * @example BDF2's boundary at four angles
@@ -276,6 +289,8 @@ export function stabilityRegion(
  * print('distance from 1 =', toFlat(real).map((x, k) => Math.hypot(x - 1, toFlat(imag)[k])))
  */
 export function boundaryLocus(method: 'bdf1' | 'bdf2' | 'bdf3', n: Size = 400): { real: Vector; imag: Vector } {
+  if (!(Number.isInteger(n) && n >= 2))
+    throw new DomainError('boundaryLocus', `boundaryLocus: n must be an integer of at least 2, got ${n}`)
   const { a, beta } = BDF[method]
   const re = new Float64Array(n)
   const im = new Float64Array(n)

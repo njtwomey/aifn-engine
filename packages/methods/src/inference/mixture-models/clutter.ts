@@ -13,7 +13,7 @@
 import { lift, type Out } from 'aifn-compute/inference/expectation-propagation'
 import { normal, type Stream, child, uniform } from 'aifn-compute/foundation/random'
 import { normalLogPdf } from 'aifn-compute/numerics/special'
-import { fromData, type Tensor, type Vector } from 'aifn-compute/foundation/tensor'
+import { float64Data, fromData, isTensor, type Tensor, type Vector } from 'aifn-compute/foundation/tensor'
 import type { EpOptions } from 'aifn-compute/inference/expectation-propagation'
 import { tiltedByQuadrature, type Tilted } from 'aifn-compute/inference/expectation-propagation'
 import { dist, model, type Model } from 'aifn-compute/inference/model'
@@ -140,12 +140,21 @@ const defaults = (p: ClutterProblem) => ({
 })
 
 /**
+ * The observations as numbers: a tensor's values in row-major order (as `sampleClutter` returns them), or the array
+ * as given.
+ *
+ * @param x The observations, a tensor or an array of numbers.
+ * @returns Their values.
+ */
+const observations = (x: ArrayLike<number> | Tensor): ArrayLike<number> => (isTensor(x) ? float64Data(x) : x)
+
+/**
  * The log-likelihood of the clutter problem,
  * $\log p(\xvec \mid \theta) = \sum_i \log[(1 - w)\Gauss(x_i; \theta, 1) + w\Gauss(x_i; 0, c^2)]$, each term
  * computed by log-sum-exp.
  *
  * @param theta The value of $\theta$.
- * @param x The observations $x_i$.
+ * @param x The observations $x_i$: an array of numbers, or a tensor such as `sampleClutter` returns.
  * @param problem The clutter problem; its `weight` and `clutterVariance` are used (the prior is not).
  * @returns The log-likelihood, 0 for no observations.
  *
@@ -155,8 +164,9 @@ const defaults = (p: ClutterProblem) => ({
  * print('theta = 2:', clutterLogLikelihood(2, x, { weight: 0.3 }))
  * print('theta = 5:', clutterLogLikelihood(5, x, { weight: 0.3 }))
  */
-export function clutterLogLikelihood(theta: number, x: ArrayLike<number>, problem: ClutterProblem): number {
+export function clutterLogLikelihood(theta: number, x: ArrayLike<number> | Tensor, problem: ClutterProblem): number {
   const { weight, clutterVariance } = defaults(problem)
+  x = observations(x)
   let total = 0
   for (let i = 0; i < x.length; i++) {
     const ls = Math.log1p(-weight) + logNormal(x[i], theta, 1)
@@ -176,8 +186,7 @@ export function clutterLogLikelihood(theta: number, x: ArrayLike<number>, proble
  * @param n The number of observations.
  * @param theta The true value of $\theta$.
  * @param problem The clutter problem; its `weight` and `clutterVariance` are used (the prior is not).
- * @returns The $n$ observations, a float64 vector. The functions here that take observations take an
- *   `ArrayLike<number>`, so pass them `toArray` of it.
+ * @returns The $n$ observations, a float64 vector, which the functions here that take observations accept as it is.
  *
  * @example Mostly near the true value, with some clutter
  * const x = sampleClutter(stream(0), 10, 2, { weight: 0.3 })
@@ -202,7 +211,7 @@ export function sampleClutter(s: Stream, n: number, theta: number, problem: Clut
  * `aifn-compute/inference/expectation-propagation`): the prior $\Gauss(0, v_0)$, one factor per observation, and
  * their tilted moments, in closed form (`clutterTilted`) for power $\alpha = 1$ and by quadrature for power EP.
  *
- * @param x The observations $x_i$, one EP factor each; copied.
+ * @param x The observations $x_i$, one EP factor each: an array of numbers or a tensor; copied.
  * @param problem The clutter problem; `priorVariance` and `clutterVariance` default to 100 and 10.
  * @param options EP settings passed through unchanged: `damping`, `power`, `order` and `tolerance`.
  * @returns The `EpOptions`: `prior`, `factors` (the number of observations), `tilted`, and the settings of `options`.
@@ -214,12 +223,12 @@ export function sampleClutter(s: Stream, n: number, theta: number, problem: Clut
  * print('factor 0, power 0.5', ep.tilted(0, ep.prior, 0.5))
  */
 export function clutterEp(
-  x: ArrayLike<number>,
+  x: ArrayLike<number> | Tensor,
   problem: ClutterProblem,
   options: Pick<EpOptions, 'damping' | 'power' | 'order' | 'tolerance'> = {},
 ): EpOptions {
   const p = defaults(problem)
-  const xs = Array.from(x)
+  const xs = Array.from(observations(x))
   const factor = (i: number) => (theta: number) => clutterLogLikelihood(theta, [xs[i]], p)
   return {
     prior: { mean: 0, variance: p.priorVariance },
@@ -237,7 +246,7 @@ export function clutterEp(
  * variance and log evidence, the reference EP is compared with. The grid must hold the posterior mass; the default
  * $[-40, 40]$ does for the usual prior.
  *
- * @param x The observations $x_i$.
+ * @param x The observations $x_i$: an array of numbers, or a tensor such as `sampleClutter` returns.
  * @param problem The clutter problem; `priorVariance` and `clutterVariance` default to 100 and 10.
  * @param options The grid.
  * @param options.lower The smallest $\theta$ of the grid.
@@ -248,18 +257,19 @@ export function clutterEp(
  *
  * @example The posterior of twenty points drawn at theta = 2
  * const x = sampleClutter(stream(1), 20, 2, { weight: 0.3 })
- * const exact = clutterPosterior(toArray(x), { weight: 0.3 })
+ * const exact = clutterPosterior(x, { weight: 0.3 })
  * print('mean', exact.mean, 'variance', exact.variance)
  * print('log evidence', exact.logEvidence)
  * const density = toArray(exact.density)
  * print('peak at theta =', toArray(exact.grid)[density.indexOf(Math.max(...density))])
  */
 export function clutterPosterior(
-  x: ArrayLike<number>,
+  x: ArrayLike<number> | Tensor,
   problem: ClutterProblem,
   { lower = -40, upper = 40, points = 4001 }: { lower?: number; upper?: number; points?: number } = {},
 ): { grid: Vector; density: Vector; mean: number; variance: number; logEvidence: number } {
   const p = defaults(problem)
+  x = observations(x)
   const h = (upper - lower) / (points - 1)
   const grid = Float64Array.from({ length: points }, (_, i) => lower + i * h)
   const logs = grid.map(

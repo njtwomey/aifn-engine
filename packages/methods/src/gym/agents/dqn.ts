@@ -242,8 +242,8 @@ export interface Minibatch {
   observations: Float64Array
   /** The next observations, $n \times d$ row-major. */
   next: Float64Array
-  /** The actions taken. */
-  actions: Int32Array
+  /** The actions taken: indices for a discrete agent, reals for a one-dimensional box action (DDPG). */
+  actions: Float64Array
   /** The rewards received. */
   rewards: Float64Array
   /** 1 where the transition reached a terminal state, else 0. */
@@ -269,7 +269,7 @@ export function gatherMinibatch(b: ReplayBuffer, indices: ArrayLike<number>): Mi
     n,
     observations: new Float64Array(n * dim),
     next: new Float64Array(n * dim),
-    actions: new Int32Array(n),
+    actions: new Float64Array(n),
     rewards: new Float64Array(n),
     terminated: new Float64Array(n),
   }

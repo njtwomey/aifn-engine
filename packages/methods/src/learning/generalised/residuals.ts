@@ -42,6 +42,7 @@ export type ResidualInput = {
  * @returns The residuals, $n$.
  *
  * @example Deviance residuals of a Poisson fit: their squares sum to the deviance
+ * import { link, poissonFamily } from 'aifn-compute/probability/likelihoods'
  * const y = tensor([0, 1, 5])
  * const mu = tensor([1, 2, 3])
  * const fit = { y, mu, eta: log(mu), family: poissonFamily(), link: link('log') }
@@ -50,6 +51,7 @@ export type ResidualInput = {
  * print('sum of squares =', sum(mul(r, r)), ' deviance =', deviance(poissonFamily(), y, mu))
  *
  * @example The four kinds side by side
+ * import { link, poissonFamily } from 'aifn-compute/probability/likelihoods'
  * const mu = tensor([1, 2, 3])
  * const fit = { y: tensor([0, 1, 5]), mu, eta: log(mu), family: poissonFamily(), link: link('log') }
  * for (const kind of ['response', 'pearson', 'deviance', 'working']) print(kind + ':', residuals(fit, kind))

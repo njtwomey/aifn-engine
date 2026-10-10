@@ -111,6 +111,29 @@ describe('state-space discretisation and kernels', () => {
     close(rec.outputs, s4.y, 1e-12)
     close(rec.states, s4.states, 1e-12)
   })
+
+  it('causalConvolution reads taps past the kernel as zero and ignores taps past the input', () => {
+    // A longer kernel: tap 3 must not leak into the upper triangle.
+    close(causalConvolution(T([1, 0.5, 0.25, 9]), T([0, 0, 1])), [0, 0, 1], 1e-12)
+    // A shorter kernel: y_t = K_0 u_t + K_1 u_{t-1}.
+    close(causalConvolution(T([1, 2]), T([1, 1, 1, 1])), [1, 3, 3, 3], 1e-12)
+    close(
+      causalConvolution(
+        T([[1, 2]]),
+        T([
+          [1, 1],
+          [1, 0],
+          [1, 0],
+        ]),
+      ),
+      [
+        [1, 2],
+        [1, 0],
+        [1, 0],
+      ],
+      1e-12,
+    )
+  })
 })
 
 describe('selective scan', () => {

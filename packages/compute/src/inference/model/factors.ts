@@ -10,7 +10,7 @@
  */
 
 import { shape, structuredGraph, type StructuredGraph } from 'aifn-compute/graph/structured'
-import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
+import { fromData, isContiguous, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** A potential over a few discrete variables; `table` has shape `scope.map((v) => cardinalities[v])`. */
@@ -79,8 +79,8 @@ export const tableSize = (shape: readonly number[]): number => shape.reduce((a, 
 
 /**
  * Contiguous float64 values of a table, in row-major order. The tensor's own storage is returned (so it must not be
- * modified) when it is float64, starts at offset 0 and holds exactly one value per entry; its strides are not checked.
- * Otherwise the entries are copied out in row-major order.
+ * modified) when it is float64, row-major (`isContiguous`), starts at offset 0 and holds exactly one value per entry.
+ * Otherwise, as for a transposed or strided view, the entries are copied out in row-major order.
  *
  * @param t The table: a tensor of any shape.
  * @returns Its entries in row-major order.
@@ -89,7 +89,7 @@ export const tableSize = (shape: readonly number[]): number => shape.reduce((a, 
  * print(valuesOf(tensor([[1, 2], [3, 4]])))
  */
 export const valuesOf = (t: Tensor): Float64Array =>
-  t.data instanceof Float64Array && t.offset === 0 && t.data.length === tableSize(t.shape)
+  t.data instanceof Float64Array && t.offset === 0 && t.data.length === tableSize(t.shape) && isContiguous(t)
     ? t.data
     : Float64Array.from(toFlat(t))
 

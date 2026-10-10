@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { grad } from 'aifn-compute/foundation/autodiff'
 import { stream, normals } from 'aifn-compute/foundation/random'
 import { dense, fromData, sum, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
+import { ShapeError } from 'aifn-compute/foundation/errors'
 import { MIL_POOLING_KINDS, milPool, MilPooling, type MilPoolingParams } from 'aifn-compute/nn/layers'
 
 const B = 2
@@ -58,6 +59,11 @@ describe('milPool', () => {
       const b = toFlat(milPool(kind, params, Zk).logits as Tensor)
       a.forEach((v, i) => expect(v).toBeCloseTo(b[i], 12))
     }
+  })
+  it('a mask that is not exactly [B, t] throws', () => {
+    const extra = fromData(new Float64Array(B * t * 2).fill(1), [B, t, 2])
+    expect(() => milPool('instance', params, Z, extra)).toThrow(ShapeError)
+    expect(() => milPool('instance', params, Z, fromData(new Float64Array(B).fill(1), [B]))).toThrow(ShapeError)
   })
   it('gradients reach the classifier and the attention head', () => {
     const g = grad((p: MilPoolingParams) => sum(milPool('additive', p, Z).logits))(params) as MilPoolingParams

@@ -272,8 +272,9 @@ export type HeatOptions = Common & {
  * $D(u_{i-1} - 2u_i + u_{i+1})/\Delta x^2$ in space, then explicit Euler (FTCS; stable only when
  * $r = D\Delta t/\Delta x^2 \le 1/2$), implicit Euler or Crank–Nicolson (both unconditionally stable; Crank–Nicolson
  * is second order in time but lets high-frequency error oscillate for large $r$). Zero-flux (Neumann) ends use a
- * mirrored ghost point, so the mass is conserved. On a periodic grid all $n$ points are distinct, so the period is
- * $n \Delta x$. `init` takes `{ u0 }`, the initial profile. Throws `DomainError` unless $D$ and $\Delta t$ are
+ * mirrored ghost point, so the mass is conserved. On a periodic grid the last point repeats the first (as in
+ * `transportEquation` and `waveEquation`), so the period is $b - a$ and the unknowns are the first $n - 1$ points.
+ * `init` takes `{ u0 }`, the initial profile. Throws `DomainError` unless $D$ and $\Delta t$ are
  * positive.
  *
  * @param options The diffusivity, grid, boundary, time step, scheme and end time.
@@ -301,10 +302,13 @@ export function heatEquation(options: HeatOptions): Algorithm<{ u0: Profile }, P
     throw new DomainError('heatEquation', 'heatEquation: the diffusivity and dt must be positive')
   const n = grid.n
   const dx = (grid.b - grid.a) / (n - 1)
+  const periodic = boundary.kind === 'periodic'
+  // On a periodic grid the last point repeats the first, so the operator acts on points 0…m−1 with m = n − 1.
+  const m = periodic ? n - 1 : n
   const k = D / (dx * dx)
-  const lo = new Float64Array(n).fill(k)
-  const di = new Float64Array(n).fill(-2 * k)
-  const up = new Float64Array(n).fill(k)
+  const lo = new Float64Array(m).fill(k)
+  const di = new Float64Array(m).fill(-2 * k)
+  const up = new Float64Array(m).fill(k)
   if (boundary.kind === 'dirichlet') {
     for (const i of [0, n - 1]) lo[i] = di[i] = up[i] = 0
   } else if (boundary.kind === 'neumann') {
@@ -316,19 +320,34 @@ export function heatEquation(options: HeatOptions): Algorithm<{ u0: Profile }, P
   const r = (D * dt) / (dx * dx)
   const limit = scheme === 'explicit' ? 0.5 : Infinity
   const stability = { number: 'r = DΔt/Δx²', value: r, limit, stable: r <= limit }
-  const L = { lo, di, up, periodic: boundary.kind === 'periodic' }
+  const L = { lo, di, up, periodic }
   const stepper = thetaMethod(`heat-${scheme}`, L, scheme, dt, dx, stability, tEnd)
+  if (!periodic)
+    return {
+      name: stepper.name,
+      init: ({ u0 }) => {
+        const u = sample(u0, grid, 'heatEquation')
+        if (boundary.kind === 'dirichlet') {
+          u[0] = boundary.left ?? u[0]
+          u[n - 1] = boundary.right ?? u[n - 1]
+        }
+        return stepper.init(u)
+      },
+      step: stepper.step,
+      done: stepper.done,
+    }
+  // Step the m distinct points, and report all n with the last a copy of the first.
+  const close = (s: PdeState): PdeState => {
+    const u = new Float64Array(n)
+    u.set(s.u.data as F64)
+    u[n - 1] = u[0]
+    return { ...s, u: fromData(u, [n]) }
+  }
+  const open = (s: PdeState): PdeState => ({ ...s, u: fromData((s.u.data as F64).slice(0, m), [m]) })
   return {
     name: stepper.name,
-    init: ({ u0 }) => {
-      const u = sample(u0, grid, 'heatEquation')
-      if (boundary.kind === 'dirichlet') {
-        u[0] = boundary.left ?? u[0]
-        u[n - 1] = boundary.right ?? u[n - 1]
-      }
-      return stepper.init(u)
-    },
-    step: stepper.step,
+    init: ({ u0 }) => close(stepper.init(sample(u0, grid, 'heatEquation').subarray(0, m))),
+    step: (s) => close(stepper.step(open(s))),
     done: stepper.done,
   }
 }

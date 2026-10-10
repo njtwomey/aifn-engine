@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { hzToMel, melFilterbank, melToHz, mfcc } from 'aifn-compute/signal/audio'
 import { toFlat } from 'aifn-compute/foundation/tensor'
 
@@ -21,5 +22,9 @@ describe('audio features', () => {
     expect(m.mfcc.shape[1]).toBe(13)
     expect(m.mfcc.shape[0]).toBe(m.logMel.shape[0])
     expect(toFlat(m.mfcc).every(Number.isFinite)).toBe(true)
+  })
+
+  it('throws DomainError when nMfcc > nMels', () => {
+    expect(() => mfcc([0, 1, 0, -1], 1000, { nfft: 4, nMels: 5, nMfcc: 6 })).toThrow(DomainError)
   })
 })

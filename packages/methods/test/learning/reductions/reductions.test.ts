@@ -10,10 +10,12 @@ import {
   oneVersusRest,
   outputCode,
   randomCode,
+  randomDichotomyTree,
 } from 'aifn-methods/learning/reductions'
 import { stream } from 'aifn-compute/foundation/random'
 import { toFlat, toRows } from 'aifn-compute/foundation/tensor'
 import { classProbabilities, dataset } from 'aifn-compute/learning/estimators'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { close, fx, X3, XQ, Y3 } from '../shared'
 
 describe('multiclass reductions', () => {
@@ -44,5 +46,12 @@ describe('multiclass reductions', () => {
       for (const row of toRows(classProbabilities(m.predictive(XQ))))
         expect(row.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 12)
     }
+  })
+  it('code and tree builders reject too few classes instead of looping', () => {
+    expect(() => randomCode(stream(0), 1, 3)).toThrow(DomainError)
+    expect(() => randomCode(stream(0), 3, -1)).toThrow(DomainError)
+    expect(() => dichotomyTree(0)).toThrow(DomainError)
+    expect(() => randomDichotomyTree(stream(0), 0)).toThrow(DomainError)
+    expect(dichotomyTree(1)).toBe(0)
   })
 })

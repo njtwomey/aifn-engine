@@ -160,6 +160,13 @@ describe('a linear-chain CRF over feature templates', () => {
     expect(topFeatures(crf, 2, 0)).toHaveLength(2)
   })
 
+  it('firingFeatures throws DomainError for a row missing a column a template reads', () => {
+    const { crf } = randomCrf(3)
+    const rows = toy[0].rows.map((r) => r.slice(0, 1))
+    expect(() => firingFeatures(crf, rows, 1)).toThrow(/firingFeatures: .*column 1/)
+    expect(() => firingFeatures(crf, rows, 1)).toThrow(expect.objectContaining({ name: 'DomainError' }))
+  })
+
   it('matches CRFsuite (L-BFGS, L2): weights, held-out marginals and Viterbi tags', () => {
     const templates = parseTemplates(golden.templates)
     const train: LabelledSequence[] = golden.train

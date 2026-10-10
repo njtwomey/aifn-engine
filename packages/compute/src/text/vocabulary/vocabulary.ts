@@ -179,9 +179,13 @@ export function vocabularyOf(
   options: { specials?: readonly string[]; unknown?: string | null } = {},
 ): Vocabulary {
   const { specials = [] } = options
+  if (new Set(specials).size !== specials.length)
+    throw new DomainError('vocabularyOf', 'vocabularyOf: specials must be distinct')
   const unknownToken = options.unknown ?? null
   const all = [...specials, ...tokens.filter((t) => !specials.includes(t))]
   if (new Set(all).size !== all.length) throw new DomainError('vocabularyOf', 'vocabularyOf: tokens must be distinct')
+  if (unknownToken !== null && !all.includes(unknownToken))
+    throw new DomainError('vocabularyOf', `vocabularyOf: unknown token '${unknownToken}' is not in the vocabulary`)
   return {
     kind: 'vocabulary',
     tokens: all,

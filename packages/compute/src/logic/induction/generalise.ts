@@ -31,6 +31,15 @@ export interface HornClause {
   readonly body: readonly Term[]
 }
 
+/**
+ * A term's identity as a string: its printed text in full, with each variable written by its id, so that two variables
+ * that share a name but not an id stay apart.
+ *
+ * @param t The term.
+ * @returns The key.
+ */
+const termKey = (t: Term) => termToString(t, { variableName: (v) => `_G${v.id}`, maxDepth: Infinity })
+
 /** The shared table of an lgg: each pair of differing subterms gets one variable. */
 class Pairs {
   private readonly table = new Map<string, Term>()
@@ -40,7 +49,7 @@ class Pairs {
     this.names = names
   }
   get(a: Term, b: Term): Term {
-    const key = `${termToString(a)}\u0000${termToString(b)}`
+    const key = `${termKey(a)}\u0000${termKey(b)}`
     let v = this.table.get(key)
     if (!v) {
       v = variable(this.names(this.count), this.count)
@@ -138,7 +147,7 @@ export function clauseLgg(c: HornClause, d: HornClause): HornClause | null {
     for (const y of d.body) {
       if (predicateOf(x) !== predicateOf(y)) continue
       const g = lggWith(x, y, pairs)
-      const key = termToString(g)
+      const key = termKey(g)
       if (!seen.has(key)) {
         seen.add(key)
         body.push(g)

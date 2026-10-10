@@ -517,7 +517,8 @@ const poly = (c: readonly number[], x: number) => c.reduceRight((acc, ci) => acc
  * print('n = 10:', shapiroWilkCoefficients(10))
  */
 export function shapiroWilkCoefficients(n: number): Float64Array {
-  if (!(Number.isInteger(n) && n >= 3)) throw new DomainError('shapiroWilkCoefficients', 'needs n ≥ 3')
+  if (!(Number.isInteger(n) && n >= 3))
+    throw new DomainError('shapiroWilkCoefficients', 'shapiroWilkCoefficients: needs an integer n ≥ 3')
   const half = Math.floor(n / 2)
   const a = new Float64Array(half)
   if (n === 3) {

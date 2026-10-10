@@ -195,4 +195,14 @@ describe('BOCPD on the generators', () => {
     expect(a.recall).toBeGreaterThanOrEqual(0.75)
     for (const r of [v, p, a]) expect(r.precision).toBeGreaterThanOrEqual(0.75)
   })
+
+  it('supports n = 0 without error and reports Infinity for unit-root AR regimes', () => {
+    const zero = meanShifts(stream('zero'), { n: 0 })
+    expect(zero.x.shape).toEqual([0, 1])
+    expect(truthOf(zero).n).toBe(0)
+    expect(truthOf(zero).segments).toEqual([])
+
+    const unitRoot = arRegimes(stream('ur'), { n: 10, regimes: [[1]] })
+    expect(truthOf(unitRoot).segments[0].variance).toBe(Infinity)
+  })
 })

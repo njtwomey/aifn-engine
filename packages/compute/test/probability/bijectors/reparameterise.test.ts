@@ -7,6 +7,7 @@ import {
   exp,
   get,
   mul,
+  neg,
   slice,
   sum,
   tensor,
@@ -69,6 +70,20 @@ describe('transformLogDensity', () => {
     const want = u.reduce((a, ui) => a + num(g.logProb(Math.exp(ui))) + ui, 0)
     expect(num(logScale.logDensity(tensor(u)))).toBeCloseTo(want, 12)
     expect(toFlat(logScale.fromOriginal!(tensor([1, Math.E])) as never)).toEqual([0, 1])
+  })
+  it('an elementwise bijector sums its log-Jacobian per row of a batch', () => {
+    const batched: LogDensity = { kind: 'log-density', dim: 2, normalised: false, logDensity: (t) => neg(sum(t, -1)) }
+    const logScale = transformLogDensity(batched, expBijector)
+    const got = toFlat(
+      logScale.logDensity(
+        tensor([
+          [0, 0],
+          [1, 1],
+        ]),
+      ) as never,
+    )
+    expect(got[0]).toBeCloseTo(-2, 12)
+    expect(got[1]).toBeCloseTo(-2 * Math.E + 2, 12)
   })
   it('HMC on the non-centred funnel does not diverge where the centred one does', () => {
     const nc = transformLogDensity(funnel, { forward: centring, logAbsDetJacobian: (u) => mul((d - 1) / 2, get(u, 0)) })

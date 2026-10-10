@@ -187,14 +187,42 @@ export function alignedMap(a: AlignedText, f: (chunk: string) => string, unit: A
 }
 
 /**
+ * The replacement string of one match, with `$` patterns read as `String.prototype.replace` reads them: `$$`, `$&`,
+ * `` $` ``, `$'`, `$n` and `$nn` (a group that exists; otherwise the text is kept), and `$<name>` (when the pattern
+ * has named groups).
+ *
+ * @param replacement The replacement, with `$` patterns.
+ * @param m The match.
+ * @param text The whole text matched against, for `` $` `` and `$'`.
+ * @returns The replacement with its patterns filled in.
+ */
+function substitute(replacement: string, m: RegExpExecArray, text: string): string {
+  const groups = m.length - 1
+  // `$<` is literal text when the pattern has no named groups.
+  const re = m.groups ? /\$(\$|&|`|'|\d{1,2}|<[^>]*>)/g : /\$(\$|&|`|'|\d{1,2})/g
+  return replacement.replace(re, (x, p: string) => {
+    if (p === '$') return '$'
+    if (p === '&') return m[0]
+    if (p === '`') return text.slice(0, m.index)
+    if (p === "'") return text.slice(m.index + m[0].length)
+    if (p[0] === '<') return m.groups![p.slice(1, -1)] ?? ''
+    // Two digits name a group when that group exists; otherwise the first digit alone does, and the second is text.
+    if (p.length === 2 && Number(p) >= 1 && Number(p) <= groups) return m[Number(p)] ?? ''
+    const k = Number(p[0])
+    return k >= 1 && k <= groups ? (m[k] ?? '') + p.slice(1) : x
+  })
+}
+
+/**
  * Replace every match of `pattern` (made global) by `replacement` (a string with `$1`-style groups, or a function of
  * the match); the units of a replacement map to the range of the text it replaced, and an empty match's replacement
  * is a zero-width insertion at its position. A replacement equal to its match keeps the match's own ranges.
  *
  * @param a The aligned text.
  * @param pattern The regular expression; a `g` flag is added when missing.
- * @param replacement A string in which `$&` stands for the match and `$1` to `$9` for its groups (no other `$`
- *   patterns are read), or a function of the match.
+ * @param replacement A string with the `$` patterns of `String.prototype.replace` (`$&` the match, `$1` … `$99` its
+ *   groups, `$<name>` a named group, `` $` `` and `$'` the text before and after it, `$$` a dollar sign), or a function
+ *   of the match.
  * @returns The rewritten text, aligned to the same original.
  *
  * @example Collapse white space, then map a token back
@@ -214,10 +242,7 @@ export function alignedReplace(
     const s = m.index
     const e = s + m[0].length
     b.keep(a, at, s)
-    const out =
-      typeof replacement === 'string'
-        ? replacement.replace(/\$(\d)|\$&/g, (_x, g: string | undefined) => (g ? (m![Number(g)] ?? '') : m![0]))
-        : replacement(m)
+    const out = typeof replacement === 'string' ? substitute(replacement, m, a.text) : replacement(m)
     if (out === m[0]) b.keep(a, s, e)
     else {
       const [os, oe] = originalSpan(a, s, e)

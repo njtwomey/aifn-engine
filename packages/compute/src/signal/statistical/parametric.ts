@@ -434,7 +434,9 @@ export function esprit(x: SignalInput, options: SubspaceOptions): LineSpectrum {
   // after taking one of each pair.
   const positive = angles.filter((a, i) => im[i] > 0 || (im[i] === 0 && a >= 0)).map((a) => Math.abs(a))
   const pool = positive.length >= options.sinusoids ? positive : angles.map(Math.abs)
-  const frequencies = [...new Set(pool.map((a) => (a * s.fs) / (2 * Math.PI)))]
+  const uniqueFreqs = [...new Set(pool.map((a) => (a * s.fs) / (2 * Math.PI)))]
+  const frequencies = uniqueFreqs
+    .sort((a, b) => b - a)
     .slice(0, options.sinusoids)
     .sort((a, b) => a - b)
   return lineSummary(s, frequencies)
@@ -497,11 +499,27 @@ export function sinusoidFit(
   const fit = lstsq(fromData(A, [n, p]), fromData(Float64Array.from(v), [n]))
   const c = toFlat(fit.x)
   const amplitudes = f.map((_, k) => Math.hypot(c[1 + 2 * k], c[2 + 2 * k]))
+  let resVar: number
+  if (fit.residuals.data.length > 0) {
+    resVar = (fit.residuals.data as Float64Array)[0] / n
+  } else {
+    let rss = 0
+    for (let t = 0; t < n; t++) {
+      let pred = c[0]
+      f.forEach((fk, k) => {
+        const w = (2 * Math.PI * fk * t) / input.fs
+        pred += c[1 + 2 * k] * Math.cos(w) + c[2 + 2 * k] * Math.sin(w)
+      })
+      const diff = v[t] - pred
+      rss += diff * diff
+    }
+    resVar = rss / n
+  }
   return {
     amplitudes: vec(amplitudes),
     phases: vec(f.map((_, k) => Math.atan2(c[1 + 2 * k], c[2 + 2 * k]))),
     powers: vec(amplitudes.map((a) => (a * a) / 2)),
     offset: c[0],
-    residualVariance: ((fit.residuals.data as Float64Array)[0] ?? NaN) / n,
+    residualVariance: resVar,
   }
 }

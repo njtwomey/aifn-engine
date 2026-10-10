@@ -208,7 +208,7 @@ fn(
   {
     key: 'discretise',
     name: 'Discretise',
-    summary: 'A continuous system sampled at Δt by zero-order hold, first-order hold, Tustin (bilinear) or Euler.',
+    summary: 'A continuous system sampled at Δt by zero-order hold, Tustin (bilinear) or forward Euler.',
     role: 'transform',
     returns: 'lti',
     notes: ['state-space-representation', 'z-transform', 'sampling-theorem'],

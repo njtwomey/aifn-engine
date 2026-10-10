@@ -138,6 +138,12 @@ describe('solveQuery: classic programs', () => {
     expect(solveQuery('', 'X is Y + 1').message).toMatch(/not sufficiently instantiated/)
     expect(solveQuery('', 'member(X, [a, b, c])', { maxSolutions: 2 }).answers).toEqual(['X = a', 'X = b'])
   })
+
+  it('raises division by zero for /, //, mod and rem alike', () => {
+    for (const op of ['/', '//', 'mod', 'rem'])
+      expect(solveQuery('', `X is 7 ${op} 0`).message, op).toMatch(/division by zero/)
+    expect(answers('', 'X is -7 rem 2, Y is -7 mod 2')).toEqual(['X = -1, Y = 1'])
+  })
 })
 
 describe('sldSteps: the search tree', () => {

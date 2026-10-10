@@ -9,6 +9,7 @@
  * `librosa.feature.mfcc`, except that the default scale here is HTK's.
  */
 
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { dct, readSignal, type Signal } from 'aifn-compute/foundation/fourier'
 import { astype, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { stft } from 'aifn-compute/signal/spectral'
@@ -176,7 +177,8 @@ export interface MfccOptions {
  * print('loudest mel band of frame 0:', loudest, 'peaking at', filterbank.edges.data[loudest + 1], 'Hz')
  */
 export function mfcc(x: Signal, fs: number, options: MfccOptions = {}): Mfcc {
-  const { nfft = 512, hop = nfft / 4, nMels = 26, nMfcc = 13, window = 'hann', logOffset = 1e-10 } = options
+  const { nfft = 512, hop = Math.floor(nfft / 4), nMels = 26, nMfcc = 13, window = 'hann', logOffset = 1e-10 } = options
+  if (nMfcc > nMels || nMfcc < 1) throw new DomainError('mfcc', `mfcc: nMfcc must be in 1..${nMels}, got ${nMfcc}`)
   const v = readSignal(x, 'mfcc')
   const s = stft(v, { fs, nperseg: nfft, noverlap: nfft - hop, window, boundary: false, padded: false })
   // A complex time–frequency map: complex128 values [bins, frames], stored interleaved (re, im).

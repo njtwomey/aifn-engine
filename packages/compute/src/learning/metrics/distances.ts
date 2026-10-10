@@ -326,8 +326,8 @@ export function orthogonalProcrustes(
 /**
  * The Procrustes disparity of two matched point sets (rows as points): after centring both and scaling each to unit
  * Frobenius norm, the least squared error over rotations (reflections allowed) and scale, $1 - (\sum_k \sigma_k)^2$,
- * in $[0, 1]$ (Gower 1975; as SciPy's `procrustes`). Throws `DomainError` when a set has all its points equal. The
- * two sets' shapes are not checked against each other: pass the same $n \times d$.
+ * in $[0, 1]$ (Gower 1975; as SciPy's `procrustes`). Throws `DomainError` when a set has all its points equal, and
+ * `ShapeError` when the two sets differ in shape.
  *
  * @param x The first point set: an $n \times d$ matrix, one point per row.
  * @param y The second point set, matched row by row.
@@ -375,6 +375,12 @@ export const procrustesDisparity = defineMetric(
     }
     const X = normalised(x)
     const Y = normalised(y)
+    if (X.shape[0] !== Y.shape[0] || X.shape[1] !== Y.shape[1])
+      throw new ShapeError(
+        'procrustesDisparity',
+        `procrustesDisparity: point sets have shapes ${X.shape[0]}×${X.shape[1]} and ${Y.shape[0]}×${Y.shape[1]}`,
+        [X.shape, Y.shape],
+      )
     const d = X.shape[1]
     const n = X.shape[0]
     const M = new Float64Array(d * d)

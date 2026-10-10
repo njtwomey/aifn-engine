@@ -92,3 +92,19 @@ describe('EP on the clutter problem against quadrature', () => {
     expect(Math.abs(power.posterior.mean - mean)).toBeLessThan(0.2)
   })
 })
+
+describe('the clutter functions take sampleClutter’s tensor as it is', () => {
+  it('a tensor gives the same answers as its array of values', () => {
+    const problem = { weight: 0.3 }
+    const x = sampleClutter(stream(5), 20, 2, problem)
+    const values = Array.from(x.data as Float64Array)
+    expect(clutterLogLikelihood(1.5, x, problem)).toBeCloseTo(clutterLogLikelihood(1.5, values, problem), 12)
+    expect(clutterLogLikelihood(1.5, x, problem)).not.toBe(0)
+    expect(clutterEp(x, problem).factors).toBe(20)
+    const fromTensor = clutterPosterior(x, problem)
+    const fromArray = clutterPosterior(values, problem)
+    expect(fromTensor.mean).toBeCloseTo(fromArray.mean, 12)
+    expect(fromTensor.logEvidence).toBeCloseTo(fromArray.logEvidence, 12)
+    expect(fromTensor.logEvidence).not.toBe(0)
+  })
+})

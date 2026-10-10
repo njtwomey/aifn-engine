@@ -12,9 +12,11 @@
  * $z = \eta_k + u/w$, halving a step that raises the penalised global deviance, until that deviance settles; then it
  * moves to the next parameter. The cycle ends with the global deviance $\text{GD} = -2\ell$. Smoothing parameters are
  * fixed or chosen by local maximum likelihood: after each parameter's inner fit,
- * $\lambda \leftarrow (r - \lambda \trace(\Hmat^{-1}\Smat))/(\betavec^\top\Smat\betavec)$ ($r = \rank\Smat$),
+ * $\lambda_j \leftarrow \lambda_j(\trace(\Smat_\lambda^-\Smat_j) - \trace(\Hmat^{-1}\Smat_j))/(\betavec^\top\Smat_j\betavec)$,
  * the Fellner–Schall fixed point of the working model's marginal likelihood (Wood and Fasiolo, 2017), which Rigby and
- * Stasinopoulos's local ML estimates. The new $\lambda$ is used from the next cycle on.
+ * Stasinopoulos's local ML estimates. For a penalty alone on its block $\trace(\Smat_\lambda^-\Smat_j) = r_j/\lambda_j$
+ * ($r_j = \rank\Smat_j$); penalties sharing a block (the two of `te`) use the pseudo-inverse of their weighted sum.
+ * The new $\lambda$ is used from the next cycle on.
  *
  * Outputs: parameter curves, centile curves, normalised quantile residuals and a worm plot (`gamlssModel`), and the
  * generalised AIC $\text{GAIC}(k) = \text{GD} + k \cdot \text{df}$ with df the summed effective degrees of freedom.
@@ -24,7 +26,7 @@ import type { Status } from 'aifn-compute/foundation/contracts'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { trace, type Algorithm, type Trace } from 'aifn-compute/foundation/trace'
-import { cholesky, choleskySolve } from 'aifn-compute/numerics/linalg'
+import { cholesky, choleskySolve, eigh } from 'aifn-compute/numerics/linalg'
 import {
   distributionalFamily,
   distributionalLinks,
@@ -231,6 +233,66 @@ const quad = (beta: F64, S: F64, P: number) => {
 }
 
 /**
+ * $\trace(\Smat_\lambda^-\Smat_j)$ for every penalty $j$ of a design, with $\Smat_\lambda^-$ the pseudo-inverse of
+ * $\Smat_\lambda = \sum_j \lambda_j\Smat_j$: the first term of the Fellner–Schall update. A penalty alone on its term's
+ * block gives $r_j/\lambda_j$ ($r_j = \rank\Smat_j$); penalties sharing a block (the two of `te`) are handled
+ * together, from the eigendecomposition of their weighted sum over the block, keeping as many eigenvalues as the rank
+ * of their unweighted (norm-scaled) sum.
+ *
+ * @param A The design, whose penalties, terms and block offsets are read.
+ * @param lambdas $\lambda_j$ per penalty, each $\ge 0$.
+ * @param ranks $r_j$ per penalty.
+ * @returns $\trace(\Smat_\lambda^-\Smat_j)$ per penalty (0 for a penalty with $\lambda_j = 0$ alone on its block).
+ */
+function penaltyTraces(A: GamDesign, lambdas: readonly number[], ranks: readonly number[]): number[] {
+  const out = new Array<number>(A.penalties.length).fill(0)
+  const byTerm = new Map<number, number[]>()
+  A.penalties.forEach(({ term }, j) => byTerm.set(term, [...(byTerm.get(term) ?? []), j]))
+  for (const [term, js] of byTerm) {
+    if (js.length === 1) {
+      const j = js[0]
+      out[j] = lambdas[j] > 0 ? ranks[j] / lambdas[j] : 0
+      continue
+    }
+    const m = A.terms[term].size
+    const o = A.offsets[term]
+    const block = (j: number) => {
+      const B = new Float64Array(m * m)
+      for (let a = 0; a < m; a++) for (let b = 0; b < m; b++) B[a * m + b] = A.penalties[j].S[(o + a) * A.P + o + b]
+      return B
+    }
+    const blocks = js.map(block)
+    const on = js.map((j) => lambdas[j] > 0)
+    const unit = new Float64Array(m * m)
+    const weighted = new Float64Array(m * m)
+    blocks.forEach((B, i) => {
+      if (!on[i]) return
+      const norm = Math.hypot(...B) || 1
+      for (let k = 0; k < m * m; k++) {
+        unit[k] += B[k] / norm
+        weighted[k] += lambdas[js[i]] * B[k]
+      }
+    })
+    const ev = toFlat(eigh(fromData(unit, [m, m])).values)
+    const top = Math.max(...Array.from(ev, Math.abs), 0)
+    const rank = Array.from(ev).filter((v) => v > 1e-9 * top).length
+    const { values, vectors } = eigh(fromData(weighted, [m, m]))
+    const e = toFlat(values)
+    const V = toFlat(vectors)
+    blocks.forEach((B, i) => {
+      let t = 0
+      for (let c = 0; c < rank; c++) {
+        let q = 0
+        for (let a = 0; a < m; a++) for (let b = 0; b < m; b++) q += V[a * m + c] * B[a * m + b] * V[b * m + c]
+        t += q / e[c]
+      }
+      out[js[i]] = t
+    })
+  }
+  return out
+}
+
+/**
  * $\thetavec_k = g_k^{-1}(\etavec_k)$ elementwise.
  *
  * @param lk The parameter's link $g_k$.
@@ -382,16 +444,18 @@ export function gamlssRs(problem: GamlssProblem): Algorithm<undefined, GamlssSta
         W = working(problem, k, eta[k], theta).W
         const inf = penalisedInference(A, W, S[k], coefficients[k])
         edf[k] = inf.edf
-        if (localMl)
+        if (localMl) {
+          const trSS = penaltyTraces(A, lambdas[k], problem.ranks[k])
           A.penalties.forEach(({ S: Sj }, j) => {
             if (!Number.isNaN(A.fixed[j])) return
             let trHS = 0
             for (let a = 0; a < A.P; a++) for (let b = 0; b < A.P; b++) trHS += inf.Hinv[a * A.P + b] * Sj[b * A.P + a]
             const bSb = quad(coefficients[k], Sj, A.P)
             const l = lambdas[k][j]
-            const proposed = (problem.ranks[k][j] - l * trHS) / Math.max(bSb, 1e-300)
+            const proposed = (l * (trSS[j] - trHS)) / Math.max(bSb, 1e-300)
             next[k][j] = Math.min(1e10, Math.max(1e-8, proposed))
           })
+        }
       }
       const S = penalties(lambdas)
       const deviance = globalDeviance(problem, theta)

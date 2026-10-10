@@ -52,7 +52,8 @@ export interface HmmSample {
 function rows(m: readonly (readonly number[])[], what: string): number[][] {
   return m.map((r, i) => {
     const total = r.reduce((a, b) => a + b, 0)
-    if (Math.abs(total - 1) > 1e-9) throw new DomainError(what, `${what}: row ${i} sums to ${total}, not 1`)
+    if (!Number.isFinite(total) || Math.abs(total - 1) > 1e-9)
+      throw new DomainError(what, `${what}: row ${i} sums to ${total}, not 1`)
     return [...r]
   })
 }
@@ -146,7 +147,7 @@ export interface CasinoOptions {
  */
 export function casino(s: Stream, options: CasinoOptions = {}): HmmSample {
   const { n = 300, toLoaded = 0.05, toFair = 0.1, loadedSix = 0.5 } = options
-  const loaded = toLoaded / (toLoaded + toFair)
+  const loaded = toLoaded + toFair > 0 ? toLoaded / (toLoaded + toFair) : 0.5
   const other = (1 - loadedSix) / 5
   const sample = hmmSample(
     s,
@@ -297,6 +298,8 @@ export interface SeasonalOptions {
 export function seasonalSeries(s: Stream, options: SeasonalOptions = {}): TimeSeries {
   const { n = 120, period = 12, amplitudes = [1], level = 0, trend = 0.02, noise = 0.3, persistence = 0 } = options
   checkCount(n, 'seasonalSeries')
+  if (Math.abs(persistence) >= 1)
+    throw new DomainError('seasonalSeries', `seasonalSeries: |persistence| must be < 1, got ${persistence}`)
   const y = new Float64Array(n)
   const innovation = noise * Math.sqrt(1 - persistence * persistence)
   let u = noise * normal(s)
@@ -405,6 +408,8 @@ export interface MotifSeries extends TimeSeries {
 export function motifSeries(s: Stream, options: MotifSeriesOptions = {}): MotifSeries {
   const { n = 600, m = 40, sd = 0.3 } = options
   checkCount(n, 'motifSeries')
+  if (m < 2 || !Number.isInteger(m))
+    throw new DomainError('motifSeries', `motifSeries: m must be an integer >= 2, got ${m}`)
   const motifs = options.motifs ?? [Math.round(n / 7), Math.round((2 * n) / 3)]
   const discord = options.discord ?? Math.round(0.43 * n)
   const y = new Float64Array(n)

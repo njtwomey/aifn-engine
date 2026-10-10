@@ -425,12 +425,12 @@ export function stopTest(
 
 /**
  * Sift one IMF out of $x$: repeat `siftStep` until the stopping rule holds, $h$ has too few extrema, or
- * `maxSifts` $- 1$ sifts have been made.
+ * `maxSifts` sifts have been made.
  *
  * @param x The samples; not modified.
  * @param rule When to stop (PyEMD's rule by default).
  * @param mirror Whether to mirror extrema at the ends before fitting envelopes.
- * @param maxSifts One more than the most sifts made.
+ * @param maxSifts The most sifts made.
  * @returns The IMF, every step taken, and whether $x$ oscillated enough to sift.
  */
 export function sift(x: ArrayLike<number>, rule: StopRule = { kind: 'pyemd' }, mirror = true, maxSifts = 1000) {
@@ -438,7 +438,7 @@ export function sift(x: ArrayLike<number>, rule: StopRule = { kind: 'pyemd' }, m
   const steps: SiftStep[] = []
   let balancedRun = 0
   let oscillating = true
-  for (let n = 1; n < maxSifts; n++) {
+  for (let n = 1; n <= maxSifts; n++) {
     const step = siftStep(h, mirror)
     if (!step) {
       oscillating = false

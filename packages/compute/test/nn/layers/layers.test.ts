@@ -14,14 +14,17 @@ import {
   tensor,
   toFlat,
   unwrap,
+  zeros,
   type Tensor,
   type Value,
 } from 'aifn-compute/foundation/tensor'
 import type { Params } from 'aifn-compute/foundation/pytree'
+import { ShapeError } from 'aifn-compute/foundation/errors'
 import {
   ActivationLayer,
   BatchNorm,
   batchNorm,
+  Conv1d,
   Conv2d,
   dropout,
   Embedding,
@@ -200,6 +203,19 @@ describe('layers', () => {
     const emb = Embedding(5, 3)
     const ep = emb.init(s)
     expect(gradCheck((p: typeof ep) => sum(mul(emb.apply(p, tensor([1, 3, 1])), 1.5)), ep).ok).toBe(true)
+  })
+
+  it('grouped convolution layers draw [O, C / groups, ...] kernels that apply', () => {
+    const c2 = Conv2d(4, 6, 3, { groups: 2 })
+    const p2 = c2.init(stream(0))
+    expect(p2.weight.shape).toEqual([6, 2, 3, 3])
+    expect((c2.apply(p2, zeros([1, 4, 5, 5])) as Tensor).shape).toEqual([1, 6, 3, 3])
+    const c1 = Conv1d(4, 4, 3, { groups: 4 })
+    const p1 = c1.init(stream(0))
+    expect(p1.weight.shape).toEqual([4, 1, 3])
+    expect((c1.apply(p1, zeros([1, 4, 8])) as Tensor).shape).toEqual([1, 4, 6])
+    expect(() => Conv2d(4, 6, 3, { groups: 4 })).toThrow(ShapeError)
+    expect(() => Conv1d(3, 6, 3, { groups: 2 })).toThrow(ShapeError)
   })
 
   it('take adds gradients over repeated rows', () => {

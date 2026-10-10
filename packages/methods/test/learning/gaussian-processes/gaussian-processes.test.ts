@@ -196,6 +196,8 @@ describe('gp regression', () => {
     const lg = Array.from(g.logGradient)
     close([lg[1], lg[0], lg[2]], R.log_gradient, 1e-6)
     expect(g.kernel.lengthscale as number).toBeCloseTo(lg[0] / R.lengthscale, 10)
+    const g0 = logMarginalLikelihoodGradient(k, x, y, { noiseVariance: 0 })
+    expect(Number.isFinite(g0.noiseVariance)).toBe(true)
   })
 
   it('fitGp reaches the maximum scikit-learn finds', () => {

@@ -416,14 +416,16 @@ export function umapSteps(
           Y[i * dims + c] += alpha * g
           Y[j * dims + c] -= alpha * g
         }
-        for (let s = 0; s < negativeSamples; s++) {
-          const m = integers(r, n)
-          if (m === i) continue
-          let q2 = 0
-          for (let c = 0; c < dims; c++) q2 += (Y[i * dims + c] - Y[m * dims + c]) ** 2
-          const repel = (2 * b) / ((0.001 + q2) * (1 + a * q2 ** b))
-          for (let c = 0; c < dims; c++)
-            Y[i * dims + c] += alpha * (q2 > 0 ? clip(repel * (Y[i * dims + c] - Y[m * dims + c])) : 4)
+        for (const u of [i, j]) {
+          for (let s = 0; s < negativeSamples; s++) {
+            const m = integers(r, n)
+            if (m === u) continue
+            let q2 = 0
+            for (let c = 0; c < dims; c++) q2 += (Y[u * dims + c] - Y[m * dims + c]) ** 2
+            const repel = (2 * b) / ((0.001 + q2) * (1 + a * q2 ** b))
+            for (let c = 0; c < dims; c++)
+              Y[u * dims + c] += alpha * (q2 > 0 ? clip(repel * (Y[u * dims + c] - Y[m * dims + c])) : 4)
+          }
         }
       }
       return { embedding: mat(Y, n, dims), t: e, alpha, samples }

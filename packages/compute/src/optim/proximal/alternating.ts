@@ -77,6 +77,7 @@ export function alternatingProjectionsSteps(
       let x = toF64(s.x, 'alternatingProjectionsSteps')
       const start = x
       const corrections: Vector[] = []
+      let qChange = 0
       projections.forEach((project, k) => {
         if (!dykstra) {
           x = toF64(project(vec(x)), 'alternatingProjectionsSteps')
@@ -86,12 +87,15 @@ export function alternatingProjectionsSteps(
         const q = toF64(s.corrections[k], 'alternatingProjectionsSteps')
         const y = Float64Array.from(x, (v, i) => v + q[i])
         const p = toF64(project(vec(y)), 'alternatingProjectionsSteps')
-        corrections.push(vec(Float64Array.from(y, (v, i) => v - p[i])))
+        const nextQ = Float64Array.from(y, (v, i) => v - p[i])
+        for (let i = 0; i < q.length; i++) qChange = Math.max(qChange, Math.abs(nextQ[i] - q[i]))
+        corrections.push(vec(nextQ))
         x = p
       })
       let change = 0
       for (let i = 0; i < x.length; i++) change = Math.max(change, Math.abs(x[i] - start[i]))
-      return { t: s.t + 1, x: vec(x), change, corrections, converged: change < tolerance }
+      const converged = change < tolerance && (!dykstra || qChange < tolerance)
+      return { t: s.t + 1, x: vec(x), change, corrections, converged }
     },
   }
 }

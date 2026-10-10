@@ -26,7 +26,7 @@ import { leaves } from 'aifn-compute/graph'
 import { pairwiseDistances } from 'aifn-compute/numerics/linalg'
 import { kmeansPlusPlus } from 'aifn-compute/numerics/neighbours'
 import { stream } from 'aifn-compute/foundation/random'
-import { tensor, toFlat, toRows, type Tensor } from 'aifn-compute/foundation/tensor'
+import { tensor, toFlat, toRows, transpose, type Tensor } from 'aifn-compute/foundation/tensor'
 import { dataset } from 'aifn-compute/learning/estimators'
 import { run, seek, trace } from 'aifn-compute/foundation/trace'
 import { expectProtocol } from '../../protocol'
@@ -92,6 +92,15 @@ describe('k-means', () => {
     expect(p[0].every((u) => Math.abs(u - 1 / 45) < 1e-15)).toBe(true)
     expect(p[1][toFlat(a.indices)[0]]).toBe(0)
     for (const row of p) expect(row.reduce((u, v) => u + v, 0)).toBeCloseTo(1, 12)
+  })
+  it('random seeding with more clusters than points throws instead of looping', () => {
+    const x = tensor([
+      [0, 0],
+      [1, 1],
+    ])
+    expect(() => kmeansSteps(x, { k: 3 }).init({ seeding: 'random' }, stream(0))).toThrow(
+      /kmeansSteps: k must lie in 1 … 2/,
+    )
   })
   it('mini-batch k-means and k-medoids find the three groups', () => {
     const mb = miniBatchKMeans({ k: 3, steps: 60, batchSize: 10 }).fit(dataset(X), { stream: stream(1) })
@@ -197,6 +206,12 @@ describe('agglomerative clustering', () => {
     const alg = agglomerativeSteps(X, { linkage: 'average' })
     expect(toFlat(seek(alg, undefined, 10).labels)).toEqual(toFlat(run(alg, undefined, 10).labels))
   })
+  it('cutTree and mergeTree read a strided (transposed) linkage matrix by its shape', () => {
+    const Z = linkage(tensor([[0], [1], [3], [7]]), 'single')
+    const strided = transpose(tensor(toRows(transpose(Z))))
+    expect(toFlat(cutTree(strided, { clusters: 2 }))).toEqual(toFlat(cutTree(Z, { clusters: 2 })))
+    expect(mergeTree(strided).nodes.map((n) => n.height)).toEqual(mergeTree(Z).nodes.map((n) => n.height))
+  })
 })
 
 describe('density clustering', () => {
@@ -222,6 +237,21 @@ describe('density clustering', () => {
     const ms = meanShift({ bandwidth: 1.5 }).fit(dataset(X))
     close(ms.centres, fx.meanshift.centres, 2)
     expect(toFlat(ms.decide(X))).toEqual(fx.meanshift.labels)
+  })
+  it('mean shift reads strided seeds by their shape and rejects seeds of the wrong width', () => {
+    const x = tensor([
+      [0, 0],
+      [0.5, 0.5],
+      [6, 6],
+    ])
+    const rows = [
+      [0, 1],
+      [6, 6.5],
+    ]
+    const alg = meanShiftSteps(x, { bandwidth: 1 })
+    const strided = transpose(tensor([rows.map((r) => r[0]), rows.map((r) => r[1])]))
+    expect(toRows(run(alg, { seeds: strided }, 20).seeds)).toEqual(toRows(run(alg, { seeds: tensor(rows) }, 20).seeds))
+    expect(() => alg.init({ seeds: tensor([[0, 0, 0]]) }, stream(0))).toThrow(/meanShiftSteps: seeds must be \[s, 2\]/)
   })
 })
 

@@ -260,6 +260,15 @@ export function kidSubsets(
 ): { mean: number; std: number; values: number[] } {
   const X = dense(realFeatures, 'kidSubsets')
   const Y = dense(generatedFeatures, 'kidSubsets')
+  if (options.subsetSize !== undefined) {
+    if (options.subsetSize <= 0 || !Number.isInteger(options.subsetSize))
+      throw new DomainError('kidSubsets', `subsetSize must be a positive integer, got ${options.subsetSize}`)
+    if (options.subsetSize > X.rows || options.subsetSize > Y.rows)
+      throw new DomainError(
+        'kidSubsets',
+        `subsetSize (${options.subsetSize}) exceeds row count of real (${X.rows}) or generated (${Y.rows}) features`,
+      )
+  }
   const size = options.subsetSize ?? Math.min(1000, X.rows, Y.rows)
   const pick = (A: Dense, stream: Stream): Dense => {
     const idx = Array.from({ length: A.rows }, (_, i) => i)
@@ -305,6 +314,11 @@ export function inceptionScoreSplits(
 ): { mean: number; std: number } {
   const P = dense(probabilities, 'inceptionScore')
   const splits = options.splits ?? 1
+  if (splits <= 0 || !Number.isInteger(splits) || splits > P.rows)
+    throw new DomainError(
+      'inceptionScoreSplits',
+      `splits must be an integer between 1 and rows (${P.rows}), got ${splits}`,
+    )
   const scores: number[] = []
   for (let s = 0; s < splits; s++) {
     const lo = Math.floor((s * P.rows) / splits)

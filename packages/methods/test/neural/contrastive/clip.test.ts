@@ -13,7 +13,8 @@ import {
 } from 'aifn-methods/neural/contrastive'
 import { valueAndGrad } from 'aifn-compute/foundation/autodiff'
 import { stream } from 'aifn-compute/foundation/random'
-import { tensor, toFlat, unwrap, type Tensor, type Value } from 'aifn-compute/foundation/tensor'
+import { matmul, tensor, toFlat, unwrap, type Tensor, type Value } from 'aifn-compute/foundation/tensor'
+import { normals } from 'aifn-compute/foundation/random'
 import { infoNce } from 'aifn-compute/learning/losses'
 
 const num = (v: Value) => {
@@ -118,4 +119,29 @@ describe('training run', () => {
     expect('params' in runs[0]).toBe(false)
     for (const r of runs) expect(Number.isFinite(r.uniformity) && Number.isFinite(r.alignment)).toBe(true)
   }, 60_000)
+})
+
+describe('a zero encoder output', () => {
+  it('stays finite when an encoder row is exactly zero (every hidden ReLU off)', () => {
+    const a = normals(stream(0), [32, 2])
+    const b = unwrap(
+      matmul(
+        a,
+        tensor([
+          [0, 1],
+          [-1, 0],
+        ]),
+      ),
+    ) as Tensor
+    const snaps = [
+      ...contrastiveTrainingRun(
+        { a, b },
+        { a, b },
+        { hidden: 8, batchSize: 16, stepSize: 0.05, steps: 60, every: 20, seed: 0 },
+      ),
+    ]
+    const last = snaps.at(-1)!
+    for (const l of last.losses) expect(Number.isFinite(l)).toBe(true)
+    for (const c of last.checkpoints) expect(Number.isFinite(c.alignment) && Number.isFinite(c.uniformity)).toBe(true)
+  })
 })

@@ -15,14 +15,25 @@
  *
  * The encoders are small MLPs (`aifn-compute/nn`), the loss and temperature are `aifn-compute/learning/losses`'
  * `infoNce` and `learnedTemperature`, training is `aifn-compute/nn`'s `trainingLoop` with Adam, and the embedding is
- * scored by `aifn-compute/learning/metrics`' `alignment` and `uniformity` (Wang & Isola, 2020). An encoder whose
- * output for a row is exactly zero (every hidden ReLU off) gives that row a NaN embedding.
+ * scored by `aifn-compute/learning/metrics`' `alignment` and `uniformity` (Wang & Isola, 2020). Rows are normalised as
+ * torch's `F.normalize` does, $\zvec / \max(\norm{\zvec}, \epsilon)$ with $\epsilon = 10^{-12}$, so an encoder output
+ * of exactly zero (every hidden ReLU off) embeds as the zero row rather than NaN.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
 import type { Params } from 'aifn-compute/foundation/pytree'
 import { child, stream, type Stream } from 'aifn-compute/foundation/random'
-import { div, fromData, norm, take, toFlat, unwrap, type Tensor, type Value } from 'aifn-compute/foundation/tensor'
+import {
+  div,
+  fromData,
+  maximum,
+  norm,
+  take,
+  toFlat,
+  unwrap,
+  type Tensor,
+  type Value,
+} from 'aifn-compute/foundation/tensor'
 import { infoNce, learnedTemperature } from 'aifn-compute/learning/losses'
 import { alignment, uniformity } from 'aifn-compute/learning/metrics'
 import { Mlp, type Layer } from 'aifn-compute/nn/layers'
@@ -177,9 +188,9 @@ export function contrastiveLoss(
   batch: { a: Value; b: Value },
   { temperature = 'learned', maxScale = 100 }: ContrastiveLossOptions = {},
 ): Value {
-  const za = model.encoderA.apply(p.a, batch.a)
-  const zb = model.encoderB.apply(p.b, batch.b)
-  return infoNce(za, zb, { temperature: temperatureOf(p, temperature, maxScale), symmetric: true })
+  const za = unitRows(model.encoderA.apply(p.a, batch.a))
+  const zb = unitRows(model.encoderB.apply(p.b, batch.b))
+  return infoNce(za, zb, { temperature: temperatureOf(p, temperature, maxScale), similarity: 'dot', symmetric: true })
 }
 
 /**
@@ -193,14 +204,28 @@ function scalarOf(v: Value): number {
   return typeof r === 'number' ? r : toFlat(r)[0]
 }
 
+/** The floor $\epsilon$ on a row's norm when normalising (torch's `F.normalize` default). */
+const NORM_FLOOR = 1e-12
+
 /**
- * Rows divided by their norms, as a plain tensor. A zero row gives NaN.
+ * Rows divided by their norms floored at $\epsilon$, $\zvec / \max(\norm{\zvec}, \epsilon)$ (torch's
+ * `F.normalize`), traced when `z` is: a zero row stays zero, with a finite gradient, rather than giving NaN.
  *
  * @param z The rows, $n \times d$.
- * @returns The unit rows, $n \times d$.
+ * @returns The unit rows (zero rows unchanged), $n \times d$.
+ */
+function unitRows(z: Value): Value {
+  return div(z, maximum(norm(z, -1, true), NORM_FLOOR))
+}
+
+/**
+ * `unitRows` as a plain tensor.
+ *
+ * @param z The rows, $n \times d$.
+ * @returns The unit rows (zero rows unchanged), $n \times d$.
  */
 function unit(z: Value): Tensor {
-  return unwrap(div(z, norm(z, -1, true))) as Tensor
+  return unwrap(unitRows(z)) as Tensor
 }
 
 /**
@@ -210,7 +235,7 @@ function unit(z: Value): Tensor {
  * @param p Its parameters.
  * @param x Rows of the view: $n \times d_A$ for `'a'`, $n \times d_B$ for `'b'`.
  * @param view Which view, and so which encoder.
- * @returns The embeddings, $n \times$ `dim`, each row of norm 1.
+ * @returns The embeddings, $n \times$ `dim`, each row of norm 1 (or zero, where the encoder outputs exactly zero).
  *
  * @example Three rows of the A view on the unit circle
  * const model = TwoTower({ inA: 3, inB: 2, hidden: 8 })

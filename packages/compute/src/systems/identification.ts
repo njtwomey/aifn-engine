@@ -156,17 +156,19 @@ export type PolynomialModel = {
  *
  * @param A The monic $A$, ascending.
  * @param B The $B$, ascending with its leading zeros.
+ * @param nb The number of estimated coefficients of $B$ (its length less the $n_k$ delay zeros), counted whatever
+ *   their values.
  * @param C The monic $C$, ascending.
  * @param F The monic $F$, ascending.
  * @param eps The prediction errors over the whole record.
  * @param from The first sample counted in the loss (earlier ones lack a full regressor); $N$ is the samples from it.
  * @param dt The sampling interval of the returned systems.
- * @returns The model, with $d$ counting the free coefficients (the nonzero-led part of $B$, and the rest past the
- *   leading 1s).
+ * @returns The model, with $d$ counting the free coefficients ($n_b$ of $B$, and the rest past the leading 1s).
  */
 function finishModel(
   A: number[],
   B: number[],
+  nb: Size,
   C: number[],
   F: number[],
   eps: F64,
@@ -177,7 +179,7 @@ function finishModel(
   for (let t = from; t < eps.length; t++) s += eps[t] * eps[t]
   const N = eps.length - from
   const loss = s / N
-  const params = A.length - 1 + (B.length - leadingZeros(B)) + C.length - 1 + F.length - 1
+  const params = A.length - 1 + nb + C.length - 1 + F.length - 1
   const AF = polyMulAsc(A, F)
   return {
     A,
@@ -192,18 +194,6 @@ function finishModel(
     aic: N * Math.log(loss) + 2 * params,
     parameters: params,
   }
-}
-
-/**
- * The number of leading zeros of a coefficient list.
- *
- * @param b The coefficients.
- * @returns How many coefficients from the start are exactly 0 (all of them for an all-zero list).
- */
-function leadingZeros(b: readonly number[]): number {
-  let k = 0
-  while (k < b.length && b[k] === 0) k++
-  return Math.min(k, b.length)
 }
 
 /**
@@ -262,7 +252,7 @@ export function arx(
   const Ay = filt(A, [1], ys)
   const Bu = filt(B, [1], us)
   for (let t = 0; t < N; t++) eps[t] = Ay[t] - Bu[t]
-  return finishModel(A, B, [1], [1], eps, from, dt)
+  return finishModel(A, B, nb, [1], [1], eps, from, dt)
 }
 
 // ── The prediction-error method ──────────────────────────────────────────────────────────────────────────────────────
@@ -516,7 +506,7 @@ export function polynomialModel(
   const s = run(predictionErrorMethod(ys, us, orders, options), { theta0: options.theta0 }, options.maxSteps ?? 100)
   const { A, B, C, F } = unpack(dense.data(s.theta), o)
   const { eps } = predictionErrors(dense.data(s.theta), o, ys, us, false)
-  return { ...finishModel(A, B, C, F, eps, 0, options.dt ?? 1), steps: s.t, converged: s.converged }
+  return { ...finishModel(A, B, o.nb, C, F, eps, 0, options.dt ?? 1), steps: s.t, converged: s.converged }
 }
 
 /**

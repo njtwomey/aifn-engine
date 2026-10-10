@@ -324,20 +324,23 @@ export function bernoulliNaiveBayes(
 // ── Discriminant analysis ────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The Cholesky factor of a covariance, with $\log\det\Sigmamat$ and the jitter that was needed. A failed
- * factorisation (`failed`) is returned, not thrown; its partial factor gives infinite or NaN log-likelihoods.
+ * The Cholesky factor of a covariance, with $\log\det\Sigmamat$ and the jitter that was needed. Throws
+ * `DomainError` when the covariance does not factor even with jitter (it is not positive semi-definite), rather than
+ * return a partial factor that gives infinite or NaN log-likelihoods.
  *
  * @param cov The covariance $\Sigmamat$, $d \times d$ row-major (only its lower triangle is read).
  * @param d The number of features.
- * @returns The factor `L` (a tensor), `logDet` $= \log\det(\Sigmamat + j\Imat)$, the `jitter` $j$ added to the
- *   diagonal, and whether the factorisation `failed`.
+ * @param where The public function, named in the error.
+ * @returns The factor `L` (a tensor), `logDet` $= \log\det(\Sigmamat + j\Imat)$ and the `jitter` $j$ added to the
+ *   diagonal.
  */
-function factorCovariance(cov: Float64Array, d: number) {
+function factorCovariance(cov: Float64Array, d: number, where: string) {
   const { L, jitter, failed } = cholesky(fromData(cov, [d, d]))
+  if (failed) throw new DomainError(where, `${where}: a covariance is not positive definite, even with jitter`)
   const l = Float64Array.from(L.data as Float64Array)
   let logDet = 0
   for (let j = 0; j < d; j++) logDet += 2 * Math.log(l[j * d + j])
-  return { L, logDet, jitter, failed }
+  return { L, logDet, jitter }
 }
 
 /**
@@ -460,7 +463,7 @@ export function linearDiscriminant(
             cov[a * d + b] = (1 - shrinkage) * cov[a * d + b] + (a === b ? (shrinkage * tr) / d : 0)
         }
       }
-      const f = factorCovariance(cov, d)
+      const f = factorCovariance(cov, d, 'linearDiscriminant')
       // Discriminant directions: with Σ = LLᵀ, the eigenvectors u of L⁻¹ S_b L⁻ᵀ give w = L⁻ᵀ u (Fisher, 1936; Rao,
       // 1948). S_b is the prior-weighted scatter of the class means about their weighted mean.
       const prior = Float64Array.from(logPrior, Math.exp)
@@ -527,11 +530,12 @@ export function linearDiscriminant(
  * Quadratic discriminant analysis: Gaussian classes each with its own covariance $\Sigmamat_k$ (the
  * maximum-likelihood estimate, divided by $n_k$, as scikit-learn $\ge 1.6$), so the boundaries are quadrics:
  * $\delta_k(\xvec) = \log \pi_k - \tfrac12 \log\det\Sigmamat_k - \tfrac12 r_k^2$, with the squared Mahalanobis
- * distance $r_k^2 = (\xvec - \muvec_k)^\top\Sigmamat_k^{-1}(\xvec - \muvec_k)$, which `forward` returns. `fit` throws
- * `DomainError` when a class has fewer than two rows.
+ * distance $r_k^2 = (\xvec - \muvec_k)^\top\Sigmamat_k^{-1}(\xvec - \muvec_k)$, which `forward` returns. Throws
+ * `DomainError` at once when `regularisation` is outside $[0, 1]$, and `fit` throws it when a class has fewer than two
+ * rows.
  *
  * @param params `priors`: the class priors, one weight per class (normalised; default the training frequencies).
- *   `regularisation` $\rho$, in $[0, 1]$ (default 0; not checked), replaces each $\Sigmamat_k$ by
+ *   `regularisation` $\rho$, in $[0, 1]$ (default 0), replaces each $\Sigmamat_k$ by
  *   $(1 - \rho)\Sigmamat_k + \rho\Imat$, as scikit-learn's `reg_param`.
  * @returns The estimator: `fit({ x, y })` returns a `DiscriminantModel`.
  *
@@ -547,6 +551,8 @@ export function quadraticDiscriminant(
   params: { priors?: readonly number[]; regularisation?: number } = {},
 ): Estimator<Supervised<Tensor, Tensor>, DiscriminantModel> {
   const { priors, regularisation = 0 } = params
+  if (!(regularisation >= 0 && regularisation <= 1))
+    throw new DomainError('quadraticDiscriminant', 'quadraticDiscriminant: regularisation must lie in [0, 1]')
   return {
     name: 'quadratic-discriminant',
     params: { priors, regularisation },
@@ -575,7 +581,7 @@ export function quadraticDiscriminant(
             cov[a * d + b] = (1 - regularisation) * (cov[a * d + b] / counts[c]) + (a === b ? regularisation : 0)
           }
         }
-        factors.push(factorCovariance(Float64Array.from(cov), d))
+        factors.push(factorCovariance(Float64Array.from(cov), d, 'quadraticDiscriminant'))
       }
       const head = (q: Tensor) => {
         const { n: m, v: qv } = inputs(q, d, 'quadraticDiscriminant')

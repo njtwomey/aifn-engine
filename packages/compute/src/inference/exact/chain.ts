@@ -19,7 +19,7 @@
 import type { Index, Size, Status } from 'aifn-compute/foundation/contracts'
 import { categorical, child, type Stream } from 'aifn-compute/foundation/random'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
-import { fromData, log, toRows, type Matrix, type Tensor, type Vector } from 'aifn-compute/foundation/tensor'
+import { fromData, log, toFlat, toRows, type Matrix, type Tensor, type Vector } from 'aifn-compute/foundation/tensor'
 import type { Algorithm } from 'aifn-compute/foundation/trace'
 import { chainOrder } from 'aifn-compute/graph/structured'
 import { bipartiteGraph, valuesOf, type DiscreteFactorGraph } from 'aifn-compute/inference/model'
@@ -228,6 +228,7 @@ export interface ViterbiResult {
  */
 export function chainViterbi(logUnary: Matrix, logPairwise: Tensor): ViterbiResult {
   const [N, K] = logUnary.shape
+  checkPositions(N, 'chainViterbi')
   const U = toRows(logUnary)
   const pair = pairwiseAt(logPairwise, K)
   const delta: number[][] = [U[0]]
@@ -258,10 +259,20 @@ export function chainViterbi(logUnary: Matrix, logPairwise: Tensor): ViterbiResu
 }
 
 /**
+ * Throw `ShapeError` unless a chain has at least one position.
+ *
+ * @param N The number of positions (rows of the unary log-potentials).
+ * @param where The caller's name for the error message.
+ */
+function checkPositions(N: number, where: string): void {
+  if (!(N >= 1)) throw new ShapeError(where, `${where}: the chain needs at least one position (N >= 1), got ${N}`)
+}
+
+/**
  * The pairwise log-potential matrix between positions $n$ and $n + 1$, as a lookup by $n$.
  *
  * @param logPairwise One shared $K \times K$ matrix, or an $(N - 1) \times K \times K$ tensor with a matrix per step
- *   (its data read as contiguous row-major values).
+ *   (read in row-major order, whatever its strides).
  * @param K The number of states.
  * @returns A function from $n$ to the $K \times K$ matrix (as rows) between positions $n$ and $n + 1$; for a shared
  *   matrix it returns the same rows every time.
@@ -271,7 +282,7 @@ function pairwiseAt(logPairwise: Tensor, K: number): (n: number) => number[][] {
     const P = toRows(logPairwise)
     return () => P
   }
-  const all = Array.from(logPairwise.data)
+  const all = toFlat(logPairwise)
   return (n) => Array.from({ length: K }, (_, u) => all.slice((n * K + u) * K, (n * K + u + 1) * K))
 }
 
@@ -361,6 +372,7 @@ export interface ChainMarginals {
  */
 export function chainForwardBackward(logUnary: Matrix, logPairwise: Tensor): ChainMarginals {
   const [N, K] = logUnary.shape
+  checkPositions(N, 'chainForwardBackward')
   const U = toRows(logUnary)
   const pair = pairwiseAt(logPairwise, K)
   const la: number[][] = [Array(K).fill(0)]
@@ -409,7 +421,7 @@ export interface PosteriorDecoding {
  * (a log-potential of $-\infty$).
  *
  * @param marginals The marginals $P(y_n = k \mid \xvec)$ ($N \times K$, row $n$ for position $n$), as
- *   `forwardBackward` or `chainForwardBackward` return them. Its data is read as contiguous row-major values.
+ *   `forwardBackward` or `chainForwardBackward` return them.
  * @returns The decoded path, the probability of each of its labels, and their sum.
  *
  * @example Posterior decoding against Viterbi
@@ -432,7 +444,7 @@ export interface PosteriorDecoding {
  */
 export function posteriorDecode(marginals: Matrix): PosteriorDecoding {
   const [N, K] = marginals.shape
-  const P = marginals.data
+  const P = toFlat(marginals)
   const path = new Int32Array(N)
   const confidence = new Float64Array(N)
   let expectedCorrect = 0

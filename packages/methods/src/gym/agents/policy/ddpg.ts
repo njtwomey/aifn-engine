@@ -171,7 +171,7 @@ export function ddpgAgent(options: DdpgOptions = {}): Agent<DdpgState, Float64Ar
     const n = b.n
     const x = rows(b.observations, n, g.dim)
     const x2 = rows(b.next, n, g.dim)
-    const a = fromData(Float64Array.from(b.actions), [n, 1])
+    const a = fromData(b.actions, [n, 1])
     // Targets from the target networks (constants for the critic's gradient).
     const a2 = unwrap(policy(g, g.actorTarget, x2)) as Tensor
     const q2 = toFlat(unwrap(criticNet(g.dim).apply(g.criticTarget, concat([x2, a2], 1))) as Tensor)

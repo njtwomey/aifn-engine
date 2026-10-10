@@ -9,6 +9,7 @@
  * comparison yields after every fit, the sweep after every dataset.
  */
 
+import { ShapeError } from 'aifn-compute/foundation/errors'
 import { child, stream, units } from 'aifn-compute/foundation/random'
 import { toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import {
@@ -285,10 +286,11 @@ export interface LearnerSweepResult {
  * The equity sweep: for each dataset (simulated with zero-inflation rate `rates[j]` for every condition), fit the
  * models and record each one's ability bias by group, equity gap, ability recovery and held-out scores. Every dataset
  * is split with the same `seed`, and models after `irt` start from its fit. Yields once before the first dataset and
- * after every dataset.
+ * after every dataset. Throws `ShapeError`, on the first step, unless there is one rate per dataset.
  *
  * @param datasets The datasets, one per point.
- * @param rates The zero-inflation rate each dataset was simulated with, in the same order; only recorded.
+ * @param rates The zero-inflation rate each dataset was simulated with, in the same order (one per dataset); only
+ *   recorded, as each point's `rate`.
  * @param options The models, the held-out share, the L-BFGS limit and the seed of the split.
  * @returns A generator of the sweep so far; its return value is the finished sweep.
  *
@@ -326,6 +328,12 @@ export function* learnerEquitySweep(
   options: LearnerRunOptions = {},
 ): Generator<LearnerSweepResult, LearnerSweepResult> {
   const { models = DEFAULT_MODELS, testShare = 0.2, maxSteps = 1000, seed = 0 } = options
+  if (rates.length !== datasets.length)
+    throw new ShapeError(
+      'learnerEquitySweep',
+      `learnerEquitySweep: one rate per dataset, got ${rates.length} rates for ${datasets.length} datasets`,
+      [[datasets.length], [rates.length]],
+    )
   const points: LearnerSweepPoint[] = []
   const snapshot = (finished: boolean) => ({ points: [...points], total: datasets.length, finished })
   yield snapshot(false)

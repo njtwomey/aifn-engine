@@ -153,7 +153,7 @@ export function expectileProblem(base: GamProblem, tau: number): GamProblem {
     let a = new Float64Array(n).fill(0.5)
     let fit = penalisedFit(
       A,
-      { y: base.data.y, weights: vec(a.map((v, i) => v * w[i])) },
+      { y: base.data.y, weights: vec(a.map((v, i) => v * w[i])), offset: base.data.offset },
       base.family,
       base.link,
       penalty,
@@ -166,7 +166,7 @@ export function expectileProblem(base: GamProblem, tau: number): GamProblem {
       a = next
       fit = penalisedFit(
         A,
-        { y: base.data.y, weights: vec(a.map((v, i) => v * w[i])) },
+        { y: base.data.y, weights: vec(a.map((v, i) => v * w[i])), offset: base.data.offset },
         base.family,
         base.link,
         penalty,

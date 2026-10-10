@@ -159,4 +159,16 @@ describe('reading and printing', () => {
     }
     expect(() => parseProgram('a :- b')).toThrow(PrologSyntaxError)
   })
+  it('parseQuery reports the line and column of the source text', () => {
+    expect(parseQuery('\n\n  ?- p(X).').line).toBe(3)
+    expect(parseQuery('p(X)').line).toBe(1)
+    try {
+      parseQuery('\n?- p(X ; .')
+      expect.unreachable()
+    } catch (e) {
+      expect(e).toBeInstanceOf(PrologSyntaxError)
+      expect((e as PrologSyntaxError).line).toBe(2)
+      expect((e as PrologSyntaxError).column).toBe(8)
+    }
+  })
 })

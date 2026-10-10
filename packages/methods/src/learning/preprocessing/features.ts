@@ -235,7 +235,7 @@ export function splineFeatures({
               }
               xs[i] = xi
             }
-            // One definition of the B-spline basis: aifn-compute/smooth's Cox–de Boor (end pieces continued outside).
+            // One definition of the B-spline basis: aifn-compute/numerics/interpolate's Cox–de Boor (end pieces continued outside).
             const B = bsplineBasis(fromData(xs, [rows]), fromData(Float64Array.from(t), [t.length]), degree).data
             for (let i = 0; i < rows; i++)
               for (let b = 0; b < perColumn; b++) out[i * width + j * perColumn + b] = B[i * nBasis + b]

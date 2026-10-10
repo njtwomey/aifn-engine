@@ -18,7 +18,7 @@ import type { RunOptions } from '../options'
 import { intTensor, matrix, readVector, vector } from './input'
 import { parseLP, toOriginal, type LinearProgram, type ParsedLP, type StandardForm } from './lp'
 import { basicSolution, pivotTableau, simplex, simplexSolve } from './simplex'
-import { DomainError } from 'aifn-compute/foundation/errors'
+import { DomainError, NumericalError } from 'aifn-compute/foundation/errors'
 
 /**
  * A mixed-integer linear program: a `LinearProgram` whose variables marked in `integrality` must take integer values,
@@ -670,7 +670,8 @@ function gomoryState(
  * the current vertex does not), and restores feasibility by dual simplex pivots. The run is done when the relaxation's
  * optimum is integral (`optimal`) or a cut makes it `infeasible`. The data must be integers so that the slack
  * variables are integer too: `DomainError` is thrown, when the algorithm is made, for fractional data or bounds or a
- * free variable.
+ * free variable. A relaxation the simplex does not solve (it cycles, or runs past 10,000 steps) throws `NumericalError`
+ * (`not-converged`) at `init`.
  *
  * @param problem The integer program, as a linear program whose variables must all be integers.
  * @param options The integrality tolerance.
@@ -695,8 +696,23 @@ export function gomory(problem: LinearProgram, options: GomoryOptions = {}): Alg
       const m = lpState.basis.shape[0]
       const w = lpState.tableau.shape[1]
       const extra = { t: 0, cuts: [], sourceRow: -1, dualPivots: 0 }
+      // Cuts are read from an optimal tableau only: a relaxation the simplex did not finish (cycling, or past its step
+      // budget) has none to cut from, so the run fails rather than cutting an arbitrary vertex.
+      if (lpState.status === 'running' || lpState.status === 'cycling')
+        throw new NumericalError(
+          'gomory',
+          `gomory: the LP relaxation did not reach an optimum (${lpState.status === 'cycling' ? 'the simplex cycled' : 'past 10000 simplex steps'})`,
+          'not-converged',
+        )
       const status: IntegerProgramStatus | undefined =
         lpState.status === 'optimal' ? undefined : lpState.status === 'unbounded' ? 'unbounded' : 'infeasible'
+      const aff = affineColumns(sf)
+      const affRows = aff.length / (sf.lp.n + 1)
+      let fullAffine = aff
+      if (w - 1 > affRows) {
+        fullAffine = new Float64Array((w - 1) * (sf.lp.n + 1))
+        fullAffine.set(aff)
+      }
       return gomoryState(
         sf,
         tol,
@@ -705,7 +721,7 @@ export function gomory(problem: LinearProgram, options: GomoryOptions = {}): Alg
         w,
         Int32Array.from(lpState.basis.data),
         lpState.labels,
-        affineColumns(sf),
+        fullAffine,
         { ...extra, status },
       )
     },

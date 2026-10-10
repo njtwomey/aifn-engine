@@ -299,4 +299,20 @@ describe('against pysubgroup (Titanic)', () => {
     const m = chiSquareQuality(y)
     for (const c of f.chiSquare) expect(m.quality(lang.cover(desc(c.selectors)))).toBeCloseTo(c.chiSquare, 9)
   })
+
+  it('lift adapts when search minSupport is smaller than measure minSupport', () => {
+    // Measure created with minSupport: 20
+    const lift20 = liftQuality(y, { minSupport: 20 })
+    expect(lift20.minSupport).toBe(20)
+    // Search run with minSupport: 5: pruning must adapt so it does not prune valid subgroups
+    const pruned = subgroupDiscovery(lang, lift20, { strategy: 'depth-first', maxDepth: 2, k: 5, minSupport: 5 })
+    const unpruned = subgroupDiscovery(lang, lift20, {
+      strategy: 'depth-first',
+      maxDepth: 2,
+      k: 5,
+      minSupport: 5,
+      prune: false,
+    })
+    expect(round(pruned.map((s) => s.quality))).toEqual(round(unpruned.map((s) => s.quality)))
+  })
 })

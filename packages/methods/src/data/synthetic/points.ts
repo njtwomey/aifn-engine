@@ -939,7 +939,14 @@ export function checkerboard(s: Stream, options: CheckerboardOptions = {}): Data
       labelNames: ['even tile', 'odd tile'],
       key: s.key,
       truth,
-      recipe: generatorRecipe('checkerboard', s.key, params({ ...options, n: [n - counted, counted] })),
+      recipe: generatorRecipe(
+        'checkerboard',
+        s.key,
+        params({
+          ...options,
+          n: explicit && typeof options.n === 'object' ? [n - counted, counted] : (options.n ?? n),
+        }),
+      ),
     },
   }
 }

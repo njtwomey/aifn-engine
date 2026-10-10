@@ -8,8 +8,10 @@ import {
   gamlssTrace,
   gamProblem,
   s,
+  te,
   type GamlssSpec,
 } from 'aifn-methods/learning/generalised/gam'
+import { penaltyMatrix } from 'aifn-methods/learning/generalised'
 
 const flat = (t: Tensor) => Float64Array.from(toFlat(t))
 const AGES = [1, 3, 6, 9, 12, 15, 17]
@@ -55,6 +57,29 @@ describe('gamlss', () => {
       expect(Math.abs(mu[i] - muX(x))).toBeLessThan(0.25 * sigmaX(x))
       expect(Math.abs(sigma[i] / sigmaX(x) - 1)).toBeLessThan(0.15)
     })
+  })
+
+  it('local ML for te: at the fixed point the penalty equals edf minus the null space', () => {
+    // Summing λ_j × the Fellner–Schall fixed point over a block gives β'S_λβ = rank(S_λ) − tr(H⁻¹S_λ) = edf − M_p.
+    // Treating te's two overlapping penalties as if each had its own rank breaks it.
+    const n = 300
+    const r = stream(11)
+    const x = flat(uniform(child(r, 'x'), 0, 1, { shape: [n, 2] }) as Tensor)
+    const e = flat(normals(child(r, 'e'), [n]) as Tensor)
+    const y = Float64Array.from(e, (v, i) => Math.sin(3 * x[2 * i]) * Math.cos(2 * x[2 * i + 1]) + 0.3 * v)
+    const problem = gamlssProblem(
+      { family: 'normal', parameters: { mu: { terms: [te(0, 1, { k: [5, 5] })] } }, tolerance: 0 },
+      { x: fromData(x, [n, 2]), y: fromData(y, [n]) },
+    )
+    const steps = gamlssTrace(problem, 150).steps
+    const [prev, last] = steps.slice(-2)
+    last.lambdas[0].forEach((l, j) => expect(Math.abs(l / prev.lambdas[0][j] - 1)).toBeLessThan(1e-4))
+    const A = problem.designs[0]
+    const S = penaltyMatrix(A, prev.lambdas[0])
+    const beta = last.coefficients[0]
+    let bSb = 0
+    for (let a = 0; a < A.P; a++) for (let b = 0; b < A.P; b++) bSb += beta[a] * S[a * A.P + b] * beta[b]
+    expect(bSb).toBeCloseTo(last.edf[0] - A.nullSpace, 2)
   })
 
   it('never raises the penalised global deviance across RS cycles at fixed λ (law)', () => {

@@ -274,10 +274,28 @@ export type ConvLayerOptions<P> = ConvOptions<P> & {
 }
 
 /**
+ * The input channels each kernel sees, $C / g$, after checking that $g$ is a positive integer dividing $C$ and $O$.
+ *
+ * @param where The layer, for the error.
+ * @param inChannels The input channels $C$.
+ * @param outChannels The output channels $O$.
+ * @param groups The channel groups $g$ (default 1).
+ * @returns $C / g$.
+ */
+function groupChannels(where: string, inChannels: number, outChannels: number, groups = 1): number {
+  if (!Number.isInteger(groups) || groups < 1 || inChannels % groups !== 0 || outChannels % groups !== 0)
+    throw new ShapeError(
+      where,
+      `${where}: ${inChannels} input and ${outChannels} output channels do not split into ${groups} groups`,
+    )
+  return inChannels / groups
+}
+
+/**
  * A 2-D convolution layer from `inChannels` to `outChannels` with a `kernel` (one size or `[KH, KW]`), plus a bias per
- * output channel; input `[N, C, H, W]` or `[C, H, W]`. See `conv2d` for the geometry. The kernels are drawn with fans
- * $C K_H K_W$ and $O K_H K_W$. The kernel shape `[O, C, KH, KW]` does not divide $C$ by `groups`, so only
- * `groups: 1` gives kernels that `conv2d` accepts.
+ * output channel; input `[N, C, H, W]` or `[C, H, W]`. See `conv2d` for the geometry. With $g$ `groups` the kernels
+ * are `[O, C / g, KH, KW]`, drawn with fans $(C / g) K_H K_W$ and $O K_H K_W$ (torch's); $g$ must divide both $C$ and
+ * $O$, or a `ShapeError` is thrown.
  *
  * @param inChannels The input channels $C$.
  * @param outChannels The output channels $O$.
@@ -303,12 +321,13 @@ export function Conv2d(
 ): Layer<ConvParams> {
   const [kh, kw] = typeof kernel === 'number' ? [kernel, kernel] : kernel
   const { bias = true, init = heUniform(), ...geometry } = options
-  const fans = { fanIn: inChannels * kh * kw, fanOut: outChannels * kh * kw }
+  const perGroup = groupChannels('Conv2d', inChannels, outChannels, geometry.groups)
+  const fans = { fanIn: perGroup * kh * kw, fanOut: outChannels * kh * kw }
   return {
     kind: 'Conv2d',
     label: `Conv2d(${inChannels} → ${outChannels}, ${kh}×${kw})`,
     init: (s) => ({
-      weight: init(child(s, 'weight'), [outChannels, inChannels, kh, kw], fans),
+      weight: init(child(s, 'weight'), [outChannels, perGroup, kh, kw], fans),
       ...(bias ? { bias: zerosInit()(s, [outChannels], fans) } : {}),
     }),
     apply: (p, x, ctx) => {
@@ -322,8 +341,8 @@ export function Conv2d(
 
 /**
  * A 1-D convolution layer from `inChannels` to `outChannels` with a kernel of length `kernel`, plus a bias per output
- * channel; input `[N, C, L]` or `[C, L]`. See `conv1d` for the geometry. As with `Conv2d`, the kernel shape ignores
- * `groups`.
+ * channel; input `[N, C, L]` or `[C, L]`. See `conv1d` for the geometry. As with `Conv2d`, $g$ `groups` give kernels
+ * `[O, C / g, K]` with fans $(C / g) K$ and $O K$; $g$ must divide both $C$ and $O$.
  *
  * @param inChannels The input channels $C$.
  * @param outChannels The output channels $O$.
@@ -345,12 +364,13 @@ export function Conv1d(
   options: ConvLayerOptions<number> = {},
 ): Layer<ConvParams> {
   const { bias = true, init = heUniform(), ...geometry } = options
-  const fans = { fanIn: inChannels * kernel, fanOut: outChannels * kernel }
+  const perGroup = groupChannels('Conv1d', inChannels, outChannels, geometry.groups)
+  const fans = { fanIn: perGroup * kernel, fanOut: outChannels * kernel }
   return {
     kind: 'Conv1d',
     label: `Conv1d(${inChannels} → ${outChannels}, ${kernel})`,
     init: (s) => ({
-      weight: init(child(s, 'weight'), [outChannels, inChannels, kernel], fans),
+      weight: init(child(s, 'weight'), [outChannels, perGroup, kernel], fans),
       ...(bias ? { bias: zerosInit()(s, [outChannels], fans) } : {}),
     }),
     apply: (p, x, ctx) => {

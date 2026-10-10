@@ -120,6 +120,16 @@ describe('streams', () => {
     expect(seen.size).toBe(20_000)
   })
 
+  it('give a child with no parts and a child with one empty part different paths', () => {
+    const root = R.stream(1)
+    expect(R.child(root).key.path).not.toBe(R.child(root, '').key.path)
+    // replicate caches by path, so the two must not share results.
+    const draw = (r: R.Stream) => R.uniform(r)
+    const none = R.replicate(2, R.child(root), draw)
+    const empty = R.replicate(2, R.child(root, ''), draw)
+    expect(empty).not.toEqual(none)
+  })
+
   it("child draws do not depend on the parent's or siblings' usage", () => {
     const fresh = R.child(R.stream(3), 'chain', 1)
     const expected = Array.from({ length: 50 }, () => R.uniform(fresh))

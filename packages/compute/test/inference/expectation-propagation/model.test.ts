@@ -84,6 +84,17 @@ describe('modelExpectationPropagation', () => {
     expect(Number.isFinite(logJoint(truncated(0, 3), { x: 2 }, { data: { y: 1 } }))).toBe(true)
   })
 
+  it('does not report convergence when every update was skipped', () => {
+    // An empty interval [2, 2] has no mass, so its tilted moments are unusable and every update is skipped.
+    const point = model('point', (mm) => {
+      const x = mm.variable('x', dist.Normal(1, 2))
+      mm.observed('y', dist.Bernoulli(mm.deterministic('inside', 'interval', [x, 2, 2])))
+    })
+    const s = run(modelExpectationPropagation(point, { data: { y: 1 } }), undefined, 5)
+    expect(s.skipped).toBeGreaterThan(0)
+    expect(s.converged).toBe(false)
+  })
+
   it('refuses models that are not linear-Gaussian', () => {
     const product = model('product', (mm) => {
       const a = mm.variable('a', dist.Normal(0, 1))

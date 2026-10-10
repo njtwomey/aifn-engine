@@ -8,6 +8,7 @@ import {
 } from 'aifn-methods/learning/generative-classifiers'
 import { tensor, toRows } from 'aifn-compute/foundation/tensor'
 import { dataset } from 'aifn-compute/learning/estimators'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { close, fx, X3, XQ, Y3 } from '../shared'
 
 describe('generative classifiers', () => {
@@ -36,5 +37,9 @@ describe('generative classifiers', () => {
     const z = toRows(lda.transform(X3))
     expect(z[0].length).toBe(2)
     close(quadraticDiscriminant({ regularisation: 0.1 }).fit(dataset(X3, Y3)).predictive(XQ), fx.qda)
+  })
+  it('QDA rejects regularisation outside [0, 1] instead of factoring an indefinite covariance', () => {
+    expect(() => quadraticDiscriminant({ regularisation: 3 })).toThrow(DomainError)
+    expect(() => quadraticDiscriminant({ regularisation: -0.1 })).toThrow(DomainError)
   })
 })

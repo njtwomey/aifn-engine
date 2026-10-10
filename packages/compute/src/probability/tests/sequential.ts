@@ -863,7 +863,8 @@ export function cusumAverageRunLength({
   states?: number
   sides?: 'upper' | 'both'
 } = {}): number {
-  if (!(h > 0) || !(k >= 0)) throw new DomainError('cusumAverageRunLength', 'needs h > 0 and k ≥ 0')
+  if (!(h > 0) || !(k >= 0))
+    throw new DomainError('cusumAverageRunLength', 'cusumAverageRunLength: needs h > 0 and k ≥ 0')
   const one = (delta: number) => {
     if (method === 'siegmund') {
       const d = delta - k

@@ -316,7 +316,8 @@ export interface InterleavedOptions {
 /**
  * Two lines, $y = 0.8x + 0.6$ and $y = -0.5x - 0.6$, taking turns over `bands` equal bands of $[-3, 3]$: regime $k$
  * on the bands $j$ with $j \bmod 2 = k$. A gate linear in $x$ splits the line once, so fitting the bands needs as many
- * experts as bands, or a gate that can bend (an MLP router or a hierarchy). The number of bands is not checked.
+ * experts as bands, or a gate that can bend (an MLP router or a hierarchy). Throws `DomainError` unless `bands` is an
+ * integer at least 1.
  *
  * @param s The stream the points are drawn from.
  * @param options The number of points and bands, and the noise (`InterleavedOptions`).
@@ -330,6 +331,8 @@ export interface InterleavedOptions {
 export function interleavedFunctions(s: Stream, options: InterleavedOptions = {}): RegimeDataset {
   const { n = 240, bands = 4, noise = 0.1 } = options
   checkCount(n, 'interleavedFunctions')
+  if (bands < 1 || !Number.isInteger(bands))
+    throw new DomainError('interleavedFunctions', `interleavedFunctions: bands must be an integer >= 1, got ${bands}`)
   const lines = [
     { a: 0.6, b: 0.8 },
     { a: -0.6, b: -0.5 },

@@ -29,7 +29,7 @@ import { trace, type Algorithm, type Trace } from 'aifn-compute/foundation/trace
 import { ints, mat, matrix, nearest, values, vec } from './util'
 import { defineModel } from 'aifn-compute/learning/estimators'
 import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
-import { ShapeError } from 'aifn-compute/foundation/errors'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 // ── Lloyd ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ function assign(v: Float64Array, n: number, c: Float64Array, k: number, d: numbe
  * and reassigns every row to its nearest centroid (ties to the lower index). Converged when no label changes or the
  * centroids' total squared shift is at most `tolerance` (default 0). An empty cluster keeps its centroid and is
  * reported in `empty`. `init` takes centroids, or seeds them from the `init` stream (k-means++ by default). Given
- * centroids of the wrong shape throw `ShapeError`.
+ * centroids of the wrong shape throw `ShapeError`; a seeding with `k` outside $1 \dots n$ throws `DomainError`.
  *
  * @param x The data, $n \times d$, one point per row.
  * @param params The number of clusters `k`, and `tolerance`, the total squared shift of the centroids at or below
@@ -114,6 +114,8 @@ export function kmeansSteps(x: Tensor, params: { k: number; tolerance?: number }
       } else {
         const st = s
         if (seeding === 'random') {
+          if (!(Number.isInteger(k) && k >= 1 && k <= n))
+            throw new DomainError('kmeansSteps', `kmeansSteps: k must lie in 1 … ${n} for random seeding`)
           const picks = new Set<number>()
           const sub = child(st, 'random-seeding')
           while (picks.size < k) picks.add(integers(sub, n))

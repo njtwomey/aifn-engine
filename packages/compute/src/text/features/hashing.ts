@@ -68,7 +68,10 @@ export interface HashingOptions {
   features?: number
   /** Give each term the sign of its hash (default true; false gives unsigned hashing, biased by collisions). */
   signed?: boolean
-  /** Count each distinct term once per document, with its sign when `signed` (default false). */
+  /**
+   * Count each distinct term once per document, with its sign when `signed` (default false). Colliding terms still add,
+   * so an entry can be 2 or cancel to 0; scikit-learn's `binary` instead sets every non-zero entry to 1 after hashing.
+   */
   binary?: boolean
   /** The hash seed (default 0). */
   seed?: number

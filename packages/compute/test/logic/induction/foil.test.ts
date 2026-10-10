@@ -17,7 +17,15 @@ import {
   termLgg,
   thetaSubsumes,
 } from 'aifn-compute/logic/induction'
-import { clauseToString, parseProgram, parseTerm, termToString } from 'aifn-compute/logic/terms'
+import {
+  atom,
+  clauseToString,
+  compound,
+  parseProgram,
+  parseTerm,
+  termToString,
+  variable,
+} from 'aifn-compute/logic/terms'
 
 const PARENTS = `
 parent(ann, mary). parent(ann, tom). parent(tom, eve). parent(tom, ian).
@@ -99,6 +107,13 @@ describe('foil', () => {
     expect(new Set(texts).size).toBe(texts.length)
   })
 
+  it('rejects rules among the facts and examples', () => {
+    expect(() => foilProblem('parent(a, b). parent(X, Y) :- step(X, Y).', 'gp(a, b).')).toThrow(
+      /foilProblem: background facts must be facts, not rules/,
+    )
+    expect(() => foilProblem('parent(a, b).', 'gp(a, b) :- parent(a, b).')).toThrow(/examples must be facts/)
+  })
+
   it('reports when no literal helps', () => {
     // Positives and negatives indistinguishable from the background.
     const result = foil(foilProblem('likes(a, b). likes(b, a).', 'friend(a, b).', 'friend(b, a).'))
@@ -113,6 +128,12 @@ describe('generality', () => {
     expect(termToString(termLgg(parseTerm('f(a, g(a))'), parseTerm('f(b, g(b))')))).toBe('f(A, g(A))')
     expect(termToString(termLgg(parseTerm('p(a, b, a)'), parseTerm('p(c, d, c)')))).toBe('p(A, B, A)')
     expect(termToString(termLgg(parseTerm('[1, 2]'), parseTerm('[3]')))).toBe('[A|B]')
+  })
+  it('keeps apart variables that share a name but not an id', () => {
+    const x0 = variable('X', 0)
+    const x1 = variable('X', 1)
+    const g = termLgg(compound('f', [x0, x1]), compound('f', [atom('a'), atom('a')]))
+    expect(termToString(g)).toBe('f(A, B)')
   })
   it('decides θ-subsumption', () => {
     expect(thetaSubsumes(clause('p(X) :- q(X, Y).'), clause('p(a) :- q(a, b), r(b).'))).toBe(true)

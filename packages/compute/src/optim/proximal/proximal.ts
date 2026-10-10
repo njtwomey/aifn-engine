@@ -125,6 +125,10 @@ export function projectBall(radius: number, center?: VectorLike): (x: Vector) =>
  * @param z The sum $z$ of the simplex, positive.
  */
 function simplexInPlace(v: Float64Array, start: number, length: number, z: number): void {
+  if (z <= 0) {
+    for (let j = start; j < start + length; j++) v[j] = 0
+    return
+  }
   const u = v
     .slice(start, start + length)
     .sort()

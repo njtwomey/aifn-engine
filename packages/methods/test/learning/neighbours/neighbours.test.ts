@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { kNearestNeighbours } from 'aifn-methods/learning/neighbours'
+import { kNearestNeighbours, kNearestNeighboursRegression } from 'aifn-methods/learning/neighbours'
 import { toRows } from 'aifn-compute/foundation/tensor'
 import { dataset, hasPredictive } from 'aifn-compute/learning/estimators'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { close, fx, X3, XQ, Y3 } from '../shared'
 
 describe('k-nearest neighbours', () => {
@@ -17,5 +18,11 @@ describe('k-nearest neighbours', () => {
     const d = toRows(nb.distance)
     for (const r of d) expect(r[0] <= r[1] && r[1] <= r[2]).toBe(true)
     expect(hasPredictive(m)).toBe(true)
+  })
+  it('validates k for classification and regression', () => {
+    expect(() => kNearestNeighbours({ k: 0 })).toThrow(DomainError)
+    expect(() => kNearestNeighboursRegression({ k: 0 })).toThrow(DomainError)
+    expect(() => kNearestNeighboursRegression({ k: -1 })).toThrow(DomainError)
+    expect(() => kNearestNeighboursRegression({ k: 1.5 })).toThrow(DomainError)
   })
 })

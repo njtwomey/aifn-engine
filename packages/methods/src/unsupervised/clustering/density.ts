@@ -15,10 +15,10 @@ import type { Dataset, Decides, Estimator, FitOptions, Trained, Transforms } fro
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { pairwiseDistances } from 'aifn-compute/numerics/linalg'
 import { trace, type Algorithm } from 'aifn-compute/foundation/trace'
-import { mat, matrix, pairwise, sq, vec } from './util'
+import { mat, matrix, pairwise, sq, values, vec } from './util'
 import { defineModel } from 'aifn-compute/learning/estimators'
 import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
-import { DomainError } from 'aifn-compute/foundation/errors'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 // ── DBSCAN ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -263,8 +263,8 @@ export interface MeanShiftState extends Status {
  * @param x The data, $n \times d$, one point per row.
  * @param params The hyperparameters: `bandwidth`, the window radius (flat) or standard deviation (Gaussian) $h$; and
  *   `kernel`, `'flat'` (default) or `'gaussian'`.
- * @returns The algorithm, whose `init` takes optional starting `seeds` ($s \times d$; the rows of `x` when left out)
- *   and whose state is a `MeanShiftState`.
+ * @returns The algorithm, whose `init` takes optional starting `seeds` ($s \times d$; the rows of `x` when left out;
+ *   any other width throws `ShapeError`) and whose state is a `MeanShiftState`.
  *
  * @example Five seeds climb to two modes
  * const x = tensor([[0], [0.5], [1], [6], [6.5]])
@@ -282,7 +282,12 @@ export function meanShiftSteps(
   return {
     name: 'mean-shift',
     init: ({ seeds } = {}) => {
-      const s = seeds ? Float64Array.from(seeds.data as Float64Array) : Float64Array.from(v)
+      if (seeds && (seeds.shape.length !== 2 || seeds.shape[1] !== d))
+        throw new ShapeError(
+          'meanShiftSteps',
+          `meanShiftSteps: seeds must be [s, ${d}], got [${seeds.shape.join(', ')}]`,
+        )
+      const s = Float64Array.from(seeds ? values(seeds) : v)
       const m = s.length / d
       return {
         seeds: mat(s, m, d),
@@ -293,9 +298,9 @@ export function meanShiftSteps(
       }
     },
     step: (state) => {
-      const old = state.seeds.data as Float64Array
+      const old = values(state.seeds)
       const m = old.length / d
-      const settled = Int32Array.from(state.settled.data as ArrayLike<number>)
+      const settled = Int32Array.from(values(state.settled))
       const s = Float64Array.from(old)
       let shift = 0
       for (let a = 0; a < m; a++) {
@@ -381,7 +386,7 @@ export function meanShift(params: {
         stopOnNonFinite: false,
         record: { shift: (s) => (Number.isFinite(s.shift) ? s.shift : NaN) },
       })
-      const seeds = training.final.seeds.data as Float64Array
+      const seeds = values(training.final.seeds)
       const m = seeds.length / d
       const intensity = Array.from({ length: m }, (_, a) => {
         let c = 0

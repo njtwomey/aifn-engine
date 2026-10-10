@@ -35,6 +35,16 @@ describe('expectileProblem', () => {
     // gamModel reads the asymmetric weights at β: the EDF of the weighted fit.
     expect(gamModel(problem, beta).edf).toBeCloseTo(model.edf, 6)
   })
+
+  it('its optimum minimises J_τ when the data carry an offset', () => {
+    const n = data.y.shape[0]
+    const offset = fromData(
+      Float64Array.from({ length: n }, (_, i) => 0.5 + 0.3 * Math.cos(i)),
+      [n],
+    )
+    const withOffset = expectileProblem(gamProblem({ terms, method: 'fixed', lambda: 0.3 }, { ...data, offset }), 0.8)
+    expect(Math.hypot(...withOffset.gradient(withOffset.optimum.beta))).toBeLessThan(1e-8)
+  })
 })
 
 describe('expectileTrainingRun', () => {

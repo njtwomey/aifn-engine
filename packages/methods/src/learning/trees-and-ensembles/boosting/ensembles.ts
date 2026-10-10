@@ -356,11 +356,12 @@ export function gradientBoostingSteps(problem: GradientBoostingProblem): Algorit
       if (!logistic) initial = [y.reduce((a, b) => a + b, 0) / n]
       else if (C === 1) {
         const p = y.reduce((a, b) => a + b, 0) / n
-        initial = [Math.log(p / (1 - p))]
+        const clamped = Math.max(1e-15, Math.min(1 - 1e-15, p))
+        initial = [Math.log(clamped / (1 - clamped))]
       } else {
         const counts = new Float64Array(C)
         for (const c of y) counts[c]++
-        const logs = Array.from(counts, (c) => Math.log(c / n))
+        const logs = Array.from(counts, (c) => Math.log(Math.max(1e-15, c) / n))
         const mean = logs.reduce((a, b) => a + b, 0) / C
         initial = logs.map((l) => l - mean)
       }

@@ -272,6 +272,8 @@ export function kNearestNeighboursRegression(
   params: NeighboursParams = {},
 ): Estimator<Supervised<Tensor, Tensor>, NeighboursRegressor> {
   const { k = 5, weights = 'uniform', metric = 'euclidean' } = params
+  if (!(Number.isInteger(k) && k >= 1))
+    throw new DomainError('kNearestNeighboursRegression', 'kNearestNeighboursRegression: k must be a positive integer')
   return {
     name: 'k-nearest-neighbours-regression',
     params: { k, weights, metric },

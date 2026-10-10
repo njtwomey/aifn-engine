@@ -1127,8 +1127,8 @@ export function modelMarkovBlanket(m: Model | ExpandedModel, key: string, bindin
 /**
  * The number of values of a discrete node (Bernoulli 2, Categorical $K$, Binomial $n + 1$), or null. A Categorical's
  * $K$ is read from its probabilities: a vector given inline, a parameter's value, the table of an `index` node, or the
- * dimension of a Dirichlet node; otherwise, as for a Binomial whose $n$ is not a number and for every other family,
- * the result is null.
+ * dimension of a Dirichlet node; otherwise, as for a Binomial whose $n$ is not a number, a Dirichlet whose named
+ * dimension is unbound or bound per plate index, and every other family, the result is null.
  *
  * @param em The expanded model, whose fixed values and bindings give the sizes read.
  * @param inst The instance; only its node's `dist` is read (not `next`).
@@ -1177,7 +1177,10 @@ export function cardinalityOf(em: ExpandedModel, inst: Instance): number | null 
   if (pd?.family === 'Dirichlet') {
     const dim = pd.args[1]
     if (typeof dim === 'number') return dim
-    if (dim !== undefined && isSize(dim)) return em.bindings.sizes?.[dim.name] as number
+    if (dim !== undefined && isSize(dim)) {
+      const s = em.bindings.sizes?.[dim.name]
+      return typeof s === 'number' ? s : null
+    }
     const c = pd.args[0]
     if (Array.isArray(c)) return c.length
     if (isTensor(c)) return (c as Tensor).shape[0]

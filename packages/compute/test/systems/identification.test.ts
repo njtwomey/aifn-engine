@@ -6,6 +6,7 @@ import {
   n4sid,
   outputError,
   poles,
+  polynomialModel,
   predictionErrorMethod,
   stateSpace,
   transferFunction,
@@ -78,6 +79,13 @@ describe('prediction-error method', () => {
       s = next
     }
     checkProtocol(predictionErrorMethod(y.slice(0, 300), u.slice(0, 300), { na: 1, nb: 1, nc: 1 }), {}, { steps: 4 })
+  })
+
+  test('counts every estimated B coefficient as a parameter, even one that is exactly 0', () => {
+    // Zero steps from θ₀ = (a₁, b₁) = (0.5, 0): B = [0, 0], whose zero b₁ is still a fitted parameter.
+    const m = polynomialModel(y, u, { na: 1, nb: 1 }, { theta0: [0.5, 0], maxSteps: 0 })
+    expect(m.B).toEqual([0, 0])
+    expect(m.parameters).toBe(2)
   })
 
   test('output error recovers B/F from noisy output', () => {

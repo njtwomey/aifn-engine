@@ -49,7 +49,10 @@ export interface FlashAttentionState extends Status {
   readonly tiles: readonly AttentionTile[]
   /** Tiles skipped because the causal mask hides them entirely. */
   readonly skipped: Size
-  /** $\avec / \ell$ once every tile is processed, else null. */
+  /**
+   * $\avec / \ell$ once every tile is processed, else null. With no queries or no keys there are no tiles, and it is
+   * zeros `[Tq, d_v]` from the start, as `scaledDotProductAttention` gives.
+   */
   readonly output: Tensor | null
   /** True once every tile is processed (at once when there are none). */
   readonly terminated: boolean
@@ -128,7 +131,8 @@ export function flashAttentionSteps(
       tile: null,
       tiles,
       skipped,
-      output: null,
+      // No queries or no keys: there are no tiles, and the output is zeros, as scaledDotProductAttention gives.
+      output: tiles.length === 0 ? fromData(new Float64Array(Q.rows * dv), [Q.rows, dv]) : null,
       terminated: tiles.length === 0,
     }),
     step: (state) => {

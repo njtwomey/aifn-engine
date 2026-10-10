@@ -44,6 +44,7 @@ describe('proximal and projected methods', () => {
     const s = run(projectedGradient(f, projectBox(0, 1), { stepSize: 0.5 }), { x0: [0.5, 0.5, 0.5] }, 200)
     close(toFlat(s.x), [1, 0, 1], 1e-6)
     close(toFlat(projectSimplex()(tensor([0.5, 0.8, -1]))), [0.35, 0.65, 0], 1e-12)
+    expect(toFlat(projectSimplex(0)(tensor([0.5, 0.8, -1])))).toEqual([0, 0, 0])
     expect(Math.hypot(...toFlat(projectBall(1)(tensor([3, 4]))))).toBeCloseTo(1, 12)
   })
 

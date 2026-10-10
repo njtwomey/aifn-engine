@@ -41,6 +41,8 @@ export interface QualityMeasure {
   readonly name: string
   /** Rows in the population. */
   readonly rows: number
+  /** The minimum support the measure assumes for its bound, if any. */
+  readonly minSupport?: number
   /** The quality of a cover ($-\infty$ for an empty one). */
   quality(cover: Bitset): number
   /** An upper bound on the quality of every non-empty subset of the cover. */
@@ -60,6 +62,8 @@ export interface CountMeasure extends QualityMeasure {
   fromCounts(n: number, tp: number): number
   /** The optimistic estimate from the same counts, when the measure has one. */
   boundFromCounts?(n: number, tp: number): number
+  /** Re-instantiate the measure with a different minimum support for its optimistic estimate. */
+  withMinSupport?(minSupport: number): CountMeasure
 }
 
 /** Which deviation is interesting. */
@@ -220,15 +224,26 @@ export function binomialQuality(target: Target, options: { direction?: Direction
  * print('lift =', lift.quality(cover), ' (0.5 / 0.375)')
  * print('optimistic estimate =', lift.bound(cover))
  */
-export function liftQuality(target: Target, options: { minSupport?: number } = {}): CountMeasure {
+/** A lift measure with its configured minimum support. */
+export interface LiftMeasure extends CountMeasure {
+  readonly minSupport: number
+  withMinSupport(minSupport: number): LiftMeasure
+}
+
+export function liftQuality(target: Target, options: { minSupport?: number } = {}): LiftMeasure {
   const m = Math.max(1, options.minSupport ?? 1)
-  return countMeasure(
+  const base = countMeasure(
     'lift',
     'Lift',
     target,
     (n, tp, N, P) => (P > 0 ? tp / n / (P / N) : 0),
     (_n, tp, N, P) => (P > 0 ? Math.min(1, tp / m) / (P / N) : 0),
   )
+  return {
+    ...base,
+    minSupport: m,
+    withMinSupport: (minSupport: number) => liftQuality(target, { ...options, minSupport }),
+  }
 }
 
 /**

@@ -97,8 +97,8 @@ const flatOf = (v: Value): Float64Array =>
  * `gradient`: `'backprop'` unrolls the solver on traced values (`unrolled`; Dormand–Prince chooses its steps on primal
  * values, so they are constants of the discrete solution), `'adjoint'` uses `odeAdjoint` on each interval. Without a
  * transform it simply solves. A solve that fails or needs more than `maxSteps` steps throws `NumericalError`
- * 'not-converged'; fewer than two times, a time equal to the one before it, or a step size that is not positive
- * throws `DomainError`.
+ * 'not-converged'; fewer than two times, a time that is not finite or equals the one before it, or a step size that is
+ * not positive throws `DomainError`.
  *
  * @param f The right-hand side $f(t, \xvec, \thetavec)$, called with $\xvec$ in the shape of $\xvec(t_0)$ and
  *   returning the derivative in that shape. It is written with tensor primitives, so that it can be differentiated.
@@ -142,8 +142,8 @@ export function odeFlow(
     onSolve,
   } = options
   if (times.length < 2) throw new DomainError('odeFlow', 'odeFlow: needs at least two times')
-  for (let i = 1; i < times.length; i++)
-    if (!(Number.isFinite(times[i]) && times[i] !== times[i - 1]))
+  for (let i = 0; i < times.length; i++)
+    if (!(Number.isFinite(times[i]) && (i === 0 || times[i] !== times[i - 1])))
       throw new DomainError('odeFlow', 'odeFlow: the times must be finite and distinct')
   if (!(stepSize > 0 && Number.isFinite(stepSize)))
     throw new DomainError('odeFlow', 'odeFlow: stepSize must be positive')

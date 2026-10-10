@@ -75,6 +75,23 @@ describe('heat equation', () => {
     expect(Math.max(...toFlat(tr.steps.at(-1)!.u).map(Math.abs))).toBeGreaterThan(10)
   })
 
+  it('treats a periodic grid’s last point as a copy of the first (period b − a), as transport and wave do', () => {
+    // cos 2πx is a discrete eigenmode of the periodic second difference on m = n − 1 points, with eigenvalue
+    // λ = −(4D/Δx²) sin²(πΔx), so Crank–Nicolson scales it by (1 + λΔt/2)/(1 − λΔt/2) every step.
+    const n = 21
+    const dx = 1 / (n - 1)
+    const dt = 0.01
+    const lambda = (-4 * D * Math.sin(Math.PI * dx) ** 2) / dx ** 2
+    const g = (1 + (lambda * dt) / 2) / (1 - (lambda * dt) / 2)
+    const alg = heatEquation({ diffusivity: D, grid: { a: 0, b: 1, n }, boundary: { kind: 'periodic' }, dt })
+    const s = run(alg, { u0: (x) => Math.cos(2 * Math.PI * x) }, 50)
+    const u = toFlat(s.u)
+    expect(u.length).toBe(n)
+    expect(u[n - 1]).toBe(u[0])
+    u.forEach((v, i) => expect(v).toBeCloseTo(g ** 50 * Math.cos(2 * Math.PI * i * dx), 12))
+    expect(s.mass).toBeCloseTo(0, 12)
+  })
+
   it('conserves mass with zero-flux ends', () => {
     const s0 = heatEquation({
       diffusivity: 0.5,

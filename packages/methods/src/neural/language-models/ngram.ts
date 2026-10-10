@@ -23,7 +23,7 @@ import { fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import type { Estimator, Scores } from 'aifn-compute/learning/estimators'
 import type { LogitsFn } from 'aifn-compute/nn/decoding'
 import type { Vocabulary } from 'aifn-compute/text/vocabulary'
-import { DomainError } from 'aifn-compute/foundation/errors'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** A corpus as token ids over a vocabulary. */
 export type TokenCorpus = { readonly ids: readonly number[]; readonly vocabulary: Vocabulary }
@@ -122,8 +122,8 @@ export type KneserNeyModel = Scores<Tensor> & {
    */
   perplexity(ids: readonly number[]): number
   /**
-   * Next-token log-probabilities for contexts `[N, k]` of ids: `[N, V]`. A one-dimensional tensor of $N$ values is read
-   * as $N$ empty contexts.
+   * Next-token log-probabilities for contexts `[N, k]` of ids: `[N, V]`. A one-dimensional tensor of $N$ ids is read as
+   * $N$ one-token contexts, `[N, 1]`; any other rank throws `ShapeError`.
    */
   score(contexts: Tensor): Tensor
 }
@@ -217,7 +217,12 @@ export function kneserNey(options: KneserNeyOptions = {}): Estimator<TokenCorpus
           return Math.exp(nll / Math.max(1, seq.length))
         },
         score: (contexts: Tensor) => {
-          const [n, k] = contexts.shape.length === 1 ? [contexts.shape[0], 0] : contexts.shape
+          const r = contexts.shape.length
+          if (r !== 1 && r !== 2)
+            throw new ShapeError('kneserNey', `kneserNey: score expects contexts [N, k] or [N], given rank ${r}`, [
+              contexts.shape,
+            ])
+          const [n, k] = r === 1 ? [contexts.shape[0], 1] : contexts.shape
           const v = toFlat(contexts)
           const out = new Float64Array(n * V)
           for (let i = 0; i < n; i++) {

@@ -330,21 +330,21 @@ export function logMarginalLikelihoodGradient<P extends KernelParams>(
 ): LogMarginalGradient<P> {
   const { noiseVariance = 0, mean = 0 } = options
   const lv = kernelLogVector(kernel)
-  const f = (tree: P, logNoise: Value) =>
-    logMarginalLikelihood(kernelFromLog(kernel, tree), x, y, { noiseVariance: exp(logNoise), mean }).value
-  const { value, grad } = valueAndGrad(f, { argnums: [0, 1] })(lv.unravel(lv.vector), Math.log(noiseVariance))
+  const f = (tree: P, noise: Value) =>
+    logMarginalLikelihood(kernelFromLog(kernel, tree), x, y, { noiseVariance: noise as number, mean }).value
+  const { value, grad } = valueAndGrad(f, { argnums: [0, 1] })(lv.unravel(lv.vector), noiseVariance)
   const [kernelGrad, noiseGrad] = grad as [P, Value]
-  const logGradient = Float64Array.from([
-    ...ravel(kernelGrad).vector,
-    typeof noiseGrad === 'number' ? noiseGrad : flat(noiseGrad as Tensor)[0],
-  ])
+  const kernelLogGrad = ravel(kernelGrad).vector
+  const directNoise = typeof noiseGrad === 'number' ? noiseGrad : flat(noiseGrad as Tensor)[0]
+  const logNoiseGrad = directNoise * noiseVariance
+  const logGradient = Float64Array.from([...kernelLogGrad, logNoiseGrad])
   // ∂/∂θ = (∂/∂ log θ) / θ.
   const params = ravel(kernel.params)
-  const direct = Float64Array.from(params.vector, (theta, i) => logGradient[i] / theta)
+  const direct = Float64Array.from(params.vector, (theta, i) => kernelLogGrad[i] / theta)
   return {
     value: value as number,
     kernel: params.unravel(direct),
-    noiseVariance: logGradient[lv.vector.length] / noiseVariance,
+    noiseVariance: directNoise,
     names: [...lv.names, 'noiseVariance'],
     logGradient,
   }

@@ -17,7 +17,7 @@ import type { Tree, TreeNode } from 'aifn-compute/graph'
 import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import { run, trace, type Algorithm, type Trace } from 'aifn-compute/foundation/trace'
 import { pairwiseDistances } from 'aifn-compute/numerics/linalg'
-import { canonical, ints, matrix } from './util'
+import { canonical, ints, matrix, values } from './util'
 import { defineModel } from 'aifn-compute/learning/estimators'
 import { int, oneOf, space } from 'aifn-compute/foundation/space'
 
@@ -76,7 +76,7 @@ export function agglomerativeSteps(x: Tensor, params: { linkage?: Linkage } = {}
       t: 0,
     }),
     step: (state) => {
-      const labels = state.labels.data as Int32Array
+      const labels = Int32Array.from(values(state.labels))
       const ids = state.active
       const c = ids.length
       if (c < 2) return state
@@ -132,7 +132,7 @@ export function agglomerativeSteps(x: Tensor, params: { linkage?: Linkage } = {}
       const id = n + state.t
       const next = Int32Array.from(labels, (l) => (l === ia || l === ib ? id : l))
       const merges = new Float64Array((state.t + 1) * 4)
-      merges.set(state.merges.data as Float64Array)
+      merges.set(values(state.merges))
       merges.set([Math.min(ia, ib), Math.max(ia, ib), bestD, size[best[0]] + size[best[1]]], state.t * 4)
       return {
         labels: fromData(next, [n]),
@@ -175,7 +175,7 @@ export type MergeTree = Tree<MergeData>
 export function mergeTree(merges: Tensor): MergeTree {
   const r = merges.shape[0]
   const n = r + 1
-  const Z = merges.data as Float64Array
+  const Z = values(merges)
   const nodes: TreeNode<MergeData>[] = Array.from({ length: n }, (_, i) => ({
     id: i,
     parent: null,
@@ -216,7 +216,7 @@ export function mergeTree(merges: Tensor): MergeTree {
 export function cutTree(merges: Tensor, cut: { clusters: number } | { height: number }): Tensor {
   const r = merges.shape[0]
   const n = r + 1
-  const Z = merges.data as Float64Array
+  const Z = values(merges)
   const keep =
     'clusters' in cut
       ? n - Math.max(1, Math.min(cut.clusters, n))

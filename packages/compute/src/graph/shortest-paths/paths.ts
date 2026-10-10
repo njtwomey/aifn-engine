@@ -56,10 +56,24 @@ export function directedArcs(g: Graph): DirectedArc[] {
 }
 
 /**
+ * Throws `DomainError` unless `v` is a node of a graph of `nodes` nodes: an integer in $0, \dots, V - 1$.
+ *
+ * @param where The public function's name, for the error message.
+ * @param role What the node is for (`source`, `target`), for the error message.
+ * @param v The node index to check.
+ * @param nodes The number of nodes $V$.
+ */
+function checkNode(where: string, role: string, v: number, nodes: number): void {
+  if (!(Number.isInteger(v) && v >= 0 && v < nodes))
+    throw new DomainError(where, `${where}: ${role} ${v} is not a node of 0…${nodes - 1}`)
+}
+
+/**
  * The path from `source` to `target` read from a predecessor array (as returned by the shortest-path functions), as
  * node indices; empty when the target is unreachable. For Floyd–Warshall pass the predecessor row of the source. The
  * walk back from `target` gives up (an empty path) when it meets $-1$ or takes more than $V$ steps, so a predecessor
- * cycle cannot make it loop.
+ * cycle cannot make it loop. Throws `ShapeError` unless `predecessors` is a vector (pass a row of a Floyd–Warshall
+ * matrix, not the matrix), and `DomainError` unless `source` and `target` are nodes of it.
  *
  * @param predecessors The predecessor of each node on a shortest path from `source`, $-1$ for none: a vector of
  *   length $V$ (a strided view, such as a row of a matrix, is read in place).
@@ -83,6 +97,14 @@ export function directedArcs(g: Graph): DirectedArc[] {
  * print('2 to 3:', shortestPath(slice(predecessor, 2), 2, 3))
  */
 export function shortestPath(predecessors: Tensor, source: number, target: number): Tensor {
+  if (predecessors.shape.length !== 1)
+    throw new ShapeError(
+      'shortestPath',
+      `shortestPath: predecessors must be a vector, not shape [${predecessors.shape}] (pass one row of a matrix)`,
+      [predecessors.shape],
+    )
+  checkNode('shortestPath', 'source', source, predecessors.shape[0])
+  checkNode('shortestPath', 'target', target, predecessors.shape[0])
   const pred = predecessors.data
   const out: number[] = [target]
   let v = target
@@ -177,8 +199,9 @@ function live(queue: Heap<number>, d: ArrayLike<number>, h: ArrayLike<number>, s
 
 /**
  * Dijkstra's algorithm or A* (by `name`) on one problem; the heuristic is 0 for Dijkstra's. `init` throws
- * `DomainError` for a negative edge weight. Popped entries are checked against the current distances (lazy deletion),
- * and a node whose distance improves after it was settled (only under an inconsistent heuristic) is reopened.
+ * `DomainError` for a negative edge weight, or a source or target that is not a node. Popped entries are checked
+ * against the current distances (lazy deletion), and a node whose distance improves after it was settled (only under
+ * an inconsistent heuristic) is reopened.
  *
  * @param name The algorithm's name, also used in its error message: `'dijkstra'` or `'a-star'`.
  * @param o The graph, the source, and optionally the target and the heuristic.
@@ -192,6 +215,8 @@ function bestFirst(name: string, o: ShortestPathProblem): Algorithm<void, Dijkst
       if (adj.some((arcs) => arcs.some((a) => a.weight < 0)))
         throw new DomainError(name, `${name}: edge weights must be non-negative`)
       const V = o.graph.nodes
+      checkNode(name, 'source', o.source, V)
+      if (o.target !== undefined) checkNode(name, 'target', o.target, V)
       const h = readHeuristic(o)
       const d = new Float64Array(V).fill(Infinity)
       const queue = createHeap<number>()
@@ -327,7 +352,8 @@ export interface ShortestPaths {
 
 /**
  * Single-source shortest paths by Dijkstra's algorithm (Dijkstra, 1959; non-negative weights); stops early at
- * `target` if given. Runs `dijkstraSteps` to the end. Throws `DomainError` for a negative edge weight.
+ * `target` if given. Runs `dijkstraSteps` to the end. Throws `DomainError` for a negative edge weight, or a `source`
+ * or `target` that is not a node.
  *
  * @param graph The graph, with non-negative weights (1 where an edge has none); it is not modified.
  * @param source The node distances are measured from.
@@ -359,7 +385,8 @@ export function dijkstra(graph: Graph, source: number, target?: number): Shortes
  * A shortest path from `source` to `target` by A* (Hart, Nilsson and Raphael, 1968) with the given heuristic: the path
  * (empty when unreachable), its length (Infinity when unreachable) and the number of node expansions. Runs
  * `aStarSteps` to the end. The path is a shortest one when the heuristic is admissible. Throws `DomainError` for a
- * negative edge weight and `ShapeError` for a heuristic without one value per node.
+ * negative edge weight or a `source` or `target` that is not a node, and `ShapeError` for a heuristic without one value
+ * per node.
  *
  * @param graph The graph, with non-negative weights (1 where an edge has none); it is not modified.
  * @param source The node the path starts from.
@@ -439,6 +466,7 @@ function predecessorCycle(pred: Int32Array, start: number): number[] | null {
 /** The init and step of `bellmanFordSteps` on the whole problem; `t` is added by the factory. */
 const bellmanFordPasses = {
   init: ({ graph, source }: ShortestPathProblem): Omit<BellmanFordState, 't'> => {
+    checkNode('bellmanFord', 'source', source, graph.nodes)
     const d = new Float64Array(graph.nodes).fill(Infinity)
     d[source] = 0
     return {
@@ -524,7 +552,7 @@ export function bellmanFordSteps(graph: Graph, options: { source: number }): Alg
 /**
  * Single-source shortest paths by Bellman–Ford (Bellman, 1958; Ford, 1956), which allows negative weights;
  * `negativeCycle` is set when one is reachable (distances are then meaningless). Runs `bellmanFordSteps` to the end:
- * at most $V$ passes over the edges.
+ * at most $V$ passes over the edges. Throws `DomainError` when `source` is not a node.
  *
  * @param graph The graph; weights may be negative, and an undirected edge of negative weight is a negative cycle. It
  *   is not modified.

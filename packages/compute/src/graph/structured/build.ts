@@ -70,7 +70,7 @@ export const groupSizes = (g: Group): readonly SizeSpec[] => (Array.isArray(g.si
 
 /**
  * The groups holding `group`, outermost first, ending with it (empty for null). Throws `AifnError` when a name on the
- * way is not a group of the graph.
+ * way is not a group of the graph, or when the parents lead back to a group already on the way (a nesting cycle).
  *
  * @param graph The graph whose groups are searched (only `groups` is read).
  * @param group The name of the innermost group, or null for a node outside every group.
@@ -89,6 +89,7 @@ export function groupChain(graph: Pick<StructuredGraph, 'groups'>, group: string
   for (let name = group; name !== null;) {
     const g = graph.groups.find((q) => q.name === name)
     if (!g) return fail(`unknown group ${name}`)
+    if (chain.includes(g)) return fail(`groups nest in a cycle at ${g.name}`)
     chain.unshift(g)
     name = g.parent
   }
@@ -150,10 +151,10 @@ function checkLag(lag: Lag, group: Group, where: string): void {
 /**
  * A structured graph from a specification. Checks that node and group names are unique, each group has one index
  * symbol per size (a tree, an `arity` of at least 1), parents and groups named exist, edge ends exist, every lagged
- * edge joins two nodes of one group with a lag of that group's kind, and no edge without a lag joins a node to itself;
- * the first failure throws `AifnError`. Group nesting must not form a cycle: the check for one does not terminate.
- * Edges touching a factor default to undirected, others to directed; the graph is `directed` when every edge is. The
- * named sizes are those of the specification plus any a group uses.
+ * edge joins two nodes of one group with a lag of that group's kind, no edge without a lag joins a node to itself, and
+ * group nesting forms no cycle; the first failure throws `AifnError`. Edges touching a factor default to undirected,
+ * others to directed; the graph is `directed` when every edge is. The named sizes are those of the specification plus
+ * any a group uses.
  *
  * @param spec The nodes, the edges between their names, the groups and the named sizes.
  * @returns The structured graph, compact (its groups not expanded).
@@ -189,7 +190,7 @@ export function structuredGraph<D = unknown>(spec: StructuredSpec<D>): Structure
   }
   for (const g of groups) {
     if (g.parent !== null && !groupNames.has(g.parent)) fail(`group ${g.name} has unknown parent ${g.parent}`)
-    if (groupChain({ groups }, g.name).length > groups.length) fail(`groups nest in a cycle at ${g.name}`)
+    groupChain({ groups }, g.name)
   }
   const attributes = spec.nodes.map((n) => ({ ...n }))
   const index = new Map<string, number>()
@@ -527,6 +528,6 @@ export function repeatedSlices<D>(
       ...slice.edges.map((e) => ({ ...e, from: name(e.from), to: name(e.to) })),
       ...transitions.map(([from, to]) => ({ from, to, lag: 1, directed: true })),
     ],
-    sizes: [...slice.sizes, ...(typeof length === 'string' ? [length] : [])],
+    sizes: [...slice.sizes, ...(typeof length === 'string' && !slice.sizes.includes(length) ? [length] : [])],
   })
 }

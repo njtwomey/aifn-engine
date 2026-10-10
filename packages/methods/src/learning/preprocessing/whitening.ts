@@ -88,7 +88,13 @@ export function whitening({
     fit({ x }) {
       const { n, d, v } = matrix(x, 'whitening')
       if (n < 2) throw new DomainError('whitening', 'whitening: needs at least two rows')
-      const k = method === 'zca' ? d : Math.min(components ?? d, d)
+      if (components !== undefined) {
+        if (components < 1 || !Number.isInteger(components))
+          throw new DomainError('whitening', `whitening: components must be an integer >= 1, got ${components}`)
+        if (components > d)
+          throw new DomainError('whitening', `whitening: components (${components}) cannot exceed feature count (${d})`)
+      }
+      const k = method === 'zca' ? d : (components ?? d)
       const mean = new Float64Array(d)
       for (let i = 0; i < n; i++) for (let j = 0; j < d; j++) mean[j] += v[i * d + j] / n
       const C = new Float64Array(d * d)

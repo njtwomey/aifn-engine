@@ -76,6 +76,7 @@ export {
   type Input,
   type Margins,
   type RespondOptions,
+  type Response,
   type SimulationOptions,
   type SimulationState,
   type StandardResponseOptions,

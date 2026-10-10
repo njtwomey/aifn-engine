@@ -28,7 +28,16 @@ import {
   backretrieval,
 } from 'aifn-methods/evaluation/text'
 import { demographicParityDifference, equalisedOddsDifference } from 'aifn-methods/evaluation/fairness'
-import { frechetDistance, generativePrecisionRecall, inceptionScore, kid } from 'aifn-methods/evaluation/generative'
+import {
+  frechetDistance,
+  generativePrecisionRecall,
+  inceptionScore,
+  inceptionScoreSplits,
+  kid,
+  kidSubsets,
+} from 'aifn-methods/evaluation/generative'
+import { DomainError } from 'aifn-compute/foundation/errors'
+import { stream } from 'aifn-compute/foundation/random'
 import { giniCoefficient } from 'aifn-methods/evaluation/beyond-accuracy'
 import {
   psnr,
@@ -203,6 +212,12 @@ describe('image, audio and generative', () => {
     )
     expect(pr.precision).toBeCloseTo(2 / 3, 12)
     expect(pr.recall).toBeCloseTo(3 / 4, 12)
+  })
+  it('validates splits, subsetSize and allows negative PSNR', () => {
+    expect(psnr([10], [20], { dataRange: 5 })).toBeLessThan(0)
+    expect(() => inceptionScoreSplits([[0.5, 0.5]], { splits: 2 })).toThrow(DomainError)
+    expect(() => inceptionScoreSplits([[0.5, 0.5]], { splits: 0 })).toThrow(DomainError)
+    expect(() => kidSubsets(stream(1), [[1]], [[2]], { subsetSize: 5 })).toThrow(DomainError)
   })
 })
 

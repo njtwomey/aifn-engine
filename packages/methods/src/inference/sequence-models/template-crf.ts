@@ -365,10 +365,10 @@ export interface FiringFeature {
 /**
  * Every template's string at position $n$ (bigram templates only for $n \ge 1$), with its weights: what the CRF sees
  * at that position. A cell outside the sequence reads `_B-1`, `_B-2`, ... before it and `_B+1`, ... after it, as in
- * CRF++.
+ * CRF++. Throws `DomainError` when a template reads a column that a row inside the sequence does not have.
  *
  * @param crf The CRF.
- * @param rows The token rows of the sequence.
+ * @param rows The token rows of the sequence, with the columns the templates read.
  * @param n The position, from 0.
  * @returns One entry per template that applies at `n`, in the order of the templates.
  *
@@ -392,6 +392,11 @@ export function firingFeatures(crf: TemplateCrf, rows: TokenRows, n: Size): Firi
     let s = t.pieces[0]
     t.macros.forEach((m, k) => {
       const at = n + m.row
+      if (at >= 0 && at < rows.length && rows[at][m.column] === undefined)
+        throw new DomainError(
+          'firingFeatures',
+          `firingFeatures: the template ${t.text} reads column ${m.column}, but row ${at} has ${rows[at].length} columns`,
+        )
       s +=
         (at < 0 ? `_B${at}` : at >= rows.length ? `_B+${at - rows.length + 1}` : rows[at][m.column]) + t.pieces[k + 1]
     })

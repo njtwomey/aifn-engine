@@ -149,13 +149,24 @@ export function powerGaussian<T extends Value>(g: NaturalGaussian<T>, p: number)
 }
 
 /**
+ * Throw `DomainError` unless a damping weight is in $[0, 1)$.
+ *
+ * @param damping The weight of the old message.
+ * @param where The caller's name for the error message.
+ */
+function checkDamping(damping: number, where: string): void {
+  if (!(damping >= 0 && damping < 1))
+    throw new DomainError(where, `${where}: damping must be in [0, 1), got ${damping}`)
+}
+
+/**
  * A damped update: $(1 - \lambda)\,\text{next} + \lambda\,\text{old}$ in natural parameters, with
  * $\lambda \in [0, 1)$ the weight of the old message ($\lambda = 0$: no damping, and `next` itself is returned).
- * Differentiable, and elementwise for tensors.
+ * Differentiable, and elementwise for tensors. Throws `DomainError` when `damping` is not in $[0, 1)$.
  *
  * @param next The newly computed message.
  * @param old The message it replaces.
- * @param damping The weight $\lambda$ of the old message (not checked).
+ * @param damping The weight $\lambda$ of the old message, in $[0, 1)$.
  * @returns The damped message.
  *
  * @example Half-way between two messages
@@ -166,6 +177,7 @@ export function dampGaussian<T extends Value>(
   old: NaturalGaussian<T>,
   damping: number,
 ): NaturalGaussian<T> {
+  checkDamping(damping, 'dampGaussian')
   if (damping === 0) return next
   return {
     precision: add(mul(next.precision, 1 - damping), mul(old.precision, damping)) as T,
@@ -366,11 +378,11 @@ export function divideMessages(a: ExpFamilyMessage, b: ExpFamilyMessage): ExpFam
 
 /**
  * A damped update $(1 - \lambda)\,\text{next} + \lambda\,\text{old}$ in natural parameters. Throws `DomainError`
- * when the families differ.
+ * when the families differ or `damping` is not in $[0, 1)$.
  *
  * @param next The newly computed message.
  * @param old The message it replaces, of the same family.
- * @param damping The weight $\lambda$ of the old message, in $[0, 1)$ (not checked).
+ * @param damping The weight $\lambda$ of the old message, in $[0, 1)$.
  * @returns The damped message.
  *
  * @example A quarter of the way back
@@ -378,6 +390,7 @@ export function divideMessages(a: ExpFamilyMessage, b: ExpFamilyMessage): ExpFam
  */
 export function dampMessages(next: ExpFamilyMessage, old: ExpFamilyMessage, damping: number): ExpFamilyMessage {
   sameFamily(next, old)
+  checkDamping(damping, 'dampMessages')
   return {
     family: next.family,
     natural: next.natural.map((x, i) => add(mul(x, 1 - damping), mul(old.natural[i], damping))),

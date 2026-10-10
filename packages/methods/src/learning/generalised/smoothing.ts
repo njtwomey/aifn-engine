@@ -205,6 +205,7 @@ export type PenalisedFit = PenalisedInference & {
  * @returns The fit.
  *
  * @example A ridge on the slope shrinks it and lowers the effective degrees of freedom
+ * import { gaussianFamily, link } from 'aifn-compute/probability/likelihoods'
  * // Columns x and 1; only the slope is penalised.
  * const X = Float64Array.of(0, 1, 1, 1, 2, 1, 3, 1)
  * const A = { X, n: 4, P: 2, penalties: [{ S: Float64Array.of(1, 0, 0, 0) }], nullSpace: 1 }
@@ -261,6 +262,7 @@ export function penalisedFit(
  * @returns The criterion.
  *
  * @example GCV and REML over a grid of smoothing parameters for a Whittaker smoother
+ * import { gaussianFamily, link } from 'aifn-compute/probability/likelihoods'
  * const n = 30
  * const xs = Array.from({ length: n }, (_, i) => i / (n - 1))
  * const y = add(tensor(xs.map((x) => Math.sin(2 * Math.PI * x))), normals(stream(1), n, 0, 0.3))

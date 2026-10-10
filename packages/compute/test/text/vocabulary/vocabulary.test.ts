@@ -66,5 +66,7 @@ describe('encodeTokens and decodeTokens', () => {
     expect(toFlat(encodeTokens(fixed, ['b', 'c', 'a'], { onUnknown: 'skip' }))).toEqual([1, 0])
     expect(() => decodeTokens(fixed, [5])).toThrow(DomainError)
     expect(() => vocabularyOf(['a', 'a'])).toThrow(DomainError)
+    expect(() => vocabularyOf(['a'], { specials: ['<s>', '<s>'] })).toThrow(DomainError)
+    expect(() => vocabularyOf(['a'], { unknown: '<unk>' })).toThrow(DomainError)
   })
 })

@@ -32,6 +32,7 @@ import {
   type Tensor,
 } from 'aifn-compute/foundation/tensor'
 import { run, trace } from 'aifn-compute/foundation/trace'
+import { DomainError } from 'aifn-compute/foundation/errors'
 import { fixture } from '../../fixtures'
 import { checkProtocol } from '../../protocol'
 
@@ -165,6 +166,18 @@ describe('implicit methods', () => {
     toFlat(a.x).forEach((v, i) => expect(v).toBeCloseTo(toFlat(b.x)[i], 6))
     expect(a.newtonConverged).toBe(true)
     expect(a.jacobianEvaluations).toBeGreaterThan(0)
+  })
+
+  it('registers only the status flags the implicit solvers set', () => {
+    const solvers = [
+      implicitEuler(decay, { stepSize: 0.1, tEnd: 0.5 }),
+      implicitTrapezoid(decay, { stepSize: 0.1, tEnd: 0.5 }),
+      bdf(decay, 2, { stepSize: 0.1, tEnd: 0.5 }),
+    ]
+    for (const [alg, factory] of solvers.map((a, i) => [a, [implicitEuler, implicitTrapezoid, bdf][i]] as const)) {
+      const s = run(alg, { x0: [1] }, 10) as unknown as Record<string, unknown>
+      for (const flag of (factory as any).info.state!.flags ?? []) expect(s).toHaveProperty(flag)
+    }
   })
 })
 
@@ -301,6 +314,30 @@ describe('stability', () => {
     // BDF2 is A-stable: stable on the imaginary axis, unstable just right of 0 on the real axis.
     expect(amplification('bdf2', 0, 5)).toBeLessThanOrEqual(1 + 1e-9)
     expect(amplification('bdf2', 0.1, 0)).toBeGreaterThan(1)
+  })
+
+  it('pivots an implicit tableau whose first pivot vanishes', () => {
+    // Two-stage Gauss–Legendre: 1 − z a₁₁ = 0 at z = 4, but I − zA is not singular there.
+    // R(z) = (1 + z/2 + z²/12) / (1 − z/2 + z²/12), so R(4) = 13.
+    const r3 = Math.sqrt(3) / 6
+    const gauss = {
+      name: 'gauss-legendre-2',
+      order: 4,
+      c: [0.5 - r3, 0.5 + r3],
+      a: [
+        [0.25, 0.25 - r3],
+        [0.25 + r3, 0.25],
+      ],
+      b: [0.5, 0.5],
+    }
+    expect(amplification(gauss, 4, 0)).toBeCloseTo(13, 10)
+    const R = (z: number) => (1 + z / 2 + (z * z) / 12) / (1 - z / 2 + (z * z) / 12)
+    expect(amplification(gauss, -3, 0)).toBeCloseTo(Math.abs(R(-3)), 12)
+  })
+
+  it('boundaryLocus rejects fewer than two points', () => {
+    expect(() => boundaryLocus('bdf2', 1)).toThrow(DomainError)
+    expect(() => boundaryLocus('bdf2', 2.5)).toThrow(DomainError)
   })
 
   it('stabilityRegion and boundaryLocus have their shapes', () => {

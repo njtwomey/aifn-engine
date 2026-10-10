@@ -262,7 +262,7 @@ export function toyCorpus(s: Stream, options: ToyCorpusOptions = {}): Corpus {
   const names = CORPUS_TOPICS.slice(0, Math.max(1, Math.min(topics, CORPUS_TOPICS.length)))
   const documents: string[] = []
   for (let k = 0; k < sentences; k++) {
-    const u = uniform(child(s, k), 0, 1, { shape: [12] }).data
+    const u = uniform(child(s, k), 0, 1, { shape: [13] }).data
     const topic = TOPICS[names[Math.min(names.length - 1, Math.floor(u[0] * names.length))]]
     const plural = u[1] < 0.35
     const subject = pick(topic.nouns, u[2], exponent)
@@ -276,7 +276,7 @@ export function toyCorpus(s: Stream, options: ToyCorpusOptions = {}): Corpus {
     else if (tense === 'present') words.push(plural ? verb[0] : verb[1])
     else words.push(plural ? 'are' : 'is', verb[3])
     words.push('the', u[9] < 0.5 ? object[0] : object[1])
-    if (u[10] < 0.6) words.push(u[11] < 0.5 ? 'in' : 'near', 'the', pick(topic.places, u[11], exponent))
+    if (u[10] < 0.6) words.push(u[11] < 0.5 ? 'in' : 'near', 'the', pick(topic.places, u[12], exponent))
     documents.push(words.join(' '))
   }
   return {

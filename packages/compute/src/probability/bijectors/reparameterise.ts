@@ -5,7 +5,8 @@
  *
  * The new log-density is written with primitives ($T$, the target and the log-Jacobian all are), so samplers and
  * variational methods differentiate it as usual. Two kinds of map are accepted: a scalar `Bijector` applied to every
- * coordinate (its $\log \lvert f'(u_i) \rvert$ summed: the constrained-to-unconstrained transforms of Stan and PyMC),
+ * coordinate (its $\log \lvert f'(u_i) \rvert$ summed over the last axis: the constrained-to-unconstrained transforms
+ * of Stan and PyMC),
  * or a vector map `Reparameterisation` such as the non-centred parameterisation of a hierarchical model,
  * $(v, \zvec) \mapsto (v, \zvec e^{v/2})$ for Neal's funnel (Papaspiliopoulos, Roberts and Sköld, 2007, Statistical
  * Science 22(1)). A vector map without a log-Jacobian gets one from the Jacobian matrix (`jacobian`, then `logDet`), at
@@ -72,9 +73,9 @@ function jacobianLogDet(forward: (u: Value) => Value, u: Value): Value {
  * parameterisations. With a `Bijector` its support is the bijector's domain.
  *
  * @param target The log-density of $\thetavec$.
- * @param map The map $T$: a scalar `Bijector`, applied to every coordinate with its log-Jacobians summed over all of
- *   them (so the new density takes one point at a time), or a vector `Reparameterisation`, whose log-Jacobian is
- *   computed by autodiff when it does not give one.
+ * @param map The map $T$: a scalar `Bijector`, applied to every coordinate with its log-Jacobians summed over the last
+ *   axis (so a batch of points, one per row, works when the target takes one), or a vector `Reparameterisation`,
+ *   whose log-Jacobian is computed by autodiff when it does not give one.
  * @returns The log-density of $\uvec$, named `<target> through <map>`.
  *
  * @example An exponential density on the log scale
@@ -93,7 +94,7 @@ function jacobianLogDet(forward: (u: Value) => Value, u: Value): Value {
 export function transformLogDensity(target: LogDensity, map: Bijector | Reparameterisation): TransformedLogDensity {
   const forward = (u: Value) => map.forward(u)
   const logJac: (u: Value) => Value = isBijector(map)
-    ? (u) => sum(map.logAbsDetJacobian(u))
+    ? (u) => (shapeOfValue(u).length > 1 ? sum(map.logAbsDetJacobian(u), -1) : sum(map.logAbsDetJacobian(u)))
     : map.logAbsDetJacobian
       ? (u) => map.logAbsDetJacobian!(u)
       : (u) => jacobianLogDet(forward, u)

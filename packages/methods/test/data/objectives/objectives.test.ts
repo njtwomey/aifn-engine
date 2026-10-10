@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { beale, himmelblau, quadraticBowl, rastrigin, rosenbrock } from 'aifn-methods/data/objectives'
 import { tensor, toFlat } from 'aifn-compute/foundation/tensor'
+import { ShapeError } from 'aifn-compute/foundation/errors'
 
 describe('test functions', () => {
   it('gradients and Hessians match finite differences', () => {
@@ -30,5 +31,27 @@ describe('test functions', () => {
       }
       for (const m of fn.minima) expect(fn.value(m)).toBeCloseTo(fn.minimumValue, 10)
     }
+  })
+
+  it('rosenbrock minima for a=0, a=1 and a not in {0, 1}', () => {
+    const r0 = rosenbrock({ a: 0, n: 3 })
+    expect(r0.minima).toHaveLength(1)
+    expect(Array.from(toFlat(r0.minima[0]))).toEqual([0, 0, 0])
+    expect(r0.minimumValue).toBe(0)
+
+    const r1 = rosenbrock({ a: 1, n: 3 })
+    expect(r1.minima).toHaveLength(1)
+    expect(Array.from(toFlat(r1.minima[0]))).toEqual([1, 1, 1])
+    expect(r1.minimumValue).toBe(0)
+
+    const r2 = rosenbrock({ a: 2, n: 3 })
+    expect(r2.minima).toHaveLength(0)
+    expect(Number.isNaN(r2.minimumValue)).toBe(true)
+  })
+
+  it('quadraticBowl validates center length against dimension n', () => {
+    expect(() => quadraticBowl({ n: 3, center: [1, 2] })).toThrow(ShapeError)
+    const valid = quadraticBowl({ n: 2, center: [1, 2] })
+    expect(valid.dimension).toBe(2)
   })
 })

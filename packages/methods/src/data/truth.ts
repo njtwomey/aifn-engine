@@ -1501,6 +1501,7 @@ export function changepointTruth(
       )
   })
   const segmentAt = (t: number): Size => {
+    if (segments.length === 0) return 0
     const i = Math.max(0, Math.min(n - 1, Math.round(t)))
     let lo = 0
     let hi = segments.length - 1
@@ -1511,8 +1512,8 @@ export function changepointTruth(
     }
     return lo
   }
-  const at = (t: Tensor) => Array.from(t.data as ArrayLike<number>, (v) => segments[segmentAt(v)])
-  const flat = (t: Tensor) => fromData(Float64Array.from(t.data as ArrayLike<number>))
+  const at = (t: Tensor) => (segments.length === 0 ? [] : Array.from(toFlat(t), (v) => segments[segmentAt(v)]))
+  const flat = (t: Tensor) => fromData(Float64Array.from(toFlat(t)))
   return {
     kind: 'model',
     task: 'changepoint',
@@ -1522,7 +1523,7 @@ export function changepointTruth(
     changepoints: segments.slice(1).map((g) => g.start),
     segments,
     segmentAt,
-    decide: (t) => fromData(Int32Array.from(t.data as ArrayLike<number>, segmentAt)),
+    decide: (t) => fromData(Int32Array.from(toFlat(t), segmentAt)),
     predictive: (t) => {
       const g = at(flat(t))
       if (family === 'poisson') return Poisson(fromData(Float64Array.from(g, (s) => s.mean)))
