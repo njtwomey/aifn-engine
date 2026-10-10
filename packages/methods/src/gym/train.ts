@@ -2,11 +2,11 @@
  * Headless training (docs/aifn-gym.md §4b): `train` runs an agent for a number of episodes with no display and returns
  * plain data, per-episode summaries (return, length, terminated, success or failure, pseudo-regret, first action and
  * the agent's own `scalars`) and agent-state checkpoints; `training` is the same run as a generator that yields partial
- * results, so a worker can stream progress. Episode e (1-based) runs on `child(stream(seed), 'step', e − 1)` from an
- * agent initialised on `child(stream(seed), 'init')`, exactly as a trace of `episodes(env, agent)` on `stream(seed)`
- * would, so any training episode can be re-run from the nearest checkpoint: `replay` gives episode e as it happened
- * (with exploration), `agentAfter` the agent's state after e episodes, and `evaluateEpisode` a fresh greedy episode of
- * that agent on an evaluation seed.
+ * results, so a worker can stream progress. Episode $e$ (from 1) runs on `child(stream(seed), 'step', e - 1)` from an
+ * agent initialised on `child(child(stream(seed), 'init'), 'agent')`, exactly as a trace of `episodes(env, agent)` on
+ * `stream(seed)` would, so any training episode can be re-run from the nearest checkpoint: `replay` gives episode $e$
+ * as it happened (with exploration), `agentAfter` the agent's state after $e$ episodes, and `evaluateEpisode` a fresh
+ * greedy episode of that agent on an evaluation seed.
  */
 
 import type { Agent, Checkpoint, Environment, Training, Trajectory } from 'aifn-compute/foundation/contracts'
@@ -16,8 +16,9 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /**
  * Options for `train` and `training`. The budget is `episodes`, or `steps`: run episodes until at least this many
- * environment steps are done. The episode that crosses the budget runs to its end (it is not cut short), so a run
- * may overshoot by up to one episode and every episode stays replayable as it happened.
+ * environment steps are done (`steps` wins when both are given). The episode that crosses the budget runs to its end
+ * (it is not cut short), so a run may overshoot by up to one episode and every episode stays replayable as it
+ * happened.
  */
 export interface TrainOptions {
   /** Episodes to run. */
@@ -37,16 +38,51 @@ export interface TrainOptions {
   chunk?: number
 }
 
-/** The checkpoint spacing for a run: at least `checkpointEvery`, wide enough for at most `maxCheckpoints`. */
+/**
+ * The checkpoint spacing for a run: at least `checkpointEvery`, wide enough for at most `maxCheckpoints`.
+ *
+ * @param episodes The episodes the run will take (0 when unknown, under a step budget).
+ * @param checkpointEvery The least spacing wanted, in episodes; rounded to an integer.
+ * @param maxCheckpoints The most checkpoints wanted besides the initial state.
+ * @returns The spacing in episodes, at least 1.
+ *
+ * @example Spacing widens for long runs
+ * print('100 episodes', checkpointSpacing(100), '; 1000 episodes', checkpointSpacing(1000))
+ * print('1000 episodes, every 10 at least', checkpointSpacing(1000, 10))
+ */
 export function checkpointSpacing(episodes: number, checkpointEvery = 1, maxCheckpoints = 200): number {
   return Math.max(1, Math.round(checkpointEvery), Math.ceil(episodes / Math.max(1, maxCheckpoints)))
 }
 
+/**
+ * The root stream of a run.
+ *
+ * @param seed The run's seed.
+ * @returns `stream(seed)`.
+ */
 const root = (seed: number | string): Stream => stream(seed)
 
 /**
- * Training as a generator: yields the run so far after every `chunk` episodes and at the end (`done: true`). Each
- * yielded value is a fresh snapshot (its arrays are copies), safe to post from a worker.
+ * Training as a generator: yields the run so far after every `chunk` episodes (under a step budget, every twentieth of
+ * the steps) and at the end (`done: true`), which it also returns. Each yielded value is a fresh snapshot (its arrays
+ * are copies), safe to post from a worker. Throws `DomainError` when neither budget is given.
+ *
+ * @param env The environment.
+ * @param agent The agent, initialised on the run's init stream and learning as it acts.
+ * @param options The budget, the seed, the checkpoints and the chunk.
+ * @returns The generator of snapshots.
+ *
+ * @example Progress in chunks of two episodes
+ * const env = gymEnvironment('gridworldEnvironment', { stepReward: -0.04 })
+ * const counter = {
+ *   name: 'up, then right; counts its steps',
+ *   init: () => 0,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g + 1,
+ * }
+ * const progress = [...training(env, counter, { episodes: 6, chunk: 2 })]
+ * print('episodes at each yield', progress.map((t) => t.episodes))
+ * print('done at each yield', progress.map((t) => t.done))
  */
 export function* training<S, O, A, G>(
   env: Environment<S, O, A>,
@@ -129,7 +165,27 @@ export function* training<S, O, A, G>(
   return last
 }
 
-/** Train with no display (see `training`): the complete run. */
+/**
+ * Train with no display (see `training`): the complete run.
+ *
+ * @param env The environment.
+ * @param agent The agent.
+ * @param options The budget, the seed and the checkpoints.
+ * @returns The finished run, `done: true`.
+ *
+ * @example Five episodes, with an agent whose state is its step count
+ * const env = gymEnvironment('gridworldEnvironment', { stepReward: -0.04 })
+ * const counter = {
+ *   name: 'up, then right; counts its steps',
+ *   init: () => 0,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g + 1,
+ * }
+ * const t = train(env, counter, { episodes: 5 })
+ * print('returns', t.returns)
+ * print('lengths', t.lengths, '; steps', t.steps, '; final agent', t.final)
+ * print('outcomes', t.outcome)
+ */
 export function train<S, O, A, G>(
   env: Environment<S, O, A>,
   agent: Agent<G, O, A>,
@@ -140,7 +196,17 @@ export function train<S, O, A, G>(
   return last!
 }
 
-/** Re-run training episodes from the nearest checkpoint at or before `from`, up to episode `to`; calls `each`. */
+/**
+ * Re-run training episodes from the nearest checkpoint at or before episode `to`, up to episode `to`, calling `each`
+ * after every episode re-run.
+ *
+ * @param env The environment of the run.
+ * @param agent The agent of the run.
+ * @param t The run's seed and checkpoints.
+ * @param to The number of episodes after which to stop.
+ * @param each Called with each re-run episode's number (from 1) and its result.
+ * @returns The agent's state after `to` episodes.
+ */
 function rerun<S, O, A, G>(
   env: Environment<S, O, A>,
   agent: Agent<G, O, A>,
@@ -160,7 +226,27 @@ function rerun<S, O, A, G>(
   return g
 }
 
-/** The agent's state after `e` episodes of a training run (re-run from the nearest checkpoint). */
+/**
+ * The agent's state after `e` episodes of a training run (re-run from the nearest checkpoint).
+ *
+ * @param env The environment of the run.
+ * @param agent The agent of the run.
+ * @param t The run (its seed and checkpoints are read).
+ * @param e The number of episodes; 0 gives the initial state.
+ * @returns The agent's state.
+ *
+ * @example The step count after three episodes
+ * const env = gymEnvironment('gridworldEnvironment', { stepReward: -0.04 })
+ * const counter = {
+ *   name: 'up, then right; counts its steps',
+ *   init: () => 0,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g + 1,
+ * }
+ * const t = train(env, counter, { episodes: 6, checkpointEvery: 2 })
+ * print('lengths', t.lengths)
+ * print('after 3 episodes', agentAfter(env, counter, t, 3))
+ */
 export function agentAfter<S, O, A, G>(
   env: Environment<S, O, A>,
   agent: Agent<G, O, A>,
@@ -170,7 +256,29 @@ export function agentAfter<S, O, A, G>(
   return rerun(env, agent, t, e)
 }
 
-/** Training episode `e` (1-based) exactly as it happened, with exploration, and the agent's state before it. */
+/**
+ * Training episode `e` exactly as it happened, with exploration, and the agent's state before it. Throws `DomainError`
+ * when `e` is below 1.
+ *
+ * @param env The environment of the run.
+ * @param agent The agent of the run.
+ * @param t The run (its seed and checkpoints are read).
+ * @param e The episode's number, from 1.
+ * @returns The episode's `trajectory`, and `agent`, the state the agent began it in.
+ *
+ * @example Episode 3 again
+ * const env = gymEnvironment('gridworldEnvironment', { stepReward: -0.04 })
+ * const counter = {
+ *   name: 'up, then right; counts its steps',
+ *   init: () => 0,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g + 1,
+ * }
+ * const t = train(env, counter, { episodes: 5 })
+ * const { trajectory, agent } = replay(env, counter, t, 3)
+ * print('return', trajectory.episodeReturn, '; recorded', t.returns[2])
+ * print('agent before it', agent, '; steps of episodes 1 and 2', t.lengths[0] + t.lengths[1])
+ */
 export function replay<S, O, A, G>(
   env: Environment<S, O, A>,
   agent: Agent<G, O, A>,
@@ -186,6 +294,25 @@ export function replay<S, O, A, G>(
 /**
  * A fresh episode of the policy learnt after `e` episodes, with no exploration and no learning (the agent's `greedy`
  * action, or its `act` when it has none), on `child(stream(evaluationSeed), 'evaluate')`.
+ *
+ * @param env The environment to evaluate in: the training one, or a variant (another start state, say).
+ * @param agent The agent of the run.
+ * @param t The run (its seed and checkpoints are read).
+ * @param e The number of training episodes after which to evaluate.
+ * @param evaluationSeed The seed of the evaluation episode's stream.
+ * @returns The evaluation `trajectory`, and `agent`, the state it was played with.
+ *
+ * @example The route after five episodes, on two evaluation seeds
+ * const env = gymEnvironment('gridworldEnvironment', { stepReward: -0.04 })
+ * const counter = {
+ *   name: 'up, then right; counts its steps',
+ *   init: () => 0,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g + 1,
+ * }
+ * const t = train(env, counter, { episodes: 5 })
+ * print('seed 0', evaluateEpisode(env, counter, t, 5, 0).trajectory.episodeReturn)
+ * print('seed 1', evaluateEpisode(env, counter, t, 5, 1).trajectory.episodeReturn)
  */
 export function evaluateEpisode<S, O, A, G>(
   env: Environment<S, O, A>,

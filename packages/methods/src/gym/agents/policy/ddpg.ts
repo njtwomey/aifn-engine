@@ -1,16 +1,21 @@
 /**
  * Deep deterministic policy gradient (DDPG; Lillicrap et al., 2016, after Silver et al., 2014) for a box observation
- * and a one-dimensional box action, on the gym protocol. An actor μ_θ(o) = a_max tanh(·) proposes the action and a
- * critic Q_φ(o, a) scores it. Transitions go into the persistent replay buffer of `../dqn`; after `warmup` steps of
- * uniformly random actions, every `updateEvery` steps the agent takes `gradientSteps` pairs of updates on fresh
- * minibatches:
+ * and a one-dimensional box action $[a_{\min}, a_{\max}]$, on the gym protocol. An actor
+ * $\mu_\theta(o) = c + h \tanh(\cdot)$ (with $c$ the box's centre and $h$ its half-width) proposes the action and a
+ * critic $Q_\phi(o, a)$ scores it. Transitions go into the persistent replay buffer of `../dqn`; after `warmup` steps
+ * of uniformly random actions, every `updateEvery` steps (once the buffer holds a minibatch) the agent takes
+ * `gradientSteps` pairs of updates on fresh minibatches:
  *
- * - the critic regresses on y = r + γ (1 − terminated) Q_φ̄(o′, μ_θ̄(o′)) with target networks φ̄, θ̄;
- * - the actor ascends Q_φ(o, μ_θ(o)), the deterministic policy gradient, through the critic by autodiff;
- * - the targets follow by Polyak averaging, φ̄ ← τ φ + (1 − τ) φ̄ (likewise θ̄).
+ * - the critic regresses, by mean squared error, on
+ *   $y = r + \gamma (1 - \text{terminated}) Q_{\bar\phi}(o', \mu_{\bar\theta}(o'))$ with target networks $\bar\phi$,
+ *   $\bar\theta$;
+ * - the actor ascends $Q_\phi(o, \mu_\theta(o))$ under the just-updated critic, the deterministic policy gradient,
+ *   through the critic by autodiff;
+ * - the targets follow by Polyak averaging, $\bar\phi \leftarrow \tau \phi + (1 - \tau) \bar\phi$ (likewise
+ *   $\bar\theta$).
  *
- * Exploration adds Gaussian noise of standard deviation `noise` · a_max to the actor's action, clipped to the box
- * (TD3's choice over the original Ornstein–Uhlenbeck noise; Fujimoto et al., 2018). Minibatch u is drawn from
+ * Exploration adds Gaussian noise of standard deviation `noise` $\cdot h$ to the actor's action, clipped to the box
+ * (TD3's choice over the original Ornstein–Uhlenbeck noise; Fujimoto et al., 2018). Minibatch $u$ is drawn from
  * `child(stream(seed), 'batch', u)` with the seed fixed in `init`, so `learn` is pure.
  */
 
@@ -41,45 +46,92 @@ import { adamWithClip, gradientStep, networkCache, rows } from './shared'
 export interface DdpgOptions {
   /** Hidden widths of actor and critic (default [64, 64]). */
   hidden?: readonly number[]
+  /** The hidden activation of both networks (default ReLU). */
   activation?: ActivationName
-  /** Adam step sizes (default 1e-3 both). */
+  /** The actor's Adam step size (default 1e-3). */
   actorLearningRate?: number
+  /** The critic's Adam step size (default 1e-3). */
   criticLearningRate?: number
+  /** The discount (default: the environment's). */
   gamma?: number
-  /** Polyak rate τ (default 0.005). */
+  /** Polyak rate $\tau$ (default 0.005). */
   tau?: number
-  /** Exploration noise as a fraction of a_max (default 0.1). */
+  /** Exploration noise's standard deviation as a fraction of the action box's half-width (default 0.1). */
   noise?: number
+  /** Transitions per minibatch (default 64). */
   batchSize?: number
+  /** The replay window: the last this many transitions (default 50 000). */
   bufferSize?: number
   /** Uniformly random actions and no updates for the first this many steps (default 1000). */
   warmup?: number
-  /** Train every this many steps (default 1), taking this many update pairs (default 1). */
+  /** Train every this many steps (default 1). */
   updateEvery?: number
+  /** Update pairs (critic, then actor) per training round (default 1). */
   gradientSteps?: number
 }
 
 /** The DDPG agent's state: plain data. */
 export interface DdpgState {
+  /** The seed of the minibatch draws, fixed in `init`. */
   seed: number
+  /** The observation length $d$. */
   dim: number
+  /** The action box's lower bound $a_{\min}$. */
   low: number
+  /** The action box's upper bound $a_{\max}$. */
   high: number
+  /** The discount $\gamma$. */
   gamma: number
+  /** Environment steps learnt from. */
   steps: number
+  /** Update pairs taken; also the index of the next minibatch's stream. */
   updates: number
+  /** The actor's parameters $\theta$. */
   actor: Params[]
+  /** The critic's parameters $\phi$. */
   critic: Params[]
+  /** The target actor's parameters $\bar\theta$. */
   actorTarget: Params[]
+  /** The target critic's parameters $\bar\phi$. */
   criticTarget: Params[]
+  /** The actor's Adam state. */
   actorOptimizer: unknown
+  /** The critic's Adam state. */
   criticOptimizer: unknown
+  /** The replay buffer of every transition learnt from (the action in its action slot). */
   buffer: ReplayBuffer
+  /** Sums over the current episode's updates: actor loss, critic loss, mean $Q(o, \mu(o))$, and their count. */
   running: { actorLoss: number; criticLoss: number; q: number; n: number }
+  /** The means over the updates of the last episode that had any (NaN before the first). */
   last: { actorLoss: number; criticLoss: number; q: number }
 }
 
-/** A DDPG agent for one continuous action (module docs). */
+/**
+ * A DDPG agent for one continuous action (module docs). `init` throws `TypeError` unless the observation is a box and
+ * the action a one-dimensional box. `act` draws from children of its stream's key, so it needs a fresh stream for
+ * every step, as the gym's rollouts pass; after the warm-up its `scores` hold the actor's action before noise.
+ * `greedy` is the actor's action, and `scalars` report the last episode's critic loss and mean $Q(o, \mu(o))$ and the
+ * buffer size.
+ *
+ * @param options The networks, the optimisers and the schedule (see `DdpgOptions` for each default).
+ * @returns The agent, named `'DDPG'`.
+ *
+ * @example A short run on a one-step task
+ * // One-step episodes: the observation o is uniform on [-1, 1], and the action a in [-1, 1] earns -(a - o)^2.
+ * const box = { kind: 'box', shape: [1], low: [-1], high: [1] }
+ * const agent = ddpgAgent({ hidden: [16], warmup: 20, batchSize: 16, tau: 0.1 })
+ * let g = agent.init({ name: 'track', observation: box, action: box, gamma: 0.9 }, stream(0))
+ * const s = stream(1)
+ * for (let t = 0; t < 60; t++) {
+ *   const o = Float64Array.of(uniform(s, -1, 1))
+ *   const action = agent.act(g, o, stream(`step ${t}`)).action
+ *   const reward = -((action[0] - o[0]) ** 2)
+ *   g = agent.learn(g, { observation: o, action, reward, next: o, terminated: true, truncated: false })
+ * }
+ * print('update pairs:', g.updates)
+ * print('scalars:', agent.scalars(g))
+ * print('greedy action at -0.5, 0, 0.5:', [-0.5, 0, 0.5].map((o) => agent.greedy(g, [o])[0]))
+ */
 export function ddpgAgent(options: DdpgOptions = {}): Agent<DdpgState, Float64Array, Float64Array> {
   const {
     hidden = [64, 64],

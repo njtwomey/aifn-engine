@@ -1,8 +1,12 @@
 /**
  * Finite MDPs on grids, and finite MDPs as environments: `mdpEnvironment` turns any `TabularMdp` into an `Environment`
- * with a tabular model, an oracle (V* by value iteration), legal-action masking and, on a grid, a grid render. The
+ * with a tabular model, an oracle ($V^*$ by value iteration), legal-action masking and, on a grid, a grid render. The
  * builders (`gridworld`, `cliffWalking`, `maze`, `frozenLake`) return `TabularMdp`s; their registered environment
  * forms are `gridworldEnvironment`, `cliffWalkingEnvironment`, `mazeEnvironment` and `frozenLakeEnvironment`.
+ *
+ * The grids follow `../mdp`'s conventions: cell $(x, y)$ is state $y w + x$ ($w$ the width) with $y = 0$ at the bottom
+ * row, layouts given as rows of text are read top row first, and the four actions are up, right, down, left. A move
+ * off the grid or into a wall leaves the agent where it is.
  */
 
 import type { Environment, EnvironmentInfo, GridRender, Outcome, TabularModel } from 'aifn-compute/foundation/contracts'
@@ -28,17 +32,37 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A tabular MDP as an `Environment` whose state and observation are the state index and whose action is an index. */
 export type MdpEnvironment = Environment<number, number, number> & {
+  /** The MDP's tables, with state indices as environment states. */
   readonly model: TabularModel<number>
+  /** The grid drawing, when the MDP is a grid. */
   readonly render?: GridRender<number>
 }
 
 /**
  * A finite MDP as an `Environment` (docs/aifn-gym.md §6): episodes start at `mdp.start`; a step samples one outcome
  * with one uniform draw; arriving at a terminal state ends the episode (`terminated`) and pays the outcome's reward
- * plus γ times the state's terminal value, so returns agree with the MDP's values. The tables are the `model` (for
- * planners); the `oracle` gives V* by value iteration (computed once, on first use) and E[r | s, a]; `legal` lists
- * the actions with outcomes when some state has an illegal action; `ending` calls a goal a success and a hole, trap or
- * time-out a failure; a grid MDP gains a grid `render`. `horizon` (default 4 × states) caps an episode.
+ * plus $\gamma$ times the state's terminal value, so returns agree with the MDP's values. The tables are the `model`
+ * (for planners); the `oracle` gives $V^*$ by value iteration (computed once, on first use) and
+ * $\expect[r \mid s, a]$; `legal` lists the actions with outcomes when some state has an illegal action; `ending` calls
+ * a goal a success and a hole, trap, cliff or time-out a failure (another terminal by the sign of its value); a grid
+ * MDP gains a grid `render`. `step` throws `DomainError` from a terminal state or for an illegal action.
+ *
+ * @param mdp The MDP's tables; read, not copied, so it must not change afterwards.
+ * @param options The episode cap.
+ * @param options.horizon The longest episode in steps, after which the rollout truncates it. Default
+ *   $4 \times$ the number of states.
+ * @returns The environment, whose states and observations are state indices and whose actions are action indices.
+ *
+ * @example Walk a three-cell corridor to its goal
+ * const env = mdpEnvironment(maze(['S.G']), { horizon: 5 })
+ * const s = stream(0)
+ * const { state } = env.reset(s)
+ * const first = env.step(state, 1, s)
+ * const second = env.step(first.state, 1, s)
+ * print('states', state, first.state, second.state)
+ * print('rewards', first.reward, second.reward, '; terminated', second.terminated)
+ * print('V*', env.oracle.optimalValues())
+ * print('ending', env.ending(second.state, 'terminated', 2))
  */
 export function mdpEnvironment(
   mdp: TabularMdp,
@@ -109,23 +133,44 @@ export function mdpEnvironment(
 
 // ── Grid builders ────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * What `buildGrid` needs to tabulate a grid MDP. A move off the grid or into a wall leaves the agent in its cell, and
+ * `land` is then called with that cell.
+ */
 interface GridSpec {
+  /** The MDP's readable name. */
   name: string
+  /** The number of columns. */
   width: number
+  /** The number of rows. */
   height: number
+  /** The kind of each cell, by state index (`width * height` of them). */
   kinds: CellKind[]
+  /** The start state. */
   start: number
+  /** The discount factor $\gamma$. */
   gamma: number
-  /** Probabilities of the intended direction and of each perpendicular one. */
+  /**
+   * The probability that a move goes in one of the two perpendicular directions instead, split equally between
+   * them; the intended direction has $1 - \text{slip}$.
+   */
   slip: number
-  /** The result of landing on a cell after a move from `from`. */
+  /** Where the agent ends up after a move arrives at `cell`, and the reward of the move (a trap may send it back). */
   land: (cell: number) => { next: number; reward: number }
+  /** The fixed value of each terminal state, by state index (0 when absent). */
   terminalValue?: (s: number) => number
-  /** Kinds that end an episode. */
+  /** Kinds that end an episode; walls are terminal too, as no action is taken there. */
   terminalKinds: CellKind[]
-  /** A move off the grid or into a wall leaves the agent in place; `clamp` does so without calling `land`. */
 }
 
+/**
+ * Tabulate a grid MDP: for every active state and each of the four moves, the intended move with probability
+ * $1 - \text{slip}$ and each perpendicular one with $\text{slip} / 2$, outcomes that land in the same place with the
+ * same reward merged. Terminal states and walls get no outcomes.
+ *
+ * @param spec The grid, its rules and its rewards.
+ * @returns The MDP, with its grid layout and the actions named up, right, down, left.
+ */
 function buildGrid(spec: GridSpec): TabularMdp {
   const { width, height, kinds, slip } = spec
   const S = width * height
@@ -184,24 +229,41 @@ function buildGrid(spec: GridSpec): TabularMdp {
 
 /** Options for `gridworld`. */
 export interface GridworldOptions {
+  /** The number of columns. Default 4. */
   width?: number
+  /** The number of rows. Default 3. */
   height?: number
-  /** Wall cells as [x, y]. */
+  /** Wall cells as `[x, y]`. Default `[[1, 1]]`. */
   walls?: readonly (readonly [number, number])[]
-  /** Terminal cells with their exit values (the reward for reaching them). */
+  /**
+   * Terminal cells with their exit values (the reward for reaching them): a positive value makes a goal, a negative
+   * one a trap. Default $+1$ at $(3, 2)$ and $-1$ at $(3, 1)$.
+   */
   terminals?: readonly { x: number; y: number; value: number }[]
   /** Probability that a move goes to one of the two perpendicular directions instead (split equally). Default 0.2. */
   noise?: number
   /** Reward for every move. Default 0. */
   stepReward?: number
+  /** The discount factor $\gamma$. Default 0.9. */
   gamma?: number
+  /** The start cell as `[x, y]`. Default `[0, 0]`, the bottom-left corner. */
   start?: readonly [number, number]
 }
 
 /**
  * The stochastic gridworld of Russell and Norvig (2021, "Artificial Intelligence: A Modern Approach", §17.1) as the
- * site uses it: a 4 × 3 grid with a wall at (1, 1), exits worth +1 at (3, 2) and −1 at (3, 1), moves that slip
- * sideways with probability `noise`, and a step reward. Terminal cells hold their exit value.
+ * site uses it: a $4 \times 3$ grid with a wall at $(1, 1)$, exits worth $+1$ at $(3, 2)$ and $-1$ at $(3, 1)$, moves
+ * that slip sideways with probability `noise`, and a step reward. Terminal cells hold their exit value, which
+ * `mdpEnvironment` pays on arrival.
+ *
+ * @param options The layout, the noise and the rewards; each field's default gives Russell and Norvig's grid.
+ * @returns The MDP: a grid of `width * height` states with four actions.
+ *
+ * @example The noisy move up from the start
+ * const mdp = gridworld()
+ * print('states', mdp.states, '; start', mdp.start)
+ * print('up from the start', mdp.outcomes[mdp.start * mdp.actions + 0])
+ * print('exit values', mdp.terminalValue)
  */
 export function gridworld(options: GridworldOptions = {}): TabularMdp {
   const { width = 4, height = 3, noise = 0.2, stepReward = 0, gamma = 0.9 } = options
@@ -234,9 +296,20 @@ export function gridworld(options: GridworldOptions = {}): TabularMdp {
 }
 
 /**
- * Cliff walking (Sutton and Barto, 2018, "Reinforcement Learning: An Introduction", Example 6.6): a 12 × 4 grid, start
- * at the bottom-left, goal at the bottom-right, and the cells between them a cliff. Every step pays −1; stepping into
- * the cliff pays −100 and returns the agent to the start. Moves are deterministic.
+ * Cliff walking (Sutton and Barto, 2018, "Reinforcement Learning: An Introduction", Example 6.6): a $12 \times 4$ grid,
+ * start at the bottom-left, goal at the bottom-right, and the cells between them a cliff. Every step pays $-1$;
+ * stepping into the cliff pays $-100$ and returns the agent to the start. Moves are deterministic.
+ *
+ * @param options The grid's size and discount.
+ * @param options.width The number of columns; the cliff is the bottom row's `width - 2` middle cells.
+ * @param options.height The number of rows.
+ * @param options.gamma The discount factor $\gamma$.
+ * @returns The MDP: start at state 0, goal at state `width - 1`.
+ *
+ * @example Stepping into the cliff from the start
+ * const mdp = cliffWalking()
+ * print('right from the start', mdp.outcomes[0 * mdp.actions + 1])
+ * print('up from the start', mdp.outcomes[0 * mdp.actions + 0])
  */
 export function cliffWalking({
   width = 12,
@@ -266,15 +339,26 @@ export function cliffWalking({
 export interface MazeOptions {
   /** Probability of slipping to a perpendicular direction (split equally). Default 0. */
   slip?: number
-  /** Rewards for a step, reaching the goal and falling into a trap. Defaults −1, 10 and −20. */
+  /** Rewards for a step, reaching the goal and falling into a trap. Defaults $-1$, 10 and $-20$. */
   rewards?: { step?: number; goal?: number; trap?: number }
+  /** The discount factor $\gamma$. Default 0.95. */
   gamma?: number
 }
 
 /**
  * A maze from rows of text, top row first: `#` wall, `.` open, `S` start, `G` goal, `T` trap. Reaching the goal pays
  * the goal reward and ends the episode; a trap pays the trap reward and sends the agent back to the start; every other
- * move pays the step reward.
+ * move, including one into a wall, pays the step reward.
+ *
+ * @param rows The layout, one string per row, top row first, all as long as the first. Without an `S` the start is
+ *   state 0, the bottom-left cell.
+ * @param options The slip, the rewards and the discount.
+ * @returns The MDP: a grid of one state per character, with four actions.
+ *
+ * @example A trap between the start and the goal
+ * const mdp = maze(['S.TG'])
+ * print('right from cell 1', mdp.outcomes[1 * mdp.actions + 1])
+ * print('right from the start', mdp.outcomes[0 * mdp.actions + 1])
  */
 export function maze(rows: readonly string[], options: MazeOptions = {}): TabularMdp {
   const { slip = 0, gamma = 0.95 } = options
@@ -315,7 +399,7 @@ export function maze(rows: readonly string[], options: MazeOptions = {}): Tabula
 }
 
 /**
- * Built-in maze layouts, top row first (`#` wall, `S` start, `G` goal, `T` trap). `room` is an open 8 × 8 room;
+ * Built-in maze layouts, top row first (`#` wall, `S` start, `G` goal, `T` trap). `room` is an open $8 \times 8$ room;
  * `corridors` a winding maze; `cliff` a row of traps between start and goal (cliff walking as a maze); `routes` a short
  * bridge between traps against a long detour, where Q-learning and SARSA choose different routes.
  */
@@ -346,18 +430,57 @@ export const MAZES: Record<
 
 /** The episode cap of an environment form: the longest episode before the rollout truncates it. */
 export interface HorizonOption {
-  /** Default 4 × the number of cells. */
+  /** The longest episode in steps. Default $4 \times$ the number of cells. */
   horizon?: number
 }
 
+/**
+ * `mdpEnvironment` with the default horizon when `horizon` is undefined.
+ *
+ * @param mdp The MDP to make an environment of.
+ * @param horizon The longest episode in steps, or undefined for $4 \times$ the number of states.
+ * @returns The environment.
+ */
 const withHorizon = (mdp: TabularMdp, horizon: number | undefined) =>
   mdpEnvironment(mdp, horizon === undefined ? {} : { horizon })
 
-/** `gridworld` as an environment (`mdpEnvironment`). */
+/**
+ * `gridworld` as an environment (`mdpEnvironment`).
+ *
+ * @param options The grid, as for `gridworld`, and the episode cap.
+ * @param options.horizon The longest episode in steps. Default $4 \times$ the number of cells.
+ * @param options.options The other fields, passed to `gridworld`.
+ * @returns The environment.
+ *
+ * @example The first steps of an episode, with a step cost
+ * const env = gridworldEnvironment({ stepReward: -0.04, noise: 0 })
+ * const s = stream(0)
+ * const { state } = env.reset(s)
+ * const up = env.step(state, 0, s)
+ * const right = env.step(up.state, 1, s)
+ * print('states', state, up.state, right.state)
+ * print('rewards', up.reward, right.reward)
+ */
 export const gridworldEnvironment = ({ horizon, ...options }: GridworldOptions & HorizonOption = {}): MdpEnvironment =>
   withHorizon(gridworld(options), horizon)
 
-/** `cliffWalking` as an environment (`mdpEnvironment`). */
+/**
+ * `cliffWalking` as an environment (`mdpEnvironment`).
+ *
+ * @param options The grid, as for `cliffWalking`, and the episode cap.
+ * @param options.horizon The longest episode in steps. Default $4 \times$ the number of cells.
+ * @param options.options The other fields, passed to `cliffWalking`.
+ * @returns The environment.
+ *
+ * @example A fall into the cliff, then a step up
+ * const env = cliffWalkingEnvironment()
+ * const s = stream(0)
+ * const { state } = env.reset(s)
+ * const fall = env.step(state, 1, s)
+ * const up = env.step(fall.state, 0, s)
+ * print('after the fall', fall.state, 'reward', fall.reward)
+ * print('after the step up', up.state, 'reward', up.reward)
+ */
 export const cliffWalkingEnvironment = ({
   horizon,
   ...options
@@ -368,7 +491,7 @@ export const cliffWalkingEnvironment = ({
 export interface MazeEnvironmentOptions extends MazeOptions {
   /** A built-in layout or rows of text. Default `small`. */
   layout?: keyof typeof MAZES | readonly string[]
-  /** The longest episode before truncation. Default 4 × the number of cells. */
+  /** The longest episode before truncation. Default $4 \times$ the number of cells. */
   horizon?: number
 }
 
@@ -376,6 +499,21 @@ export interface MazeEnvironmentOptions extends MazeOptions {
  * A maze as an `Environment` (docs/aifn-gym.md): the observation is the agent's cell index and the action one
  * of four moves (up, right, down, left); reaching the goal ends the episode (`terminated`), and the rollout truncates it
  * at `horizon`. Its `model` is the maze's transition table (for value iteration) and its `render` the grid.
+ *
+ * @param options The layout, the maze's rules as for `maze`, and the episode cap.
+ * @param options.layout A key of `MAZES`, or the rows of a layout of one's own.
+ * @param options.horizon The longest episode in steps. Default $4 \times$ the number of cells.
+ * @param options.options The other fields (slip, rewards, discount), passed to `maze`.
+ * @returns The environment.
+ *
+ * @example Up the left edge of the small maze
+ * const env = mazeEnvironment({ layout: 'small' })
+ * const s = stream(0)
+ * const { state } = env.reset(s)
+ * const a = env.step(state, 0, s)
+ * const b = env.step(a.state, 0, s)
+ * print('cells', state, a.state, b.state, '; rewards', a.reward, b.reward)
+ * print('best value from the start', env.oracle.optimalValues().data[state])
  */
 export function mazeEnvironment({
   layout = 'small',
@@ -385,17 +523,30 @@ export function mazeEnvironment({
   return withHorizon(maze(typeof layout === 'string' ? MAZES[layout] : layout, options), horizon)
 }
 
-/** The FrozenLake maps of Gymnasium. */
+/** The FrozenLake maps of Gymnasium, top row first (`S` start, `F` frozen, `H` hole, `G` goal). */
 export const FROZEN_LAKE_MAPS: Record<'4x4' | '8x8', readonly string[]> = {
   '4x4': ['SFFF', 'FHFH', 'FFFH', 'HFFG'],
   '8x8': ['SFFFFFFF', 'FFFFFFFF', 'FFFHFFFF', 'FFFFFHFF', 'FFFHFFFF', 'FHHFFFHF', 'FHFFHFHF', 'FFFHFFFG'],
 }
 
 /**
- * FrozenLake (Gymnasium's `FrozenLake-v1`): cross a frozen lake from S to G without falling into a hole H. On slippery
- * ice the agent moves in the intended direction or either perpendicular one with probability 1/3 each. Reaching G pays
- * 1; holes end the episode with nothing. Map rows are given top row first; actions follow this module's order (up,
- * right, down, left), not Gymnasium's.
+ * FrozenLake (Gymnasium's `FrozenLake-v1`): cross a frozen lake from `S` to `G` without falling into a hole `H`. On
+ * slippery ice the agent moves in the intended direction or either perpendicular one with probability $1/3$ each.
+ * Reaching `G` pays 1; holes end the episode with nothing. Map rows are given top row first; actions follow this
+ * module's order (up, right, down, left), not Gymnasium's.
+ *
+ * @param options The map, the ice and the discount.
+ * @param options.map A key of `FROZEN_LAKE_MAPS`, or rows of text of one's own (`S`, `F`, `H`, `G`).
+ * @param options.slippery Whether moves slip sideways (with probability $2/3$ in all); false for deterministic moves.
+ * @param options.gamma The discount factor $\gamma$.
+ * @returns The MDP: a grid of one state per character, with four actions.
+ *
+ * @example A move right from the start, on slippery ice and not
+ * const icy = frozenLake()
+ * const dry = frozenLake({ slippery: false })
+ * print('start', icy.start)
+ * print('slippery', icy.outcomes[icy.start * 4 + 1])
+ * print('not slippery', dry.outcomes[dry.start * 4 + 1])
  */
 export function frozenLake({
   map = '4x4',
@@ -431,7 +582,27 @@ export function frozenLake({
   })
 }
 
-/** `frozenLake` as an environment (`mdpEnvironment`). */
+/**
+ * `frozenLake` as an environment (`mdpEnvironment`).
+ *
+ * @param options The lake, as for `frozenLake`, and the episode cap.
+ * @param options.horizon The longest episode in steps. Default $4 \times$ the number of cells.
+ * @param options.options The other fields, passed to `frozenLake`.
+ * @returns The environment.
+ *
+ * @example A safe path across the dry 4x4 lake
+ * const env = frozenLakeEnvironment({ slippery: false })
+ * const s = stream(0)
+ * let { state } = env.reset(s)
+ * const rewards = []
+ * for (const a of [2, 2, 1, 1, 2, 1]) {
+ *   const step = env.step(state, a, s)
+ *   state = step.state
+ *   rewards.push(step.reward)
+ * }
+ * print('rewards', rewards)
+ * print('ending', env.ending(state, 'terminated', 6))
+ */
 export const frozenLakeEnvironment = ({
   horizon,
   ...options
@@ -439,8 +610,15 @@ export const frozenLakeEnvironment = ({
 
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/** Registers an environment factory of `gym/environments`. */
 const environment = definer<EnvironmentInfo>('environment', 'gym/environments')
 const tabular = { observation: 'discrete', action: 'discrete', capabilities: ['model', 'oracle', 'render'] } as const
+/**
+ * The registry's parameter for an episode cap.
+ *
+ * @param fallback The default horizon, in steps.
+ * @returns An integer parameter on $[1, 10000]$.
+ */
 const horizon = (fallback: number) => int(1, 10000, { default: fallback })
 
 environment(

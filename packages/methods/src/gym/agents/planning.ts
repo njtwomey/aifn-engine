@@ -3,6 +3,11 @@
  * policy evaluation, value iteration and policy iteration, each traceable with the value table and greedy policy per
  * step, on any `MdpTables` (a `TabularMdp`, or an environment's tabular `model`). As agents, `valueIterationAgent` and
  * `policyIterationAgent` plan on the environment's model in `init` and then act greedily; they require a tabular model.
+ *
+ * Conventions, from `../mdp`: `outcomes[s * actions + a]` lists the outcomes of action $a$ in state $s$ (empty for an
+ * illegal action, whose action value is $-\infty$); terminal states take no action and keep their `terminalValue`, so
+ * every backup is $Q(s, a) = \sum p \, (r + \gamma V(s'))$. Policies are int32 actions per state, $-1$ at terminals,
+ * and value tables start from the terminal values, with 0 at the active states.
  */
 
 import { LinAlgError, solve } from 'aifn-compute/numerics/linalg'
@@ -23,12 +28,51 @@ import {
 } from '../mdp'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** The greedy policy for an action-value table (states × actions), as int32 actions (−1 at terminals). */
+/**
+ * The greedy policy for an action-value table (states $\times$ actions), as int32 actions ($-1$ at terminals). Ties
+ * within $10^{-9}$ go to the lowest action index.
+ *
+ * @param mdp The MDP's tables: its sizes and terminal flags are read.
+ * @param Q The action values, $S \times A$ (a tensor, or $SA$ numbers row-major).
+ * @returns The action of every state.
+ *
+ * @example The greedy actions of a table, ties to the lower index
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const Q = tensor([[0.729, 0.81], [0.729, 0.9], [0.5, 0.5], [0, 0]])
+ * print('policy:', greedyPolicy(mdp, Q))
+ */
 export function greedyPolicy(mdp: MdpTables, Q: Tensor | ArrayLike<number>): Tensor {
   return fromData(greedyActions(mdp, 'shape' in Q ? Q.data : Q))
 }
 
-/** V(s) = max_a Q(s, a) at active states and the terminal value elsewhere. */
+/**
+ * $V(s) = \max_a Q(s, a)$ at active states and the terminal value elsewhere.
+ *
+ * @param mdp The MDP's tables: its sizes, terminal flags and terminal values are read.
+ * @param Q The action values, $S \times A$ (a tensor, or $SA$ numbers row-major).
+ * @returns $V$, one value per state.
+ *
+ * @example State values from action values
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const Q = tensor([[0.729, 0.81], [0.729, 0.9], [0.81, 1], [0, 0]])
+ * print('V:', valuesFromQ(mdp, Q))
+ */
 export function valuesFromQ(mdp: MdpTables, Q: Tensor | ArrayLike<number>): Tensor {
   const q = 'shape' in Q ? Q.data : Q
   const V = Float64Array.from(mdp.terminalValue)
@@ -42,8 +86,45 @@ export function valuesFromQ(mdp: MdpTables, Q: Tensor | ArrayLike<number>): Tens
 }
 
 /**
- * The exact value of a policy: solve (I − γ P_π) v = r_π over the active states, with terminal values fixed. With
- * γ = 1 a policy that never terminates makes the system singular; the result is then non-finite.
+ * The exact value of a policy: solve $(\Imat - \gamma \Pmat_\pi) \vvec = \rvec_\pi$ over the active states by one
+ * linear solve, with terminal values fixed. With $\gamma = 1$ a policy that never terminates makes the system singular,
+ * and the solve throws `LinAlgError` (as `policyIteration` relies on); a nearly singular one gives very large values.
+ *
+ * @param mdp The MDP's tables.
+ * @param policy The policy: an action per state ($-1$ where none is taken) or $S \times A$ probabilities row-major.
+ *   Throws `ShapeError` for any other length.
+ * @returns $\vvec_\pi$, one value per state.
+ *
+ * @example Always moving right, and a uniformly random walk
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * print('always right:', evaluatePolicy(mdp, [1, 1, 1, -1]))
+ * print('uniform:', evaluatePolicy(mdp, [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0, 0]))
+ *
+ * @example A policy that never terminates has no value without discounting
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const undiscounted = { ...mdp, gamma: 1 }
+ * try {
+ *   evaluatePolicy(undiscounted, [0, 0, 0, -1])
+ * } catch (e) {
+ *   print('always left:', e.name)
+ * }
+ * print('always right:', evaluatePolicy(undiscounted, [1, 1, 1, -1]))
  */
 export function evaluatePolicy(mdp: MdpTables, policy: PolicyInput): Tensor {
   const { states: S, actions: A, gamma } = mdp
@@ -76,15 +157,16 @@ export function evaluatePolicy(mdp: MdpTables, policy: PolicyInput): Tensor {
 
 /** A state of value iteration or policy evaluation: the value table, action values and greedy policy. */
 export interface ValueState extends Status {
-  /** V_k, length S. */
+  /** $V_k$, length $S$. */
   V: Tensor
-  /** Q_k(s, a) = Σ p (r + γ V_k(s′)), the one-step backup of V_k, S × A. */
+  /** $Q_k(s, a) = \sum p \, (r + \gamma V_k(s'))$, the one-step backup of $V_k$, $S \times A$. */
   Q: Tensor
-  /** The greedy policy for V_k (int32, −1 at terminals). */
+  /** The greedy policy for $V_k$ (int32, $-1$ at terminals). */
   policy: Tensor
   /**
-   * The Bellman residual max_s |(T V_k)(s) − V_k(s)|: the largest change the next sweep will make. Defined from k = 0,
-   * so it can be plotted on a log scale; the error ‖V_k − V*‖∞ is at most γ/(1 − γ) times it.
+   * The Bellman residual $\max_s \lvert (T V_k)(s) - V_k(s) \rvert$: the largest change the next sweep will make.
+   * Defined from $k = 0$, so it can be plotted on a log scale; for value iteration the error
+   * $\lVert V_k - V^* \rVert_\infty$ is at most $\gamma/(1 - \gamma)$ times it.
    */
   residual: number
   /** Sweeps done. */
@@ -93,8 +175,19 @@ export interface ValueState extends Status {
   converged: boolean
 }
 
+/** A sweep's update of one state: its new value from the action values $Q_k$ ($S \times A$) and the state $s$. */
 type Backup = (Q: Float64Array, s: number) => number
 
+/**
+ * The state of a sweep algorithm at a value table: its backup $Q$, greedy policy and residual.
+ *
+ * @param mdp The MDP's tables.
+ * @param V The value table $V_k$, one per state; kept in the state (not copied).
+ * @param t The number of sweeps done.
+ * @param tolerance The residual below which the state is `converged`.
+ * @param backup The update the next sweep applies, for the residual.
+ * @returns The state, flagged `diverged` when the residual is not finite.
+ */
 function valueState(mdp: MdpTables, V: Float64Array, t: number, tolerance: number, backup: Backup): ValueState {
   const Q = qFromValues(mdp, V)
   let residual = 0
@@ -111,7 +204,16 @@ function valueState(mdp: MdpTables, V: Float64Array, t: number, tolerance: numbe
   }
 }
 
-/** Synchronous sweeps V_{k+1}(s) = backup(Q_k, s) over the active states, from V₀ = 0 with terminal values fixed. */
+/**
+ * Synchronous sweeps $V_{k+1}(s) = \text{backup}(Q_k, s)$ over the active states, from $V_0 = 0$ with terminal values
+ * fixed.
+ *
+ * @param mdp The MDP's tables.
+ * @param name The algorithm's readable name.
+ * @param tolerance The residual below which a state is `converged`, which stops `run`.
+ * @param backup The update of one state from the current action values.
+ * @returns The algorithm, which takes no start.
+ */
 function sweeps(mdp: MdpTables, name: string, tolerance: number, backup: Backup): Algorithm<void, ValueState> {
   return {
     name,
@@ -126,8 +228,42 @@ function sweeps(mdp: MdpTables, name: string, tolerance: number, backup: Backup)
 }
 
 /**
- * Value iteration: V_{k+1}(s) = max_a Σ p (r + γ V_k(s′)) for every active state at once (a synchronous sweep), from
- * V₀ = 0 with terminal values fixed. The residual falls at least as fast as γᵏ; done when it is below `tolerance`.
+ * Value iteration: $V_{k+1}(s) = \max_a \sum p \, (r + \gamma V_k(s'))$ for every active state at once (a synchronous
+ * sweep), from $V_0 = 0$ with terminal values fixed. The residual falls at least as fast as $\gamma^k$; done when it is
+ * below `tolerance`. Run it with `run(valueIteration(mdp), undefined, steps)`.
+ *
+ * @param mdp The MDP's tables.
+ * @param options When to stop.
+ * @param options.tolerance The Bellman residual below which the state is `converged`.
+ * @returns The algorithm, whose state carries $V_k$, $Q_k$, the greedy policy and the residual.
+ *
+ * @example Value iteration on a corridor, against its known optimum
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const state = run(valueIteration(mdp), undefined, 1000)
+ * print('V =', state.V)
+ * print('optimum:', [0.9 ** 2, 0.9, 1, 0])
+ * print('policy:', state.policy)
+ * print('sweeps:', state.t, 'converged:', state.converged)
+ *
+ * @example The residual after each sweep
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * for (const k of [0, 1, 2, 3]) print(`after ${k} sweeps:`, run(valueIteration(mdp), undefined, k).residual)
  */
 export function valueIteration(
   mdp: MdpTables,
@@ -142,8 +278,32 @@ export function valueIteration(
 }
 
 /**
- * Iterative policy evaluation: V_{k+1}(s) = Σ_a π(a|s) Σ p (r + γ V_k(s′)), synchronous sweeps from V₀ = 0. The
- * `policy` field of the state is the greedy policy with respect to V_k (the improvement step would pick it).
+ * Iterative policy evaluation: $V_{k+1}(s) = \sum_a \pi(a \mid s) \sum p \, (r + \gamma V_k(s'))$, synchronous sweeps
+ * from $V_0 = 0$. The `policy` field of the state is the greedy policy with respect to $V_k$ (the improvement step
+ * would pick it), not the policy evaluated.
+ *
+ * @param mdp The MDP's tables.
+ * @param policy The policy evaluated: an action per state ($-1$ where none is taken) or $S \times A$ probabilities
+ *   row-major. Throws `ShapeError` for any other length.
+ * @param options When to stop.
+ * @param options.tolerance The residual below which the state is `converged`.
+ * @returns The algorithm, whose state carries $V_k$ and the residual.
+ *
+ * @example Sweeps converge to the exact value
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const walk = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0, 0]
+ * const state = run(policyEvaluation(mdp, walk), undefined, 1000)
+ * print('by sweeps:', state.V, 'after', state.t)
+ * print('exact:', evaluatePolicy(mdp, walk))
+ * print('greedy with respect to it:', state.policy)
  */
 export function policyEvaluation(
   mdp: MdpTables,
@@ -161,10 +321,11 @@ export function policyEvaluation(
 
 /** A state of policy iteration. */
 export interface PolicyIterationState extends Status {
-  /** The current policy (int32, −1 at terminals). */
+  /** The current policy (int32, $-1$ at terminals). */
   policy: Tensor
-  /** Its exact value v_π and action values q_π. */
+  /** Its exact value $v_\pi$, one per state. */
   V: Tensor
+  /** Its action values $q_\pi$, $S \times A$. */
   Q: Tensor
   /** States whose action changed in the last improvement. */
   changed: number
@@ -175,9 +336,28 @@ export interface PolicyIterationState extends Status {
 }
 
 /**
- * Policy iteration (Howard, 1960): evaluate the policy exactly, then improve it greedily (keeping the current action
- * on ties), until the policy is stable. Starts from the first legal action in every state. Converges in finitely
- * many iterations. With γ = 1, a policy that never reaches a terminal state is evaluated under γ = 1 − 10⁻⁹.
+ * Policy iteration (Howard, 1960): evaluate the policy exactly (`evaluatePolicy`), then improve it greedily (keeping
+ * the current action on ties within $10^{-9}$), until the policy is stable. Starts from the first legal action in every
+ * state. Converges in finitely many iterations; the step that finds the policy stable counts as one. With
+ * $\gamma = 1$, a policy that never reaches a terminal state is evaluated under $\gamma = 1 - 10^{-9}$.
+ *
+ * @param mdp The MDP's tables.
+ * @returns The algorithm, whose state carries the policy, its values and the number of states changed.
+ *
+ * @example Policy iteration on a corridor
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const state = run(policyIteration(mdp), undefined, 100)
+ * print('policy:', state.policy)
+ * print('V =', state.V)
+ * print('improvements:', state.t, 'converged:', state.converged)
  */
 export function policyIteration(mdp: MdpTables): Algorithm<void, PolicyIterationState> {
   const evaluate = (policy: Int32Array, changed: number, t: number): PolicyIterationState => {
@@ -224,17 +404,23 @@ export function policyIteration(mdp: MdpTables): Algorithm<void, PolicyIteration
 
 /** A planning agent's state: the optimal action values it planned and their greedy policy. */
 export interface PlannerState {
-  /** Q*(s, a), states × actions (−∞ for illegal actions). */
+  /** $Q^*(s, a)$, states $\times$ actions ($-\infty$ for illegal actions). */
   Q: Tensor
-  /** V*(s). */
+  /** $V^*(s)$, one per state. */
   V: Tensor
-  /** The greedy policy (int32, −1 at terminals). */
+  /** The greedy policy (int32, $-1$ at terminals). */
   policy: Tensor
   /** Sweeps (value iteration) or improvements (policy iteration) the plan took. */
   iterations: number
 }
 
-/** The environment's tabular model, or an error naming the agent. */
+/**
+ * The environment's tabular model. Throws `DomainError`, naming the agent, when it has none.
+ *
+ * @param env The environment the agent is initialised for.
+ * @param who The agent's name, for the error message.
+ * @returns The model's tables.
+ */
 function tabularModel(env: EnvironmentShape, who: string): MdpTables {
   const m = env.model
   if (m?.kind !== 'tabular') throw new DomainError('tabularModel', `${who} needs an environment with a tabular model`)
@@ -243,8 +429,12 @@ function tabularModel(env: EnvironmentShape, who: string): MdpTables {
 
 /**
  * An agent that plans with `plan` on the environment's tabular model once, in `init`, and then acts greedily on the
- * planned Q* (observations are the model's state indices), breaking ties among the best legal actions at random. It
- * learns nothing.
+ * planned $Q^*$ (observations are the model's state indices), breaking ties within $10^{-9}$ among the best legal
+ * actions at random; `greedy` takes the first strictly best. It learns nothing.
+ *
+ * @param name The agent's readable name, also used in the error when the environment has no tabular model.
+ * @param plan The planner: from the model's tables to the `PlannerState`.
+ * @returns The agent.
  */
 function plannerAgent(name: string, plan: (mdp: MdpTables) => PlannerState): Agent<PlannerState, number, number> {
   return {
@@ -269,7 +459,32 @@ function plannerAgent(name: string, plan: (mdp: MdpTables) => PlannerState): Age
   }
 }
 
-/** Value iteration on the environment's tabular model (to `tolerance`), then greedy action (see `plannerAgent`). */
+/**
+ * Value iteration on the environment's tabular model (to `tolerance`, at most 100000 sweeps) in `init`, then the
+ * greedy action of $Q^*$, ties broken at random. Throws `DomainError` at `init` when the environment has no tabular
+ * model.
+ *
+ * @param options When planning stops.
+ * @param options.tolerance The Bellman residual at which value iteration stops.
+ * @returns The agent, named `'value iteration'`.
+ *
+ * @example A planner acts optimally from its first step
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const env = { observation: { kind: 'discrete', n: 4 }, action: { kind: 'discrete', n: 2 }, gamma: 0.9 }
+ * const agent = valueIterationAgent()
+ * const g = agent.init({ ...env, model: { kind: 'tabular', ...mdp } }, stream(0))
+ * print('V* =', g.V)
+ * print('sweeps:', g.iterations)
+ * print('action in state 0:', agent.act(g, 0, stream(1)).action)
+ */
 export function valueIterationAgent({ tolerance = 1e-10 }: { tolerance?: number } = {}): Agent<
   PlannerState,
   number,
@@ -281,7 +496,29 @@ export function valueIterationAgent({ tolerance = 1e-10 }: { tolerance?: number 
   })
 }
 
-/** Policy iteration on the environment's tabular model, then greedy action (see `plannerAgent`). */
+/**
+ * Policy iteration on the environment's tabular model (at most 1000 improvements) in `init`, then the greedy action
+ * of the optimal $Q$, ties broken at random. Throws `DomainError` at `init` when the environment has no tabular model.
+ *
+ * @returns The agent, named `'policy iteration'`.
+ *
+ * @example The planned policy and its values
+ * // A corridor of states 0 to 3 (3 terminal): action 1 moves right, 0 left; reaching state 3 pays 1.
+ * const outcomes = []
+ * for (let s = 0; s < 4; s++)
+ *   for (let a = 0; a < 2; a++) {
+ *     const next = a === 1 ? s + 1 : Math.max(0, s - 1)
+ *     outcomes.push(s === 3 ? [] : [{ p: 1, next, reward: next === 3 ? 1 : 0 }])
+ *   }
+ * const terminal = Uint8Array.from([0, 0, 0, 1])
+ * const mdp = { states: 4, actions: 2, outcomes, terminal, terminalValue: new Float64Array(4), gamma: 0.9 }
+ * const env = { observation: { kind: 'discrete', n: 4 }, action: { kind: 'discrete', n: 2 }, gamma: 0.9 }
+ * const agent = policyIterationAgent()
+ * const g = agent.init({ ...env, model: { kind: 'tabular', ...mdp } }, stream(0))
+ * print('policy:', g.policy)
+ * print('V =', g.V)
+ * print('improvements:', g.iterations)
+ */
 export function policyIterationAgent(): Agent<PlannerState, number, number> {
   return plannerAgent('policy iteration', (mdp) => {
     const s = run(policyIteration(mdp), undefined, 1000)

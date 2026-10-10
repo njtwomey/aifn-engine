@@ -16,7 +16,9 @@ import type { Algorithm } from 'aifn-compute/foundation/trace'
 
 /** The transition of one step, with the agent's scores and action probabilities when it reports them. */
 export interface RolloutTransition<O, A> extends Transition<O, A> {
+  /** The score the agent gave each action, by action index, when it reports them. */
   scores?: Float64Array
+  /** The agent's probability of each action, by action index, when it reports them. */
   probabilities?: Float64Array
   /** Best expected reward minus the action's in the state acted in (when the oracle knows both). */
   regret?: number
@@ -24,21 +26,40 @@ export interface RolloutTransition<O, A> extends Transition<O, A> {
 
 /** The rollout's view of a running episode. */
 interface Position<S, O, G> {
+  /** The environment's current state. */
   envState: S
+  /** What the agent sees of it. */
   observation: O
+  /** The agent's state. */
   agent: G
   /** Steps taken in the current episode. */
   length: number
 }
 
-/** The pseudo-regret of action a in state s, when the oracle can tell. */
+/**
+ * The pseudo-regret of action $a$ in state $s$, the best expected reward minus the action's, when the oracle can tell.
+ *
+ * @param env The environment, whose `oracle` is read.
+ * @param s The environment state acted in.
+ * @param a The action taken.
+ * @returns The pseudo-regret, or undefined when the oracle lacks `expectedReward` or `bestExpectedReward`.
+ */
 function regretOf<S, O, A>(env: Environment<S, O, A>, s: S, a: A): number | undefined {
   const o = env.oracle
   if (!o?.expectedReward || !o.bestExpectedReward) return undefined
   return o.bestExpectedReward(s) - o.expectedReward(s, a)
 }
 
-/** One environment step: act (within the legal actions), step, truncate at the horizon, learn. */
+/**
+ * One environment step: act (within the legal actions), step, truncate at the horizon, learn. The agent draws from
+ * `child(stream, 'agent')` and the environment from `child(stream, 'env')`.
+ *
+ * @param env The environment.
+ * @param agent The agent.
+ * @param at The episode so far: the states before the step and the steps already taken.
+ * @param stream The step's stream, split between the agent and the environment.
+ * @returns The position after the step (the agent's state after learning from it) and the step's transition.
+ */
 function advance<S, O, A, G>(
   env: Environment<S, O, A>,
   agent: Agent<G, O, A>,
@@ -68,7 +89,14 @@ function advance<S, O, A, G>(
   }
 }
 
-/** A fresh episode from a reset drawn from `stream`. */
+/**
+ * A fresh episode from a reset drawn from `stream`.
+ *
+ * @param env The environment to reset.
+ * @param agent The agent's state, carried into the episode unchanged.
+ * @param stream The stream the reset draws from.
+ * @returns The position at the reset, with no steps taken.
+ */
 function begin<S, O, A, G>(env: Environment<S, O, A>, agent: G, stream: Stream): Position<S, O, G> {
   const { state, observation } = env.reset(stream)
   return { envState: state, observation, agent, length: 0 }
@@ -82,12 +110,13 @@ export interface RolloutState<S, O, A, G> extends Status {
   t: number
   /** Episodes completed. */
   episode: number
-  /** The environment's state and the agent's observation after the last step (the reset state at t = 0). */
+  /** The environment's state after the last step (the reset state at $t = 0$). */
   envState: S
+  /** The agent's observation of `envState`. */
   observation: O
   /** The agent's state (what it has learnt). */
   agent: G
-  /** The last step's transition (null at t = 0). */
+  /** The last step's transition (null at $t = 0$). */
   last: RolloutTransition<O, A> | null
   /** Steps taken in the current episode. */
   length: number
@@ -95,7 +124,10 @@ export interface RolloutState<S, O, A, G> extends Status {
   episodeReturn: number
   /** The undiscounted sum of every reward so far. */
   totalReward: number
-  /** Σ_t (best expected reward − the action's), when the environment's oracle knows expected rewards; else 0. */
+  /**
+   * The cumulative pseudo-regret, the sum over steps of the best expected reward minus the action's, when the
+   * environment's oracle knows expected rewards; else 0.
+   */
   cumulativeRegret: number
   /** The last step ended its episode: the next step resets the environment first. */
   ended: boolean
@@ -112,6 +144,31 @@ export interface RolloutOptions {
  * environment or at its `horizon`), the state shows the arrival and the next step resets the environment, from
  * `child(ctx.stream, 'reset')`, before acting. Step 0 resets from the init stream. A bandit (horizon 1) is the one-step
  * case: every step is a round.
+ *
+ * @param env The environment.
+ * @param agent The agent, initialised for `env` on the init stream.
+ * @param options When to stop.
+ * @param options.episodes The number of episodes after which the algorithm is `done`; without it, it runs for as many
+ *   steps as it is given.
+ * @returns The algorithm, for `run`, `trace` or `live`.
+ *
+ * @example A fixed policy's return in the gridworld
+ * const env = gymEnvironment('gridworldEnvironment', { noise: 0, stepReward: -0.04 })
+ * const route = {
+ *   name: 'up, then right',
+ *   init: () => null,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g,
+ * }
+ * const end = run(rollout(env, route, { episodes: 1 }), undefined, 20, { stream: stream(0) })
+ * print('steps', end.t, '; ended', end.ended, 'at state', end.envState)
+ * print('return', end.episodeReturn, '; last reward', end.last.reward)
+ *
+ * @example Pseudo-regret of always pulling the worse arm
+ * const env = gymEnvironment('bernoulliBandit', { means: [0.2, 0.9] })
+ * const arm1 = { name: 'arm 1', init: () => null, act: () => ({ action: 0 }), learn: (g) => g }
+ * const end = run(rollout(env, arm1), undefined, 10, { stream: stream(0) })
+ * print('rounds', end.episode, '; total reward', end.totalReward, '; regret', end.cumulativeRegret)
  */
 export function rollout<S, O, A, G>(
   env: Environment<S, O, A>,
@@ -158,10 +215,30 @@ export function rollout<S, O, A, G>(
 export type EpisodeMode = 'learn' | 'greedy'
 
 /**
- * One episode from agent state `g`: the reset from `child(stream, 'reset')`, the k-th step on `child(stream, 'step', k)`
- * (split into `env` and `agent` as in `rollout`), until a terminal state or the `horizon`. With `mode: 'greedy'` the
- * agent does not learn and takes `agent.greedy` actions (its `act` when it has none). Returns the trajectory and the
- * agent's state after it.
+ * One episode from agent state `g`: the reset from `child(stream, 'reset')`, the $k$-th step on
+ * `child(stream, 'step', k)` (split into `env` and `agent` as in `rollout`), until a terminal state or the `horizon`.
+ * With `mode: 'greedy'` the agent does not learn and takes `agent.greedy` actions (its `act` when it has none). Returns
+ * the trajectory and the agent's state after it. The `horizon` must be finite unless the episode is sure to end.
+ *
+ * @param env The environment.
+ * @param agent The agent.
+ * @param g The agent's state at the start of the episode; not modified.
+ * @param stream The episode's stream.
+ * @param mode `learn` to act and learn as in training, `greedy` to play the learnt policy without learning.
+ * @returns The agent's state after the episode (`g` itself in greedy mode) and the episode's `trajectory`.
+ *
+ * @example One episode of a fixed route
+ * const env = gymEnvironment('gridworldEnvironment', { noise: 0, stepReward: -0.04 })
+ * const route = {
+ *   name: 'up, then right',
+ *   init: () => null,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g,
+ * }
+ * const { trajectory } = runEpisode(env, route, null, stream(0))
+ * print('states', trajectory.states)
+ * print('rewards', trajectory.rewards, '; return', trajectory.episodeReturn)
+ * print('ending', trajectory.ending.reason)
  */
 export function runEpisode<S, O, A, G>(
   env: Environment<S, O, A>,
@@ -208,12 +285,31 @@ export function runEpisode<S, O, A, G>(
 export interface EpisodeState<O, A, G, S = unknown> extends Status, Trajectory<S, O, A> {
   /** Episodes completed. */
   t: number
+  /** The agent's state after the last episode. */
   agent: G
 }
 
 /**
- * One whole episode per algorithm step (no start): episode e is `runEpisode` on the step stream `ctx.stream`. An
- * episode ends at a terminal state or at the environment's `horizon` (which must then be finite).
+ * One whole episode per algorithm step (no start): episode $e$ is `runEpisode` on the step stream `ctx.stream`. An
+ * episode ends at a terminal state or at the environment's `horizon` (which must then be finite). The initial state
+ * holds the agent initialised on `child(stream, 'agent')` and a reset from `child(stream, 'env')`, with no steps.
+ *
+ * @param env The environment.
+ * @param agent The agent, learning as it acts.
+ * @returns The algorithm, never `done` by itself.
+ *
+ * @example Three episodes of a fixed route on slippery ground
+ * const env = gymEnvironment('gridworldEnvironment', { stepReward: -0.04 })
+ * const route = {
+ *   name: 'up, then right',
+ *   init: () => null,
+ *   act: (g, o) => ({ action: o === 0 || o === 4 ? 0 : 1 }),
+ *   learn: (g) => g,
+ * }
+ * const alg = episodes(env, route)
+ * print('returns', [1, 2, 3].map((n) => run(alg, undefined, n, { stream: stream(0) }).episodeReturn))
+ * const third = run(alg, undefined, 3, { stream: stream(0) })
+ * print('episode', third.t, 'took', third.actions.length, 'steps and', third.ending.reason)
  */
 export function episodes<S, O, A, G>(
   env: Environment<S, O, A>,
@@ -245,11 +341,18 @@ export function episodes<S, O, A, G>(
 
 // ── compare ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Mean, standard deviation and 10 % and 90 % quantiles across replicates, each [agents, points]. */
+/**
+ * Mean, standard deviation and 10 % and 90 % quantiles across replicates, each $P \times K$ ($P$ agents, $K$ recorded
+ * steps).
+ */
 export interface Spread {
+  /** The mean across replicates. */
   mean: Tensor
+  /** The sample standard deviation across replicates ($n - 1$ in the denominator). */
   sd: Tensor
+  /** The 10 % quantile: the replicates' sorted values at index $\lfloor 0.1 (n - 1) \rfloor$, $n$ the replicates. */
   lower: Tensor
+  /** The 90 % quantile: the replicates' sorted values at index $\lceil 0.9 (n - 1) \rceil$. */
   upper: Tensor
 }
 
@@ -259,15 +362,15 @@ export interface Comparison {
   t: Tensor
   /** The agents' names, in order. */
   names: string[]
-  /** Cumulative reward Σ r up to each recorded step. */
+  /** Cumulative reward $\sum r$ up to each recorded step. */
   reward: Spread
   /** Cumulative pseudo-regret up to each recorded step, when the environment's oracle knows expected rewards. */
   regret: Spread | null
-  /** Mean episodes completed by each recorded step, [agents, points]. */
+  /** Mean episodes completed by each recorded step, $P \times K$. */
   episodes: Tensor
-  /** Mean times each action was taken over the run, [agents, actions] (discrete action domains; else [agents, 0]). */
+  /** Mean times each action was taken over the run, $P \times A$ (discrete action domains; else $P \times 0$). */
   actions: Tensor
-  /** Every replicate's final cumulative regret (or reward, without an oracle), [agents, replicates]. */
+  /** Every replicate's final cumulative regret (or reward, without an oracle), $P \times n$ ($n$ the replicates). */
   final: Tensor
 }
 
@@ -283,7 +386,16 @@ export interface CompareOptions {
   points?: number
 }
 
-/** One run as `trace(rollout(env, agent), …, { stream: root })` would make it, recording the cumulative quantities. */
+/**
+ * One run as `trace(rollout(env, agent), …, { stream: root })` would make it, recording the cumulative quantities.
+ *
+ * @param env The environment.
+ * @param agent The agent.
+ * @param steps The environment steps to run.
+ * @param root The run's root stream: init on `child(root, 'init')`, step $t$ on `child(root, 'step', t)`.
+ * @returns After each step: the cumulative `reward`, the cumulative `regret` and the `episodes` completed (each `steps`
+ *   long), and `counts`, the times each action was taken (empty for a non-discrete action domain).
+ */
 function runOnce<S, O, A, G>(env: Environment<S, O, A>, agent: Agent<G, O, A>, steps: number, root: Stream) {
   const alg = rollout(env, agent)
   let s = alg.init(undefined, child(root, 'init'))
@@ -304,9 +416,28 @@ function runOnce<S, O, A, G>(env: Environment<S, O, A>, agent: Agent<G, O, A>, s
 
 /**
  * Run each agent `replicates` times for `steps` environment steps and summarise the cumulative reward and, when the
- * oracle knows expected rewards, the cumulative pseudo-regret Σ_t (best expected reward − the action's). Replicate k of
- * every agent runs on `child(stream, k)` (through `replicate`), as a trace of `rollout` on that root would, so all
- * agents face the same environment draws (common random numbers) and differences between them come from the agents.
+ * oracle knows expected rewards, the cumulative pseudo-regret (the sum over steps of the best expected reward minus the
+ * action's). Replicate $k$ of every agent runs on `child(stream, k)` (through `replicate`), as a trace of `rollout` on
+ * that root would, so all agents face the same environment draws (common random numbers) and differences between them
+ * come from the agents.
+ *
+ * @param env The environment.
+ * @param agents The agents to compare, in the order of the result's rows.
+ * @param options The replicates, the steps, the root stream and how many steps to record.
+ * @param options.replicates The independent runs per agent, $n$.
+ * @param options.steps The environment steps of each run.
+ * @param options.stream The root stream; replicate $k$ runs on `child(stream, k)`. Default `stream(0)`.
+ * @param options.points About how many steps to record: every $\lfloor \text{steps} / \text{points} \rfloor$-th, and
+ *   the last.
+ * @returns The summaries, one row per agent, at about `points` evenly spaced steps ending with the last.
+ *
+ * @example Two fixed arms of a Bernoulli bandit
+ * const env = gymEnvironment('bernoulliBandit', { means: [0.2, 0.9] })
+ * const arm = (a) => ({ name: `arm ${a + 1}`, init: () => null, act: () => ({ action: a }), learn: (g) => g })
+ * const c = compare(env, [arm(0), arm(1)], { replicates: 8, steps: 20, points: 4 })
+ * print('steps', c.t)
+ * print('mean reward', c.reward.mean)
+ * print('mean regret', c.regret.mean)
  */
 export function compare<S, O, A>(
   env: Environment<S, O, A>,

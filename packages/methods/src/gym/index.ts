@@ -1,12 +1,33 @@
 /**
- * `aifn-methods/gym`: sequential decisions on one protocol (docs/aifn-gym.md): environments (`./environments`: bandits,
- * finite MDPs, classic control) and agents (`./agents`: bandit policies, tabular learners, planners) meet in the loops
- * of `rollout.ts` (`rollout`, `episodes`, `compare`); `train.ts` trains headlessly (`train`, `training`) and replays
- * or evaluates any training episode (`replay`, `evaluateEpisode`). `mdp.ts` holds the finite-MDP tables both sides
- * share.
- * Registries: `environmentRegistry` and `agentRegistry`, keyed by `info.key`; `validPairs` lists the environment ×
- * agent pairs whose declared domains, model and family agree; `gymSetup` makes the compute `GymSetup` a training view
- * consumes from two registry keys.
+ * `aifn-methods/gym`: sequential decisions on one protocol, environments and agents run against each other
+ * (docs/aifn-gym.md), in the manner of Gymnasium with explicit random streams.
+ *
+ * Child modules:
+ *
+ * - `aifn-methods/gym/environments`: what agents act in. Bandits (Bernoulli, Gaussian, linear contextual), finite MDPs
+ *   on grids (gridworld, cliff walking, mazes, FrozenLake) and `mdpEnvironment` for any table, and, in its child
+ *   `control`, the pendulum and the cart-pole with differentiable dynamics models.
+ * - `aifn-methods/gym/agents`: what acts and learns. The random baseline, bandit policies, tabular learners (TD and
+ *   Monte Carlo control, REINFORCE), planners (value and policy iteration), the deep Q-network, and, in its children,
+ *   classic-control and policy-gradient agents.
+ *
+ * Shared by both, at this level:
+ *
+ * - Finite-MDP tables (`mdp.ts`): `TabularMdp` and `tabularMdp`, outcome sampling (`sampleOutcome`), legal actions
+ *   (`legalActions`, `hasIllegalActions`, `isActive`), the backup `qFromValues`, `greedyActions` and `policyMatrix`,
+ *   the oracle's `optimalValues`, and the grid conventions (`cellState`, `stateCell`, `GRID_ACTIONS`).
+ * - Running an agent (`rollout.ts`): `rollout` (one environment step per algorithm step), `episodes` (one episode per
+ *   step), `runEpisode` (a single episode, learning or greedy) and `compare` (several agents over replicates, with
+ *   common random numbers).
+ * - Training without a display (`train.ts`): `train` and its generator form `training`, with checkpoints
+ *   (`checkpointSpacing`) from which `replay`, `agentAfter` and `evaluateEpisode` re-run any episode exactly.
+ * - Registries: `environmentRegistry` and `agentRegistry`, keyed by `info.key`; `compatible` and `validPairs` pair
+ *   environments with the agents whose declared domains, model and family agree; `gymEnvironment` and `gymSetup` build
+ *   them, and the compute `GymSetup` a training view consumes, from registry keys; `gymFunctions` registers the
+ *   functions of this level.
+ *
+ * Environments and agents are plain data with pure functions that draw only from the stream they are given, so a run
+ * is reproduced exactly from its seed.
  */
 
 import type { Agent, AgentInfo, Environment, EnvironmentInfo, GymSetup } from 'aifn-compute/foundation/contracts'
@@ -67,6 +88,17 @@ export const agentRegistry = entries('agent', agents) as Readonly<Record<string,
  * Whether an agent can run in an environment by their declared metadata: the agent's required observation and action
  * domain kinds, tabular or dynamics model (a capability `model`; the kind is checked when the model is built) and
  * environment families all match.
+ *
+ * @param env The environment's registry metadata (`environmentRegistry[key].info`).
+ * @param agent The agent's registry metadata (`agentRegistry[key].info`); each of its `requires` fields left out
+ *   accepts any environment.
+ * @returns True when every requirement the agent declares is met by the environment.
+ *
+ * @example Q-learning runs on a gridworld but not on the continuous pendulum
+ * const grid = environmentRegistry.gridworldEnvironment.info
+ * const pendulum = environmentRegistry.pendulumEnvironment.info
+ * print('gridworld:', compatible(grid, agentRegistry.qLearningAgent.info))
+ * print('pendulum:', compatible(pendulum, agentRegistry.qLearningAgent.info))
  */
 export function compatible(env: EnvironmentInfo, agent: AgentInfo): boolean {
   const r = agent.requires
@@ -77,7 +109,17 @@ export function compatible(env: EnvironmentInfo, agent: AgentInfo): boolean {
   return true
 }
 
-/** Every registered environment × agent pair that `compatible` allows, as registry keys. */
+/**
+ * Every pair of a registered environment and a registered agent that `compatible` allows, as registry keys, in
+ * registry order (environments outer, agents inner).
+ *
+ * @returns The allowed pairs, each `{ environment, agent }` naming two registry keys.
+ *
+ * @example How many pairs the registries allow, and the first few
+ * const pairs = validPairs()
+ * print('pairs:', pairs.length)
+ * print('first:', pairs.slice(0, 3).map((p) => `${p.environment} + ${p.agent}`))
+ */
 export function validPairs(): { environment: string; agent: string }[] {
   const out: { environment: string; agent: string }[] = []
   for (const e of Object.values(environmentRegistry))
@@ -88,17 +130,48 @@ export function validPairs(): { environment: string; agent: string }[] {
 
 // ── Setups for training views ─────────────────────────────────────────────────────────────────────────────────────
 
+/** An environment of any state, observation and action types, as the registries build them. */
 type AnyEnv = Environment<unknown, unknown, unknown>
+/** An agent of any state, observation and action types, as the registries build them. */
 type AnyAgent = Agent<unknown, unknown, unknown>
 
-/** An environment of the gym registry built from its parameters (an evaluation variant, say). */
+/**
+ * An environment of the gym registry built from its parameters, for instance an evaluation variant of the environment
+ * a setup trains on. Throws `DomainError` for a key the registry doesn't hold.
+ *
+ * @param envKey The environment's registry key, e.g. `'gridworldEnvironment'`.
+ * @param envParams The parameters its factory takes; `{}` gives its defaults.
+ * @returns The environment.
+ *
+ * @example The default gridworld
+ * const env = gymEnvironment('gridworldEnvironment', {})
+ * print('name:', env.name, ' discount:', env.gamma)
+ */
 export function gymEnvironment(envKey: string, envParams: object): AnyEnv {
   const e = environmentRegistry[envKey]
   if (!e) throw new DomainError('gymEnvironment', `gymEnvironment: no environment '${envKey}' in the gym registry`)
   return (e as unknown as (p: object) => AnyEnv)(envParams)
 }
 
-/** The setup for environment `envKey` and agent `agentKey` of the gym registries, built from their parameters. */
+/**
+ * The setup for environment `envKey` and agent `agentKey` of the gym registries, built from their parameters: the two
+ * built objects, the calls that rebuild them in a worker, the training address, and the `replay`, `evaluate` and
+ * `agentAfter` functions a training view uses to re-run any episode. Throws `DomainError` for a key either registry
+ * doesn't hold; it does not check that the pair is `compatible`.
+ *
+ * @param envKey The environment's registry key.
+ * @param envParams The environment factory's parameters.
+ * @param agentKey The agent's registry key.
+ * @param agentParams The agent factory's parameters.
+ * @param extra Fields copied into the setup as they are.
+ * @param extra.evaluationEnv An environment to evaluate the trained agent on, when it differs from the training one.
+ * @returns The `GymSetup` a training view consumes.
+ *
+ * @example Q-learning on the default gridworld
+ * const setup = gymSetup('gridworldEnvironment', {}, 'qLearningAgent', {})
+ * print('environment call:', setup.envCall.address)
+ * print('agent call:', setup.agentCall.address)
+ */
 export function gymSetup(
   envKey: string,
   envParams: object,

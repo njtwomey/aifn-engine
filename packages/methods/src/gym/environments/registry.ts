@@ -1,8 +1,12 @@
-/** The environment constructors of the `aifn-methods/gym/environments` group's shared layer. */
+/**
+ * The registry entries of the functions of `aifn-methods/gym/environments`: the grid builders and `mdpEnvironment`,
+ * kind `function`. The environments themselves register in their own files, kind `environment`.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as gridworlds from './gridworlds'
 
+/** Registers a function of `gym/environments`. */
 const fn = definer<FunctionInfo>('function', 'gym/environments')
 const MDP = ['markov-decision-process']
 

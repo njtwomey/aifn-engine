@@ -1,19 +1,28 @@
 /**
  * On-policy gradient agents for a box observation and discrete actions, on the gym protocol. Each holds a categorical
- * policy network π_θ(a|o) (logits from a multilayer perceptron) and a value network V_φ(o), both trained by Adam:
+ * policy network $\pi_\theta(a \mid o)$ (logits from a multilayer perceptron) and a value network $V_\phi(o)$, each
+ * trained by its own Adam step on its part of the loss:
  *
- * - **REINFORCE with a baseline** (Williams, 1992): at the end of every episode, the returns Gₜ = Σ γᵏ rₜ₊ₖ weigh the
- *   score: the policy loss is −mean[log π(aₜ|oₜ) (Gₜ − V(oₜ))] with the advantages standardised, and V regresses on Gₜ.
- * - **Advantage actor–critic (A2C)** (Mnih et al., 2016, synchronous form): every n steps (or at an episode's end) the
- *   n-step returns Rₜ = rₜ + γ rₜ₊₁ + … + γⁿ V(oₜ₊ₙ), bootstrapped unless the episode terminated, give advantages
- *   Rₜ − V(oₜ); one step on −mean[log π · A] + c_v mean[(R − V)²] − β mean[entropy].
+ * - **REINFORCE with a baseline** (Williams, 1992): at the end of every episode, the returns
+ *   $G_t = \sum_k \gamma^k r_{t+k}$ weigh the score: the policy loss is
+ *   $-\operatorname{mean}[\log \pi(a_t \mid o_t) (G_t - V(o_t))]$ with the advantages standardised, and $V$ regresses
+ *   on $G_t$.
+ * - **Advantage actor–critic (A2C)** (Mnih et al., 2016, synchronous form): every $n$ steps (or at an episode's end)
+ *   the $n$-step returns $R_t = r_t + \gamma r_{t+1} + \dots + \gamma^n V(o_{t+n})$, bootstrapped unless the episode
+ *   terminated, give advantages $R_t - V(o_t)$; one step on $-\operatorname{mean}[\log \pi \cdot A]$ plus
+ *   $c_v \operatorname{mean}[(R - V)^2] - \beta \operatorname{mean}[\text{entropy}]$.
  * - **Proximal policy optimisation (PPO, clipped)** (Schulman et al., 2017): collect `horizon` steps across episodes,
- *   compute generalised advantage estimates (GAE(λ); Schulman et al., 2016) from the values recorded when the steps
- *   were taken, then run `epochs` passes of minibatch Adam on −mean[min(ρA, clip(ρ, 1 ± ε)A)] + c_v mean[(V − R)²]
- *   − β entropy, where ρ = π_θ(a|o)/π_old(a|o) and π_old is the policy that collected the steps.
+ *   compute generalised advantage estimates (GAE($\lambda$); Schulman et al., 2016) from the values recorded when the
+ *   steps were taken, then run `epochs` passes of minibatch Adam on the clipped surrogate
+ *   $-\operatorname{mean}[\min(\rho A, \operatorname{clip}(\rho, 1 \pm \varepsilon) A)]$ plus
+ *   $c_v \operatorname{mean}[(V - R)^2] - \beta\,\text{entropy}$, where
+ *   $\rho = \pi_\theta(a \mid o) / \pi_{\text{old}}(a \mid o)$ and $\pi_{\text{old}}$ is the policy that collected the
+ *   steps; each minibatch's advantages are standardised.
  *
- * A truncated episode (a time limit) is not terminal: its last step bootstraps from V of the next observation. The
- * agents' states are plain data; minibatch orders are drawn from a seed fixed in `init`, so `learn` stays pure.
+ * For A2C and PPO a truncated episode (a time limit) is not terminal: its last step bootstraps from $V$ of the next
+ * observation. REINFORCE's returns stop at the episode's last reward, truncated or not. The agents' states are plain
+ * data; minibatch orders are drawn from a seed fixed in `init`, so `learn` stays pure. `act` draws from a child of its
+ * stream's key, so it needs a fresh stream for every step, as the gym's rollouts pass.
  */
 
 import type { Agent, AgentInfo, EnvironmentShape, Transition } from 'aifn-compute/foundation/contracts'
@@ -53,14 +62,15 @@ import {
 export interface OnPolicyOptions {
   /** Hidden widths of the policy and value networks (default [64, 64]). */
   hidden?: readonly number[]
+  /** The hidden activation of both networks (default tanh). */
   activation?: ActivationName
   /** Adam's step size for both networks (default 3e-4 for PPO, 1e-3 for A2C, 3e-3 for REINFORCE). */
   learningRate?: number
   /** The discount (default: the environment's). */
   gamma?: number
-  /** Entropy bonus β (default 0 for PPO and REINFORCE, 0.01 for A2C). */
+  /** Entropy bonus $\beta$ (default 0 for PPO and REINFORCE, 0.01 for A2C). */
   entropy?: number
-  /** Value-loss weight c_v (default 0.5). */
+  /** Value-loss weight $c_v$ (default 0.5). */
   valueCoef?: number
   /** Gradient clipping by global norm (default 0.5 for PPO and A2C, Infinity for REINFORCE). */
   clipNorm?: number
@@ -68,37 +78,57 @@ export interface OnPolicyOptions {
 
 /** The stored steps of the current batch, as flat columns. */
 interface Steps {
+  /** The observations, $d$ numbers per step, row after row. */
   obs: number[]
+  /** The actions taken. */
   actions: number[]
+  /** The rewards received. */
   rewards: number[]
   /** 1 when the step ended the episode by termination. */
   terminated: number[]
   /** 1 when the step ended the episode (terminated or truncated). */
   ends: number[]
-  /** V(o) and V(o′) under the networks that collected the step (PPO and A2C), and log π_old(a|o) (PPO). */
+  /** $V(o)$ under the value network that collected the step (PPO and A2C; empty for REINFORCE). */
   values: number[]
+  /** $V(o')$ under the same network, 0 after a termination (PPO and A2C; 0 for REINFORCE). */
   nextValues: number[]
+  /** $\log \pi_{\text{old}}(a \mid o)$ of the policy that acted (PPO; empty otherwise). */
   logp: number[]
 }
 
 /** An on-policy agent's state. */
 export interface OnPolicyState {
+  /** The seed of the minibatch orders, fixed in `init`. */
   seed: number
+  /** The observation length $d$. */
   dim: number
+  /** The number of actions. */
   actions: number
+  /** The discount $\gamma$. */
   gamma: number
+  /** The policy network's parameters $\theta$. */
   policy: Params[]
+  /** The value network's parameters $\phi$. */
   value: Params[]
+  /** The policy's Adam state. */
   policyOptimizer: unknown
+  /** The value network's Adam state. */
   valueOptimizer: unknown
+  /** The steps stored since the last update. */
   steps: Steps
-  /** Environment steps and gradient updates so far. */
+  /** Environment steps so far. */
   t: number
+  /** Updates so far: one per batch of steps learnt from (PPO's epochs of minibatches count as one). */
   updates: number
   /** Losses and diagnostics of the last update (NaN before the first). */
   last: { policyLoss: number; valueLoss: number; entropy: number; clipFraction: number; approxKl: number }
 }
 
+/**
+ * No stored steps: every column empty.
+ *
+ * @returns A fresh `Steps`.
+ */
 const emptySteps = (): Steps => ({
   obs: [],
   actions: [],
@@ -112,9 +142,24 @@ const emptySteps = (): Steps => ({
 
 const NAN_LAST = { policyLoss: NaN, valueLoss: NaN, entropy: NaN, clipFraction: NaN, approxKl: NaN }
 
+/** Which of the three agents: it decides what each step records. */
 type Kind = 'reinforce' | 'a2c' | 'ppo'
 
-/** The protocol shared by the three agents; `update` decides when and how to learn from the stored steps. */
+/**
+ * The protocol shared by the three agents: `act` samples the policy, `learn` stores the step (with its values for A2C
+ * and PPO, and its log-probability for PPO) and, when `due`, runs `update` on the stored steps and clears them.
+ * `greedy` is the most probable action. `init` throws `TypeError` unless the observation is a box and the actions are
+ * discrete.
+ *
+ * @param name The agent's readable name, also used in its errors.
+ * @param kind Which agent, for what each step records.
+ * @param options The caller's options; the unset ones fall back to `defaults`.
+ * @param defaults The agent's own defaults for the step size, the entropy bonus and the clipping norm.
+ * @param update How to learn from the stored steps: the new state from the state, the two networks, the update rule
+ *   and the loss weights.
+ * @param due Whether to update after storing a transition: from the state with the step stored, and the transition.
+ * @returns The agent.
+ */
 function onPolicyAgent(
   name: string,
   kind: Kind,
@@ -199,7 +244,21 @@ function onPolicyAgent(
   }
 }
 
-/** Policy and value losses on a batch with fixed advantages and value targets; returns both updated networks. */
+/**
+ * Policy and value losses on a batch with fixed advantages and value targets; returns both updated networks. The
+ * policy loss is $-\operatorname{mean}[\log \pi \cdot A]$, or PPO's clipped surrogate when `logpOld` and a clip range
+ * are given, minus $\beta$ times the mean entropy; the value loss is $c_v \operatorname{mean}[(V - R)^2]$.
+ *
+ * @param g The agent's state, whose networks and optimisers are updated.
+ * @param nets The policy and value networks.
+ * @param rule The update rule both networks step with.
+ * @param batch The rows: observations ($n \times d$, flat), actions, advantages $A$, value targets $R$ and, for PPO,
+ *   the log-probabilities $\log \pi_{\text{old}}$ of the policy that acted.
+ * @param coef The entropy bonus $\beta$, the value weight $c_v$ and, for PPO, the clip range $\varepsilon$.
+ * @returns The new state (one more update), the two losses before the step, the mean entropy, and for PPO the share
+ *   of rows whose ratio left $1 \pm \varepsilon$ and the approximate KL divergence, both under the parameters before
+ *   the step (NaN otherwise).
+ */
 function actorCriticStep(
   g: OnPolicyState,
   nets: { policy: ReturnType<ReturnType<typeof networkCache>>; value: ReturnType<ReturnType<typeof networkCache>> },
@@ -269,13 +328,42 @@ function actorCriticStep(
   }
 }
 
-/** Advantages standardised with SB3's 1e-8 guard, so a constant batch (one step) gives zeros rather than NaN. */
+/**
+ * Advantages standardised with SB3's $10^{-8}$ guard, so a constant batch (one step) gives zeros rather than NaN.
+ *
+ * @param a The advantages.
+ * @returns $(a - \bar{a}) / (s + 10^{-8})$, with $\bar{a}$ their mean and $s$ their standard deviation.
+ */
 const standardise = (a: Float64Array): Float64Array => {
   const { mean: m, scale } = zScores(a)
   return a.map((v) => (v - m) / (scale + 1e-8))
 }
 
-/** REINFORCE with a learned value baseline (module docs). */
+/**
+ * REINFORCE with a learned value baseline (module docs): one update at the end of every episode, on that episode's
+ * steps. Defaults: step size $3 \times 10^{-3}$, no entropy bonus, no gradient clipping.
+ *
+ * @param options The networks and the optimiser (`OnPolicyOptions`), and `normalise`, whether to standardise the
+ *   advantages $G_t - V(o_t)$ (default true).
+ * @returns The agent, named `'REINFORCE with baseline'`.
+ *
+ * @example REINFORCE learns which action each sign asks for
+ * // Each step the observation is -1 or 1, and the action matching its sign (0 or 1) pays 1; episodes last 10 steps.
+ * const env = { name: 'sign', observation: { kind: 'box', shape: [1], low: [-1], high: [1] } }
+ * const agent = reinforceBaselineAgent({ hidden: [8], learningRate: 0.02 })
+ * let g = agent.init({ ...env, action: { kind: 'discrete', n: 2 }, gamma: 0.9 }, stream(0))
+ * const s = stream(1)
+ * for (let episode = 0; episode < 20; episode++)
+ *   for (let t = 0; t < 10; t++) {
+ *     const o = Float64Array.of(uniform(s) < 0.5 ? -1 : 1)
+ *     const action = agent.act(g, o, stream(`${episode} ${t}`)).action
+ *     const reward = action === (o[0] > 0 ? 1 : 0) ? 1 : 0
+ *     g = agent.learn(g, { observation: o, action, reward, next: o, terminated: false, truncated: t === 9 })
+ *   }
+ * print('updates:', g.updates)
+ * print('pi at -1:', agent.act(g, [-1], stream('a')).probabilities)
+ * print('pi at 1:', agent.act(g, [1], stream('b')).probabilities)
+ */
 export function reinforceBaselineAgent(
   options: OnPolicyOptions & { normalise?: boolean } = {},
 ): Agent<OnPolicyState, Float64Array, number> {
@@ -311,7 +399,31 @@ export function reinforceBaselineAgent(
   )
 }
 
-/** Synchronous advantage actor–critic with n-step returns (module docs). */
+/**
+ * Synchronous advantage actor–critic with $n$-step returns (module docs): one update every `nSteps` steps (default
+ * 16) or at an episode's end, whichever comes first. Defaults: step size $10^{-3}$, entropy bonus 0.01, gradients
+ * clipped to global norm 0.5.
+ *
+ * @param options The networks and the optimiser (`OnPolicyOptions`), and `nSteps`, the most steps per update.
+ * @returns The agent, named `'A2C'`.
+ *
+ * @example A2C on a ten-step task
+ * // Each step the observation is -1 or 1, and the action matching its sign (0 or 1) pays 1; episodes last 10 steps.
+ * const env = { name: 'sign', observation: { kind: 'box', shape: [1], low: [-1], high: [1] } }
+ * const agent = a2cAgent({ hidden: [8], learningRate: 0.05, nSteps: 10 })
+ * let g = agent.init({ ...env, action: { kind: 'discrete', n: 2 }, gamma: 0.9 }, stream(0))
+ * const s = stream(1)
+ * for (let episode = 0; episode < 20; episode++)
+ *   for (let t = 0; t < 10; t++) {
+ *     const o = Float64Array.of(uniform(s) < 0.5 ? -1 : 1)
+ *     const action = agent.act(g, o, stream(`${episode} ${t}`)).action
+ *     const reward = action === (o[0] > 0 ? 1 : 0) ? 1 : 0
+ *     g = agent.learn(g, { observation: o, action, reward, next: o, terminated: false, truncated: t === 9 })
+ *   }
+ * print('updates:', g.updates)
+ * print('pi at -1:', agent.act(g, [-1], stream('a')).probabilities)
+ * print('pi at 1:', agent.act(g, [1], stream('b')).probabilities)
+ */
 export function a2cAgent(
   options: OnPolicyOptions & { nSteps?: number } = {},
 ): Agent<OnPolicyState, Float64Array, number> {
@@ -343,15 +455,42 @@ export function a2cAgent(
 export interface PpoOptions extends OnPolicyOptions {
   /** Steps collected per update (SB3's `n_steps`; default 512). */
   horizon?: number
-  /** Passes over the collected steps (default 10) and rows per minibatch (default 64). */
+  /** Passes over the collected steps (default 10). */
   epochs?: number
+  /** Rows per minibatch (default 64); the rows left over after whole minibatches sit out that epoch. */
   batchSize?: number
-  /** The clip range ε (default 0.2) and GAE's λ (default 0.95). */
+  /** The clip range $\varepsilon$ (default 0.2). */
   clipRange?: number
+  /** GAE's $\lambda$ (default 0.95). */
   lambda?: number
 }
 
-/** PPO with the clipped surrogate and GAE(λ) (module docs). */
+/**
+ * PPO with the clipped surrogate and GAE($\lambda$) (module docs): one update every `horizon` steps, of `epochs`
+ * passes over the steps in shuffled minibatches. Defaults: step size $3 \times 10^{-4}$, no entropy bonus, gradients
+ * clipped to global norm 0.5. `scalars` add the clip fraction and the approximate KL divergence.
+ *
+ * @param options The networks, the optimiser and the rollout (see `PpoOptions` for each default).
+ * @returns The agent, named `'PPO'`.
+ *
+ * @example PPO on a ten-step task
+ * // Each step the observation is -1 or 1, and the action matching its sign (0 or 1) pays 1; episodes last 10 steps.
+ * const env = { name: 'sign', observation: { kind: 'box', shape: [1], low: [-1], high: [1] } }
+ * const agent = ppoAgent({ hidden: [8], learningRate: 0.01, horizon: 50, epochs: 4, batchSize: 25 })
+ * let g = agent.init({ ...env, action: { kind: 'discrete', n: 2 }, gamma: 0.9 }, stream(0))
+ * const s = stream(1)
+ * for (let episode = 0; episode < 20; episode++)
+ *   for (let t = 0; t < 10; t++) {
+ *     const o = Float64Array.of(uniform(s) < 0.5 ? -1 : 1)
+ *     const action = agent.act(g, o, stream(`${episode} ${t}`)).action
+ *     const reward = action === (o[0] > 0 ? 1 : 0) ? 1 : 0
+ *     g = agent.learn(g, { observation: o, action, reward, next: o, terminated: false, truncated: t === 9 })
+ *   }
+ * print('updates:', g.updates)
+ * print('pi at -1:', agent.act(g, [-1], stream('a')).probabilities)
+ * print('pi at 1:', agent.act(g, [1], stream('b')).probabilities)
+ * print('last update:', g.last)
+ */
 export function ppoAgent(options: PpoOptions = {}): Agent<OnPolicyState, Float64Array, number> {
   const { horizon = 512, epochs = 10, batchSize = 64, clipRange = 0.2, lambda = 0.95 } = options
   return onPolicyAgent(

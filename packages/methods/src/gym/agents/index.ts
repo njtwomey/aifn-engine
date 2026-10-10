@@ -1,9 +1,26 @@
 /**
- * `aifn-methods/gym/agents`: agents on the gym protocol. `random.ts` (the baseline), `bandits.ts` (the bandit
- * policies), `tabular.ts` (TD control, n-step SARSA, Monte Carlo control, TD(0) prediction, REINFORCE) and
- * `planning.ts` (value and policy iteration as traceable algorithms on an MDP's tables, and as planning agents),
- * `dqn.ts` (the deep Q-network and its persistent replay buffer); children:
- * `control` (classic control) and `policy` (REINFORCE with baseline, A2C, PPO, DDPG, offline CQL).
+ * `aifn-methods/gym/agents`: agents on the gym protocol, from bandit policies to deep reinforcement learning.
+ *
+ * - The baseline: `randomAgent`, uniform over the legal actions.
+ * - Bandit policies on arm statistics: `uniformPolicy`, `exploreThenCommit`, `epsilonGreedy`, `ucb1`, `klUcb`,
+ *   `thompsonBernoulli`, `thompsonGaussian` and `exp3` (adversarial); on a $K \times d$ context, `linUcb` and
+ *   `linearThompson`. With them, the KL-UCB index (`klBernoulli`, `klUcbIndex`) and the Lai–Robbins regret bound
+ *   (`laiRobbinsBound`).
+ * - Tabular learning on discrete observations and actions: `qLearningAgent`, `sarsaAgent`, `expectedSarsaAgent` (all
+ *   `tdControlAgent`), `nStepSarsaAgent`, `monteCarloControlAgent`, `tdPredictionAgent` and the softmax
+ *   `reinforceAgent`; `greedyPath` reads a route off a policy.
+ * - Planning on a known MDP's tables, as traceable algorithms run by `run`: `valueIteration`, `policyIteration` and
+ *   `policyEvaluation`, with the exact `evaluatePolicy`, `greedyPolicy` and `valuesFromQ`; as agents that plan in
+ *   `init`, `valueIterationAgent` and `policyIterationAgent`, which need a tabular model.
+ * - The deep Q-network, `dqnAgent`, with its pieces: the persistent replay buffer (`replayBuffer`, `pushTransition`,
+ *   `transitionAt`, `bufferSize`, `sampleIndices`, `gatherMinibatch`), `qNetwork`, `qValues`, `tdTargets`, and the
+ *   RL Baselines3 Zoo's CartPole recipe (`SB3_CARTPOLE`, `epsilonStepsFor`).
+ * - From the child modules: `control` (LQR from autodiff Jacobians, the pendulum's swing-up, the cross-entropy
+ *   method) and `policy` (REINFORCE with a baseline, A2C, PPO, DDPG, and offline CQL).
+ * - The registry tables `planningAlgorithms` and `agentFunctions`.
+ *
+ * Agents' states are plain data: `init` and `act` draw from the stream they are given, and `learn` is a pure update
+ * that returns a new state. Agents that need particular domains or a model check them in `init` and throw otherwise.
  */
 
 export { randomAgent, type RandomAgentState } from './random'

@@ -7,12 +7,32 @@ import { sampleDomain, space } from 'aifn-compute/foundation/space'
 
 /** The random agent's state: the action domain it draws from. */
 export interface RandomAgentState {
+  /** The environment's action domain, copied at `init`. */
   action: Domain
 }
 
 /**
  * An agent acting uniformly at random: over the legal actions when the environment masks some, else over the action
- * domain (an integer of a discrete domain, or a uniform point of a bounded box). It learns nothing.
+ * domain (an integer of a discrete domain, or a uniform point of a bounded box). It learns nothing. On a discrete
+ * domain its decision carries the action probabilities ($1/n$ each, or 1 over the number of legal actions).
+ *
+ * @returns The agent, named `'random'`; `learn` returns its state unchanged.
+ *
+ * @example Uniform action counts over three actions
+ * const agent = randomAgent()
+ * const s = stream(1)
+ * const g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * const counts = [0, 0, 0]
+ * for (let t = 0; t < 300; t++) counts[agent.act(g, 0, s).action]++
+ * print('counts of 300 draws:', counts)
+ *
+ * @example Only the legal actions are drawn
+ * const agent = randomAgent()
+ * const s = stream(2)
+ * const g = agent.init({ action: { kind: 'discrete', n: 4 } }, s)
+ * const d = agent.act(g, 0, s, [1, 3])
+ * print('action:', d.action)
+ * print('probabilities:', d.probabilities)
  */
 export function randomAgent<A = number>(): Agent<RandomAgentState, unknown, A> {
   return {

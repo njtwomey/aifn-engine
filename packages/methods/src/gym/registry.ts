@@ -1,10 +1,14 @@
-/** The functions of the `aifn-methods/gym` area's shared layer: MDP tables, rollouts and training. */
+/**
+ * The registry entries of the functions of the `aifn-methods/gym` area's shared layer: MDP tables, rollouts and
+ * training, kind `function`.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as mdp from './mdp'
 import * as rollout from './rollout'
 import * as train from './train'
 
+/** Registers a function of `gym`. */
 const fn = definer<FunctionInfo>('function', 'gym')
 const MDP = ['markov-decision-process']
 

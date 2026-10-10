@@ -1,10 +1,13 @@
 /**
- * Bandit policies as `Agent`s (docs/aifn-gym.md §5): `init` builds the policy's statistics from the action domain (one
- * arm per action), `act` picks an arm and reports the index, sample or estimate of every arm it maximised (`scores`)
- * and, for randomised policies, its probabilities, and `learn` records the pulled arm's reward. States are plain data.
- * The round number t is one more than the pulls so far. The linear policies read the round's context, a flat
- * arms × d observation, and take d from the observation domain's shape. Also: the KL-UCB index and the Lai–Robbins
- * lower bound.
+ * Bandit policies as `Agent`s (docs/aifn-gym.md §5), with the KL-UCB index and the Lai–Robbins lower bound on regret.
+ *
+ * `init` builds the policy's statistics from the action domain (one arm per action, $K$ arms; a domain that is not
+ * discrete throws `DomainError`), `act` picks an arm and reports the index, sample or estimate of every arm it
+ * maximised (`scores`) and, for randomised policies, its probabilities, and `learn` records the pulled arm's reward.
+ * States are plain data, and `learn` returns a new one. The round number $t$ is one more than the pulls so far. Ties
+ * between the best arms are broken uniformly at random in `act`, and towards the first arm in `greedy`. The linear
+ * policies read the round's context, a flat $K \times d$ observation (row $a$ holds arm $a$'s features), and take $d$
+ * from the observation domain's shape.
  */
 
 import type { Agent, AgentInfo, Decision, EnvironmentShape, Transition } from 'aifn-compute/foundation/contracts'
@@ -18,10 +21,19 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** Pull counts and reward sums per arm: the state of every context-free policy. */
 export interface ArmStatistics {
+  /** The number of pulls of each arm, by arm index. */
   counts: Float64Array
+  /** The sum of the rewards each arm has returned, by arm index. */
   sums: Float64Array
 }
 
+/**
+ * The index of the largest score, ties broken uniformly at random (a draw is made only when there is a tie).
+ *
+ * @param scores One score per arm.
+ * @param s The stream the tie-break draws from.
+ * @returns The chosen arm.
+ */
 function argmaxRandom(scores: Float64Array, s: Stream): number {
   let best = -Infinity
   let ties: number[] = []
@@ -34,14 +46,34 @@ function argmaxRandom(scores: Float64Array, s: Stream): number {
   return ties.length === 1 ? ties[0] : ties[integers(s, ties.length)]
 }
 
+/**
+ * The number of arms: the size of the environment's discrete action domain. Throws `DomainError` for any other domain.
+ *
+ * @param env The environment the policy is initialised for.
+ * @returns The number of actions $K$.
+ */
 function armCount(env: EnvironmentShape): number {
   if (env.action.kind !== 'discrete')
     throw new DomainError('armCount', 'bandit policies need a discrete action domain (the arms)')
   return env.action.n
 }
 
+/**
+ * Empty statistics: no pulls and no reward for every arm.
+ *
+ * @param arms The number of arms $K$.
+ * @returns Zeroed `counts` and `sums` of $K$ entries each.
+ */
 const stats = (arms: number): ArmStatistics => ({ counts: new Float64Array(arms), sums: new Float64Array(arms) })
 
+/**
+ * The statistics after one more pull: the arm's count rises by 1 and its sum by the reward.
+ *
+ * @param st The statistics before the pull, with any further fields of the policy's state; not modified.
+ * @param arm The arm pulled.
+ * @param reward The reward it returned.
+ * @returns A copy of `st` with new `counts` and `sums`; other fields are carried over as they are.
+ */
 function record<T extends ArmStatistics>(st: T, arm: number, reward: number): T {
   const counts = st.counts.slice()
   const sums = st.sums.slice()
@@ -50,25 +82,59 @@ function record<T extends ArmStatistics>(st: T, arm: number, reward: number): T 
   return { ...st, counts, sums }
 }
 
-/** The first index of the largest score: a deterministic greedy choice. */
+/**
+ * The first index of the largest score: a deterministic greedy choice.
+ *
+ * @param scores One score per arm.
+ * @returns The lowest index holding the largest score.
+ */
 const firstMax = (scores: ArrayLike<number>) => {
   let arg = 0
   for (let i = 1; i < scores.length; i++) if (scores[i] > scores[arg]) arg = i
   return arg
 }
 
-/** The share of pulls that went to the most-pulled arm: how settled a policy is, a training-curve scalar. */
+/**
+ * The share of pulls that went to the most-pulled arm: how settled a policy is, a training-curve scalar.
+ *
+ * @param st The policy's statistics.
+ * @returns `top arm share`, the largest count over the total (0 before any pull).
+ */
 const armScalars = (st: ArmStatistics) => {
   const n = st.counts.reduce((a, b) => a + b, 0)
   return { 'top arm share': n > 0 ? Math.max(...st.counts) / n : 0 }
 }
 
-/** Round t = 1, 2, …: one more than the pulls so far. */
+/**
+ * The round $t = 1, 2, \dots$ about to be played: one more than the pulls so far.
+ *
+ * @param st The policy's statistics.
+ * @returns The round number $t$.
+ */
 const round = (st: ArmStatistics) => st.counts.reduce((a, b) => a + b, 0) + 1
+/**
+ * The empirical mean reward $\hat{\mu}_a$ of every arm, 0 for an arm never pulled.
+ *
+ * @param st The policy's statistics.
+ * @returns One mean per arm.
+ */
 const means = (st: ArmStatistics) => st.counts.map((c, i) => (c > 0 ? st.sums[i] / c : 0))
+/**
+ * The first arm never pulled.
+ *
+ * @param st The policy's statistics.
+ * @returns Its index, or $-1$ once every arm has been pulled.
+ */
 const firstUnpulled = (st: ArmStatistics) => st.counts.findIndex((c) => c === 0)
 
-/** A context-free policy on arm statistics: `choose(st, t, s)` picks in round t; `learn` records the reward. */
+/**
+ * A context-free policy on arm statistics: `choose(st, t, s)` picks in round $t$; `learn` records the reward, and
+ * `greedy` is the first arm of largest empirical mean.
+ *
+ * @param name The agent's readable name.
+ * @param choose The decision of a round from the statistics, the round number $t$ and the act's stream.
+ * @returns The agent, whose state is the `ArmStatistics`.
+ */
 function armAgent(
   name: string,
   choose: (st: ArmStatistics, t: number, s: Stream) => Decision<number>,
@@ -83,7 +149,15 @@ function armAgent(
   }
 }
 
-/** An index policy: pulls every arm once, then the arm with the largest index. */
+/**
+ * An index policy: pulls every arm once, in order, then the arm with the largest index (ties at random). While arms
+ * remain unpulled, the scores are $\infty$ for those and $-\infty$ for the rest.
+ *
+ * @param name The agent's readable name.
+ * @param index The index of every arm from the statistics and the round number $t$; called only once every arm has a
+ *   pull, so it may divide by the counts.
+ * @returns The agent, whose state is the `ArmStatistics`.
+ */
 function indexAgent(name: string, index: (st: ArmStatistics, t: number) => Float64Array) {
   return armAgent(name, (st, t, s) => {
     const first = firstUnpulled(st)
@@ -92,12 +166,57 @@ function indexAgent(name: string, index: (st: ArmStatistics, t: number) => Float
   })
 }
 
-/** Round robin over the arms (an A/B/n test): arm (t − 1) mod K. */
+/**
+ * Round robin over the arms (an A/B/n test): in round $t$ it pulls arm $(t - 1) \bmod K$, whatever the rewards. Its
+ * `scores` are the empirical means, and `greedy` the arm with the best of them. Regret grows linearly: the baseline of
+ * the bandit policies.
+ *
+ * @returns The agent, named `'uniform'`.
+ *
+ * @example Every arm gets the same share
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = uniformPolicy()
+ * const s = stream(1)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 300; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 300)
+ * print('greedy arm:', agent.greedy(g))
+ */
 export function uniformPolicy(): Agent<ArmStatistics, unknown, number> {
   return armAgent('uniform', (st, t) => ({ action: (t - 1) % st.counts.length, scores: means(st) }))
 }
 
-/** Explore then commit: m pulls of every arm in turn, then the best empirical mean for ever. */
+/**
+ * Explore then commit: $m$ pulls of every arm in turn (rounds $t \le mK$), then the arm of best empirical mean. The
+ * means are recomputed every round, so after exploring it plays greedily: it stays with its choice unless that arm's
+ * mean falls below another's.
+ *
+ * @param options The length of the exploration phase.
+ * @param options.m The pulls of every arm before committing.
+ * @returns The agent, named after $m$.
+ *
+ * @example Explore 10 pulls an arm, then commit
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = exploreThenCommit({ m: 10 })
+ * const s = stream(2)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 300; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 300)
+ */
 export function exploreThenCommit({ m = 50 }: { m?: number } = {}): Agent<ArmStatistics, unknown, number> {
   return armAgent(`explore-then-commit (m = ${m})`, (st, t, s) => {
     const k = st.counts.length
@@ -107,8 +226,31 @@ export function exploreThenCommit({ m = 50 }: { m?: number } = {}): Agent<ArmSta
 }
 
 /**
- * ε-greedy: with probability ε a uniformly random arm, otherwise the best empirical mean. With `decay: c` the
- * exploration rate is min(1, cK/t) (Auer, Cesa-Bianchi and Fischer, 2002, Machine Learning 47, §3).
+ * $\varepsilon$-greedy: every arm once, in order, then with probability $\varepsilon$ a uniformly random arm (which may
+ * be the best) and otherwise the best empirical mean. With `decay: c` the exploration rate is $\min(1, cK/t)$ (Auer,
+ * Cesa-Bianchi and Fischer, 2002, Machine Learning 47, §3). Its decision reports the probabilities
+ * $\varepsilon / K$ for every arm plus $1 - \varepsilon$ for the greedy one.
+ *
+ * @param options The exploration rate, fixed or decaying.
+ * @param options.epsilon The fixed exploration rate $\varepsilon$, used when `decay` is not given.
+ * @param options.decay The constant $c$ of the decaying rate $\min(1, cK/t)$; when given, `epsilon` is ignored.
+ * @returns The agent, named after its rate.
+ *
+ * @example Action counts of an epsilon-greedy agent
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = epsilonGreedy({ epsilon: 0.1 })
+ * const s = stream(3)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 500; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 500)
+ * print('probabilities now:', agent.act(g, 0, s).probabilities)
  */
 export function epsilonGreedy({ epsilon = 0.1, decay }: { epsilon?: number; decay?: number } = {}): Agent<
   ArmStatistics,
@@ -132,22 +274,67 @@ export function epsilonGreedy({ epsilon = 0.1, decay }: { epsilon?: number; deca
 }
 
 /**
- * UCB1 (Auer, Cesa-Bianchi and Fischer, 2002): the index μ̂_a + √(c ln t / n_a), c = 2 by default, for rewards in
- * [0, 1].
+ * UCB1 (Auer, Cesa-Bianchi and Fischer, 2002): every arm once, then the arm of largest index
+ * $\hat{\mu}_a + \sqrt{c \ln t / n_a}$, for rewards in $[0, 1]$; $\hat{\mu}_a$ is arm $a$'s empirical mean and $n_a$
+ * its pulls. The indices are the decision's `scores`.
+ *
+ * @param options The width of the confidence bonus.
+ * @param options.c The constant $c$ of the bonus; 2 is Auer et al.'s UCB1.
+ * @returns The agent, named `'UCB1'`.
+ *
+ * @example UCB1 finds the best of three Bernoulli arms
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = ucb1()
+ * const s = stream(4)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 500; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 500)
+ * print('indices now:', agent.act(g, 0, s).scores)
  */
 export function ucb1({ c = 2 }: { c?: number } = {}): Agent<ArmStatistics, unknown, number> {
   return indexAgent('UCB1', (st, t) => st.counts.map((n, i) => st.sums[i] / n + Math.sqrt((c * Math.log(t)) / n)))
 }
 
-/** KL(Bernoulli(p) ‖ Bernoulli(q)) in nats, with 0 log 0 = 0; infinite when q is 0 or 1 and p is not. */
+/**
+ * $\KL(\Bern(p) \,\Vert\, \Bern(q)) = p \log(p/q) + (1 - p) \log((1 - p)/(1 - q))$ in nats, with $0 \log 0 = 0$;
+ * infinite when $q$ is 0 or 1 and $p$ is not.
+ *
+ * @param p The success probability of the first distribution, in $[0, 1]$.
+ * @param q The success probability of the second, in $[0, 1]$.
+ * @returns The divergence, $\ge 0$ (0 when $p = q$).
+ *
+ * @example The divergence grows as q moves from p
+ * print('KL(0.5, 0.5) =', klBernoulli(0.5, 0.5))
+ * print('KL(0.5, 0.6) =', klBernoulli(0.5, 0.6))
+ * print('KL(0.5, 0.9) =', klBernoulli(0.5, 0.9))
+ * print('KL(0.5, 1) =', klBernoulli(0.5, 1))
+ */
 export function klBernoulli(p: number, q: number): number {
   const term = (x: number, y: number) => (x === 0 ? 0 : y === 0 ? Infinity : x * Math.log(x / y))
   return term(p, q) + term(1 - p, 1 - q)
 }
 
 /**
- * The KL-UCB index: the largest q ∈ [p, 1] with n · kl(p, q) ≤ level (Garivier and Cappé, 2011, COLT), by bisection to
- * 1e-10.
+ * The KL-UCB index: the largest $q \in [p, 1]$ with $n \KL(p, q) \le \text{level}$ (Garivier and Cappé, 2011, COLT),
+ * where $\KL$ is `klBernoulli`, by bisection to $10^{-10}$ (at most 60 halvings).
+ *
+ * @param p The arm's empirical mean, in $[0, 1]$.
+ * @param n The arm's number of pulls.
+ * @param level The exploration level, $\ln t$ for KL-UCB.
+ * @returns The index $q$: 1 when even $q = 1$ is within the level, else the bisection's lower end.
+ *
+ * @example The index shrinks towards the mean as pulls accumulate
+ * const level = Math.log(1000)
+ * print('n = 10:', klUcbIndex(0.5, 10, level))
+ * print('n = 100:', klUcbIndex(0.5, 100, level))
+ * print('n = 1000:', klUcbIndex(0.5, 1000, level))
  */
 export function klUcbIndex(p: number, n: number, level: number): number {
   let lo = p
@@ -161,7 +348,30 @@ export function klUcbIndex(p: number, n: number, level: number): number {
   return lo
 }
 
-/** KL-UCB for rewards in [0, 1]: the index `klUcbIndex(μ̂_a, n_a, ln t + c ln ln t)`, c = 0 by default. */
+/**
+ * KL-UCB for rewards in $[0, 1]$ (Garivier and Cappé, 2011): every arm once, then the arm of largest index
+ * `klUcbIndex` $(\hat{\mu}_a, n_a, \ln t + c \ln \ln t)$, with $\hat{\mu}_a$ arm $a$'s empirical mean and $n_a$ its
+ * pulls. Asymptotically optimal for Bernoulli arms.
+ *
+ * @param options The exploration level.
+ * @param options.c The constant $c$ of the $\ln \ln t$ term (applied from $t = 2$); 0 drops the term.
+ * @returns The agent, named `'KL-UCB'`.
+ *
+ * @example KL-UCB on three Bernoulli arms
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = klUcb()
+ * const s = stream(5)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 500; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 500)
+ */
 export function klUcb({ c = 0 }: { c?: number } = {}): Agent<ArmStatistics, unknown, number> {
   return indexAgent('KL-UCB', (st, t) => {
     const level = Math.log(t) + (c > 0 && t > 1 ? c * Math.log(Math.log(t)) : 0)
@@ -171,7 +381,29 @@ export function klUcb({ c = 0 }: { c?: number } = {}): Agent<ArmStatistics, unkn
 
 /**
  * Thompson sampling for Bernoulli rewards (Thompson, 1933, Biometrika 25; Agrawal and Goyal, 2012, COLT): draw
- * θ_a ~ Beta(α + s_a, β + n_a − s_a) and pull the largest. Rewards outside {0, 1} are used as fractional successes.
+ * $\theta_a \sim \Beta(\alpha + s_a, \beta + n_a - s_a)$ for every arm, with $s_a$ its reward sum and $n_a$ its pulls,
+ * and pull the largest draw. The draws are the decision's `scores`. Rewards in $(0, 1)$ count as fractional successes;
+ * a reward above 1 can make the second parameter non-positive.
+ *
+ * @param options The $\Beta(\alpha, \beta)$ prior of every arm's success probability.
+ * @param options.alpha The prior's $\alpha$: pseudo-successes.
+ * @param options.beta The prior's $\beta$: pseudo-failures.
+ * @returns The agent, named `'Thompson sampling'`.
+ *
+ * @example Thompson sampling on three Bernoulli arms
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = thompsonBernoulli()
+ * const s = stream(6)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 500; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 500)
  */
 export function thompsonBernoulli({ alpha = 1, beta = 1 }: { alpha?: number; beta?: number } = {}): Agent<
   ArmStatistics,
@@ -185,8 +417,31 @@ export function thompsonBernoulli({ alpha = 1, beta = 1 }: { alpha?: number; bet
 }
 
 /**
- * Thompson sampling for Gaussian rewards with known noise sd σ and a N(μ₀, τ₀²) prior on each mean: the posterior of
- * arm a is N(m_a, v_a) with 1/v_a = 1/τ₀² + n_a/σ², m_a = v_a (μ₀/τ₀² + s_a/σ²).
+ * Thompson sampling for Gaussian rewards with known noise standard deviation $\sigma$ and a $\Gauss(\mu_0, \tau_0^2)$
+ * prior on each mean: the posterior of arm $a$ is $\Gauss(m_a, v_a)$ with $1/v_a = 1/\tau_0^2 + n_a/\sigma^2$ and
+ * $m_a = v_a (\mu_0/\tau_0^2 + s_a/\sigma^2)$ ($n_a$ its pulls, $s_a$ its reward sum). It draws a mean from every
+ * posterior (the decision's `scores`) and pulls the largest.
+ *
+ * @param options The prior and the noise.
+ * @param options.priorMean The prior mean $\mu_0$ of every arm.
+ * @param options.priorSd The prior standard deviation $\tau_0$.
+ * @param options.noiseSd The rewards' noise standard deviation $\sigma$, taken as known.
+ * @returns The agent, named `'Gaussian Thompson sampling'`.
+ *
+ * @example Gaussian Thompson sampling on arms with noisy rewards
+ * const means = [0, 0.5, 1]
+ * const agent = thompsonGaussian({ noiseSd: 1 })
+ * const s = stream(7)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 500; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = means[a] + normal(s)
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 500)
  */
 export function thompsonGaussian({ priorMean = 0, priorSd = 1, noiseSd = 1 } = {}): Agent<
   ArmStatistics,
@@ -205,13 +460,36 @@ export function thompsonGaussian({ priorMean = 0, priorSd = 1, noiseSd = 1 } = {
 
 /** The state of EXP3: log-weights per arm, with counts and sums for display. */
 export interface Exp3State extends ArmStatistics {
+  /** The log-weight $\log w_a$ of each arm, 0 at the start. */
   logWeights: Float64Array
 }
 
 /**
- * EXP3 for adversarial rewards in [0, 1] (Auer, Cesa-Bianchi, Freund and Schapire, 2002, SIAM J. Comput. 32(1)):
- * p_a = (1 − γ) w_a / Σ w + γ/K, and the pulled arm's weight grows by exp(γ r̂ / K) with the importance-weighted reward
- * r̂ = r / p_a (p from the weights that chose the arm, which `learn` recomputes).
+ * EXP3 for adversarial rewards in $[0, 1]$ (Auer, Cesa-Bianchi, Freund and Schapire, 2002, SIAM J. Comput. 32(1)):
+ * arm $a$ is drawn with probability $p_a = (1 - \gamma) w_a / \sum_b w_b + \gamma/K$, and the pulled arm's weight grows
+ * by $\exp(\gamma \hat{r} / K)$ with the importance-weighted reward $\hat{r} = r / p_a$ ($p$ from the weights that
+ * chose the arm, which `learn` recomputes). The probabilities are the decision's `scores` and `probabilities`, and
+ * `greedy` is the arm of largest weight.
+ *
+ * @param options The exploration mix.
+ * @param options.gamma The share $\gamma$ of uniform exploration, in $(0, 1]$; it also scales the weight update.
+ * @returns The agent, named after $\gamma$.
+ *
+ * @example EXP3 shifts its weight to the best arm
+ * const means = [0.2, 0.5, 0.8]
+ * const agent = exp3({ gamma: 0.1 })
+ * const s = stream(8)
+ * let g = agent.init({ action: { kind: 'discrete', n: 3 } }, s)
+ * let total = 0
+ * for (let t = 0; t < 500; t++) {
+ *   const a = agent.act(g, 0, s).action
+ *   const r = uniform(s) < means[a] ? 1 : 0
+ *   total += r
+ *   g = agent.learn(g, { observation: 0, action: a, reward: r, next: 0, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('average reward:', total / 500)
+ * print('probabilities now:', agent.act(g, 0, s).probabilities)
  */
 export function exp3({ gamma = 0.1 }: { gamma?: number } = {}): Agent<Exp3State, unknown, number> {
   const probs = (lw: Float64Array) => {
@@ -254,16 +532,29 @@ export function exp3({ gamma = 0.1 }: { gamma?: number } = {}): Agent<Exp3State,
 
 // ── Linear policies ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The ridge statistics of a linear policy: V = λI + Σ x xᵀ (and its inverse) and b = Σ r x. */
+/**
+ * The ridge statistics of a linear policy: $\Vmat = \lambda\Imat + \sum \xvec\xvec^\top$ (kept as its inverse) and
+ * $\bvec = \sum r\xvec$, over the features $\xvec$ of the arms pulled and their rewards $r$.
+ */
 export interface RidgeState extends ArmStatistics {
-  /** V⁻¹, d × d row-major, kept by Sherman–Morrison updates. */
+  /** $\Vmat^{-1}$, $d \times d$ row-major, kept by Sherman–Morrison updates. */
   vInverse: Float64Array
+  /** $\bvec = \sum r\xvec$, $d$ values. */
   b: Float64Array
-  /** θ̂ = V⁻¹ b. */
+  /** The ridge estimate $\hat{\thetavec} = \Vmat^{-1}\bvec$, $d$ values. */
   theta: Float64Array
+  /** The feature dimension $d$. */
   dim: number
 }
 
+/**
+ * The ridge statistics before any pull: $\Vmat^{-1} = \Imat/\lambda$, $\bvec = \hat{\thetavec} = \zeros$. Throws
+ * `DomainError` unless the observation domain is a $K \times d$ box and the actions are discrete.
+ *
+ * @param env The environment: its observation shape gives $d$, its action domain $K$.
+ * @param lambda The ridge penalty $\lambda > 0$.
+ * @returns The initial `RidgeState`.
+ */
 function ridgeInit(env: EnvironmentShape, lambda: number): RidgeState {
   const o = env.observation
   if (o.kind !== 'box' || o.shape.length !== 2)
@@ -277,9 +568,25 @@ function ridgeInit(env: EnvironmentShape, lambda: number): RidgeState {
   return { ...stats(armCount(env)), vInverse, b: new Float64Array(d), theta: new Float64Array(d), dim: d }
 }
 
-/** Arm a's features: row a of the flat arms × d context. */
+/**
+ * Arm $a$'s features: row $a$ of the flat $K \times d$ context, as a view (not a copy).
+ *
+ * @param ctx The round's context, $Kd$ values row-major.
+ * @param a The arm.
+ * @param d The feature dimension.
+ * @returns Entries $ad$ to $ad + d - 1$ of `ctx`.
+ */
 const featuresOf = (ctx: Float64Array, a: number, d: number) => ctx.subarray(a * d, (a + 1) * d)
 
+/**
+ * The ridge statistics after a pull: $\Vmat^{-1}$ by a Sherman–Morrison rank-one update with the pulled arm's
+ * features $\xvec$, $\bvec$ plus $r\xvec$, and $\hat{\thetavec} = \Vmat^{-1}\bvec$ recomputed. The `learn` of the
+ * linear policies.
+ *
+ * @param st The statistics before the pull; not modified.
+ * @param tr The transition: `observation` is the context the arm was pulled in, `action` the arm, `reward` $r$.
+ * @returns The new statistics, with the pull counted.
+ */
 function ridgeUpdate(st: RidgeState, tr: Transition<Float64Array, number>): RidgeState {
   const d = st.dim
   const x = featuresOf(tr.observation, tr.action, d)
@@ -297,13 +604,29 @@ function ridgeUpdate(st: RidgeState, tr: Transition<Float64Array, number>): Ridg
   return { ...record(st, tr.action, r), vInverse: next, b, theta, dim: d }
 }
 
+/**
+ * The confidence width $\lVert \xvec \rVert_{\Amat} = \sqrt{\xvec^\top\Amat\xvec}$ (negative rounding clamped to 0).
+ *
+ * @param A The matrix $\Amat$ ($\Vmat^{-1}$), $d \times d$ row-major.
+ * @param x The features $\xvec$, $d$ values.
+ * @param d The feature dimension.
+ * @returns The width.
+ */
 function width(A: Float64Array, x: Float64Array, d: number): number {
   let s = 0
   for (let i = 0; i < d; i++) for (let j = 0; j < d; j++) s += x[i] * A[i * d + j] * x[j]
   return Math.sqrt(Math.max(0, s))
 }
 
-/** The score of every arm under parameter w: xₐᵀw (+ a per-arm bonus). */
+/**
+ * The score of every arm under parameter $\wvec$: $\xvec_a^\top\wvec$, plus a per-arm bonus when given.
+ *
+ * @param st The policy's state, for $K$ and $d$.
+ * @param ctx The round's context, $K \times d$ row-major.
+ * @param w The parameter $\wvec$, $d$ values.
+ * @param bonus A bonus of an arm's features, added to its score (the confidence width of LinUCB).
+ * @returns $K$ scores.
+ */
 function linearScores(st: RidgeState, ctx: Float64Array, w: Float64Array, bonus?: (x: Float64Array) => number) {
   const k = st.counts.length
   const d = st.dim
@@ -315,7 +638,29 @@ function linearScores(st: RidgeState, ctx: Float64Array, w: Float64Array, bonus?
 
 /**
  * LinUCB (Li, Chu, Langford and Schapire, 2010, WWW; the disjoint-free form of Abbasi-Yadkori et al., 2011): pull the
- * arm maximising xᵀθ̂ + α ‖x‖_{V⁻¹}, with the ridge estimate θ̂ = V⁻¹ b. α = 0 is the greedy ridge policy.
+ * arm maximising $\xvec^\top\hat{\thetavec} + \alpha \lVert \xvec \rVert_{\Vmat^{-1}}$, with the ridge estimate
+ * $\hat{\thetavec} = \Vmat^{-1}\bvec$ shared by all arms. $\alpha = 0$ is the greedy ridge policy. Needs a
+ * $K \times d$ box observation (the round's context), or `init` throws `DomainError`.
+ *
+ * @param options The exploration bonus and the ridge penalty.
+ * @param options.alpha The bonus weight $\alpha$.
+ * @param options.lambda The ridge penalty $\lambda$: $\Vmat$ starts at $\lambda\Imat$.
+ * @returns The agent, named after $\alpha$.
+ *
+ * @example LinUCB learns the parameter of a two-arm linear bandit
+ * const theta = [0.2, 0.7]
+ * const ctx = new Float64Array([1, 0, 0, 1])
+ * const agent = linUcb({ alpha: 1 })
+ * const s = stream(9)
+ * const observation = { kind: 'box', shape: [2, 2], low: [0, 0, 0, 0], high: [1, 1, 1, 1] }
+ * let g = agent.init({ observation, action: { kind: 'discrete', n: 2 } }, s)
+ * for (let t = 0; t < 200; t++) {
+ *   const a = agent.act(g, ctx, s).action
+ *   const r = theta[a] + 0.1 * normal(s)
+ *   g = agent.learn(g, { observation: ctx, action: a, reward: r, next: ctx, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('estimate of theta:', g.theta)
  */
 export function linUcb({ alpha = 1, lambda = 1 }: { alpha?: number; lambda?: number } = {}): Agent<
   RidgeState,
@@ -336,7 +681,30 @@ export function linUcb({ alpha = 1, lambda = 1 }: { alpha?: number; lambda?: num
 }
 
 /**
- * Linear Thompson sampling (Agrawal and Goyal, 2013, ICML): draw θ̃ ~ N(θ̂, v² V⁻¹) and pull the arm maximising xᵀθ̃.
+ * Linear Thompson sampling (Agrawal and Goyal, 2013, ICML): draw
+ * $\tilde{\thetavec} \sim \Gauss(\hat{\thetavec}, v^2 \Vmat^{-1})$ (through the Cholesky factor of $v^2\Vmat^{-1}$) and
+ * pull the arm maximising $\xvec^\top\tilde{\thetavec}$. Needs a $K \times d$ box observation, or `init` throws
+ * `DomainError`.
+ *
+ * @param options The posterior scale and the ridge penalty.
+ * @param options.v The scale $v$ of the posterior draw; larger explores more.
+ * @param options.lambda The ridge penalty $\lambda$: $\Vmat$ starts at $\lambda\Imat$.
+ * @returns The agent, named after $v$.
+ *
+ * @example Linear Thompson sampling on a two-arm linear bandit
+ * const theta = [0.2, 0.7]
+ * const ctx = new Float64Array([1, 0, 0, 1])
+ * const agent = linearThompson({ v: 0.5 })
+ * const s = stream(10)
+ * const observation = { kind: 'box', shape: [2, 2], low: [0, 0, 0, 0], high: [1, 1, 1, 1] }
+ * let g = agent.init({ observation, action: { kind: 'discrete', n: 2 } }, s)
+ * for (let t = 0; t < 200; t++) {
+ *   const a = agent.act(g, ctx, s).action
+ *   const r = theta[a] + 0.1 * normal(s)
+ *   g = agent.learn(g, { observation: ctx, action: a, reward: r, next: ctx, terminated: true, truncated: false })
+ * }
+ * print('pulls per arm:', g.counts)
+ * print('estimate of theta:', g.theta)
  */
 export function linearThompson({ v = 0.5, lambda = 1 }: { v?: number; lambda?: number } = {}): Agent<
   RidgeState,
@@ -375,7 +743,17 @@ export function linearThompson({ v = 0.5, lambda = 1 }: { v?: number; lambda?: n
 
 /**
  * The Lai–Robbins lower bound for Bernoulli arms (Lai and Robbins, 1985, Adv. Appl. Math. 6): every consistent policy
- * has E[R_T] ≥ (1 + o(1)) ln T · Σ_{a: μ_a < μ*} (μ* − μ_a) / kl(μ_a, μ*). Returns the constant and the bound at each t.
+ * has $\expect[R_T] \ge (1 + o(1)) \ln T \sum_{a : \mu_a < \mu^*} (\mu^* - \mu_a) / \KL(\mu_a, \mu^*)$, with $R_T$ the
+ * regret after $T$ rounds and $\KL$ the Bernoulli divergence (`klBernoulli`).
+ *
+ * @param means The arms' success probabilities $\mu_a$; $\mu^*$ is the largest.
+ * @param t The rounds $T$ to evaluate the bound at: a tensor or an array of numbers.
+ * @returns `constant`, the sum (the coefficient of $\ln T$), and `bound`, the constant times $\ln T$ at each `t`.
+ *
+ * @example The regret floor of three Bernoulli arms
+ * const { constant, bound } = laiRobbinsBound([0.2, 0.5, 0.8], [10, 100, 1000])
+ * print('constant:', constant)
+ * print('bound at T = 10, 100, 1000:', bound)
  */
 export function laiRobbinsBound(
   means: readonly number[],

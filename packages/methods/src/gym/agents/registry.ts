@@ -9,6 +9,7 @@ import * as dqn from './dqn'
 import * as planning from './planning'
 import * as tabular from './tabular'
 
+/** A registry table: entries of info kind `I`, keyed by factory or function name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'gym/agents')
 const fn = definer<FunctionInfo>('function', 'gym/agents')

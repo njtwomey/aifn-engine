@@ -1,21 +1,23 @@
 /**
- * The inverted pendulum (Gymnasium's `Pendulum-v1`): a uniform rod of mass m and length l on a frictionless pivot,
- * driven by a torque u. The angle θ is measured from upright (θ = 0 at the top, positive anticlockwise), so
+ * The inverted pendulum (Gymnasium's `Pendulum-v1`): a uniform rod of mass $m$ and length $l$ on a frictionless pivot,
+ * driven by a torque $u$. The angle $\theta$ is measured from upright ($\theta = 0$ at the top, positive
+ * anticlockwise), so
+ * $\ddot\theta = \frac{3g}{2l} \sin\theta + \frac{3}{m l^2} u - c \dot\theta$,
+ * with an optional viscous damping $c$ (0 in Gymnasium). The agent observes
+ * $(\cos\theta, \sin\theta, \dot\theta)$ and earns $-(\theta^2 + 0.1 \dot\theta^2 + 0.001 u^2)$ per step with
+ * $\theta$ wrapped to $[-\pi, \pi)$; an episode lasts 200 steps of $\Delta t = 0.05$ s.
  *
- *   θ̈ = (3g / 2l) sin θ + (3 / ml²) u − c θ̇,
+ * **Integrator.** One environment step is one classical RK4 step of size $\Delta t$ (`rungeKutta(…, 'rk4')` from
+ * `aifn-compute/dynamics/ode`), with $u$ held constant over the step, then $\dot\theta$ clipped to $\pm$`maxSpeed`.
+ * Gymnasium uses semi-implicit Euler ($\dot\theta \leftarrow \dot\theta + \Delta t\, \ddot\theta$, then
+ * $\theta \leftarrow \theta + \Delta t\, \dot\theta$), so trajectories agree only to first order in $\Delta t$, not
+ * exactly; RK4 conserves the undamped, unforced energy to $O(\Delta t^4)$ per unit time, which the tests check. The
+ * step is written with tensor primitives, so `model.transition` is differentiable in $\xvec$ and $\uvec$ (autodiff
+ * Jacobians for LQR, iLQR, MPC), and `step` calls that same transition.
  *
- * with an optional viscous damping c (0 in Gymnasium). The agent observes (cos θ, sin θ, θ̇) and earns
- * −(θ² + 0.1 θ̇² + 0.001 u²) per step with θ wrapped to [−π, π); an episode lasts 200 steps of dt = 0.05 s.
- *
- * **Integrator.** One environment step is one classical RK4 step of size dt (`rungeKutta(…, 'rk4')` from
- * `aifn-compute/dynamics/ode`), with u held constant over the step, then θ̇ clipped to ±`maxSpeed`. Gymnasium uses
- * semi-implicit Euler (θ̇ ← θ̇ + dt θ̈, then θ ← θ + dt θ̇), so trajectories agree to O(dt) per step, not exactly; RK4
- * conserves the undamped, unforced energy to O(dt⁴) per unit time, which the tests check. The step is written with
- * tensor primitives, so `model.transition` is differentiable in x and u (autodiff Jacobians for LQR, iLQR, MPC), and
- * `step` calls that same transition.
- *
- * Actions are a box [−maxTorque, maxTorque] (a length-1 `Float64Array`), or, with `torques: n`, the n evenly spaced
- * torque levels of that interval as a discrete domain, for agents that need discrete actions.
+ * Actions are a box $[-u_{\max}, u_{\max}]$ ($u_{\max}$ the `maxTorque`; a length-1 `Float64Array`), or, with
+ * `torques: n`, the $n$ evenly spaced torque levels of that interval as a discrete domain, for agents that need discrete
+ * actions.
  *
  * Reference: Gymnasium, `gymnasium/envs/classic_control/pendulum.py` (Farama Foundation, 2023).
  */
@@ -51,9 +53,11 @@ import {
 } from 'aifn-compute/foundation/tensor'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** The pendulum's state: the angle θ from upright (radians, not wrapped) and the angular velocity θ̇ (rad/s). */
+/** The pendulum's state: the angle $\theta$ and the angular velocity $\dot\theta$. */
 export interface PendulumState {
+  /** The angle $\theta$ from upright, anticlockwise, in radians (not wrapped). */
   theta: number
+  /** The angular velocity $\dot\theta$, in rad/s. */
   thetaDot: number
 }
 
@@ -62,42 +66,55 @@ export type PendulumAction = Float64Array | number
 
 /** Options of `pendulumEnvironment`; the defaults are Gymnasium's `Pendulum-v1`. */
 export interface PendulumOptions {
-  /** Gravity g (m/s², default 10). */
+  /** Gravity $g$ (m/s$^2$, default 10). */
   g?: number
-  /** Rod mass m (kg, default 1). */
+  /** Rod mass $m$ (kg, default 1). */
   mass?: number
-  /** Rod length l (m, default 1). */
+  /** Rod length $l$ (m, default 1). */
   length?: number
-  /** Viscous damping c in θ̈ (1/s, default 0). */
+  /** Viscous damping $c$ in $\ddot\theta$ (1/s, default 0). */
   damping?: number
-  /** Torque limit (N·m, default 2): actions are clipped to [−maxTorque, maxTorque]. */
+  /** Torque limit $u_{\max}$ (N m, default 2): actions are clipped to $[-u_{\max}, u_{\max}]$. */
   maxTorque?: number
-  /** Speed limit (rad/s, default 8): θ̇ is clipped to it after each step. */
+  /** Speed limit (rad/s, default 8): $\dot\theta$ is clipped to $\pm$ this after each step. */
   maxSpeed?: number
-  /** Time step dt (s, default 0.05). */
+  /** Time step $\Delta t$ (s, default 0.05). */
   dt?: number
   /** Episode length in steps (default 200). */
   horizon?: number
   /** Discount the problem is posed with (default 0.99). */
   gamma?: number
-  /** Discrete torque levels (n ≥ 2, evenly spaced on [−maxTorque, maxTorque]); 0 or absent for a box action. */
+  /**
+   * The number $n \ge 2$ of discrete torque levels, evenly spaced on $[-u_{\max}, u_{\max}]$; 0 or absent for a box
+   * action.
+   */
   torques?: number
-  /** A fixed start state; by default θ ~ U[−π, π) and θ̇ ~ U[−1, 1), as in Gymnasium. */
+  /**
+   * A fixed start state; by default $\theta \sim \Unif[-\pi, \pi)$ and $\dot\theta \sim \Unif[-1, 1)$, as in
+   * Gymnasium.
+   */
   start?: PendulumState
 }
 
 /** The physical constants of a pendulum, resolved from its options. */
 export interface PendulumParameters {
+  /** Gravity $g$ (m/s$^2$). */
   g: number
+  /** Rod mass $m$ (kg). */
   mass: number
+  /** Rod length $l$ (m). */
   length: number
+  /** Viscous damping $c$ (1/s). */
   damping: number
+  /** Torque limit $u_{\max}$ (N m). */
   maxTorque: number
+  /** Speed limit on $\lvert \dot\theta \rvert$ (rad/s). */
   maxSpeed: number
+  /** Time step $\Delta t$ (s). */
   dt: number
-  /** Gravity's gain 3g / 2l in θ̈ (1/s²). */
+  /** Gravity's gain $3g / 2l$ in $\ddot\theta$ (1/s$^2$). */
   gravityGain: number
-  /** The torque's gain 3 / ml² in θ̈ (1/(kg·m²)). */
+  /** The torque's gain $3 / m l^2$ in $\ddot\theta$ (1/(kg m$^2$)). */
   torqueGain: number
   /** The torque of each discrete action, or null for a box action. */
   levels: readonly number[] | null
@@ -105,19 +122,37 @@ export interface PendulumParameters {
 
 /** A pendulum environment, with its parameters for model-based agents and the lab. */
 export interface PendulumEnvironment extends Environment<PendulumState, Float64Array, PendulumAction> {
+  /** The constants it was built with. */
   readonly parameters: PendulumParameters
+  /**
+   * The differentiable dynamics on $\xvec = (\theta, \dot\theta)$ and $\uvec = (u)$: one RK4 step and the reward.
+   */
   readonly model: DynamicsModel<PendulumState>
+  /** The drawing of the rod, with $\theta$ (wrapped) and $\dot\theta$ as series. */
   readonly render: PendulumRender<PendulumState>
 }
 
 const TWO_PI = 2 * Math.PI
 
-/** θ wrapped to [−π, π). */
+/**
+ * An angle wrapped to $[-\pi, \pi)$.
+ *
+ * @param theta The angle $\theta$, in radians.
+ * @returns $\theta - 2\pi k$ for the integer $k$ that puts it in $[-\pi, \pi)$.
+ *
+ * @example Angles past a half turn
+ * print('wrap(1.5 pi) =', wrapAngle(1.5 * Math.PI))
+ * print('wrap(pi) =', wrapAngle(Math.PI), '; wrap(-pi) =', wrapAngle(-Math.PI))
+ * print('wrap(7) =', wrapAngle(7))
+ */
 export const wrapAngle = (theta: number): number => theta - TWO_PI * Math.floor((theta + Math.PI) / TWO_PI)
 
 /**
- * θ wrapped to [−π, π) as a value: θ minus a multiple of 2π read from its primal, so the derivative is 1 (the wrap is
- * piecewise constant).
+ * $\theta$ wrapped to $[-\pi, \pi)$ as a value: $\theta$ minus a multiple of $2\pi$ read from its primal, so the
+ * derivative is 1 (the shift is piecewise constant).
+ *
+ * @param theta The angle $\theta$ in radians: a number, or a scalar value that may be traced.
+ * @returns The wrapped angle, `theta` itself when it is already in range.
  */
 function wrapValue(theta: Value): Value {
   const raw = unwrap(theta)
@@ -127,14 +162,52 @@ function wrapValue(theta: Value): Value {
 }
 
 /**
- * The specific mechanical energy ½θ̇² + (3g / 2l) cos θ (the energy divided by the rod's moment of inertia ml²/3):
- * constant without torque and damping, (3g / 2l) at rest upright and −(3g / 2l) at rest hanging.
+ * The specific mechanical energy $\frac12 \dot\theta^2 + \frac{3g}{2l} \cos\theta$ (the energy divided by the rod's
+ * moment of inertia $m l^2 / 3$): constant without torque and damping, $3g / 2l$ at rest upright and $-3g / 2l$ at rest
+ * hanging.
+ *
+ * @param p The pendulum's constants (its `parameters`); only `gravityGain` is read.
+ * @param s The state.
+ * @returns The energy, in 1/s$^2$.
+ *
+ * @example Energy is conserved by the free swing
+ * const env = pendulumEnvironment({ start: { theta: 1, thetaDot: 0 } })
+ * const s = stream(0)
+ * let { state } = env.reset(s)
+ * print('at the start', pendulumEnergy(env.parameters, state))
+ * for (let k = 0; k < 20; k++) state = env.step(state, Float64Array.of(0), s).state
+ * print('after 20 steps', pendulumEnergy(env.parameters, state))
+ * print('upright at rest', pendulumEnergy(env.parameters, { theta: 0, thetaDot: 0 }))
  */
 export function pendulumEnergy(p: PendulumParameters, s: PendulumState): number {
   return 0.5 * s.thetaDot * s.thetaDot + p.gravityGain * Math.cos(s.theta)
 }
 
-/** The pendulum of Gymnasium's `Pendulum-v1`, stepped by RK4 on compute's ODE solver (module docs). */
+/**
+ * The pendulum of Gymnasium's `Pendulum-v1`, stepped by RK4 on compute's ODE solver (see the file's introduction).
+ * Throws `DomainError` when `torques` is neither 0 nor an integer of at least 2, and `step` throws for a number action
+ * on a box pendulum (`TypeError`) or an index with no torque level (`DomainError`).
+ *
+ * @param options The physical constants, the action domain, the start and the episode; every field defaults to
+ *   Gymnasium's value.
+ * @returns The environment: state $(\theta, \dot\theta)$, observation $(\cos\theta, \sin\theta, \dot\theta)$, never
+ *   terminated (the rollout truncates it at `horizon`), with its `parameters`, a dynamics `model` and a `render`.
+ *
+ * @example Full torque from hanging at rest
+ * const env = pendulumEnvironment({ start: { theta: Math.PI, thetaDot: 0 } })
+ * const s = stream(0)
+ * const { state, observation } = env.reset(s)
+ * print('observation', observation)
+ * const a = env.step(state, Float64Array.of(2), s)
+ * const b = env.step(a.state, Float64Array.of(2), s)
+ * print('rewards', a.reward, b.reward)
+ * print('state after two steps', b.state)
+ *
+ * @example Discrete torque levels
+ * const env = pendulumEnvironment({ torques: 5 })
+ * print('actions', env.action.names)
+ * print('torques', env.parameters.levels)
+ */
 export function pendulumEnvironment(options: PendulumOptions = {}): PendulumEnvironment {
   const {
     g = 10,
@@ -171,7 +244,7 @@ export function pendulumEnvironment(options: PendulumOptions = {}): PendulumEnvi
   }
   const { gravityGain: a, torqueGain: b } = parameters
 
-  /** One RK4 step from x = (θ, θ̇) under torque u (length 1), then the speed clip. Primitives only: traceable. */
+  /** One RK4 step from $\xvec = (\theta, \dot\theta)$ under torque $\uvec$ (length 1), then the speed clip. */
   function transition(x: Value, u: Value): Value {
     const torque = clip(get(u, 0), -maxTorque, maxTorque)
     const rhs = (_t: number, y: Tensor) => {
@@ -183,7 +256,7 @@ export function pendulumEnvironment(options: PendulumOptions = {}): PendulumEnvi
     return stack([get(y, 0), clip(get(y, 1), -maxSpeed, maxSpeed)])
   }
 
-  /** −(θ² + 0.1 θ̇² + 0.001 u²) with θ wrapped and u clipped, at the state the action is taken in. */
+  /** $-(\theta^2 + 0.1 \dot\theta^2 + 0.001 u^2)$ with $\theta$ wrapped and $u$ clipped, at the state acted in. */
   function reward(x: Value, u: Value): Value {
     const torque = clip(get(u, 0), -maxTorque, maxTorque)
     return neg(add(add(square(wrapValue(get(x, 0))), mul(0.1, square(get(x, 1)))), mul(0.001, square(torque))))
