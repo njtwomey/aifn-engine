@@ -3,12 +3,20 @@
  * `Algorithm` in time whose state reports the solution, its mass and the scheme's stability number against its limit
  * (CFL).
  *
- * - `heatEquation` (explicit, implicit, Crank–Nicolson; Dirichlet, Neumann or periodic ends).
- * - `transportEquation` (upwind, Lax–Friedrichs, Lax–Wendroff).
- * - `waveEquation` (leapfrog, with the discrete energy).
- * - `fokkerPlanck` (conservative, upwinded flux form with reflecting ends).
- * - `gridPoints` for the grid's coordinates.
- * - `densityEvolution`: the density of a scalar SDE dX = a(X) dt + σ(X) dW by its Fokker–Planck equation.
+ * - Diffusion: `heatEquation` (explicit, implicit or Crank–Nicolson, the `TimeScheme`; Dirichlet, Neumann or periodic
+ *   ends, the `Boundary`), with `HeatOptions`.
+ * - Advection: `transportEquation` (upwind, Lax–Friedrichs or Lax–Wendroff), with `TransportOptions`.
+ * - Waves: `waveEquation` (leapfrog), with `WaveOptions`; its `WaveState` adds the previous level and the discrete
+ *   energy.
+ * - Densities: `fokkerPlanck` (conservative, exponentially fitted flux with reflecting ends), with
+ *   `FokkerPlanckOptions`, and `densityEvolution`, the density of a scalar SDE
+ *   $dX = a(X) \, dt + \sigma(X) \, dW$ by its Fokker–Planck equation.
+ * - Grids and profiles: a `Grid1` of $n$ points on $[a, b]$, `gridPoints` for its coordinates, and a `Profile` (values
+ *   or a function of $x$) for the initial condition.
+ * - `pdeAlgorithms`: the registry entries of the five solvers.
+ *
+ * Every state is a `PdeState`, whose `Stability` reports the stability number (rather than refusing an unstable step)
+ * and whose `diverged` flags a non-finite solution. Invalid settings throw `DomainError`.
  */
 
 export { densityEvolution } from './density'

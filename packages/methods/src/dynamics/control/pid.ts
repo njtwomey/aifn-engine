@@ -1,6 +1,11 @@
 /**
  * A discrete PID controller closing a loop around a SISO plant, simulated as a traceable algorithm: filtered
  * derivative, actuator limits with anti-windup, set-point and load-disturbance inputs, and an optional input delay.
+ *
+ * The controller is the parallel form $u = k_p e + k_i \int e \, dt + k_d \dot{e}$, sampled every $\Delta t$ with
+ * the input held between samples, so a continuous plant is advanced exactly by its zero-order-hold discretisation
+ * (Åström and Murray, 2021, "Feedback Systems", 2nd ed., §11.5; Åström and Hägglund, 2006, "Advanced PID Control",
+ * for the anti-windup schemes).
  */
 
 import type { LtiSystem, Status, VectorLike } from 'aifn-compute/foundation/contracts'
@@ -9,80 +14,137 @@ import type { Algorithm } from 'aifn-compute/foundation/trace'
 import { discretise, toStateSpace } from 'aifn-compute/systems'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** PID gains: u = k_p e + k_i ∫e dt + k_d de/dt, the derivative filtered by a first-order lag of time constant T_f. */
+/**
+ * PID gains: $u = k_p e + k_i \int e \, dt + k_d \, de/dt$, the derivative filtered by a first-order lag of time
+ * constant $T_f$.
+ */
 export type PidGains = {
+  /** The proportional gain $k_p$. */
   kp: number
+  /** The integral gain $k_i$. Default 0: no integral action. */
   ki?: number
+  /** The derivative gain $k_d$. Default 0: no derivative action. */
   kd?: number
-  /** Derivative filter time constant T_f (the derivative is k_d s/(1 + T_f s)). Default 0: unfiltered. */
+  /** Derivative filter time constant $T_f$ (the derivative is $k_d s/(1 + T_f s)$). Default 0: unfiltered. */
   filter?: number
 }
 
 /** How the integrator is kept from winding up while the actuator saturates. */
 export type AntiWindup = 'none' | 'clamp' | 'back-calculation'
 
-/** Options for `pid`. */
+/** Options for `pidLoop`. */
 export type PidOptions = {
-  /** Controller sampling interval (the plant is advanced exactly between samples with the input held). */
+  /**
+   * Controller sampling interval $\Delta t$ (the plant is advanced exactly between samples with the input held). A
+   * discrete plant must have this sampling interval.
+   */
   dt: number
-  /** Set point r(t): a constant or a function of time. Default 1 (a unit step). */
+  /** Set point $r(t)$: a constant or a function of time. Default 1 (a unit step). */
   setpoint?: number | ((t: number) => number)
-  /** Load disturbance d(t) added to the plant input. Default 0. */
+  /** Load disturbance $d(t)$ added to the plant input, read at each sample and held. Default 0. */
   disturbance?: number | ((t: number) => number)
-  /** Actuator limits; the applied input is clipped to [uMin, uMax] and `saturated` reports when. Default ±∞. */
+  /** Lower actuator limit; the applied input is clipped to $[u_{\min}, u_{\max}]$. Default $-\infty$. */
   uMin?: number
+  /** Upper actuator limit. Default $\infty$. */
   uMax?: number
   /** Anti-windup scheme. Default `clamp` (conditional integration). */
   antiWindup?: AntiWindup
-  /** Tracking time constant T_t for back-calculation. Default √(T_i T_d) or T_i when k_d = 0 (Åström & Hägglund). */
+  /**
+   * Tracking time constant $T_t$ for back-calculation. Default $\sqrt{T_i T_d}$, or $T_i$ when $k_d = 0$
+   * (Åström and Hägglund), where $T_i = k_p/k_i$ and $T_d = k_d/k_p$; 1 when there is no integral action.
+   */
   tracking?: number
   /** Derivative on the error (default) or on the measurement only (no derivative kick on set-point steps). */
   derivativeOn?: 'error' | 'measurement'
-  /** A pure delay τ on the plant input, rounded to whole samples. Default 0. */
+  /**
+   * A pure delay $\tau$ on the plant input, rounded to whole samples. Default 0. (The plant's own `delay` field is not
+   * read.)
+   */
   delay?: number
-  /** Stop at this time. */
+  /** Stop at this time (default never). */
   tEnd?: number
 }
 
-/** The state of `pidLoop`: `t` counts samples (the runner's `Status`), `time` is t · dt. */
+/** The state of `pidLoop`: `t` counts samples (the runner's `Status`), `time` is $t \, \Delta t$. */
 export type PidState = Status & {
   /** Samples taken. */
   t: number
   /** The current time. */
   time: number
-  /** Plant state x. */
+  /** Plant state $\xvec$ (of its discrete state-space realisation). */
   x: Vector
-  /** Measured output y (the plant's first output). */
+  /** Measured output $y$ (the plant's first output). */
   y: number
-  /** Set point r and error e = r − y. */
+  /** Set point $r$. */
   r: number
+  /** Error $e = r - y$. */
   e: number
-  /** The P, I and D contributions and their unsaturated sum. */
+  /** The P contribution $k_p e$. */
   proportional: number
+  /** The I contribution: the integrator's state, $k_i \int e \, dt$ less what anti-windup removed. */
   integral: number
+  /** The filtered D contribution. */
   derivative: number
+  /** The unsaturated sum of the three contributions. */
   uRaw: number
-  /** The applied (clipped) input u, held until the next sample. */
+  /** The applied (clipped) input $u$, held until the next sample. */
   u: number
+  /** Whether the actuator limits clipped `uRaw`. */
   saturated: boolean
   /** Computed inputs still in the delay line (length = delay in samples), oldest first. */
   pending: number[]
-  /** The previous derivative input (e or −y), for the difference quotient. */
+  /** The previous derivative input ($e$ or $-y$), for the difference quotient. */
   previousD: number
+  /** True once the output or the plant state is not finite. */
   diverged: boolean
 }
 
+/**
+ * A set point or disturbance at time `t`.
+ *
+ * @param f A constant, a function of time, or undefined.
+ * @param t The time.
+ * @param fallback The value when `f` is undefined.
+ * @returns The value.
+ */
 const value = (f: number | ((t: number) => number) | undefined, t: number, fallback: number) =>
   f === undefined ? fallback : typeof f === 'function' ? f(t) : f
 
 /**
- * A PID loop around a SISO plant (continuous or discrete state space; the first input and output are used), in the
- * parallel form u = k_p e + k_i ∫e + k_d ė with the derivative filtered by 1/(1 + T_f s) and discretised by backward
- * Euler: D_k = (T_f D_{k−1} + k_d (e_k − e_{k−1})) / (T_f + dt) (Åström & Murray, 2021, "Feedback Systems", 2nd ed.,
- * §11.5). The integrator is updated by forward Euler after the output is computed. Anti-windup:
+ * A PID loop around a SISO plant (continuous or discrete, in any representation; the first input and output are
+ * used), in the parallel form $u = k_p e + k_i \int e \, dt + k_d \dot{e}$ with the derivative filtered by
+ * $1/(1 + T_f s)$ and discretised by backward Euler:
+ * $D_k = (T_f D_{k-1} + k_d (e_k - e_{k-1})) / (T_f + \Delta t)$, with $D_0 = 0$ (Åström and Murray, 2021,
+ * "Feedback Systems", 2nd ed., §11.5). The integrator is updated by forward Euler after the output is computed.
+ * Anti-windup:
  * - `clamp`: skip the integrator update while the actuator is saturated and the error would drive it further in;
- * - `back-calculation`: add (u − u_raw)/T_t to the integrator's rate, bleeding it off while saturated.
- * `init` takes `{ x0 }` (default rest).
+ * - `back-calculation`: add $(u - u_{\text{raw}})/T_t$ to the integrator's rate, bleeding it off while saturated;
+ * - `none`: integrate regardless.
+ * `init` takes `{ x0 }` (default rest). Throws `DomainError` when $\Delta t$ is not positive, when a discrete plant
+ * has another sampling interval, or when the plant has direct feedthrough ($\Dmat \ne 0$, an algebraic loop).
+ *
+ * @param plant The plant: a SISO `LtiSystem`, continuous (discretised by zero-order hold at $\Delta t$) or discrete.
+ * @param gains The gains $k_p$, $k_i$, $k_d$ and the derivative filter $T_f$.
+ * @param options The sampling interval, set point, disturbance, actuator limits, anti-windup, delay and end time.
+ * @returns The loop as an `Algorithm`: each step advances the plant one sample and recomputes the controller.
+ *
+ * @example PI control of a first-order lag: the closed-loop step response
+ * // The plant 1/(s + 1) as a transfer function.
+ * const repr = { form: 'tf', b: tensor([1]), a: tensor([1, 1]) }
+ * const plant = { kind: 'lti', domain: 'continuous', dt: null, delay: 0, repr }
+ * const loop = pidLoop(plant, { kp: 2, ki: 2 }, { dt: 0.1 })
+ * const tr = trace(loop, {}, 50, { every: 5, record: { y: (s) => s.y, u: (s) => s.u } })
+ * print('t =', Array.from(tr.index, (k) => k * 0.1))
+ * print('y =', tr.series.y)
+ * print('u =', tr.series.u)
+ *
+ * @example Actuator limits: clamping the integrator against windup
+ * const repr = { form: 'tf', b: tensor([1]), a: tensor([1, 1]) }
+ * const plant = { kind: 'lti', domain: 'continuous', dt: null, delay: 0, repr }
+ * for (const antiWindup of ['none', 'clamp']) {
+ *   const s = run(pidLoop(plant, { kp: 2, ki: 4 }, { dt: 0.1, uMax: 1.2, antiWindup }), {}, 40)
+ *   print(antiWindup, ' y at t = 4:', s.y, ' integral:', s.integral)
+ * }
  */
 export function pidLoop(
   plant: LtiSystem,

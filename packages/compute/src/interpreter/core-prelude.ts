@@ -1,8 +1,11 @@
 /**
- * The core prelude, in namespaces that mirror aifn's module tree. `math` is generated from aifn's primitive registry
- * (every elementwise primitive of the tensor, special-function and neural-network modules), so a new primitive appears
- * without a new line; `array`, `random`, `stats`, `linalg` and `signal` wrap their modules by hand. Everything takes
- * numbers, plain arrays or tensors and returns numbers, plain (nested) arrays or plain objects of them.
+ * The core prelude, in namespaces that mirror aifn's module tree, and the root random stream of a run.
+ *
+ * `math` is generated from aifn's primitive registry (every elementwise primitive of the tensor, special-function and
+ * neural-network modules), so a new primitive appears without a new line; `array`, `random`, `stats`, `linalg` and
+ * `signal` wrap their modules by hand. Everything takes numbers, plain arrays or tensors and returns numbers, plain
+ * (nested) arrays or plain objects of them. Each random entry draws from `ctx.draw()`, a fresh child of the run's root
+ * stream, so the draws depend on the seed and the call order only.
  */
 import { convolve } from 'aifn-compute/foundation/convolution'
 import { rfft, rfftfreq } from 'aifn-compute/foundation/fourier'
@@ -148,13 +151,25 @@ export const CORE_NAMESPACES: readonly Namespace[] = [
   },
 ]
 
-/** A program's arguments as aifn values, through `f`, and back to program data. */
+/**
+ * An entry's implementation from an aifn function: the program's arguments as aifn values, through `f`, and back to
+ * program data.
+ *
+ * @param name The entry's qualified name, used in error messages (`'math.sin: argument 1'`).
+ * @param f The aifn function, taking the arguments as numbers or tensors.
+ * @returns The implementation, which ignores the context.
+ */
 const lift =
   (name: string, f: (...v: Value[]) => Value) =>
   (_ctx: Context, ...args: unknown[]) =>
     toData(f(...args.map((a, i) => toValue(a, `${name}: argument ${i + 1}`))))
 
-/** One `math` entry per registered elementwise primitive of the maths modules. */
+/**
+ * One `math` entry per registered elementwise primitive of the maths modules (less `MATH_EXCLUDED`), its parameters
+ * named by arity and its doc the primitive's summary, else `MATH_DOCS`, else a generic line.
+ *
+ * @returns The entries, in the registry's order.
+ */
 function mathFromRegistry(): PreludeEntry[] {
   return registry
     .list()
@@ -170,7 +185,14 @@ function mathFromRegistry(): PreludeEntry[] {
     }))
 }
 
-/** A `math` entry from a plain scalar function mapped elementwise (what has no primitive: tan, floor, …). */
+/**
+ * A `math` entry from a plain scalar function mapped elementwise (what has no primitive: `tan`, `floor`, …).
+ *
+ * @param name The entry's name in `math`.
+ * @param doc Its one-sentence doc.
+ * @param f The function of one number.
+ * @returns The entry, of one parameter `x`.
+ */
 function scalar(name: string, doc: string, f: (x: number) => number): PreludeEntry {
   return {
     namespace: 'math',
@@ -183,7 +205,14 @@ function scalar(name: string, doc: string, f: (x: number) => number): PreludeEnt
   }
 }
 
-/** An entry of a namespace. */
+/**
+ * A maker of entries of one namespace: the returned function takes the entry's name, its parameters as a `params`
+ * spec, its doc, what it returns in words, and its implementation.
+ *
+ * @param namespace The namespace, or null for top-level entries.
+ * @param source The aifn module the entries wrap.
+ * @returns The maker.
+ */
 const def =
   (namespace: string | null, source: string) =>
   (
@@ -202,9 +231,20 @@ const def =
     impl: impl as PreludeEntry['impl'],
   })
 
+/**
+ * A program's axis argument: undefined or null means all elements.
+ *
+ * @param axis The argument as the program gave it.
+ * @returns The axis, or null for a reduction over every element.
+ */
 const axisOf = (axis: unknown) => (axis === undefined || axis === null ? null : (axis as number))
 
-/** A reduction over all elements (a number) or along an axis (an array). */
+/**
+ * An entry's implementation from a reduction: over all elements (a number) or along an axis (an array).
+ *
+ * @param f The reduction, given the input as a tensor and the axis (null for all elements).
+ * @returns The implementation, of the arguments `x` and an optional `axis`.
+ */
 const reduction =
   (f: (x: Value, axis: number | null) => Value) =>
   (_ctx: Context, x: unknown, axis?: unknown): unknown =>
@@ -347,10 +387,23 @@ const ARRAY: PreludeEntry[] = [
   arr('cumsum', 'x', 'Running sums.', 'number[]', (_c, x: unknown) => toData(cumsum(toTensor(x)))),
 ]
 
-/** The draws' size argument: omitted for one number, a length or a shape for an array. */
+/**
+ * The draws' size argument: omitted for one number, a length or a shape for an array.
+ *
+ * @param n The program's size argument: undefined or null, a length, or a shape.
+ * @param what The entry's name, used in error messages.
+ * @returns The shape, or undefined for a single draw.
+ */
 const sizeOf = (n: unknown, what: string) => (n === undefined || n === null ? undefined : toShape(n, what))
 
-/** A draw of `shape` (a number when no shape) from a sampler on a stream. */
+/**
+ * A draw of `shape` (a number when no shape) from a sampler on a stream, as program data.
+ *
+ * @param shape The shape of the draw, or undefined for one number.
+ * @param draw The sampler, given `{ shape }` or undefined, as the sampling functions of
+ *   `aifn-compute/foundation/random` take their options.
+ * @returns A number, or a nested array of the given shape.
+ */
 function sampled(shape: number[] | undefined, draw: (options: { shape: number[] } | undefined) => unknown): unknown {
   return toData(draw(shape === undefined ? undefined : { shape }) as Value)
 }
@@ -467,6 +520,13 @@ const STATS_ENTRIES: PreludeEntry[] = [
 
 const lin = def('linalg', LINALG)
 const lt = def('linalg', TENSOR)
+/**
+ * A program's matrix (or vector) argument as a tensor.
+ *
+ * @param x The argument.
+ * @param what The entry's name, used in error messages.
+ * @returns The tensor.
+ */
 const mat = (x: unknown, what: string): Tensor => toTensor(x, what)
 const LINALG_ENTRIES: PreludeEntry[] = [
   lt(
@@ -558,6 +618,13 @@ const SIGNAL_ENTRIES: PreludeEntry[] = [
   ),
 ]
 
+/**
+ * A value as `print` writes it: a string as itself, numbers to six significant digits, anything else as JSON (with
+ * numbers rounded alike) cut to 400 characters, or its string form when it has no JSON.
+ *
+ * @param x The value printed.
+ * @returns Its text.
+ */
 const show = (x: unknown): string => {
   if (typeof x === 'string') return x
   if (typeof x === 'number') return String(Number(x.toPrecision(6)))
@@ -603,7 +670,21 @@ export const corePrelude: Prelude = withPrelude(
   ),
 )
 
-/** The root stream of a run: the run's seed, keyed further by the program's own `seed(s)` when it calls one. */
+/**
+ * The root stream of a run: the run's seed, keyed further by the program's own `seed(s)` when it calls one, so a seed
+ * control outside the code still varies the data.
+ *
+ * @param runSeed The run's seed (`runProgram`'s `seed` option).
+ * @param codeSeed The seed the program passed to `seed(s)`, if it called it.
+ * @returns The stream every random call of the run draws a child of.
+ *
+ * @example The program's seed keys the run's
+ * const draw = (root) => uniform(root, 0, 1)
+ * print('run seed 1:       ', draw(rootStream(1)))
+ * print('run 1, seed(7):   ', draw(rootStream(1, 7)))
+ * print('run 2, seed(7):   ', draw(rootStream(2, 7)))
+ * print('run 1 again:      ', draw(rootStream(1)))
+ */
 export function rootStream(runSeed: number | string, codeSeed?: number | string) {
   const root = stream(runSeed)
   return codeSeed === undefined ? root : child(root, 'seed', codeSeed)

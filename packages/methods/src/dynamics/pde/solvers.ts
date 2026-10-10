@@ -1,10 +1,13 @@
 /**
  * Method-of-lines finite differences on a uniform one-dimensional grid for the heat, transport (advection), wave and
- * Fokker–Planck equations, each a traceable `Algorithm` stepping in time that reports its stability number (the
- * diffusion number r = D·Δt/Δx² or the Courant number ν = |c|·Δt/Δx), the scheme's limit and whether it holds
- * (LeVeque, 2007, "Finite Difference Methods for Ordinary and Partial Differential Equations", §9–10; Morton & Mayers,
- * 2005, "Numerical Solution of Partial Differential Equations", 2nd ed., §2–4; Chang & Cooper, 1970, for the
- * conservative Fokker–Planck flux form).
+ * Fokker–Planck equations, each a traceable `Algorithm` stepping in time.
+ *
+ * Every solver's state reports its stability number (the diffusion number $r = D \Delta t/\Delta x^2$ or the Courant
+ * number $\nu = \lvert c \rvert \Delta t/\Delta x$), the scheme's limit and whether it holds, rather than refusing
+ * an unstable step; a non-finite solution sets `diverged`. The heat and Fokker–Planck solvers share a $\theta$-method
+ * on a tridiagonal operator, whose implicit system is factored once (LeVeque, 2007, "Finite Difference Methods for
+ * Ordinary and Partial Differential Equations", §9–10; Morton and Mayers, 2005, "Numerical Solution of Partial
+ * Differential Equations", 2nd ed., §2–4; Chang and Cooper, 1970, for the conservative Fokker–Planck flux form).
  */
 
 import { lu, luSolve, type LU } from 'aifn-compute/numerics/linalg'
@@ -15,10 +18,24 @@ import { DomainError, NumericalError, ShapeError } from 'aifn-compute/foundation
 
 type F64 = Float64Array<ArrayBuffer>
 
-/** A uniform grid of n points on [a, b], both ends included (spacing Δx = (b − a)/(n − 1)). */
+/**
+ * A uniform grid of `n` points on [`a`, `b`], both ends included (spacing $\Delta x = (b - a)/(n - 1)$; at least 3
+ * points).
+ */
 export type Grid1 = { a: number; b: number; n: number }
 
-/** The points of a grid (length n). */
+/**
+ * The points of a grid (length $n$). Throws `DomainError` for fewer than 3 points.
+ *
+ * @param options The grid.
+ * @param options.a The left end $a$.
+ * @param options.b The right end $b$.
+ * @param options.n The number of points $n$, ends included.
+ * @returns The points $a + (b - a) i/(n - 1)$, $i = 0, \dots, n - 1$.
+ *
+ * @example Five points on [0, 1]
+ * print(gridPoints({ a: 0, b: 1, n: 5 }))
+ */
 export function gridPoints({ a, b, n }: Grid1): Vector {
   if (!(n >= 3)) throw new DomainError('gridPoints', 'gridPoints: a grid needs at least 3 points')
   return fromData(
@@ -30,6 +47,14 @@ export function gridPoints({ a, b, n }: Grid1): Vector {
 /** An initial profile: values at the grid points, or a function of x sampled there. */
 export type Profile = ArrayLike<number> | Tensor | ((x: number) => number)
 
+/**
+ * An initial profile as values at the grid points. Throws `ShapeError` when an array's length is not the grid's.
+ *
+ * @param profile A function of $x$ (sampled at the points) or $n$ values.
+ * @param grid The grid.
+ * @param where The caller's name, used in error messages.
+ * @returns The $n$ values, as a new array.
+ */
 function sample(profile: Profile, grid: Grid1, where: string): F64 {
   const xs = toFlat(gridPoints(grid))
   if (typeof profile === 'function') return Float64Array.from(xs, profile)
@@ -41,16 +66,21 @@ function sample(profile: Profile, grid: Grid1, where: string): F64 {
   return v
 }
 
-/** Boundary conditions: fixed values (Dirichlet), zero flux (Neumann, reflecting) or periodic. */
+/**
+ * Boundary conditions, by `kind`: fixed values (`'dirichlet'`, the ends held at `left` and `right`, each defaulting to
+ * the initial profile's end value), zero flux (`'neumann'`, reflecting) or `'periodic'`.
+ */
 export type Boundary = { kind: 'dirichlet'; left?: number; right?: number } | { kind: 'neumann' } | { kind: 'periodic' }
 
 /** How a stability limit reads for the scheme in use. */
 export type Stability = {
   /** The name of the number: `'r = DΔt/Δx²'`, `'ν = |c|Δt/Δx'`, … */
   number: string
+  /** Its value for the grid and time step in use. */
   value: number
   /** The largest value for which the scheme is stable (Infinity for unconditionally stable schemes). */
   limit: number
+  /** Whether `value` is within `limit`. */
   stable: boolean
 }
 
@@ -58,20 +88,37 @@ export type Stability = {
 export type PdeState = Status & {
   /** Time steps taken. */
   t: number
-  /** The current time, t · Δt. */
+  /** The current time, $t \, \Delta t$. */
   time: number
   /** The solution at the grid points. */
   u: Vector
+  /** The time step $\Delta t$. */
   dt: number
-  /** ∫u dx by the trapezoid rule (the total mass for densities). */
+  /**
+   * $\int u \, dx$ by the trapezoid rule (the total mass for densities; `fokkerPlanck` reports the sum
+   * $\sum_i u_i \Delta x$ it conserves).
+   */
   mass: number
+  /** The stability number of the scheme in use, its limit and whether it holds. */
   stability: Stability
+  /** True once the solution is not finite. */
   diverged: boolean
+  /** `'not finite'` once the solution is not finite, else null. */
   failure: string | null
 }
 
+/** The options every solver shares: `tEnd`, the time at which the run is done (default never). */
 type Common = { tEnd?: number }
 
+/**
+ * $\int u \, dx$ by the trapezoid rule, or the plain sum times $\Delta x$ on a periodic grid.
+ *
+ * @param u The values at the grid points.
+ * @param dx The spacing $\Delta x$.
+ * @param periodic Whether every point is a distinct point of a periodic grid (each then weighs $\Delta x$, not
+ *   $\Delta x/2$ at the ends).
+ * @returns The integral.
+ */
 function trapezoidMass(u: F64, dx: number, periodic: boolean): number {
   let s = 0
   for (let i = 0; i < u.length; i++) s += u[i]
@@ -79,11 +126,27 @@ function trapezoidMass(u: F64, dx: number, periodic: boolean): number {
   return s * dx
 }
 
+/**
+ * Whether every value is finite.
+ *
+ * @param u The values.
+ * @returns True when none is NaN or infinite.
+ */
 const finite = (u: F64) => u.every(Number.isFinite)
 
-// A tridiagonal operator (L u)_i = lo_i u_{i−1} + di_i u_i + up_i u_{i+1}, with periodic wrap-around when asked.
+/**
+ * A tridiagonal operator $(\Lmat \uvec)_i = l_i u_{i-1} + d_i u_i + p_i u_{i+1}$ (`lo`, `di`, `up`), with periodic
+ * wrap-around when `periodic`; otherwise the missing neighbours at the ends count as 0.
+ */
 type Tridiagonal = { lo: F64; di: F64; up: F64; periodic: boolean }
 
+/**
+ * $\Lmat \uvec$ for a tridiagonal operator.
+ *
+ * @param L The operator.
+ * @param u The values $\uvec$ ($n$, as many as the operator's diagonal); not modified.
+ * @returns $\Lmat \uvec$, as a new array.
+ */
 function apply(L: Tridiagonal, u: F64): F64 {
   const n = u.length
   const out = new Float64Array(n)
@@ -95,7 +158,15 @@ function apply(L: Tridiagonal, u: F64): F64 {
   return out
 }
 
-/** The LU factors of I − θΔt L (dense; n is small in figures), reused at every step since Δt is fixed. */
+/**
+ * The LU factors of $\Imat - \theta \Delta t \Lmat$ (dense; $n$ is small in figures), reused at every step since
+ * $\Delta t$ is fixed.
+ *
+ * @param L The operator $\Lmat$.
+ * @param theta The implicitness $\theta \in (0, 1]$.
+ * @param dt The time step $\Delta t$.
+ * @returns The factors, with `singular` set when the system cannot be solved.
+ */
 function implicitFactor(L: Tridiagonal, theta: number, dt: number): LU {
   const n = L.di.length
   const M = new Float64Array(n * n)
@@ -109,20 +180,42 @@ function implicitFactor(L: Tridiagonal, theta: number, dt: number): LU {
   return lu(fromData(M, [n, n]))
 }
 
-/** Time-stepping schemes for u′ = L u: explicit (forward) Euler, implicit (backward) Euler, or Crank–Nicolson. */
+/**
+ * Time-stepping schemes for $\uvec' = \Lmat \uvec$: explicit (forward) Euler, implicit (backward) Euler, or
+ * Crank–Nicolson.
+ */
 export type TimeScheme = 'explicit' | 'implicit' | 'crank-nicolson'
 
+/** The implicitness $\theta$ of each scheme: 0 explicit, 1 implicit, $1/2$ Crank–Nicolson. */
 const THETA: Record<TimeScheme, number> = { explicit: 0, implicit: 1, 'crank-nicolson': 0.5 }
 
 /** A deterministic time stepper from an initial profile (the core of an `Algorithm` whose `init` samples a profile). */
 type Stepper = {
+  /** The algorithm's name. */
   name: string
+  /** The state at time 0 from the sampled profile. */
   init(u0: F64): PdeState
+  /** The state one time step on. */
   step(s: PdeState): PdeState
+  /** Whether the run has reached its end time. */
   done(s: PdeState): boolean
 }
 
-/** A θ-method stepper for u′ = Lu (+ fixed Dirichlet values), shared by the heat and Fokker–Planck solvers. */
+/**
+ * A $\theta$-method stepper for $\uvec' = \Lmat\uvec$, shared by the heat and Fokker–Planck solvers:
+ * $(\Imat - \theta \Delta t \Lmat)\uvec^{k+1} = \uvec^k + (1 - \theta)\Delta t \Lmat\uvec^k$. Zero rows of
+ * $\Lmat$ hold their values fixed (Dirichlet ends). Throws `DomainError` for an unknown scheme and `NumericalError`
+ * when the implicit system is singular.
+ *
+ * @param name The algorithm's name, also used in error messages.
+ * @param L The operator $\Lmat$.
+ * @param scheme The time-stepping scheme, which sets $\theta$.
+ * @param dt The time step $\Delta t$.
+ * @param dx The grid spacing $\Delta x$, for the reported mass.
+ * @param stability The stability number reported in every state.
+ * @param tEnd The time at which the run is done, or undefined for never.
+ * @returns The stepper.
+ */
 function thetaMethod(
   name: string,
   L: Tridiagonal,
@@ -162,21 +255,45 @@ function thetaMethod(
 
 /** Options for `heatEquation`. */
 export type HeatOptions = Common & {
-  /** The diffusivity D > 0 in u_t = D u_xx. */
+  /** The diffusivity $D > 0$ in $u_t = D u_{xx}$. */
   diffusivity: number
+  /** The grid. */
   grid: Grid1
+  /** The boundary conditions. */
   boundary: Boundary
+  /** The time step $\Delta t > 0$. */
   dt: number
   /** Default `'crank-nicolson'`. */
   scheme?: TimeScheme
 }
 
 /**
- * The heat (diffusion) equation u_t = D u_xx by the method of lines: the second difference D(u_{i−1} − 2u_i +
- * u_{i+1})/Δx² in space, then explicit Euler (FTCS; stable only when r = DΔt/Δx² ≤ ½), implicit Euler or
- * Crank–Nicolson (both unconditionally stable; Crank–Nicolson is second order in time but lets high-frequency error
- * oscillate for large r). Zero-flux (Neumann) ends use a mirrored ghost point, so the mass is conserved. `init` takes
- * `{ u0 }`, the initial profile.
+ * The heat (diffusion) equation $u_t = D u_{xx}$ by the method of lines: the second difference
+ * $D(u_{i-1} - 2u_i + u_{i+1})/\Delta x^2$ in space, then explicit Euler (FTCS; stable only when
+ * $r = D\Delta t/\Delta x^2 \le 1/2$), implicit Euler or Crank–Nicolson (both unconditionally stable; Crank–Nicolson
+ * is second order in time but lets high-frequency error oscillate for large $r$). Zero-flux (Neumann) ends use a
+ * mirrored ghost point, so the mass is conserved. On a periodic grid all $n$ points are distinct, so the period is
+ * $n \Delta x$. `init` takes `{ u0 }`, the initial profile. Throws `DomainError` unless $D$ and $\Delta t$ are
+ * positive.
+ *
+ * @param options The diffusivity, grid, boundary, time step, scheme and end time.
+ * @returns The solver as an `Algorithm`, one time step per step.
+ *
+ * @example A rod with cold ends: the sine mode decays exponentially
+ * const grid = { a: 0, b: 1, n: 21 }
+ * const heat = heatEquation({ diffusivity: 1, grid, boundary: { kind: 'dirichlet' }, dt: 0.01 })
+ * const u0 = (x) => Math.sin(Math.PI * x)
+ * for (const steps of [0, 10, 20]) {
+ *   const s = run(heat, { u0 }, steps)
+ *   print('t =', s.time, ' middle =', s.u.data[10], ' exact =', Math.exp(-(Math.PI ** 2) * s.time))
+ * }
+ *
+ * @example The explicit scheme beyond its limit
+ * const grid = { a: 0, b: 1, n: 21 }
+ * const ftcs = heatEquation({ diffusivity: 1, grid, boundary: { kind: 'dirichlet' }, dt: 0.002, scheme: 'explicit' })
+ * const s = run(ftcs, { u0: (x) => Math.sin(Math.PI * x) + 0.01 * Math.sin(19 * Math.PI * x) }, 60)
+ * print(s.stability)
+ * print('largest |u| after 60 steps =', Math.max(...s.u.data.map(Math.abs)))
  */
 export function heatEquation(options: HeatOptions): Algorithm<{ u0: Profile }, PdeState> {
   const { diffusivity: D, grid, boundary, dt, scheme = 'crank-nicolson', tEnd } = options
@@ -218,21 +335,39 @@ export function heatEquation(options: HeatOptions): Algorithm<{ u0: Profile }, P
 
 /** Options for `transportEquation`. */
 export type TransportOptions = Common & {
-  /** The constant velocity c in u_t + c u_x = 0. */
+  /** The constant velocity $c$ in $u_t + c u_x = 0$. */
   velocity: number
+  /** The grid; when periodic, its last point repeats the first. */
   grid: Grid1
-  /** Periodic (default), or an inflow boundary holding the upstream end at its initial value. */
+  /**
+   * Periodic (default), or an inflow boundary holding the upstream end at its initial value (the downstream end is
+   * extrapolated with zero gradient).
+   */
   boundary?: 'periodic' | 'inflow'
+  /** The time step $\Delta t$. */
   dt: number
   /** Default `'upwind'`. */
   scheme?: 'upwind' | 'lax-wendroff' | 'lax-friedrichs'
 }
 
 /**
- * The transport (advection) equation u_t + c u_x = 0 with Courant number ν = cΔt/Δx: first-order upwind
- * (u_i − ν(u_i − u_{i−1}) for c > 0; monotone, diffusive), Lax–Friedrichs (½(u_{i−1} + u_{i+1}) − ½ν(u_{i+1} −
- * u_{i−1}); more diffusive) and Lax–Wendroff (second order; dispersive, with oscillations behind steep fronts). All
- * are stable exactly when |ν| ≤ 1 (the CFL condition: the numerical domain of dependence must contain the true one).
+ * The transport (advection) equation $u_t + c u_x = 0$ with Courant number $\nu = c\Delta t/\Delta x$: first-order
+ * upwind ($u_i - \nu(u_i - u_{i-1})$ for $c > 0$; monotone, diffusive), Lax–Friedrichs
+ * ($\tfrac{1}{2}(u_{i-1} + u_{i+1}) - \tfrac{1}{2}\nu(u_{i+1} - u_{i-1})$; more diffusive) and Lax–Wendroff
+ * (second order; dispersive, with oscillations behind steep fronts). All are stable exactly when
+ * $\lvert \nu \rvert \le 1$ (the CFL condition: the numerical domain of dependence must contain the true one).
+ * `init` takes `{ u0 }`, the initial profile.
+ *
+ * @param options The velocity, grid, boundary, time step, scheme and end time.
+ * @returns The solver as an `Algorithm`, one time step per step.
+ *
+ * @example A pulse once round a periodic domain: upwind smears it, Lax–Wendroff keeps its height
+ * const u0 = (x) => Math.exp(-((x - 0.5) ** 2) / 0.005)
+ * for (const scheme of ['upwind', 'lax-wendroff']) {
+ *   const pde = transportEquation({ velocity: 1, grid: { a: 0, b: 1, n: 41 }, dt: 0.0125, scheme })
+ *   const s = run(pde, { u0 }, 80)
+ *   print(scheme, ' t =', s.time, ' peak =', Math.max(...s.u.data), ' mass =', s.mass)
+ * }
  */
 export function transportEquation(options: TransportOptions): Algorithm<{ u0: Profile }, PdeState> {
   const { velocity: c, grid, boundary = 'periodic', dt, scheme = 'upwind', tEnd } = options
@@ -281,25 +416,45 @@ export function transportEquation(options: TransportOptions): Algorithm<{ u0: Pr
 
 /** Options for `waveEquation`. */
 export type WaveOptions = Common & {
-  /** The wave speed c in u_tt = c² u_xx. */
+  /** The wave speed $c$ in $u_{tt} = c^2 u_{xx}$. */
   speed: number
+  /** The grid; when periodic, its last point repeats the first. */
   grid: Grid1
-  /** Fixed ends (u = 0, the default) or periodic. */
+  /** Fixed ends ($u = 0$, the default) or periodic. */
   boundary?: 'fixed' | 'periodic'
+  /** The time step $\Delta t$. */
   dt: number
 }
 
 /** The state of `waveEquation`: the solution now and one step earlier, and the discrete energy. */
 export type WaveState = PdeState & {
+  /** The solution one time step earlier (at time 0, the virtual level implied by the Taylor start). */
   previous: Vector
-  /** ½Σ((u_i − u_i^{prev})/Δt)² Δx + ½c²Σ((u_{i+1} − u_i)/Δx)² Δx: nearly conserved when stable. */
+  /**
+   * $\tfrac{1}{2}\sum_i ((u_i - u_i^{\text{prev}})/\Delta t)^2 \Delta x
+   * + \tfrac{1}{2}c^2\sum_i ((u_{i+1} - u_i)/\Delta x)^2 \Delta x$: nearly conserved when stable.
+   */
   energy: number
 }
 
 /**
- * The wave equation u_tt = c² u_xx by the leapfrog scheme u^{n+1} = 2uⁿ − u^{n−1} + ν²(u_{i+1} − 2u_i + u_{i−1})ⁿ,
- * ν = cΔt/Δx, started with the Taylor step u¹ = u⁰ + Δt v⁰ + ½ν²δ²u⁰. Second order, non-dissipative, and stable
- * exactly when ν ≤ 1; at ν = 1 it is exact on the grid. `init` takes `{ u0, v0 }` (displacement and velocity).
+ * The wave equation $u_{tt} = c^2 u_{xx}$ by the leapfrog scheme
+ * $u_i^{k+1} = 2u_i^k - u_i^{k-1} + \nu^2(u_{i+1}^k - 2u_i^k + u_{i-1}^k)$, $\nu = c\Delta t/\Delta x$, started
+ * with the Taylor step $u^1 = u^0 + \Delta t \, v^0 + \tfrac{1}{2}\nu^2\delta^2 u^0$. Second order,
+ * non-dissipative, and stable exactly when $\lvert \nu \rvert \le 1$; at $\nu = 1$ it is exact on the grid. `init`
+ * takes `{ u0, v0 }` (displacement and velocity, the velocity 0 by default); fixed ends are set to 0.
+ *
+ * @param options The speed, grid, boundary, time step and end time.
+ * @returns The solver as an `Algorithm`, one time step per step, whose state also carries the previous level and the
+ *   discrete energy.
+ *
+ * @example A standing wave at Courant number 1, exact on the grid
+ * const wave = waveEquation({ speed: 1, grid: { a: 0, b: 1, n: 21 }, dt: 0.05 })
+ * const u0 = (x) => Math.sin(Math.PI * x)
+ * for (const steps of [0, 10, 20]) {
+ *   const s = run(wave, { u0 }, steps)
+ *   print('t =', s.time, ' middle =', s.u.data[10], ' exact =', Math.cos(Math.PI * s.time), ' energy =', s.energy)
+ * }
  */
 export function waveEquation(options: WaveOptions): Algorithm<{ u0: Profile; v0?: Profile }, WaveState> {
   const { speed: c, grid, boundary = 'fixed', dt, tEnd } = options
@@ -367,23 +522,44 @@ export function waveEquation(options: WaveOptions): Algorithm<{ u0: Profile; v0?
 
 /** Options for `fokkerPlanck`. */
 export type FokkerPlanckOptions = Common & {
-  /** The drift μ(x) of dX = μ(X) dt + σ(X) dW. */
+  /** The drift $\mu(x)$ of $dX = \mu(X) \, dt + \sigma(X) \, dW$, evaluated midway between grid points. */
   drift: (x: number) => number
-  /** The diffusion coefficient D(x) = σ(x)²/2. */
+  /** The diffusion coefficient $D(x) = \sigma(x)^2/2$, evaluated at the grid points; must be non-negative. */
   diffusion: (x: number) => number
+  /** The grid; its ends are reflecting walls. */
   grid: Grid1
+  /** The time step $\Delta t$. */
   dt: number
   /** Default `'implicit'`. */
   scheme?: TimeScheme
 }
 
 /**
- * The Fokker–Planck (forward Kolmogorov) equation p_t = −(μp)_x + (Dp)_xx for the density of dX = μ dt + σ dW with
- * D = σ²/2, in conservative flux form p_i′ = −(J_{i+½} − J_{i−½})/Δx with the exponentially fitted flux of
- * Scharfetter & Gummel (1969) (see the code), which keeps densities non-negative and is exact for the stationary
- * density when the coefficients are constant between grid points. The flux is zero through both ends (reflecting
- * walls), so the mass Σp_iΔx is conserved exactly. The explicit limit reported is Δt·(2 max D/Δx² + max|μ|/Δx) ≤ 1.
- * `init` takes `{ u0 }`, the initial density.
+ * The Fokker–Planck (forward Kolmogorov) equation $p_t = -(\mu p)_x + (D p)_{xx}$ for the density of
+ * $dX = \mu \, dt + \sigma \, dW$ with $D = \sigma^2/2$, in conservative flux form
+ * $p_i' = -(J_{i+1/2} - J_{i-1/2})/\Delta x$ with the exponentially fitted flux of Scharfetter and Gummel (1969):
+ * $J = (D/\Delta x)(B(-w) p_i - B(w) p_{i+1})$, $w = (\mu - D')\Delta x/D$, $B(z) = z/(e^z - 1)$, which keeps
+ * densities non-negative, is exact for the stationary density when the coefficients are constant between grid points,
+ * and reduces to upwinding as $D \to 0$. The flux is zero through both ends (reflecting walls), so the mass
+ * $\sum_i p_i \Delta x$ is conserved exactly. The stability number reported is the largest over the cell interfaces
+ * of $\Delta t (2 \max D/\Delta x^2 + \lvert \mu - D' \rvert/\Delta x)$, with limit 1 for the explicit scheme.
+ * `init` takes `{ u0 }`, the initial density. Throws `DomainError` for a negative diffusion.
+ *
+ * @param options The drift, diffusion, grid, time step, scheme (default implicit) and end time.
+ * @returns The solver as an `Algorithm`, one time step per step.
+ *
+ * @example An Ornstein–Uhlenbeck density relaxes to its stationary variance 1/2
+ * // dX = -X dt + dW: drift -x, diffusion 1/2; stationary density N(0, 1/2).
+ * const grid = { a: -4, b: 4, n: 81 }
+ * const fp = fokkerPlanck({ drift: (x) => -x, diffusion: () => 0.5, grid, dt: 0.05 })
+ * const u0 = (x) => Math.exp(-((x - 1) ** 2) / 0.08) / Math.sqrt(0.08 * Math.PI)
+ * const xs = gridPoints(grid).data
+ * for (const steps of [0, 20, 100]) {
+ *   const s = run(fp, { u0 }, steps)
+ *   const mean = s.u.data.reduce((acc, p, i) => acc + p * xs[i] * 0.1, 0)
+ *   const variance = s.u.data.reduce((acc, p, i) => acc + p * (xs[i] - mean) ** 2 * 0.1, 0)
+ *   print('t =', s.time, ' mass =', s.mass, ' mean =', mean, ' variance =', variance)
+ * }
  */
 export function fokkerPlanck(options: FokkerPlanckOptions): Algorithm<{ u0: Profile }, PdeState> {
   const { drift, diffusion, grid, dt, scheme = 'implicit', tEnd } = options

@@ -1,5 +1,6 @@
 /**
- * Running a program: plain JavaScript compiled with `new Function`, the prelude's names passed in as its parameters.
+ * Running a program: plain JavaScript compiled with `new Function`, the prelude's names passed in as its parameters,
+ * and checking one for syntax errors without running it.
  *
  * - **The result** is the program's own top-level `return` value; without one, the entry function (default `make`)
  *   is called, if the program defines it, and its value is the result.
@@ -36,7 +37,10 @@ export type RunError = {
   readonly column?: number
 }
 
-/** What a run gives: the result or the error, the printed lines and the time taken. */
+/**
+ * What a run gives: `ok`, and with it the result `value` (true) or the `error` (false); the `output` lines the program
+ * printed, in order, up to the error if there was one; and `ms`, the wall-clock time taken in milliseconds.
+ */
 export type RunResult =
   | { readonly ok: true; readonly value: unknown; readonly output: readonly string[]; readonly ms: number }
   | { readonly ok: false; readonly error: RunError; readonly output: readonly string[]; readonly ms: number }
@@ -48,7 +52,13 @@ const FOOTER = '\n}'
 const ARGS = '__aifnEntryArgs'
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/
 
-/** The (line, column) of the innermost frame of compiled code in an error's stack, as the engine reports it. */
+/**
+ * The (line, column) of the innermost frame of compiled code in an error's stack, as the engine reports it.
+ *
+ * @param err The thrown value; anything that is not an `Error` has no stack.
+ * @returns The 1-based line and column within the compiled function's source (header included), or null when the
+ *   stack has no frame of compiled code.
+ */
 function framePosition(err: unknown): { line: number; column: number } | null {
   const stack = err instanceof Error ? (err.stack ?? '') : ''
   // V8: "(eval at …, <anonymous>:4:13)"; Firefox: "… > Function:4:13".
@@ -67,7 +77,14 @@ const LINE_OFFSET: number | null = (() => {
   return null
 })()
 
-/** An error as a value, its position mapped to the program's own lines. */
+/**
+ * An error as a value, its position mapped to the program's own lines. Syntax errors, and positions outside the
+ * program (in the appended entry call, or in the prelude's own code), get no line or column.
+ *
+ * @param err The thrown value; a non-`Error` becomes an `Error`-named message of its string form.
+ * @param lines The number of lines of the program, to reject positions past its end.
+ * @returns The message, the error's name and, when the position falls on the program, its line and column.
+ */
 function toRunError(err: unknown, lines: number): RunError {
   if (!(err instanceof Error)) return { message: String(err), name: 'Error' }
   const at = err instanceof SyntaxError ? null : framePosition(err)
@@ -77,7 +94,14 @@ function toRunError(err: unknown, lines: number): RunError {
   return { ...base, line, column: at!.column }
 }
 
-/** The names a program sees: each namespace as an object, the top-level entries, the constants, `Math` and `console`. */
+/**
+ * The names a program sees: each namespace as a frozen object, the top-level entries, the constants, `Math` and
+ * `console`. Entries and namespaces whose names are not identifiers are left out.
+ *
+ * @param prelude The prelude whose entries become the names.
+ * @param ctx The run's context, bound into every entry's implementation.
+ * @returns The names and their values, in the order they become the compiled function's parameters.
+ */
 function scope(prelude: Prelude, ctx: Context): Map<string, unknown> {
   const names = new Map<string, unknown>()
   const spaces = new Map<string, Record<string, unknown>>(prelude.namespaces.map((n) => [n.name, {}]))
@@ -104,7 +128,19 @@ function scope(prelude: Prelude, ctx: Context): Map<string, unknown> {
   return names
 }
 
-/** A program's syntax error, or null when it compiles (it is not run). */
+/**
+ * A program's syntax error, or null when it compiles (it is not run). An editor calls it as the user types; V8 gives
+ * no position for a syntax error inside `new Function`, so the error has no line there.
+ *
+ * @param source The program's source text.
+ * @param prelude The names the program may use (default `corePrelude`); they are compiled as parameters, so a program
+ *   that redeclares one still compiles.
+ * @returns The syntax error, or null.
+ *
+ * @example A program that compiles and one that does not
+ * print('fine:', checkProgram('const x = math.sin(1)\nreturn x'))
+ * print('broken:', checkProgram('return 1 +'))
+ */
 export function checkProgram(source: string, prelude: Prelude = corePrelude): RunError | null {
   try {
     const names = [...scope(prelude, { draw: () => rootStream(0), seed: () => {}, log: () => {} }).keys()]
@@ -116,11 +152,27 @@ export function checkProgram(source: string, prelude: Prelude = corePrelude): Ru
 }
 
 /**
- * Run a program and return its result (see the module comment): the top-level `return` value, or the entry
- * function's value when it returns nothing.
+ * Run a program and return its result (see the file comment): the top-level `return` value, or the entry function's
+ * value when it returns nothing. Errors, the program's own included, are returned in the result, never thrown.
  *
- * @example
- * runProgram('seed(7)\nfunction make(n = 5) { return random.normal(n) }').value // five seeded normal draws
+ * @param source The program's source text.
+ * @param options The seed, the prelude, the entry function and its arguments (see `RunOptions`).
+ * @returns The result or the error, the printed output and the time taken.
+ *
+ * @example A two-line program and its value
+ * const r = runProgram('const x = array.linspace(0, 1, 5)\nreturn x.map((v) => v * v)')
+ * print('ok:', r.ok, 'value:', r.value)
+ *
+ * @example The entry function, its defaults and its arguments
+ * const program = 'seed(7)\nfunction make(n = 3) { return random.normal(n) }'
+ * print('make():', runProgram(program).value)
+ * print('make(2):', runProgram(program, { args: [2] }).value)
+ * print('same seed, same data:', runProgram(program).value)
+ *
+ * @example Printed output, and an error with its line
+ * const r = runProgram('print("before")\nconst c = array.column([[1, 2], [3, 4]], 5)\nprint("after")')
+ * print('output:', r.output)
+ * print('error:', r.error.name, 'on line', r.error.line, '-', r.error.message)
  */
 export function runProgram(source: string, options: RunOptions = {}): RunResult {
   const { seed = 0, prelude = corePrelude, entry = 'make', args = [] } = options

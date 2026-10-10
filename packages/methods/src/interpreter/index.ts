@@ -1,11 +1,15 @@
 /**
  * `aifn-methods/interpreter`: models for programs run by `aifn-compute/interpreter`, in the `learn` namespace.
  *
- * - `learn.fitLinear(X, y, l2 = 0)`: least squares (ridge when l2 > 0) by `linearRegression`;
- * - `learn.fitLogistic(X, labels, l2 = 1)`: logistic regression by `logisticRegression`;
- * - `learningPrelude` holds them, and `prelude` is the core prelude with them added.
+ * - `learn.fitLinear(X, y, l2 = 0)`: least squares (ridge when `l2` is positive) by `linearRegression`, with the
+ *   fitted values, $R^2 = 1 - \mathrm{RSS}/\mathrm{TSS}$ and the noise standard deviation.
+ * - `learn.fitLogistic(X, labels, l2 = 1)`: two-class logistic regression by `logisticRegression`, with the fitted
+ *   probabilities, the training accuracy at threshold $0.5$ and whether the fit converged.
+ * - `learningPrelude` holds them, and `prelude` is the core prelude with them added: pass it as `runProgram`'s
+ *   `prelude` option.
  *
- * Each returns plain data (weights, intercept, fitted values, a goodness of fit) and a `predict` function.
+ * `X` is a vector (one feature) or a matrix of rows of features. Each returns plain data (weights, intercept, fitted
+ * values or probabilities, a goodness of fit) and a `predict(X)` function for new rows.
  */
 import { tensor, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import {
@@ -21,7 +25,14 @@ import { dataset } from 'aifn-compute/learning/estimators'
 import { linearRegression } from 'aifn-methods/learning/linear'
 import { logisticRegression } from 'aifn-methods/learning/generalised/glm'
 
-/** A design matrix from a program's X: a vector is one feature, a matrix is rows of features. */
+/**
+ * A design matrix from a program's `X`: a vector is one feature, a matrix is rows of features. Throws a `TypeError`
+ * for any other rank.
+ *
+ * @param X The program's value: a vector of $n$ values, or an $n \times d$ matrix.
+ * @param what The caller's name, used in error messages (`'fitLinear'`, `'predict'`).
+ * @returns The $n \times 1$ or $n \times d$ design matrix.
+ */
 function design(X: unknown, what: string): Tensor {
   const t = toTensor(X, what)
   if (t.shape.length === 1) return tensor(toFlat(t).map((v) => [v]))
@@ -29,6 +40,12 @@ function design(X: unknown, what: string): Tensor {
   return t
 }
 
+/**
+ * A tensor's values as a plain array, for program data.
+ *
+ * @param t The tensor (any shape; it is flattened in row-major order).
+ * @returns Its values.
+ */
 const flat = (t: unknown) => Array.from(toFlat(t as Tensor))
 
 const fitLinear: PreludeEntry = {
