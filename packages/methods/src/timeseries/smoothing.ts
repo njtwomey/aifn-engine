@@ -1,7 +1,10 @@
 /**
  * Exponential smoothing in the component form of Hyndman & Athanasopoulos (2021), "Forecasting: Principles and
- * Practice", 3rd ed., §8: level ℓ, optionally damped trend b and additive or multiplicative seasonal s of period m.
- * Simple exponential smoothing, Holt's linear (and damped) trend and Holt–Winters are special cases of one recursion.
+ * Practice", 3rd ed., §8: level $\ell$, optionally damped trend $b$ and additive or multiplicative seasonal $s$ of
+ * period $m$. Simple exponential smoothing, Holt's linear (and damped) trend and Holt–Winters are special cases of one
+ * recursion. The prediction intervals are those of the matching additive-error ETS model (Hyndman et al., 2008), with
+ * $\hat\sigma^2$ the mean squared one-step error; the parameters are fitted by least squares, as statsmodels'
+ * `ExponentialSmoothing` does.
  */
 
 import { normalQuantile } from 'aifn-compute/numerics/special'
@@ -12,50 +15,54 @@ import { simplexFit, type FitState } from './fit'
 import { toVec, type VectorLike } from './inputs'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** The structure of an exponential-smoothing model. */
+/** The structure of an exponential-smoothing model: which components it has. */
 export type SmoothingStructure = {
   /** `none` (simple), `additive` (Holt) or `damped` (Gardner & McKenzie, 1985). Default `none`. */
   trend?: 'none' | 'additive' | 'damped'
   /** `none`, `additive` or `multiplicative` (Holt–Winters, Winters, 1960). Default `none`. */
   seasonal?: 'none' | 'additive' | 'multiplicative'
-  /** The seasonal period m (required with a seasonal component). */
+  /** The seasonal period $m$, at least 2 (required with a seasonal component). */
   period?: number
 }
 
-/** An exponential-smoothing model: its structure and smoothing parameters, each in [0, 1]. */
+/** An exponential-smoothing model: its structure and smoothing parameters, each in $[0, 1]$ (not checked). */
 export type SmoothingSpec = SmoothingStructure & {
-  /** Level smoothing α. */
+  /** Level smoothing $\alpha$. */
   alpha: number
-  /** Trend smoothing β* (ignored without a trend). */
+  /** Trend smoothing $\beta^*$ (default 0.1; ignored without a trend). */
   beta?: number
-  /** Seasonal smoothing γ (ignored without a season). */
+  /** Seasonal smoothing $\gamma$ (default 0.1; ignored without a season). */
   gamma?: number
-  /** Damping φ (only with `trend: 'damped'`; 1 gives Holt's trend). Default 0.98. */
+  /** Damping $\phi$ (only with `trend: 'damped'`; 1 gives Holt's trend). Default 0.98. */
   phi?: number
-  /** Initial states; by default a heuristic from the first two seasons (or the first two values). */
+  /**
+   * Initial states $\ell_0$, $b_0$ and the $m$ seasonal states $s_{1-m}, \dots, s_0$ (oldest first); each one left out
+   * comes from the heuristic on the first two seasons (or the first two values).
+   */
   initial?: { level?: number; trend?: number; seasonal?: VectorLike }
 }
 
 /** An exponential-smoothing fit and its forecasts. */
 export type SmoothingResult = {
-  /** One-step-ahead forecasts ŷ_{t|t−1}, aligned with y. */
+  /** One-step-ahead forecasts $\hat{y}_{t \mid t-1}$, aligned with $y$. */
   fitted: Vector
-  /** y_t − ŷ_{t|t−1}. */
+  /** The one-step errors $y_t - \hat{y}_{t \mid t-1}$. */
   residuals: Vector
-  /** The level ℓ_t after each observation. */
+  /** The level $\ell_t$ after each observation. */
   level: Vector
-  /** The trend b_t after each observation (zeros without a trend). */
+  /** The trend $b_t$ after each observation (zeros without a trend). */
   trend: Vector
-  /** The seasonal state s_t after each observation (zeros, or ones for multiplicative, without a season). */
+  /** The seasonal state $s_t$ after each observation (zeros without a season). */
   season: Vector
-  /** Σ residuals². */
+  /** The sum of squared residuals, $\sum_t (y_t - \hat{y}_{t \mid t-1})^2$. */
   sse: number
-  /** The residual variance σ̂² = SSE/n. */
+  /** The residual variance $\hat\sigma^2 = \mathrm{SSE}/n$. */
   sigma2: number
-  /** Forecasts ŷ_{T+h|T}, h = 1 … horizon. */
+  /** Forecasts $\hat{y}_{T+h \mid T}$, $h = 1, \dots, \mathrm{horizon}$. */
   forecast: Vector
-  /** Prediction interval at `level`. */
+  /** The lower ends of the prediction intervals at `level`, one per forecast. */
   lower: Vector
+  /** The upper ends of the prediction intervals at `level`, one per forecast. */
   upper: Vector
   /**
    * True when the intervals are the additive-error formula applied to a multiplicative-seasonal model, which is only
@@ -64,8 +71,18 @@ export type SmoothingResult = {
   approximateIntervals: boolean
 }
 
+/**
+ * A `SmoothingSpec` with its defaults filled in: no trend gives $\beta^* = 0$ and $\phi = 1$, no season $\gamma = 0$
+ * and period 1. `initial` is kept as given.
+ */
 type Parsed = Required<Omit<SmoothingSpec, 'initial'>> & { initial: SmoothingSpec['initial'] }
 
+/**
+ * Fill the defaults of a `SmoothingSpec`. Throws `DomainError` for a seasonal model without a period of at least 2.
+ *
+ * @param spec The model as given by the caller.
+ * @returns The model with every parameter set.
+ */
 function parse(spec: SmoothingSpec): Parsed {
   const trend = spec.trend ?? 'none'
   const seasonal = spec.seasonal ?? 'none'
@@ -84,9 +101,14 @@ function parse(spec: SmoothingSpec): Parsed {
 }
 
 /**
- * Initial states from the first two seasons: level the mean of the first season, trend the change in seasonal means
- * per step, and seasonal states the first season's values relative to the straight line through its centre; the
- * level is then moved from the season's centre to just before t = 1.
+ * Initial states from the first two seasons (the first two values without a season): level the mean of the first
+ * season, trend the change in seasonal means per step, and seasonal states the first season's values relative to the
+ * straight line through its centre; the level is then moved from the season's centre to just before $t = 1$. Values
+ * given in `p.initial` replace the heuristic ones. Throws `DomainError` for fewer than $2m$ (or 2) observations.
+ *
+ * @param y The series.
+ * @param p The parsed model: its structure, period and `initial`.
+ * @returns The initial level `l`, trend `b` and the $m$ seasonal states `s`, oldest first (empty without a season).
  */
 function initialStates(y: number[], p: Parsed) {
   const seasonal = p.seasonal !== 'none'
@@ -111,11 +133,36 @@ function initialStates(y: number[], p: Parsed) {
 }
 
 /**
- * Run the smoothing recursion over y and forecast `horizon` steps. With ℓ⁻ = ℓ_{t−1} + φ b_{t−1}:
- * ŷ = ℓ⁻ + s_{t−m} (or ℓ⁻ s_{t−m}); ℓ_t = α(y_t − s_{t−m}) + (1 − α)ℓ⁻; b_t = β*(ℓ_t − ℓ_{t−1}) + (1 − β*)φ b_{t−1};
- * s_t = γ(y_t − ℓ⁻) + (1 − γ)s_{t−m} (divisions for multiplicative). Forecasts ŷ_{T+h} = ℓ_T + φ_h b_T + s, with
- * φ_h = φ + … + φ^h. Interval variances σ²(1 + Σ_{j<h} c_j²), c_j = α + αβ* φ_j + γ·[j mod m = 0] (Hyndman et al.,
- * 2008, Table 6.1, class 1), at `level` (default 0.95).
+ * Run the smoothing recursion over $y$ and forecast `horizon` steps. With $\ell^- = \ell_{t-1} + \phi b_{t-1}$:
+ * $\hat{y}_{t \mid t-1} = \ell^- + s_{t-m}$ (or $\ell^- s_{t-m}$),
+ * $\ell_t = \alpha(y_t - s_{t-m}) + (1 - \alpha)\ell^-$,
+ * $b_t = \beta^*(\ell_t - \ell_{t-1}) + (1 - \beta^*)\phi b_{t-1}$ and
+ * $s_t = \gamma(y_t - \ell^-) + (1 - \gamma)s_{t-m}$ (for multiplicative seasonality, $y_t / s_{t-m}$ and
+ * $y_t / \ell^-$ in place of the differences). Forecasts
+ * $\hat{y}_{T+h \mid T} = \ell_T + \phi_h b_T + s_{T+h-m(k+1)}$, $k = \lfloor (h - 1)/m \rfloor$ (the seasonal term a
+ * factor for multiplicative), with $\phi_h = \phi + \dots + \phi^h$. Interval variances
+ * $\hat\sigma^2 (1 + \sum_{j=1}^{h-1} c_j^2)$, $c_j = \alpha + \alpha\beta^* \phi_j + \gamma [j \bmod m = 0]$
+ * (Hyndman et al., 2008, Table 6.1, class 1), which are only approximate for multiplicative seasonality.
+ *
+ * @param y The series, at least $2m$ values with a season and 2 without.
+ * @param spec The model: its structure, smoothing parameters and optional initial states.
+ * @param options Forecast options.
+ * @param options.horizon The number of steps to forecast past the end of $y$ (default 0, no forecasts).
+ * @param options.level The coverage of the prediction intervals (default 0.95).
+ * @returns The fitted values and states over $y$, the error summaries, and the forecasts with their intervals.
+ *
+ * @example Simple exponential smoothing of a short series
+ * const r = exponentialSmoothing([3, 5, 4, 6, 5, 7], { alpha: 0.5 }, { horizon: 3 })
+ * print('fitted:', r.fitted)
+ * print('level:', r.level)
+ * print('forecast:', r.forecast)
+ * print('95% interval:', r.lower, r.upper)
+ *
+ * @example Holt–Winters follows a trend and a season exactly
+ * const y = Array.from({ length: 16 }, (_, t) => 10 + 0.5 * t + [2, 0, -2, 0][t % 4])
+ * const spec = { trend: 'additive', seasonal: 'additive', period: 4, alpha: 0.3, beta: 0.1, gamma: 0.1 }
+ * print('forecast:', exponentialSmoothing(y, spec, { horizon: 4 }).forecast)
+ * print('truth:   ', [16, 17, 18, 19].map((t) => 10 + 0.5 * t + [2, 0, -2, 0][t % 4]))
  */
 export function exponentialSmoothing(
   y: VectorLike,
@@ -184,8 +231,21 @@ export function exponentialSmoothing(
 
 /**
  * A least-squares fitter of the smoothing parameters as a traceable algorithm: Nelder–Mead on the SSE of the one-step
- * forecasts over logit coordinates, so α, β*, γ stay in (0, 1) and φ in (0.8, 0.995) (the range of Hyndman et al.,
- * 2008, §2.2). Initial states follow the heuristic. Each state's `params` is the spec at the best vertex.
+ * forecasts over logit coordinates, so $\alpha$, $\beta^*$, $\gamma$ stay in $(0, 1)$ and $\phi$ in $(0.8, 0.995)$ (the
+ * range of Hyndman et al., 2008, §2.2). It starts from $\alpha = 0.3$, $\beta^* = \gamma = 0.1$ and $\phi = 0.95$.
+ * Initial states follow the heuristic and are not fitted. Each state's `params` is the spec at the best vertex.
+ * `init` takes no start (`run(alg, undefined, steps)`).
+ *
+ * @param y The series.
+ * @param structure Which components the model has (trend, season, period); only their parameters are fitted.
+ * @returns The algorithm; its state is a `FitState` whose `params` is a `SmoothingSpec`.
+ *
+ * @example Fit Holt's linear trend to a noisy line
+ * const { x } = simulateArma(stream(1), { ar: [0.5] }, 60)
+ * const y = toFlat(x).map((v, t) => 10 + 0.1 * t + v)
+ * const s = run(exponentialSmoothingFitSteps(y, { trend: 'additive' }), undefined, 500)
+ * print('α =', s.params.alpha, 'β* =', s.params.beta)
+ * print('SSE =', s.objective, 'converged:', s.converged, 'after', s.t, 'steps')
  */
 export function exponentialSmoothingFitSteps(
   y: VectorLike,

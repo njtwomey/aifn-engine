@@ -9,24 +9,44 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 
 /** Options of `constantVelocityModel`. */
 export type ConstantVelocityOptions = {
-  /** Spatial dimensions d (default 2). */
+  /** The number of spatial dimensions $d$ (default 2). */
   dim?: number
-  /** Time step Δt (default 1). */
+  /** The time step $\Delta t$ between observations (default 1). */
   dt?: number
-  /** Spectral density q of the white-noise acceleration, per axis (default 1). */
+  /** The spectral density $q$ of the white-noise acceleration, per axis (default 1). */
   processNoise?: number
-  /** Standard deviation σ of each position measurement (default 1). */
+  /** The standard deviation $\sigma$ of each position measurement (default 1). */
   measurementStd?: number
-  /** Mean and standard deviations of the initial state (defaults: at rest at the origin, sd 10 in position and 1 in velocity). */
+  /** The mean $\mvec_0$ of the initial state, $2d$ values, positions first (default: at rest at the origin). */
   initialMean?: readonly number[]
+  /** The standard deviation of each initial position (default 10). */
   initialPositionStd?: number
+  /** The standard deviation of each initial velocity (default 1). */
   initialVelocityStd?: number
 }
 
 /**
- * The nearly-constant-velocity model in d dimensions, state z = (position₁…d, velocity₁…d): per axis
- * A = [[1, Δt], [0, 1]] and Q = q·[[Δt³/3, Δt²/2], [Δt²/2, Δt]] (the exact discretisation of white-noise acceleration
- * with spectral density q), and y = position + N(0, σ²I).
+ * The nearly-constant-velocity model in $d$ dimensions, with state $\zvec = (p_1, \dots, p_d, v_1, \dots, v_d)$,
+ * positions then velocities: per axis $\Amat = \begin{pmatrix} 1 & \Delta t \\ 0 & 1 \end{pmatrix}$ and
+ * $\Qmat = q \begin{pmatrix} \Delta t^3/3 & \Delta t^2/2 \\ \Delta t^2/2 & \Delta t \end{pmatrix}$ (the exact
+ * discretisation of white-noise acceleration with spectral density $q$), and $\yvec = (p_1, \dots, p_d) + \vvec$,
+ * $\vvec \sim \Gauss(\zeros, \sigma^2\Imat)$. The prior $\Pmat_0$ is diagonal. Throws `ShapeError` when
+ * `initialMean` does not have $2d$ values.
+ *
+ * @param options The dimension, time step, noise levels and prior (see `ConstantVelocityOptions`).
+ * @returns The model $\Amat$, $\Cmat$, $\Qmat$, $\Rmat$, $\mvec_0$, $\Pmat_0$ as rows of numbers, ready for
+ *   `aifn-compute/inference/filtering`.
+ *
+ * @example One axis with a half-second step
+ * const m = constantVelocityModel({ dim: 1, dt: 0.5 })
+ * print('A =', m.A)
+ * print('Q =', m.Q)
+ * print('C =', m.C)
+ *
+ * @example In the plane the positions come first
+ * const m = constantVelocityModel({ dim: 2, dt: 0.1 })
+ * print('A =', m.A)
+ * print('C =', m.C)
  */
 export function constantVelocityModel(options: ConstantVelocityOptions = {}): StateSpaceModel {
   const {

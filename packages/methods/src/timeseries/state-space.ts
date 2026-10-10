@@ -1,3 +1,12 @@
+/**
+ * Maximum-likelihood estimation of a linear-Gaussian state-space model
+ * $\zvec_t = \Amat\zvec_{t-1} + \wvec_t$, $\yvec_t = \Cmat\zvec_t + \vvec_t$, $\wvec_t \sim \Gauss(\zeros, \Qmat)$,
+ * $\vvec_t \sim \Gauss(\zeros, \Rmat)$, $\zvec_0 \sim \Gauss(\mvec_0, \Pmat_0)$, by expectation–maximisation.
+ *
+ * The model and its conventions are those of `aifn-compute/inference/filtering`, whose Kalman filter and
+ * Rauch–Tung–Striebel smoother give the E-step and the log-likelihood; the M-step is closed form. $n$ is the state
+ * dimension, $m$ the observation dimension and $T$ the number of observations.
+ */
 import {
   add,
   div,
@@ -17,30 +26,53 @@ import { toSeries, type MatrixLike, type VectorLike } from './inputs'
 import { filterAll, parseModel, smoothAll, type Model, type StateSpaceModel } from 'aifn-compute/inference/filtering'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** X with A X = B, or null when A is singular to working precision. */
+/**
+ * The solution $\Xmat$ of $\Amat\Xmat = \Bmat$ by LU factorisation, or null when $\Amat$ is singular to working
+ * precision.
+ *
+ * @param a The square matrix $\Amat$.
+ * @param b The right-hand side $\Bmat$, a vector or a matrix with as many rows as $\Amat$.
+ * @returns $\Xmat$, with the shape of `b`, or null.
+ */
 function solveOrNull(a: Tensor, b: Tensor): Tensor | null {
   const f = luFactor(a)
   return f.singular ? null : luSolve(f, b)
 }
 
-/** (A + Aᵀ)/2, to remove the asymmetry rounding leaves in a covariance. */
+/**
+ * $(\Amat + \Amat^\top)/2$, to remove the asymmetry rounding leaves in a covariance.
+ *
+ * @param a A square matrix $\Amat$.
+ * @returns The symmetric part of $\Amat$.
+ */
 const symmetrise = (a: Tensor): Tensor => mul(0.5, add(a, transpose(a)))
 
-/** A B Aᵀ. */
+/**
+ * The product $\Amat\Bmat\Amat^\top$.
+ *
+ * @param a The outer matrix $\Amat$.
+ * @param b The inner square matrix $\Bmat$.
+ * @returns $\Amat\Bmat\Amat^\top$.
+ */
 const sandwich = (a: Tensor, b: Tensor): Tensor => matmul(matmul(a, b), transpose(a))
 
-/** Which parts of the model EM re-estimates (default all). */
+/**
+ * Which parts of the model EM re-estimates: `A`, `C`, `Q`, `R`, and `initial` for $\mvec_0$ and $\Pmat_0$ together.
+ * Each defaults to true; a part set to false keeps its starting value.
+ */
 export type EmEstimate = { A?: boolean; C?: boolean; Q?: boolean; R?: boolean; initial?: boolean }
 
 /** The state of `stateSpaceEm`. */
 export type StateSpaceEmState = {
+  /** EM steps taken. */
   t: number
   /** The current model. */
   model: { A: Matrix; C: Matrix; Q: Matrix; R: Matrix; m0: Tensor; P0: Matrix }
-  /** log p(y) under the current model; EM never decreases it. */
+  /** $\log p(\yvec_{1:T})$ under the current model, from the Kalman filter; EM never decreases it. */
   logLikelihood: number
-  /** The increase on the last step (NaN at step 0). */
+  /** The increase on the last step (NaN at step 0, 0 after a failed step). */
   improvement: number
+  /** True when the last increase was at most `tolerance` times $1 + \lvert \log p \rvert$. */
   converged: boolean
   /** True if a covariance solve failed (the step kept the previous model). */
   diverged: boolean
@@ -50,10 +82,35 @@ export type StateSpaceEmState = {
 
 /**
  * Expectation–maximisation for a linear-Gaussian state-space model (Shumway & Stoffer, 1982; Ghahramani & Hinton,
- * 1996) as a traceable algorithm. E-step: the RTS smoother gives E[z_t], E[z_t z_tᵀ] and E[z_t z_{t−1}ᵀ]. M-step, with
- * sums over t = 1 … T: A = S₁₀ S₀₀⁻¹, Q = (S₁₁ − A S₁₀ᵀ)/T, C = (Σ y_t E[z_t]ᵀ) S₁₁⁻¹,
- * R = (Σ y_t y_tᵀ − C Σ E[z_t] y_tᵀ)/T, m₀ = μ_{0|T}, P₀ = P_{0|T}. Stops when the log-likelihood rises by less than
- * `tolerance` (default 1e-8, relative). No missing observations. `init` takes `{}`; the start is `model`.
+ * 1996) as a traceable algorithm. E-step: the RTS smoother gives $\expect[\zvec_t]$, $\expect[\zvec_t\zvec_t^\top]$
+ * and $\expect[\zvec_t\zvec_{t-1}^\top]$. M-step, with sums over $t = 1, \dots, T$ of
+ * $\Smat_{11} = \sum_t \expect[\zvec_t\zvec_t^\top]$, $\Smat_{10} = \sum_t \expect[\zvec_t\zvec_{t-1}^\top]$ and
+ * $\Smat_{00} = \sum_t \expect[\zvec_{t-1}\zvec_{t-1}^\top]$: $\Amat = \Smat_{10}\Smat_{00}^{-1}$,
+ * $\Qmat = (\Smat_{11} - \Amat\Smat_{10}^\top)/T$, $\Cmat = (\sum_t \yvec_t \expect[\zvec_t]^\top) \Smat_{11}^{-1}$,
+ * $\Rmat = (\sum_t \yvec_t\yvec_t^\top - \Cmat \sum_t \expect[\zvec_t]\yvec_t^\top)/T$, $\mvec_0 = \muvec_{0 \mid T}$,
+ * $\Pmat_0 = \Pmat_{0 \mid T}$. With $\Amat$ (or $\Cmat$) held fixed, $\Qmat$ (or $\Rmat$) is the full average of
+ * the expected residual outer products. Each step runs the filter and smoother once and the filter again for the new
+ * log-likelihood. A singular $\Smat_{00}$ or $\Smat_{11}$ ends the run with `diverged` and the previous model. Throws
+ * `DomainError` for a non-finite observation: no missing values. `init` takes no start; the start is `model`.
+ *
+ * @param y The observations: a vector of $T$ scalar observations, or a $T \times m$ matrix, one row per time step.
+ * @param model The starting model, in the form `aifn-compute/inference/filtering` takes.
+ * @param options EM options.
+ * @param options.estimate Which parts of the model to re-estimate (default all; see `EmEstimate`).
+ * @param options.tolerance Stop when the log-likelihood rises by at most this much relative to
+ *   $1 + \lvert \log p \rvert$ (default 1e-8).
+ * @returns The algorithm; it is done when it has converged or diverged.
+ *
+ * @example Estimate the noise variances of a local-level model
+ * // A random walk with step sd 0.5 (Q = 0.25) seen through noise of sd 1 (R = 1).
+ * const s = stream(1)
+ * const y = add(cumsum(normals(s, 60, 0, 0.5)), normals(s, 60, 0, 1))
+ * const start = { A: [[1]], C: [[1]], Q: [[1]], R: [[1]], m0: [0], P0: [[10]] }
+ * const alg = stateSpaceEm(y, start, { estimate: { A: false, C: false } })
+ * print('log L at the start:', run(alg, undefined, 0).logLikelihood)
+ * const st = run(alg, undefined, 15)
+ * print('after', st.t, 'steps: log L =', st.logLikelihood)
+ * print('Q =', st.model.Q, 'R =', st.model.R)
  */
 export function stateSpaceEm(
   y: VectorLike | MatrixLike,
