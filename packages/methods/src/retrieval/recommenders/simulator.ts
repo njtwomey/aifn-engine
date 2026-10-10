@@ -1,7 +1,7 @@
 /**
  * A feedback-loop simulator (Chaney, Stewart and Engelhardt, 2018; Mansoury et al., 2020): recommenders retrained each
  * round on the clicks their own recommendations produced. Users have fixed true click probabilities; each round every
- * user is shown a slate of K items they have not clicked, clicks each with its true probability, and the clicks join
+ * user is shown a slate of $K$ items they have not clicked, clicks each with its true probability, and the clicks join
  * the log the next round's model is trained on. Policies that rank by what was clicked before concentrate exposure on
  * the items that were shown early, which the exposure Gini coefficient measures round by round.
  */
@@ -13,7 +13,10 @@ import { alsFactors, factorScorer, implicitAls } from './factorisation'
 import { popularity } from './neighbourhood'
 import { topK, type Interactions, type Scorer } from './interactions'
 
-/** The simulated world: every user's true click probability for every item (users × items, row-major). */
+/**
+ * The simulated world: the numbers of `users` and `items`, and every user's true click probability for every item in
+ * `clickProbability` (`users` rows of `items`, row-major).
+ */
 export type SimulatedWorld = { users: Size; items: Size; clickProbability: Float64Array }
 
 /** How a policy ranks: by training popularity, by implicit-ALS factors, at random, or by the true probabilities. */
@@ -21,17 +24,22 @@ export type FeedbackPolicy = 'popularity' | 'matrix-factorisation' | 'random' | 
 
 /** Options of `feedbackLoop`. */
 export type FeedbackLoopOptions = {
+  /** The true click probabilities. */
   world: SimulatedWorld
   /** Policies simulated side by side, each with its own log (default all four). */
   policies?: readonly FeedbackPolicy[]
   /** Rounds after the bootstrap round (default 30). */
   rounds?: Size
-  /** Slate size K (default 5). */
+  /** Slate size $K$ (default 5). */
   slate?: Size
-  /** Share of each slate filled with random unclicked items (ε-exploration; default 0). */
+  /**
+   * Share $\varepsilon$ of each slate filled with random unclicked items, $\mathrm{round}(\varepsilon K)$ slots
+   * ($\varepsilon$-exploration; default 0).
+   */
   exploration?: number
-  /** Implicit-ALS factors and sweeps per round for `matrix-factorisation` (default 8 and 3). */
+  /** Implicit-ALS factor dimension for `matrix-factorisation` (default 8). */
   factors?: Size
+  /** Implicit-ALS sweeps per round, warm-started from the last round's factors (default 3). */
   sweeps?: Size
   /** Root seed (default 'feedback'). The bootstrap round shows every policy the same random slates. */
   seed?: string | number
@@ -47,7 +55,7 @@ export type PolicyHistory = {
   coverage: number[]
   /** Mean true click probability of the shown items (the round's expected click-through rate). */
   ctr: number[]
-  /** Cumulative clicks per user. */
+  /** Cumulative clicks per user, the mean over users. */
   clicks: number[]
   /** Cumulative exposure of each item after the round. */
   exposure: Float64Array
@@ -55,12 +63,30 @@ export type PolicyHistory = {
 
 /** A snapshot of `feedbackLoop` after a round. */
 export type FeedbackSnapshot = {
+  /** The round just played (0 for the bootstrap round). */
   round: Size
+  /** The rounds of the simulation, after the bootstrap. */
   rounds: Size
+  /** True after the last round. */
   done: boolean
+  /** Each policy's curves, keyed by its name. */
   policies: Record<string, PolicyHistory>
 }
 
+/**
+ * Fit a policy's scorer for one round. `popularity` counts the log's clicks, `oracle` returns the true probabilities,
+ * `random` draws uniform scores, and `matrix-factorisation` runs implicit ALS ($\alpha = 5$, $\lambda = 0.5$) on the
+ * log, warm-started from the last round's factors.
+ *
+ * @param policy The policy.
+ * @param log The clicks logged so far under this policy.
+ * @param world The simulated world (the oracle reads its probabilities).
+ * @param s The round's stream for the policy (random scores, ALS initialisation and sweeps).
+ * @param warm The factors of the policy's last round, or null in the first.
+ * @param factors The implicit-ALS factor dimension.
+ * @param sweeps The implicit-ALS sweeps.
+ * @returns The scorer, and the factors to warm-start the next round from (unchanged for policies without factors).
+ */
 function scorerOf(
   policy: FeedbackPolicy,
   log: Interactions,
@@ -91,10 +117,25 @@ function scorerOf(
 }
 
 /**
- * Simulate the feedback loop round by round, yielding a snapshot after each: a generator, so a worker can stream it. In
- * round r every policy ranks the items each user has not clicked, shows the top K (the last ⌈εK⌉ slots replaced by
- * random items under exploration), and logs the clicks drawn from the true probabilities with `child(seed, r, u)`, the
- * same draws for every policy, so differences come from the slates alone.
+ * Simulate the feedback loop round by round, yielding a snapshot after each: a generator, so a worker can stream it.
+ * Round 0 shows every policy the same random slates. In round $r$ every policy ranks the items each user has not
+ * clicked, shows the top $K$ (the last $\mathrm{round}(\varepsilon K)$ slots replaced by random unclicked items under
+ * exploration), and logs the clicks drawn from the true probabilities with `child(root, 'click', r, u)`, the same
+ * draws for every policy, so differences come from the slates alone.
+ *
+ * @param options The world, the policies, the rounds, the slate size, the exploration, the ALS settings and the seed.
+ * @returns A generator of snapshots, one after the bootstrap round and one after each round.
+ *
+ * @example Exposure concentrates under popularity, not under random slates
+ * const f = randomFactors(stream(0), 20, 15, 2, 1)
+ * const world = worldFromFactors(f.P, f.Q, 20, 15)
+ * const policies = ['popularity', 'random', 'oracle']
+ * const snapshots = [...feedbackLoop({ world, policies, rounds: 5 })]
+ * const last = snapshots[snapshots.length - 1]
+ * for (const p of policies) {
+ *   const h = last.policies[p]
+ *   print(p, ': exposure Gini by round', h.gini, '; clicks per user', h.clicks[5])
+ * }
  */
 export function* feedbackLoop(options: FeedbackLoopOptions): Generator<FeedbackSnapshot> {
   const {
@@ -216,7 +257,23 @@ export function* feedbackLoop(options: FeedbackLoopOptions): Generator<FeedbackS
   }
 }
 
-/** A world from user and item factors: click probability σ(scale · w_uᵀv_i + offset). */
+/**
+ * A world from user and item factors: click probability
+ * $\operatorname{sigmoid}(\mathit{scale} \cdot \wvec_u^\top \vvec_i + \mathit{offset})$.
+ *
+ * @param userFactors The user factors $\wvec_u$, row-major, `users` rows of $k$ (with $k$ the length over `users`).
+ * @param itemFactors The item factors $\vvec_i$, row-major, `items` rows of $k$.
+ * @param users The number of users.
+ * @param items The number of items.
+ * @param options The scale and offset of the logit.
+ * @param options.scale The multiplier of the inner product (default 2).
+ * @param options.offset The offset of the logit (default $-2$, so a zero inner product clicks with probability
+ *   $\operatorname{sigmoid}(-2) \approx 0.12$).
+ * @returns The world.
+ *
+ * @example Aligned factors click more often than opposed ones
+ * print(worldFromFactors([1, -1], [1, 0, -1], 2, 3).clickProbability)
+ */
 export function worldFromFactors(
   userFactors: ArrayLike<number>,
   itemFactors: ArrayLike<number>,

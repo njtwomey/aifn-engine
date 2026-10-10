@@ -2,18 +2,22 @@
  * Recommenders trained by gradient descent on implicit feedback, each a small parameter tree with a loss and a scorer,
  * trained through `aifn-compute/nn/training` with gradients from `aifn-compute/foundation/autodiff`:
  *
- * - **Logistic MF**: s_ui = p_uᵀq_i + b_i with binary cross-entropy on positives and sampled negatives.
+ * - **Logistic MF**: $s_{ui} = \pvec_u^\top \qvec_i + b_i$ with binary cross-entropy on positives and sampled
+ *   negatives.
  * - **BPR** (Rendle et al., 2009): the same scores, trained to rank a positive above a sampled negative,
- *   −log σ(s_ui − s_uj).
+ *   $-\log \operatorname{sigmoid}(s_{ui} - s_{uj})$.
  * - **Factorisation machines** (Rendle, 2010) and **field-aware FM** (Juan et al., 2016) over four one-hot fields:
  *   user, item, user group and item category.
- * - **Wide & Deep** (Cheng et al., 2016): a linear model on the fields and the group × category cross, plus an MLP on
+ * - **Wide & Deep** (Cheng et al., 2016): a linear model on the fields and the group-by-category cross, plus an MLP on
  *   their embeddings. **DeepFM** (Guo et al., 2017): an FM and an MLP sharing one set of embeddings.
  * - **NCF / NeuMF** (He et al., 2017): generalised matrix factorisation and an MLP on user and item embeddings, joined.
  * - **Two-tower** (Covington et al., 2016; Yi et al., 2019): user and item towers (MLPs on id and side embeddings),
  *   scored by inner product and trained with the in-batch softmax.
  * - **SASRec** (Kang and McAuley, 2018): item and position embeddings, one causal transformer block of
  *   `aifn-compute/nn/attention`, and the next item predicted at every position by a softmax over the catalogue.
+ *
+ * Negatives are items the user has not interacted with, drawn uniformly once per training set. Every model adds an L2
+ * penalty on the embeddings its batch touches.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -44,6 +48,7 @@ import { itemsByUser, type Interactions, type Scorer } from './interactions'
 
 /** What the gradient recommenders read besides the interactions: side features and the order of each user's items. */
 export type RecommenderContext = {
+  /** The training interactions. */
   readonly train: Interactions
   /** A group per user (e.g. a segment), int32; default all 0. */
   readonly userGroup?: ArrayLike<number>
@@ -73,7 +78,10 @@ export type NeuralOptions = {
   hidden?: Size[]
   /** Sampled negatives per positive for pointwise and pairwise losses (default 4). */
   negatives?: Size
-  /** L2 penalty on the embeddings of each training row (default 1e-2). */
+  /**
+   * L2 penalty on the embeddings of each training row (default 1e-2); BPR applies it to the batch's summed squares
+   * and SASRec to the whole item table, without dividing by the rows.
+   */
   regularisation?: number
   /** In-batch softmax temperature of the two-tower model (default 0.1). */
   temperature?: number
@@ -81,13 +89,19 @@ export type NeuralOptions = {
   maxLength?: Size
 }
 
-/** A gradient recommender: its parameters' initialiser, training rows, loss, scorer and (when it has them) embeddings. */
+/**
+ * A gradient recommender: its parameters' initialiser, training rows, loss, scorer and (when it has them) embeddings.
+ */
 export type NeuralRecommender = {
+  /** The kind it was built as. */
   readonly kind: NeuralKind
+  /** Initial parameters, drawn from `s`. */
   init(s: Stream): Params
   /** The training rows (a batch of named tensors with equal first axes), drawn once from `s` (negatives). */
   data(s: Stream): Record<string, Tensor>
+  /** The training loss of a batch of rows (differentiable in the parameters). */
   loss(params: Params, batch: Record<string, Tensor>): Value
+  /** The scorer of the parameters, over every item. */
   scorer(params: Params): Scorer
   /** User and item embeddings to draw (factors, tower outputs or item vectors). */
   embeddings(params: Params): { users: Tensor | null; items: Tensor }
@@ -95,11 +109,39 @@ export type NeuralRecommender = {
 
 // ── Shared pieces ────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A tensor of indices as a plain array.
+ *
+ * @param t The indices (stored as floats).
+ * @returns Its entries, in row-major order.
+ */
 const ids = (t: Tensor): number[] => Array.from(toFlat(t))
+/**
+ * Numbers as a float64 vector.
+ *
+ * @param xs The numbers.
+ * @returns A tensor of shape `[xs.length]`.
+ */
 const vec = (xs: ArrayLike<number>) => fromData(Float64Array.from(xs), [xs.length])
+/**
+ * An embedding table with entries drawn from $\Gauss(0, \mathit{sd}^2)$.
+ *
+ * @param s The stream the entries are drawn from.
+ * @param rows The number of rows (embeddings).
+ * @param cols The embedding dimension.
+ * @param sd The standard deviation of every entry.
+ * @returns The table, shape `[rows, cols]`.
+ */
 const table = (s: Stream, rows: Size, cols: Size, sd = 0.1) => normal(s, 0, sd, { shape: [rows, cols] }) as Tensor
 
-/** Positives (u, i) with `negatives` uniformly drawn unseen items per positive, labelled 1 and 0. */
+/**
+ * Positives $(u, i)$ with `negatives` uniformly drawn unseen items per positive, labelled 1 and 0.
+ *
+ * @param ctx The training context; its interactions are the positives.
+ * @param negatives The number of negatives per positive.
+ * @param s The stream the negatives are drawn from (`child(s, r, n)` for negative `n` of row `r`).
+ * @returns The rows as vectors `user`, `item` and `label`, each positive followed by its negatives.
+ */
 function pointwiseRows(ctx: RecommenderContext, negatives: Size, s: Stream) {
   const { train } = ctx
   const seen = itemsByUser(train)
@@ -119,7 +161,14 @@ function pointwiseRows(ctx: RecommenderContext, negatives: Size, s: Stream) {
   return { user: vec(u), item: vec(i), label: vec(y) }
 }
 
-/** Triples (u, i, j): each positive with `negatives` sampled unseen items. */
+/**
+ * Triples $(u, i, j)$: each positive $(u, i)$ repeated with each of `negatives` sampled unseen items $j$.
+ *
+ * @param ctx The training context; its interactions are the positives.
+ * @param negatives The number of negatives per positive.
+ * @param s The stream the negatives are drawn from (`child(s, r, n)` for negative `n` of row `r`).
+ * @returns The rows as vectors `user`, `item` and `negative`.
+ */
 function pairwiseRows(ctx: RecommenderContext, negatives: Size, s: Stream) {
   const { train } = ctx
   const seen = itemsByUser(train)
@@ -135,6 +184,14 @@ function pairwiseRows(ctx: RecommenderContext, negatives: Size, s: Stream) {
   return { user: vec(u), item: vec(i), negative: vec(j) }
 }
 
+/**
+ * An item drawn uniformly from those a user has not seen, by rejection; any item when the user has seen them all.
+ *
+ * @param s The stream of the draw (attempt `t` uses `child(s, t)`).
+ * @param seen The user's items.
+ * @param items The number of items in the catalogue.
+ * @returns The item.
+ */
 function sampleUnseen(s: Stream, seen: ReadonlySet<number>, items: Size): number {
   if (seen.size >= items) return integers(s, items)
   for (let t = 0; ; t++) {
@@ -143,7 +200,13 @@ function sampleUnseen(s: Stream, seen: ReadonlySet<number>, items: Size): number
   }
 }
 
-/** Every (user, item) pair of a list of users, as two index arrays (users vary slowest). */
+/**
+ * Every (user, item) pair of a list of users, as two index arrays (users vary slowest).
+ *
+ * @param users The users.
+ * @param items The number of items; every item is paired with every user.
+ * @returns `u` and `i`, parallel arrays of `users.length * items` indices.
+ */
 function allPairs(users: readonly number[], items: Size) {
   const u: number[] = []
   const i: number[] = []
@@ -155,7 +218,13 @@ function allPairs(users: readonly number[], items: Size) {
   return { u, i }
 }
 
-/** Evaluate a pairwise logit function on every pair of the users, as their score rows. */
+/**
+ * Evaluate a pairwise logit function on every pair of the users, as their score rows.
+ *
+ * @param items The number of items.
+ * @param logit The model's logit of parallel user and item index arrays, one value per pair.
+ * @returns A scorer over every item.
+ */
 function pairScorer(items: Size, logit: (u: number[], i: number[]) => Value): Scorer {
   return (users) => {
     const { u, i } = allPairs(users, items)
@@ -163,10 +232,29 @@ function pairScorer(items: Size, logit: (u: number[], i: number[]) => Value): Sc
   }
 }
 
+/**
+ * The summed squares of every entry of the tensors, the L2 penalty.
+ *
+ * @param xs The tensors penalised.
+ * @returns $\sum \lVert \cdot \rVert^2$ over all of them (differentiable).
+ */
 const l2 = (...xs: Value[]) => xs.reduce<Value>((acc, x) => add(acc, sum(square(x))), 0)
+/**
+ * A row count safe to divide by.
+ *
+ * @param n The number of rows.
+ * @returns $\max(1, n)$.
+ */
 const rowsOf = (n: Size) => Math.max(1, n)
 
-/** The four one-hot fields of a (user, item) row: user, item, user group, item category, as global feature ids. */
+/**
+ * The four one-hot fields of a (user, item) row: user, item, user group, item category, as global feature ids (users
+ * first, then items, groups and categories).
+ *
+ * @param ctx The training context; the numbers of groups and categories are one more than the largest given.
+ * @returns The feature and field counts, the group and category counts, `featuresOf` (the feature ids `[n, 4]` of
+ *   rows), and each user's group and each item's category.
+ */
 function fieldLayout(ctx: RecommenderContext) {
   const { users, items } = ctx.train
   const groups = ctx.userGroup ? Math.max(...Array.from(ctx.userGroup)) + 1 : 1
@@ -189,7 +277,13 @@ function fieldLayout(ctx: RecommenderContext) {
   return { features, fields: 4, groups, categories, featuresOf, group, category }
 }
 
-/** The FM interaction ½ Σ_k [(Σ_f v_fk)² − Σ_f v_fk²] of embeddings [n, F, k], as [n]. */
+/**
+ * The FM interaction $\tfrac{1}{2} \sum_k [(\sum_f v_{fk})^2 - \sum_f v_{fk}^2]$, Rendle's $O(Fk)$ form of the sum of
+ * the pairwise inner products of a row's field embeddings.
+ *
+ * @param v The embeddings of each row's fields, shape `[n, F, k]`.
+ * @returns The interaction of each row, shape `[n]`.
+ */
 function fmInteraction(v: Value): Value {
   const total = sum(v, 1)
   return mul(0.5, sum(sub(square(total), sum(square(v), 1)), -1))
@@ -197,7 +291,34 @@ function fmInteraction(v: Value): Value {
 
 // ── The models ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Build a gradient recommender of a kind on the training context. */
+/**
+ * Build a gradient recommender of a kind on the training context: its initialiser, training rows, loss, scorer and
+ * embeddings, ready for `aifn-compute/nn/training`'s `trainingLoop` (as `recommenderRun` uses it). Logistic MF, FM,
+ * field-aware FM, Wide & Deep, DeepFM and NCF are trained by binary cross-entropy on each positive and `negatives`
+ * sampled unseen items; BPR on the same pairs; the two-tower model on the in-batch softmax of the interactions; and
+ * SASRec on each user's next item at every position of the last `maxLength` of its sequence.
+ *
+ * @param kind Which model to build.
+ * @param ctx The training interactions, and the side features and sequences the models that use them read.
+ * @param options The embedding dimension, MLP widths, negatives per positive, L2 penalty, two-tower temperature and
+ *   SASRec's sequence length.
+ * @returns The recommender.
+ *
+ * @example BPR on two taste groups, trained by plain gradient descent
+ * const rows = []
+ * for (let u = 0; u < 6; u++) for (let i = 0; i < 3; i++) rows.push([u, (u < 3 ? 0 : 3) + i])
+ * const rec = neuralRecommender('bpr', { train: interactionsFromRows(rows, 6, 6) }, { dimension: 2, negatives: 2 })
+ * const batch = rec.data(stream(1))
+ * let params = rec.init(stream(0))
+ * print('rows:', batch.user.shape[0], '; loss at init:', rec.loss(params, batch))
+ * const step = (x, g) => sub(x, mul(0.1, g))
+ * for (let t = 0; t < 40; t++) {
+ *   const g = grad((p) => rec.loss(p, batch))(params)
+ *   params = { P: step(params.P, g.P), Q: step(params.Q, g.Q), b: step(params.b, g.b) }
+ * }
+ * print('after 40 steps:', rec.loss(params, batch))
+ * print("user 0's scores (its own items are 0 to 2):", rec.scorer(params)([0]))
+ */
 export function neuralRecommender(
   kind: NeuralKind,
   ctx: RecommenderContext,

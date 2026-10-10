@@ -1,9 +1,14 @@
 /**
  * A recall-against-speed benchmark of nearest-neighbour indexes in the manner of ann-benchmarks (Aumüller,
- * Bernhardsson and Faithfull 2020): the last `queries` rows of the data are the queries, the rest the indexed points;
- * every method is built once and queried at each setting of its speed knob (tree leaf size, LSH tables, IVF probes, PQ
- * codewords, HNSW beam width), and each setting reports recall@k against brute force, queries per second, distance
- * evaluations per query and build time. A generator, so a worker can stream methods as they finish.
+ * Bernhardsson and Faithfull, 2020).
+ *
+ * The last `queries` rows of the data are the queries and the rest the indexed points. Every index of
+ * `aifn-compute/numerics/neighbours` is queried at several settings of its speed knob: the k-d tree's leaf size, the
+ * number of LSH tables, IVF's probed lists, PQ's codewords per subspace and HNSW's beam width (the indexes FAISS calls
+ * `IndexIVFFlat`, `IndexPQ` and `IndexHNSWFlat`). Each setting reports recall@$k$ against brute force, queries per
+ * second and distance evaluations per query, and each method its build time. Recall and distance counts are
+ * reproducible from the seed; the timings are the machine's. A generator, so a worker can stream methods as they
+ * finish.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -30,45 +35,79 @@ import {
 
 /** The indexes the benchmark runs. */
 export const ANN_METHODS = ['kd-tree', 'lsh', 'ivf', 'pq', 'hnsw'] as const
+/** The name of one index of the benchmark, an entry of `ANN_METHODS`. */
 export type AnnMethod = (typeof ANN_METHODS)[number]
 
 /** Options of `annBenchmark`. */
 export interface AnnBenchmarkOptions {
-  /** The rows: the last `queries` are queries, the rest are indexed. */
+  /** The rows, an $N \times d$ matrix in `x`: the last `queries` are queries, the rest are indexed. */
   data: { x: Tensor }
+  /** The number of queries $m$ (default 100, and at most half the rows). */
   queries?: Size
+  /** The neighbours $k$ found per query, against which recall is measured (default 10). */
   k?: Size
+  /** The indexes to run, in order (default all of `ANN_METHODS`). */
   methods?: readonly AnnMethod[]
+  /** The root seed of the indexes' random construction (default `'ann'`). */
   seed?: string | number
 }
 
 /** One setting of one method. */
 export interface AnnPoint {
-  /** The knob's value, e.g. `probes = 4`. */
+  /** The knob's value as a label, e.g. `4 probes` or `ef 20`. */
   readonly setting: string
+  /** Recall@$k$: the share of the true $k$ nearest neighbours found, over all queries. */
   readonly recall: number
+  /** Throughput of the search, timed once on this machine. */
   readonly queriesPerSecond: number
+  /** Mean distance evaluations per query (brute force needs $n$). */
   readonly distancesPerQuery: number
 }
 
 /** One method's curve. */
 export interface AnnCurve {
+  /** The index. */
   readonly method: AnnMethod
+  /** Seconds to build the index (for LSH and PQ, the mean over the indexes built for its settings). */
   readonly buildSeconds: number
+  /** One point per setting, in the order `annBenchmark` lists them. */
   readonly points: readonly AnnPoint[]
 }
 
 /** A snapshot: the curves of the methods finished so far, and brute force's speed. */
 export interface AnnBenchmarkSnapshot {
+  /** True on the last snapshot, after every method. */
   readonly done: boolean
+  /** The number of indexed points $n$. */
   readonly n: Size
+  /** The dimension $d$ of the points. */
   readonly d: Size
+  /** The number of queries $m$. */
   readonly queries: Size
+  /** The exact search's throughput and distance evaluations per query, the baseline. */
   readonly bruteForce: { queriesPerSecond: number; distancesPerQuery: number }
+  /** The curves of the methods finished so far, in the order run. */
   readonly curves: readonly AnnCurve[]
 }
 
-/** Run every method's settings (module notes), yielding after each method. */
+/**
+ * Run every method at each of its settings, yielding a snapshot before the first method, after each method and once
+ * more at the end (`done`). The settings are leaf sizes 4, 16 and 64 for the k-d tree (always exact); 1 to 16 tables of
+ * four hashes for LSH, with a bucket width of four times the first query's $k$-th neighbour distance; 1 to 16 probes of
+ * $\sqrt{n}$ lists for IVF; 4, 16 and 64 codewords on 4, 2 or 1 subspaces for PQ; and a beam width $k$ to $8k$ for HNSW
+ * ($M = 8$, construction beam 64).
+ *
+ * @param options The data, the number of queries and neighbours $k$, the methods to run and the seed.
+ * @returns A generator of snapshots, each holding the curves finished so far.
+ *
+ * @example Recall of the true nearest point of 200 points rises with each index's knob
+ * const x = normal(stream(0), 0, 1, { shape: [220, 2] })
+ * const snapshots = [...annBenchmark({ data: { x }, queries: 20, k: 1, methods: ['kd-tree', 'ivf', 'hnsw'] })]
+ * const last = snapshots[snapshots.length - 1]
+ * print('indexed', last.n, 'points; brute force evaluates', last.bruteForce.distancesPerQuery, 'distances per query')
+ * for (const c of last.curves)
+ *   print(c.method, c.points.map((p) => `${p.setting}: recall ${p.recall}, ${p.distancesPerQuery} evals`).join('; '))
+ */
 export function* annBenchmark(options: AnnBenchmarkOptions): Generator<AnnBenchmarkSnapshot> {
   const { k = 10, methods = ANN_METHODS } = options
   const all = options.data.x

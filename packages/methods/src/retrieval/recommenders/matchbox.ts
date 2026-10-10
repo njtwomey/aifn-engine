@@ -2,21 +2,25 @@
  * Matchbox (Stern, Herbrich and Graepel, 2009): Bayesian recommendation from user and item features, learned online
  * by assumed-density filtering on a factor graph.
  *
- * A user is a sparse feature vector x (a one-hot id plus side features such as age band or region) and an item is y.
- * Each of K user traits is linear in the user's features, sₖ = Σᵢ xᵢ uₖᵢ, and each item trait in the item's,
- * tₖ = Σⱼ yⱼ vₖⱼ; biases b = Σᵢ xᵢ wᵢ + Σⱼ yⱼ w′ⱼ likewise. The latent rating is the bilinear affinity
- * r̃ = Σₖ sₖtₖ + b plus Gaussian noise of variance β², and an ordinal rating l ∈ {0, …, L − 1} is observed when
- * τₗ₋₁ < r̃ + ε < τₗ, with Gaussian thresholds τ₀ < … < τ_{L−2}. Every weight and threshold has a factorised Gaussian
- * posterior. Features let a new user or item borrow the traits of similar ones (cold start).
+ * A user is a sparse feature vector $\xvec$ (a one-hot id plus side features such as age band or region) and an item
+ * is $\yvec$. Each of $K$ user traits is linear in the user's features, $s_k = \sum_i x_i u_{ki}$, and each item trait
+ * in the item's, $t_k = \sum_j y_j v_{kj}$; biases $b = \sum_i x_i w_i + \sum_j y_j w'_j$ likewise. The latent rating
+ * is the bilinear affinity $\tilde r = \sum_k s_k t_k + b$ plus Gaussian noise $\varepsilon$ of variance $\beta^2$, and
+ * an ordinal rating $l \in \{0, \dots, L - 1\}$ is observed when $\tau_{l-1} < \tilde r + \varepsilon < \tau_l$, with
+ * Gaussian thresholds $\tau_0 < \dots < \tau_{L-2}$ (and $\tau_{-1} = -\infty$, $\tau_{L-1} = \infty$). Every weight
+ * and threshold has a factorised Gaussian posterior. Features let a new user or item borrow the traits of similar ones
+ * (cold start).
  *
- * One rating is one update. Forward: the sum factors give Gaussian sₖ, tₖ and b; the product sₖtₖ is replaced by the
- * Gaussian with its exact mean μₛμₜ and variance vₛvₜ + μₛ²vₜ + μₜ²vₛ. The two threshold comparisons are step factors
- * on r̃ + ε − τ, iterated by EP with `stepTilted` and the Gaussian message algebra of
- * `aifn-compute/inference/expectation-propagation`. Backward: the message to r̃ is split over the summands by the sum factor,
- * the product factor sends sₖ the message with mean m μₜ/(vₜ + μₜ²) and variance v/(vₜ + μₜ²) (the variational
- * message of Stern et al., 2009, §3), and the sum factors pass each weight its share. Each posterior is multiplied by
- * its message: ADF, one pass, no stored messages. The item trait weights start at small random means, which breaks
- * the symmetry of sₖtₖ (all zero means would leave every product message flat).
+ * One rating is one update. Forward: the sum factors give Gaussian $s_k$, $t_k$ and $b$; the product $s_k t_k$ is
+ * replaced by the Gaussian with its exact mean $\mu_s \mu_t$ and variance $v_s v_t + \mu_s^2 v_t + \mu_t^2 v_s$. The
+ * two threshold comparisons are step factors on $\tilde r + \varepsilon - \tau$, iterated by EP with `stepTilted` and
+ * the Gaussian message algebra of `aifn-compute/inference/expectation-propagation`. Backward: the message to
+ * $\tilde r$ is split over the summands by the sum factor, the product factor sends $s_k$ the message with mean
+ * $m \mu_t / (v_t + \mu_t^2)$ and variance $v / (v_t + \mu_t^2)$ (the variational message of Stern et al., 2009, §3),
+ * and the sum factors pass each weight its share. Each posterior is multiplied by its message: ADF, one pass, no
+ * stored messages. The item trait weights start at small random means, which breaks the symmetry of $s_k t_k$ (all
+ * zero means would leave every product message flat). Infer.NET's Matchbox recommender learner implements the same
+ * model.
  */
 
 import { child, standardNormals, stream, units, type Stream } from 'aifn-compute/foundation/random'
@@ -31,54 +35,104 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A sparse feature vector: indices into the feature space and their values. */
 export interface SparseFeatures {
+  /** The indices of the non-zero features. */
   readonly index: readonly number[]
+  /** Their values, parallel to `index`. */
   readonly value: readonly number[]
 }
 
 /** Factorised Gaussian posteriors, mean and variance per entry. */
 export interface GaussianTable {
+  /** The posterior mean of each entry. */
   readonly mean: Float64Array
+  /** The posterior variance of each entry, parallel to `mean`. */
   readonly variance: Float64Array
 }
 
-/** A Matchbox model: posteriors over trait weights U [K × user features], V [K × item features], biases, thresholds. */
+/**
+ * A Matchbox model: posteriors over the trait weights $\Umat$ ($K \times$ user features) and $\Vmat$ ($K \times$ item
+ * features), the biases and the thresholds.
+ */
 export interface Matchbox {
+  /** The number of traits $K$. */
   readonly traits: number
+  /** The number of rating levels $L$. */
   readonly levels: number
+  /** The standard deviation $\beta$ of the latent noise. */
   readonly beta: number
+  /** The size of the user feature space. */
   readonly userFeatures: number
+  /** The size of the item feature space. */
   readonly itemFeatures: number
+  /** User trait weights $u_{ki}$, row-major: trait $k$'s weights at `k * userFeatures` onwards. */
   readonly U: GaussianTable
+  /** Item trait weights $v_{kj}$, row-major: trait $k$'s weights at `k * itemFeatures` onwards. */
   readonly V: GaussianTable
+  /** User bias weights $w_i$, one per user feature. */
   readonly userBias: GaussianTable
+  /** Item bias weights $w'_j$, one per item feature. */
   readonly itemBias: GaussianTable
+  /** The $L - 1$ thresholds $\tau_l$. */
   readonly thresholds: GaussianTable
 }
 
 /** Options of `matchbox`. */
 export interface MatchboxOptions {
-  /** Traits K (default 2), rating levels L (default 5), latent noise β (default 1). */
+  /** Traits $K$ (default 2). */
   traits?: number
+  /** Rating levels $L$, at least 2 (default 5). */
   levels?: number
+  /** The latent noise's standard deviation $\beta$ (default 1). */
   beta?: number
-  /** Prior variance of trait weights (default 1), of bias weights (default 1), of thresholds (default 0.25). */
+  /** Prior variance of the trait weights (default 1). */
   traitVariance?: number
+  /** Prior variance of the bias weights (default 1). */
   biasVariance?: number
+  /** Prior variance of the thresholds (default 0.25). */
   thresholdVariance?: number
   /** The standard deviation of the item trait weights' random initial means (default 0.1). */
   symmetryBreaking?: number
 }
 
+/**
+ * A table of $n$ Gaussians of one variance.
+ *
+ * @param n The number of entries.
+ * @param variance The variance of every entry.
+ * @param means The means, taken as they are (not copied); omitted, all 0.
+ * @returns The table.
+ */
 const table = (n: number, variance: number, means?: Float64Array): GaussianTable => ({
   mean: means ?? new Float64Array(n),
   variance: new Float64Array(n).fill(variance),
 })
+/**
+ * A copy of a table, so an update leaves the original as it was.
+ *
+ * @param t The table.
+ * @returns New arrays with the same means and variances.
+ */
 const copy = (t: GaussianTable): GaussianTable => ({
   mean: Float64Array.from(t.mean),
   variance: Float64Array.from(t.variance),
 })
 
-/** A Matchbox model with prior posteriors; thresholds start evenly spaced, one unit apart, centred on 0. */
+/**
+ * A Matchbox model with prior posteriors: zero-mean weights, except the item trait weights, whose means are drawn
+ * with standard deviation `symmetryBreaking`; thresholds start evenly spaced, one unit apart, centred on 0. Throws
+ * `DomainError` for fewer than two levels.
+ *
+ * @param s The stream of the item trait weights' initial means (`child(s, 'item traits')`).
+ * @param userFeatures The size of the user feature space (ids and side features).
+ * @param itemFeatures The size of the item feature space.
+ * @param options The traits, levels, noise, prior variances and symmetry breaking.
+ * @returns The model.
+ *
+ * @example The prior of five levels: thresholds centred on 0
+ * const m = matchbox(stream(0), 3, 2)
+ * print('thresholds:', m.thresholds.mean, ', variances:', m.thresholds.variance)
+ * print('item trait means:', m.V.mean)
+ */
 export function matchbox(
   s: Stream,
   userFeatures: number,
@@ -107,7 +161,14 @@ export function matchbox(
   }
 }
 
-/** Mean and variance of Σᵢ xᵢ wᵢ for weights at `offset + i` of a table. */
+/**
+ * Mean and variance of $\sum_i x_i w_i$ for weights at `offset + i` of a table.
+ *
+ * @param t The weights' posteriors.
+ * @param x The features $x_i$.
+ * @param offset Where the weights start in `t` (a trait's row of $\Umat$ or $\Vmat$).
+ * @returns The mean and the variance.
+ */
 function sumForward(t: GaussianTable, x: SparseFeatures, offset = 0): [number, number] {
   let m = 0
   let v = 0
@@ -119,8 +180,16 @@ function sumForward(t: GaussianTable, x: SparseFeatures, offset = 0): [number, n
 }
 
 /**
- * Pass a message N(m, v) on Σᵢ xᵢ wᵢ back to every weight through the sum factor and multiply it into the posterior
- * (in place): weight i gets mean (m − Σⱼ≠ᵢ xⱼμⱼ)/xᵢ and variance (v + Σⱼ≠ᵢ xⱼ²vⱼ)/xᵢ².
+ * Pass a message $\Gauss(m, v)$ on $\sum_i x_i w_i$ back to every weight through the sum factor and multiply it into
+ * the posterior (in place): weight $i$ gets mean $(m - \sum_{j \ne i} x_j \mu_j) / x_i$ and variance
+ * $(v + \sum_{j \ne i} x_j^2 v_j) / x_i^2$. Zero features, and messages whose variance is not positive and finite, are
+ * skipped.
+ *
+ * @param t The weights' posteriors, updated in place.
+ * @param x The features $x_i$.
+ * @param m The message's mean $m$.
+ * @param v The message's variance $v$.
+ * @param offset Where the weights start in `t`.
  */
 function sumBackward(t: GaussianTable, x: SparseFeatures, m: number, v: number, offset = 0) {
   const [sm, sv] = sumForward(t, x, offset)
@@ -142,16 +211,30 @@ function sumBackward(t: GaussianTable, x: SparseFeatures, m: number, v: number, 
 
 /** The forward quantities of one user–item pair. */
 interface Forward {
+  /** Mean and variance of each user trait $s_k$. */
   s: [number, number][]
+  /** Mean and variance of each item trait $t_k$. */
   t: [number, number][]
+  /** Mean and variance of each product $s_k t_k$. */
   z: [number, number][]
+  /** Mean and variance of the user bias. */
   bu: [number, number]
+  /** Mean and variance of the item bias. */
   bi: [number, number]
-  /** The latent affinity r̃ before the noise. */
+  /** The mean of the latent affinity $\tilde r$ before the noise. */
   mean: number
+  /** Its variance. */
   variance: number
 }
 
+/**
+ * The forward pass of one pair: the traits, their products, the biases and the latent affinity, each a Gaussian.
+ *
+ * @param m The model.
+ * @param x The user's features.
+ * @param y The item's features.
+ * @returns The forward quantities.
+ */
 function forward(m: Matchbox, x: SparseFeatures, y: SparseFeatures): Forward {
   const K = m.traits
   const s = Array.from({ length: K }, (_, k) => sumForward(m.U, x, k * m.userFeatures))
@@ -169,16 +252,38 @@ function forward(m: Matchbox, x: SparseFeatures, y: SparseFeatures): Forward {
 
 /** A prediction: the traits' posteriors, the latent affinity and the probability of each rating level. */
 export interface MatchboxPrediction {
+  /** The posterior mean of each user trait $s_k$. */
   userTraits: Float64Array
+  /** The posterior mean of each item trait $t_k$. */
   itemTraits: Float64Array
+  /** The mean $\mu$ of the latent affinity $\tilde r$. */
   latentMean: number
+  /** Its variance $v$. */
   latentVariance: number
+  /** The probability of each level $0, \dots, L - 1$. */
   probabilities: Float64Array
-  /** The expected rating level Σ l P(l). */
+  /** The expected rating level $\sum_l l \, \pr(l)$. */
   expected: number
 }
 
-/** P(rating = l) = Φ((τₗ − μ)/σₗ) − Φ((τₗ₋₁ − μ)/σₗ₋₁), σ² = v + β² + v_τ, for the pair's latent affinity N(μ, v). */
+/**
+ * The predicted rating of a pair:
+ * $\pr(\mathrm{rating} = l) = \Phi((\tau_l - \mu)/\sigma_l) - \Phi((\tau_{l-1} - \mu)/\sigma_{l-1})$ with
+ * $\sigma_l^2 = v + \beta^2 + v_{\tau_l}$, for the pair's latent affinity $\Gauss(\mu, v)$ and the thresholds'
+ * posterior means $\tau_l$ and variances $v_{\tau_l}$. Negative differences are set to 0 and the probabilities
+ * renormalised.
+ *
+ * @param m The model.
+ * @param x The user's features.
+ * @param y The item's features.
+ * @returns The traits, the latent affinity, and the probability and expectation of each level.
+ *
+ * @example A prior prediction is centred on the middle level
+ * const m = matchbox(stream(0), 1, 1)
+ * const p = matchboxPredict(m, { index: [0], value: [1] }, { index: [0], value: [1] })
+ * print('probabilities:', p.probabilities)
+ * print('expected level:', p.expected)
+ */
 export function matchboxPredict(m: Matchbox, x: SparseFeatures, y: SparseFeatures): MatchboxPrediction {
   const f = forward(m, x, y)
   const L = m.levels
@@ -203,7 +308,27 @@ export function matchboxPredict(m: Matchbox, x: SparseFeatures, y: SparseFeature
   }
 }
 
-/** One ADF update on a rating `level` of item y by user x (module docs). Returns a new model; `iterations` EP sweeps over the two thresholds (default 4). */
+/**
+ * One ADF update on a rating `level` of item $\yvec$ by user $\xvec$ (see the file's introduction): EP on the (at most
+ * two) threshold comparisons the level implies, then messages back to the thresholds, the biases and the trait
+ * weights. Throws `DomainError` when `level` is not a whole number from 0 to $L - 1$.
+ *
+ * @param m The model; not modified.
+ * @param x The user's features.
+ * @param y The item's features.
+ * @param level The observed rating level $l$, from 0 to $L - 1$.
+ * @param options `iterations`, the EP sweeps over the threshold comparisons (default 4).
+ * @returns The updated model, with new posterior tables.
+ *
+ * @example Repeated top ratings of one pair raise its expected level
+ * let m = matchbox(stream(0), 1, 1)
+ * const x = { index: [0], value: [1] }
+ * const y = { index: [0], value: [1] }
+ * print('before:', matchboxPredict(m, x, y).expected)
+ * for (let t = 0; t < 5; t++) m = matchboxUpdate(m, x, y, 4)
+ * print('after five ratings of 4:', matchboxPredict(m, x, y).expected)
+ * print('top threshold:', m.thresholds.mean[3])
+ */
 export function matchboxUpdate(
   m: Matchbox,
   x: SparseFeatures,
@@ -295,41 +420,68 @@ export function matchboxUpdate(
 
 /** Ratings drawn from a Matchbox-like model, with the true traits kept for checking. */
 export interface MatchboxData {
+  /** The number of users. */
   users: number
+  /** The number of items. */
   items: number
+  /** The number of rating levels $L$. */
   levels: number
-  /** Side features per user [users × userSide] and per item [items × itemSide], dense. */
+  /** Side features per user. */
   userSide: number
+  /** Side features per item. */
   itemSide: number
+  /** The users' side features, dense and row-major, `users` rows of `userSide`. */
   userX: Float64Array
+  /** The items' side features, `items` rows of `itemSide`. */
   itemY: Float64Array
   /** The ratings as (user, item, level) triples. */
   ratings: { user: Int32Array; item: Int32Array; level: Int32Array }
-  /** The true traits [users × K], [items × K], the true affinities' scale and thresholds. */
+  /** The true user traits, row-major, `users` rows of $K$. */
   userTraits: Float64Array
+  /** The true item traits, `items` rows of $K$. */
   itemTraits: Float64Array
+  /** The $L - 1$ cut points of the noisy affinity between levels. */
   thresholds: Float64Array
 }
 
 /** Options of `matchboxRatings`. */
 export interface MatchboxRatingsOptions {
+  /** The number of users (default 200). */
   users?: number
+  /** The number of items (default 100). */
   items?: number
+  /** The number of true traits $K$ (default 2). */
   traits?: number
+  /** The number of rating levels $L$ (default 5). */
   levels?: number
-  /** Side features per user and item (default 3 each, standard normal); traits are linear in them plus noise. */
+  /** Side features per user (default 3, standard normal); traits are linear in them plus noise. */
   userSide?: number
+  /** Side features per item (default 3). */
   itemSide?: number
-  /** How much of each trait the side features explain (default 0.8); the rest is individual. */
+  /** The share of each trait's variance the side features explain (default 0.8); the rest is individual. */
   featureShare?: number
-  /** Ratings per user (default 30), latent noise sd (default 0.5). */
+  /** Ratings per user (default 30), of distinct items while there are enough. */
   perUser?: number
+  /** The standard deviation of the noise added to each affinity (default 0.5). */
   noise?: number
 }
 
 /**
- * Ratings on L levels from the model: user traits uₖ = Aₖ·f + e, item traits vₖ = Bₖ·g + e′ (side features f, g
- * standard normal), affinity Σₖ uₖvₖ plus noise, cut at thresholds at the affinity's quantiles (equal shares).
+ * Ratings on $L$ levels from the model: user traits $u_k = \sqrt{\rho} \, \avec_k^\top \fvec / \sqrt{d} +
+ * \sqrt{1 - \rho} \, e$ and item traits $v_k = \sqrt{\rho} \, \bvec_k^\top \gvec / \sqrt{d'} + \sqrt{1 - \rho} \, e'$,
+ * with side features $\fvec$, $\gvec$, weights $\avec_k$, $\bvec_k$ and noise $e$, $e'$ all standard normal and
+ * $\rho$ the `featureShare`; the affinity $\sum_k u_k v_k$ plus noise is cut at its empirical quantiles into levels of
+ * equal shares. Each user rates `perUser` items in a random order of the catalogue.
+ *
+ * @param s The stream every draw comes from.
+ * @param options The sizes, the feature share and the noise.
+ * @returns The side features, the ratings, and the true traits and thresholds.
+ *
+ * @example Equal shares of each level
+ * const d = matchboxRatings(stream(0), { users: 20, items: 10, perUser: 5 })
+ * const count = (l) => d.ratings.level.filter((v) => v === l).length
+ * print('ratings:', d.ratings.level.length, '; per level:', [0, 1, 2, 3, 4].map(count))
+ * print('thresholds:', d.thresholds)
  */
 export function matchboxRatings(s: Stream, options: MatchboxRatingsOptions = {}): MatchboxData {
   const { users = 200, items = 100, traits: K = 2, levels = 5, userSide = 3, itemSide = 3 } = options
@@ -393,7 +545,16 @@ export function matchboxRatings(s: Stream, options: MatchboxRatingsOptions = {})
   }
 }
 
-/** The sparse features of user u: a one-hot id (index u) and, with `side`, the side features after the ids. */
+/**
+ * The sparse features of a user or item: a one-hot id and, with `withSide`, the side features after the ids.
+ *
+ * @param id The user or item index, the one-hot feature.
+ * @param count The number of users (or items): the side features start at this index.
+ * @param side The side features, row-major, `d` per user or item.
+ * @param d The side features per user or item.
+ * @param withSide Whether to include the side features.
+ * @returns The features.
+ */
 const features = (id: number, count: number, side: Float64Array, d: number, withSide: boolean): SparseFeatures => ({
   index: withSide ? [id, ...Array.from({ length: d }, (_, j) => count + j)] : [id],
   value: withSide ? [1, ...Array.from({ length: d }, (_, j) => side[id * d + j])] : [1],
@@ -403,51 +564,85 @@ const features = (id: number, count: number, side: Float64Array, d: number, with
 export interface MatchboxRunOptions extends MatchboxOptions {
   /** Use the side features (default true); without them a new user or item is the prior. */
   useFeatures?: boolean
-  /** Share of users held out entirely (cold start, default 0.1) and of the other ratings held out (default 0.2). */
+  /** Share of users held out entirely, the cold-start users (default 0.1). */
   coldUsers?: number
+  /** Share of the other users' ratings held out for testing (default 0.2). */
   testShare?: number
   /** Passes over the training ratings (default 1: online ADF; more reuse ratings and overcount them). */
   passes?: number
+  /** About how many checkpoints to take over the run (default 30), besides the one before training. */
   checkpoints?: number
+  /** The root seed of the split, the prior and the order of the ratings (default 0). */
   seed?: number | string
 }
 
 /** One checkpoint of a Matchbox run. */
 export interface MatchboxCheckpoint {
+  /** Ratings learned from so far. */
   seen: number
-  /** Held-out ratings of known users: RMSE of the expected level, accuracy of the most probable, mean log-probability. */
+  /** RMSE of the expected level on the held-out ratings of known users. */
   rmse: number
+  /** Share of those ratings whose most probable level is right. */
   accuracy: number
+  /** Their mean log-probability (each probability floored at $10^{-12}$). */
   logProbability: number
-  /** The same RMSE on the cold-start users. */
+  /** The same RMSE on the cold-start users' ratings. */
   coldRmse: number
-  /** Posterior mean item traits [items × K] and their mean variance. */
+  /** Posterior mean item traits, row-major, `items` rows of $K$. */
   itemTraits: Float64Array
+  /** The mean posterior variance of the item traits. */
   traitVariance: number
+  /** The thresholds' posterior means. */
   thresholds: Float64Array
 }
 
 /** A Matchbox run so far. */
 export interface MatchboxRun {
+  /** Updates in the whole run: training ratings times passes. */
   total: number
+  /** Updates made so far. */
   seen: number
+  /** True once every update is made. */
   finished: boolean
+  /** The number of rating levels $L$. */
   levels: number
+  /** The number of traits $K$. */
   traits: number
-  /** Baselines: RMSE of each item's training mean level (known users) and of the global mean (cold users). */
+  /** Baseline: RMSE of each item's training mean level on the known users' held-out ratings. */
   itemMeanRmse: number
+  /** Baseline: RMSE of the global training mean on the cold-start users' ratings. */
   coldGlobalRmse: number
+  /** The checkpoints so far, the first before any update. */
   checkpoints: MatchboxCheckpoint[]
-  /** The test triples of known users and the final predicted distributions [n × L]. */
+  /** The test triples of known users. */
   test: { user: Int32Array; item: Int32Array; level: Int32Array }
+  /** The predicted distributions of the test triples at the latest checkpoint, row-major, one row of $L$ each. */
   predictions: Float64Array
-  /** True item traits [items × K] (for comparing up to rotation). */
+  /** True item traits, row-major, `items` rows of $K$ (for comparing up to rotation). */
   trueItemTraits: Float64Array
   /** The model's posteriors now. */
   model: Matchbox
 }
 
-/** Train Matchbox online on `matchboxRatings` data and yield checkpoints. Deterministic in `seed`. */
+/**
+ * Train Matchbox online on `matchboxRatings` data and yield checkpoints: a share of users is held out entirely (cold
+ * start) and a share of the others' ratings held out for testing; the rest are learned one `matchboxUpdate` at a time
+ * in a random order. Each user's features are its one-hot id and, with `useFeatures`, its side features; likewise
+ * each item's. The levels come from the data, overriding `options.levels`. Deterministic in `seed`.
+ *
+ * @param data The ratings and side features.
+ * @param options The model's options, the use of features, the held-out shares, the passes, the number of
+ *   checkpoints and the seed.
+ * @returns A generator of the run so far, yielding before training and at each checkpoint, and returning the final
+ *   state.
+ *
+ * @example Held-out error falls below the item-mean baseline
+ * const data = matchboxRatings(stream(0), { users: 60, items: 30, perUser: 15 })
+ * const runs = [...matchboxRun(data, { checkpoints: 3 })]
+ * const last = runs[runs.length - 1]
+ * print('item-mean RMSE:', last.itemMeanRmse, '; global-mean RMSE on cold users:', last.coldGlobalRmse)
+ * for (const c of last.checkpoints) print('after', c.seen, 'ratings: RMSE', c.rmse, ', cold RMSE', c.coldRmse)
+ */
 export function* matchboxRun(
   data: MatchboxData,
   options: MatchboxRunOptions = {},

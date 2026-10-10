@@ -1,7 +1,9 @@
 /**
  * `recommenderRun`: train one recommender of the module on implicit feedback and stream its progress, epoch by epoch,
- * for a page to plot and play: the training loss, recall@k and NDCG@k on held-out items, and checkpoints holding every
- * user's scores and a two-dimensional map of the learned embeddings.
+ * for a page to plot and play: the training loss, recall@$k$ and NDCG@$k$ on held-out items, and checkpoints holding
+ * every user's scores and a two-dimensional map of the learned embeddings. Gradient models are trained by Adam with
+ * the gradient norm clipped at 10; implicit ALS by its sweeps; popularity and the neighbourhood models need no
+ * training.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -18,13 +20,17 @@ import { itemKnn, popularity, userKnn } from './neighbourhood'
 
 /** Implicit-feedback data as the generators of `aifn-methods/data` produce it. */
 export type RecommenderData = {
+  /** The number of users. */
   users: Size
+  /** The number of items. */
   items: Size
-  /** Training interactions as rows (user, item), and held-out rows. */
+  /** Training interactions as rows `[m, 2]` of (user, item). */
   train: Tensor
+  /** Held-out interactions, rows of the same form. */
   test: Tensor
-  /** Side features: a group per user and a category per item (int32). */
+  /** Side features: a group per user (int32). */
   userGroup?: Tensor
+  /** A category per item (int32). */
   itemCategory?: Tensor
   /** Each user's training items in time order. */
   sequences?: readonly (readonly number[])[]
@@ -52,7 +58,9 @@ export const RECOMMENDERS: readonly { kind: RecommenderKind; name: string; train
 
 /** Options of `recommenderRun`. */
 export type RecommenderRunOptions = NeuralOptions & {
+  /** The training and held-out interactions. */
   data: RecommenderData
+  /** The recommender to train. */
   model: RecommenderKind
   /** Passes over the training rows (ALS sweeps; ignored by the untrained models). Default 20. */
   epochs?: Size
@@ -64,8 +72,12 @@ export type RecommenderRunOptions = NeuralOptions & {
   k?: Size
   /** Neighbours of the kNN models (default 20). */
   neighbours?: Size
-  /** Implicit ALS's confidence slope α and penalty λ (default 10 and 0.1). */
+  /** Implicit ALS's confidence slope $\alpha$ (default 10). */
   alpha?: number
+  /**
+   * The penalty: implicit ALS's $\lambda$ (default 0.1 there), and the gradient models' L2 penalty (default 1e-2
+   * there, as in `NeuralOptions`).
+   */
   regularisation?: number
   /** The root seed (default 'recommender'). */
   seed?: string | number
@@ -73,36 +85,64 @@ export type RecommenderRunOptions = NeuralOptions & {
 
 /** Curves of a run, one entry per evaluated epoch (epoch 0 is the untrained model). */
 export type RecommenderHistory = {
+  /** The epoch of each entry. */
   epoch: number[]
-  /** Mean training loss over the epoch's steps (NaN for the untrained models and at epoch 0). */
+  /**
+   * Mean training loss over the epoch's steps: NaN for the untrained models and for the gradient models at epoch 0;
+   * implicit ALS records its objective per cell, $\mathit{users} \cdot \mathit{items}$, at epoch 0 too.
+   */
   loss: number[]
+  /** Held-out recall@$k$. */
   recall: number[]
+  /** Held-out NDCG@$k$. */
   ndcg: number[]
+  /** Held-out hit rate at $k$. */
   hitRate: number[]
+  /** Catalogue coverage of the top-$k$ lists. */
   coverage: number[]
 }
 
 /** The state shown at one epoch: every user's scores and the embedding map. */
 export type RecommenderCheckpoint = {
+  /** The epoch. */
   readonly epoch: Size
-  /** Scores [users, items], row-major. */
+  /** Scores `[users, items]`, row-major. */
   readonly scores: Float64Array
-  /** Two-dimensional maps of the item (and user) embeddings by their first two principal components; null when the model has none. */
+  /**
+   * A two-dimensional map of the item embeddings by their first two principal components (`principalMap`), `[items,
+   * 2]`; null when the model has none.
+   */
   readonly itemMap: Float64Array | null
+  /** The same map of the user embeddings, `[users, 2]`; null when the model has none (SASRec, the untrained ones). */
   readonly userMap: Float64Array | null
 }
 
 /** A snapshot of `recommenderRun`. */
 export type RecommenderSnapshot = {
+  /** The epoch just evaluated. */
   readonly epoch: Size
+  /** The epochs of the run (0 for the untrained models). */
   readonly epochs: Size
+  /** True on the last snapshot, or when training diverged. */
   readonly done: boolean
+  /** The recommender trained. */
   readonly model: RecommenderKind
+  /** The curves so far. */
   readonly history: RecommenderHistory
+  /** The checkpoints so far, one per evaluated epoch. */
   readonly checkpoints: readonly RecommenderCheckpoint[]
 }
 
-/** Rows [n, d] projected on their first two principal axes, as [n, 2]. */
+/**
+ * Rows projected on their first two principal axes, by the SVD of the centred rows. A single column gives its
+ * centred values and a second coordinate of 0.
+ *
+ * @param rows The rows, shape `[n, d]`.
+ * @returns The coordinates, row-major, `[n, 2]`.
+ *
+ * @example Points on a line in three dimensions map onto the first axis
+ * print(principalMap(tensor([[1, 2, 3], [2, 4, 6], [3, 6, 9], [4, 8, 12]])))
+ */
 export function principalMap(rows: Tensor): Float64Array {
   const [n, d] = rows.shape
   const x = Float64Array.from(toFlat(rows))
@@ -125,12 +165,32 @@ export function principalMap(rows: Tensor): Float64Array {
   return out
 }
 
+/**
+ * The indices from 0 to $n - 1$.
+ *
+ * @param n The number of indices.
+ * @returns The array of indices.
+ */
 const range = (n: Size) => Array.from({ length: n }, (_, i) => i)
 
 /**
  * Train a recommender on `data.train` and evaluate it on `data.test` after every epoch (and before the first), yielding
  * a snapshot each time: a generator, so a worker can stream the run. Popularity and the kNN models have nothing to
- * train and yield once.
+ * train and yield once. An epoch of a gradient model is $\lfloor m / \mathit{batchSize} \rfloor$ Adam steps over its
+ * $m$ training rows; of implicit ALS, one sweep. A run that diverges stops after the epoch it diverged in.
+ *
+ * @param options The data, the model and its hyperparameters, the epochs, the cut-off $k$ and the seed.
+ * @returns A generator of snapshots, each holding the history and checkpoints so far.
+ *
+ * @example Popularity against implicit ALS on two taste groups, each user holding out one item of its group
+ * const train = []
+ * const test = []
+ * for (let u = 0; u < 6; u++) for (let i = 0; i < 3; i++) (i === u % 3 ? test : train).push([u, (u < 3 ? 0 : 3) + i])
+ * const data = { users: 6, items: 6, train: tensor(train), test: tensor(test) }
+ * for (const model of ['popularity', 'implicit-als']) {
+ *   const snapshots = [...recommenderRun({ data, model, epochs: 4, dimension: 2, k: 1 })]
+ *   print(model, 'recall@1 by epoch:', snapshots[snapshots.length - 1].history.recall)
+ * }
  */
 export function* recommenderRun(options: RecommenderRunOptions): Generator<RecommenderSnapshot> {
   const {

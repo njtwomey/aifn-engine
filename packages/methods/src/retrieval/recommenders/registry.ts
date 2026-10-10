@@ -234,6 +234,7 @@ fn(
   matchbox.matchboxRun,
 )
 
+/** A registry table: entries keyed by name, each a function with its registry `info`. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const sources = [neighbourhood, factorisation, models, interactions, run, simulator, matchbox]
 /** The algorithms of the module. */

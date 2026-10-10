@@ -1,7 +1,8 @@
 /**
  * Recommenders without learned parameters: popularity, and user- and item-based neighbourhood collaborative filtering
  * (Resnick et al., 1994; Sarwar et al., 2001) with cosine similarity between interaction vectors. Neighbours are found
- * by `aifn-compute/numerics/neighbours`' exact search.
+ * by `aifn-compute/numerics/neighbours`' exact search. Each returns a `Scorer`; the scores include the items a user
+ * has already seen, which `topK` and `evaluateRanking` leave out.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -9,7 +10,18 @@ import { fromData, toFlat } from 'aifn-compute/foundation/tensor'
 import { bruteForceNeighbours } from 'aifn-compute/numerics/neighbours'
 import { interactionMatrix, type Interactions, type Scorer } from './interactions'
 
-/** The popularity recommender: every user gets the items ranked by their number of training interactions. */
+/**
+ * The popularity recommender: every user gets the items ranked by their number of training interactions (their summed
+ * values, when the interactions have values).
+ *
+ * @param train The training interactions.
+ * @returns A scorer giving every user the same row of item counts.
+ *
+ * @example Item 1 is the most popular
+ * const train = interactionsFromRows([[0, 1], [1, 1], [2, 1], [0, 0], [1, 2]], 3, 4)
+ * print('scores:', popularity(train)([0]))
+ * print("user 0's top 2 unseen:", topK(popularity(train)([0]), 2, itemsByUser(train)[0]))
+ */
 export function popularity(train: Interactions): Scorer {
   const counts = new Float64Array(train.items)
   for (let r = 0; r < train.item.length; r++) counts[train.item[r]] += train.value ? train.value[r] : 1
@@ -24,11 +36,24 @@ export function popularity(train: Interactions): Scorer {
 export type NeighbourhoodOptions = {
   /** Neighbours kept per user (user-kNN) or per item (item-kNN); default 20. */
   k?: Size
-  /** Shrink each similarity by n/(n + shrinkage), where n is the overlap of the two vectors (default 0: none). */
+  /**
+   * Shrink each similarity by $n/(n + \mathit{shrinkage})$, where $n$ is the overlap of the two vectors, the entries
+   * positive in both (default 0: none).
+   */
   shrinkage?: number
 }
 
-/** Cosine similarities of each row of R (rows × cols) to its k nearest other rows: neighbour ids and weights. */
+/**
+ * Cosine similarities of each row of $\Rmat$ to its $k$ nearest other rows: neighbour ids and weights.
+ *
+ * @param R The matrix $\Rmat$, row-major, `rows` rows of `cols` entries (not modified).
+ * @param rows The number of rows.
+ * @param cols The number of columns.
+ * @param k The neighbours wanted per row; at most `rows - 1` are kept.
+ * @param shrinkage The shrinkage of each similarity towards 0 by the overlap (0 for none).
+ * @returns `ids` and `weights`, row-major with `k` entries per row (the neighbour ids, nearest first, and their
+ *   similarities; 0 for an all-zero row), and the `k` actually kept.
+ */
 function nearestRows(R: Float64Array, rows: Size, cols: Size, k: Size, shrinkage: number) {
   const kk = Math.min(k, rows - 1)
   const nn = bruteForceNeighbours(fromData(R, [rows, cols]), fromData(R, [rows, cols]), kk, {
@@ -51,8 +76,19 @@ function nearestRows(R: Float64Array, rows: Size, cols: Size, k: Size, shrinkage
 }
 
 /**
- * User-based collaborative filtering: score(u, i) = Σ_{v ∈ N_k(u)} sim(u, v) r_vi, with N_k(u) the k users whose
- * interaction vectors have the largest cosine similarity to u's.
+ * User-based collaborative filtering: $\mathrm{score}(u, i) = \sum_{v \in N_k(u)} \mathrm{sim}(u, v) \, r_{vi}$, with
+ * $N_k(u)$ the $k$ other users whose interaction vectors have the largest cosine similarity to $u$'s. The neighbours
+ * are found once, when the scorer is built.
+ *
+ * @param train The training interactions; their matrix $r_{vi}$ is what neighbours contribute.
+ * @param options The neighbours $k$ per user and the similarity shrinkage.
+ * @returns A scorer over every item.
+ *
+ * @example User 0 is most like user 1, who also has item 2
+ * const train = interactionsFromRows([[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [2, 3]], 3, 4)
+ * const scores = userKnn(train, { k: 1 })([0])
+ * print('scores:', scores)
+ * print('top unseen:', topK(scores, 1, itemsByUser(train)[0]))
  */
 export function userKnn(train: Interactions, options: NeighbourhoodOptions = {}): Scorer {
   const { k = 20, shrinkage = 0 } = options
@@ -73,9 +109,20 @@ export function userKnn(train: Interactions, options: NeighbourhoodOptions = {})
 }
 
 /**
- * Item-based collaborative filtering (Sarwar et al., 2001; Linden, Smith and York, 2003): score(u, i) =
- * Σ_{j ∈ I_u} sim_k(i, j) r_uj, where sim_k keeps each item's k most similar items by the cosine of their user
- * columns and is 0 elsewhere.
+ * Item-based collaborative filtering (Sarwar et al., 2001; Linden, Smith and York, 2003):
+ * $\mathrm{score}(u, i) = \sum_{j \in I_u} \mathrm{sim}_k(i, j) \, r_{uj}$ over the items $I_u$ of user $u$, where
+ * $\mathrm{sim}_k(i, j)$ is the cosine of the two items' user columns when $i$ is among $j$'s $k$ most similar items,
+ * and 0 otherwise.
+ *
+ * @param train The training interactions.
+ * @param options The neighbours $k$ kept per item and the similarity shrinkage.
+ * @returns A scorer over every item.
+ *
+ * @example Items 0 and 2 are bought together, so a user with item 0 is offered item 2
+ * const train = interactionsFromRows([[0, 0], [0, 2], [1, 0], [1, 2], [2, 1], [3, 0]], 4, 3)
+ * const scores = itemKnn(train, { k: 1 })([3])
+ * print('scores:', scores)
+ * print('top unseen:', topK(scores, 1, itemsByUser(train)[3]))
  */
 export function itemKnn(train: Interactions, options: NeighbourhoodOptions = {}): Scorer {
   const { k = 20, shrinkage = 0 } = options
