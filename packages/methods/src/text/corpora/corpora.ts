@@ -1,8 +1,14 @@
 /**
  * Toy text corpora for the text pipeline: the small corpora the notes work by hand (the five "cat sat on the mat"
- * documents, the thirteen pet sentences, Sennrich's "low lower newest widest", the Hugging Face WordPiece corpus), and a
- * seeded generator of short sentences about a few topics, with English inflection (plurals, -ed, -ing with doubled
- * consonants) so that stemming and subword merges have something to find.
+ * documents, the thirteen pet sentences, Sennrich's "low lower newest widest", the Hugging Face WordPiece corpus), and
+ * three seeded generators. `toyCorpus` writes short sentences about a few topics with English inflection (plurals,
+ * -ed, -ing with doubled consonants) so that stemming and subword merges have something to find; `topicCorpus` builds
+ * labelled sentences from shared frames for word representations; `driftingTopicCorpus` mixes themes whose words
+ * change over time, for dynamic topic models.
+ *
+ * Every generator draws each document from its own child stream of the seed, so the documents do not depend on how
+ * many are drawn, and returns a `Corpus` with whatever truth it knows (topic labels, word topics, time slices,
+ * generating topics).
  */
 
 import type { DatasetInfo, DatasetMeta } from 'aifn-compute/foundation/contracts'
@@ -15,8 +21,11 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** A corpus: documents of raw text (one sentence or paragraph each) and what they are. */
 export interface Corpus {
+  /** Always `'corpus'`, the tag of this output kind. */
   readonly kind: 'corpus'
+  /** The documents, each a string of space-separated words (lower case, no punctuation, in the generated corpora). */
   readonly documents: readonly string[]
+  /** The corpus's name, description and task (`'text'`), and the topic names when there are labels. */
   readonly meta: DatasetMeta
   /** The true topic of each document, an index into `meta.labelNames` (generated corpora with topics only). */
   readonly labels?: readonly number[]
@@ -34,9 +43,16 @@ export interface Corpus {
   }
 }
 
+/**
+ * A word repeated.
+ *
+ * @param word The word.
+ * @param n How many copies.
+ * @returns `n` copies of `word`.
+ */
 const repeat = (word: string, n: number) => Array.from({ length: n }, () => word)
 
-/** The named corpora of {@link namedCorpus}. */
+/** The named corpora of {@link namedCorpus}: each one's description and documents. */
 export const NAMED_CORPORA = {
   'cat-sat-on-the-mat': {
     description: 'Five short documents about cats and dogs, the worked example of the TF-IDF and BM25 notes.',
@@ -83,7 +99,23 @@ export const NAMED_CORPORA = {
 /** A named corpus. */
 export type CorpusName = keyof typeof NAMED_CORPORA
 
-/** One of the hand-worked corpora of the notes. */
+/**
+ * One of the hand-worked corpora of the notes, by name: the TF-IDF and BM25 example (`cat-sat-on-the-mat`), the PMI
+ * example (`pets`), Sennrich et al.'s BPE corpus (`low-lower-newest-widest`) or the Hugging Face WordPiece corpus
+ * (`hug-pug-pun`). Throws `DomainError` for an unknown name.
+ *
+ * @param knobs The corpus to return: `name`, one of `NAMED_CORPORA` (default `cat-sat-on-the-mat`).
+ * @returns The corpus, its documents copied, with no labels.
+ *
+ * @example The TF-IDF example's five documents
+ * const c = namedCorpus({ name: 'cat-sat-on-the-mat' })
+ * print(c.documents.length, 'documents:', c.documents)
+ * print(c.meta.description)
+ *
+ * @example The BPE corpus is one document of repeated words
+ * print(Object.keys(NAMED_CORPORA))
+ * print(namedCorpus({ name: 'low-lower-newest-widest' }).documents[0])
+ */
 export function namedCorpus(knobs: { name?: CorpusName } = {}): Corpus {
   const name = knobs.name ?? 'cat-sat-on-the-mat'
   const c = NAMED_CORPORA[name]
@@ -93,17 +125,24 @@ export function namedCorpus(knobs: { name?: CorpusName } = {}): Corpus {
 
 // ── A seeded sentence generator ──────────────────────────────────────────────────────────────────────────────────────
 
+/** A noun: singular, plural. */
 type Noun = readonly [singular: string, plural: string]
 /** A verb: base form, third person singular, past, -ing form. */
 type Verb = readonly [string, string, string, string]
 
+/** The word lists of a topic of {@link toyCorpus}, each in order of decreasing frequency. */
 interface Topic {
+  /** The nouns: subjects and objects. */
   readonly nouns: readonly Noun[]
+  /** The verbs, in all four forms. */
   readonly verbs: readonly Verb[]
+  /** The adjectives that may come before the subject. */
   readonly adjectives: readonly string[]
+  /** The places a sentence may end at ("in the garden"). */
   readonly places: readonly string[]
 }
 
+/** The topics of {@link toyCorpus}: pets, food and weather. */
 const TOPICS: Readonly<Record<string, Topic>> = {
   pets: {
     nouns: [
@@ -174,12 +213,20 @@ export interface ToyCorpusOptions {
   /** How many of the topics (pets, food, weather) to mix, from the first (default 3). */
   topics?: number
   /**
-   * Zipf exponent of word choice within a topic (default 1): word k of a list is picked with probability ∝ (k + 1)^−s,
-   * so a few words dominate as in real text.
+   * Zipf exponent $s$ of word choice within a topic (default 1): word $k$ of a list (from 0) is picked with probability
+   * $\propto (k + 1)^{-s}$, so a few words dominate as in real text. 0 picks uniformly.
    */
   exponent?: number
 }
 
+/**
+ * Pick one item of a list by Zipf's law, by inverting the cumulative weights at `u`.
+ *
+ * @param xs The items, most frequent first.
+ * @param u A uniform draw in $[0, 1)$.
+ * @param exponent The Zipf exponent $s$: item $k$ has weight $(k + 1)^{-s}$.
+ * @returns The item picked.
+ */
 const pick = <T>(xs: readonly T[], u: number, exponent: number): T => {
   const w = xs.map((_, k) => (k + 1) ** -exponent)
   let r = u * w.reduce((a, b) => a + b, 0)
@@ -188,9 +235,26 @@ const pick = <T>(xs: readonly T[], u: number, exponent: number): T => {
 }
 
 /**
- * A seeded toy corpus: each sentence is drawn from one topic as "the [adjective] noun(s) verb(s|ed|ing) the noun(s) in
- * the place", with determiners, number and tense drawn too. Sentence k depends only on `child(s, k)`, so a longer
- * corpus extends a shorter one.
+ * A seeded toy corpus: each sentence is drawn from one topic, uniformly, as a determiner (`the`, or `a` / `some` by
+ * number), an optional adjective, the subject in singular or plural, the verb in the past, present or progressive
+ * ("is chasing"), `the` and an object in either number, and in 60% of sentences `in` or `near the` and a place. Words
+ * are picked by Zipf's law within the topic. Sentence $k$ depends only on `child(s, k)`, so a longer corpus extends a
+ * shorter one. Throws `DomainError` unless `sentences` is a positive integer.
+ *
+ * @param s The random stream the corpus is drawn from.
+ * @param options The size, the number of topics and the Zipf exponent.
+ * @returns The corpus, with no labels.
+ *
+ * @example Five sentences about pets, food and weather
+ * const c = toyCorpus(stream(0), { sentences: 5 })
+ * print(c.documents)
+ * print(c.meta.description)
+ *
+ * @example A longer corpus extends a shorter one
+ * const short = toyCorpus(stream(0), { sentences: 3 })
+ * const long = toyCorpus(stream(0), { sentences: 6 })
+ * print('extends', short.documents.every((d, k) => d === long.documents[k]))
+ * print('pets only, uniform words', toyCorpus(stream(1), { sentences: 3, topics: 1, exponent: 0 }).documents)
  */
 export function toyCorpus(s: Stream, options: ToyCorpusOptions = {}): Corpus {
   const { sentences = 40, topics = 3, exponent = 1 } = options
@@ -231,13 +295,19 @@ export function toyCorpus(s: Stream, options: ToyCorpusOptions = {}): Corpus {
 /** A word with its two forms: a noun's singular and plural, or a verb's third-person singular and base form. */
 type Forms = readonly [one: string, many: string]
 
+/** The words of a topic of {@link topicCorpus}, by their role in a sentence. */
 interface TopicFrames {
+  /** The subject nouns. */
   readonly subjects: readonly Forms[]
+  /** The verbs that take an object. */
   readonly transitive: readonly Forms[]
+  /** The object nouns (singular only). */
   readonly objects: readonly string[]
+  /** The verbs that take no object. */
   readonly intransitive: readonly Forms[]
 }
 
+/** The topics of {@link topicCorpus}: animals, food, vehicles, colours and places. */
 const TOPIC_FRAMES: Readonly<Record<string, TopicFrames>> = {
   animals: {
     subjects: [
@@ -338,6 +408,7 @@ const TOPIC_FRAMES: Readonly<Record<string, TopicFrames>> = {
 const COLOURS = ['red', 'blue', 'green', 'yellow', 'white', 'black']
 /** Places: where any topic's intransitive sentences happen ("the cat sleeps in the town"). */
 const PLACES = ['city', 'town', 'village', 'park', 'market']
+/** Determiners and prepositions, the words of no topic. */
 const FUNCTION_WORDS = ['the', 'a', 'some', 'in', 'near', 'to']
 
 /** The topics of {@link topicCorpus}, in label order. */
@@ -360,8 +431,19 @@ export interface TopicCorpusOptions {
  * from the same frames ("the cat chases the mouse", "the buses stop near the market", "the painter paints the wall
  * red"), so that words cluster both by topic (the nouns and verbs of one topic share contexts) and by syntactic role
  * (colour words follow determiners in every topic, place words follow prepositions, plural nouns take base-form verbs).
- * The document labels are each sentence's topic; `wordTopics` gives every word's. Sentence k depends only on
- * `child(s, k)`, so a longer corpus extends a shorter one.
+ * Each sentence's topic is drawn uniformly; 60% of sentences are transitive. The document labels are each sentence's
+ * topic; `wordTopics` gives every word's (colour and place words belong to `colours` and `places` whichever topics are
+ * used). Sentence $k$ depends only on `child(s, k)`, so a longer corpus extends a shorter one. Throws `DomainError`
+ * unless `sentences` is a positive integer.
+ *
+ * @param s The random stream the corpus is drawn from.
+ * @param options The size, the number of topics, and the rates of colour adjectives and place phrases.
+ * @returns The corpus, with `labels` (indices into `meta.labelNames`) and `wordTopics`.
+ *
+ * @example Five labelled sentences
+ * const c = topicCorpus(stream(0), { sentences: 5 })
+ * c.documents.forEach((d, k) => print(c.meta.labelNames[c.labels[k]], '|', d))
+ * print('words with a topic', Object.keys(c.wordTopics).length, '; red is', c.wordTopics.red)
  */
 export function topicCorpus(s: Stream, options: TopicCorpusOptions = {}): Corpus {
   const { sentences = 300, topics = TOPIC_CORPUS_TOPICS.length, colourRate = 0.2, placeRate = 0.7 } = options
@@ -478,23 +560,39 @@ export const DRIFTING_TOPICS: Readonly<Record<string, readonly string[]>> = {
 
 /** Options of `driftingTopicCorpus`. */
 export interface DriftingTopicCorpusOptions {
-  /** Time slices (default 6) and documents per slice (default 30). */
+  /** The number of time slices $T$ (default 6). */
   slices?: number
+  /** Documents per slice (default 30). */
   documentsPerSlice?: number
-  /** Words per document (default 40) and the Dirichlet concentration of the documents' topic proportions (0.1). */
+  /** Words per document (default 40). */
   length?: number
+  /** The Dirichlet concentration $\alpha$ of the documents' theme proportions (default 0.1). */
   alpha?: number
-  /** Width of a theme's usage window, in words of its list (default 2.5). */
+  /** Width $w$ of a theme's usage window, in words of its list (default 2.5). */
   width?: number
 }
 
 /**
  * Documents whose themes' vocabularies change over time, for dynamic topic models (Blei & Lafferty, 2006): four themes
- * (travel, messages, medicine, work), each a list of twelve words from old usage to new; in slice t of T a theme's
- * word distribution is a Gaussian window over its list, centred at position 11·t/(T − 1), so "horse" gives way to
- * "jet" and "letter" to "email". Each document draws proportions θ ~ Dir(α) over the themes, then each word's theme
- * and the word. The true topics of every slice are returned with the documents. Document (t, i) depends only on
- * `child(s, t, i)`.
+ * (travel, messages, medicine, work), each a list of twelve words from old usage to new. In slice $t$ of $T$ a theme
+ * gives word $i$ of its list weight $\exp(-(i - c_t)^2 / (2w^2))$, a Gaussian window centred at $c_t = 11t/(T - 1)$
+ * ($c_t = 5.5$ when $T = 1$), so "horse" gives way to "jet" and "letter" to "email". Each document draws proportions
+ * $\thetavec \sim \Dir(\alpha)$ over the themes (by normalised Gamma draws), then each word's theme and the word.
+ * The true topics of every slice are returned with the documents. Document $(t, i)$ depends only on `child(s, t, i)`.
+ * Throws `DomainError` unless `slices`, `documentsPerSlice` and `length` are positive integers and `alpha` and `width`
+ * are positive.
+ *
+ * @param s The random stream the corpus is drawn from.
+ * @param options The number of slices, documents per slice and words per document, $\alpha$ and the window width.
+ * @returns The corpus, slice by slice: `times` (each document's slice), `labels` (each document's largest theme, an
+ *   index into `meta.labelNames`), `wordTopics`, and `topics`, the 48-word vocabulary and `topicWord[t][k]`, theme
+ *   $k$'s word distribution in slice $t$.
+ *
+ * @example Two short documents per slice, and the travel theme drifting
+ * const c = driftingTopicCorpus(stream(0), { slices: 3, documentsPerSlice: 2, length: 8 })
+ * c.documents.forEach((d, k) => print('slice', c.times[k], c.meta.labelNames[c.labels[k]], '|', d))
+ * const travel = c.topics.topicWord.map((slice) => slice[0].slice(0, 12).map((p) => p.toFixed(2)).join(' '))
+ * print(travel.join('\n'))
  */
 export function driftingTopicCorpus(s: Stream, options: DriftingTopicCorpusOptions = {}): Corpus {
   const { slices = 6, documentsPerSlice = 30, length = 40, alpha = 0.1, width = 2.5 } = options

@@ -1,9 +1,13 @@
 /**
- * A suite of tokenisers to compare side by side, each assembled from `aifn-compute/text/pipeline` stages as its namesake is:
- * characters, raw bytes (ByT5), Penn Treebank words with a word-level vocabulary, character-level BPE with "</w>"
- * (Sennrich et al. 2016), byte-level BPE (GPT-2, or with the cl100k / o200k split), WordPiece (BERT), a unigram
+ * A suite of tokenisers to compare side by side, each assembled from `aifn-compute/text/pipeline` stages as its
+ * namesake is: characters, raw bytes (ByT5), Penn Treebank words with a word-level vocabulary, character-level BPE with
+ * "</w>" (Sennrich et al. 2016), byte-level BPE (GPT-2, or with the cl100k / o200k split), WordPiece (BERT), a unigram
  * language model with Metaspace, and SentencePiece-style BPE with "▁" and byte fallback (LLaMA). All are trained on one
  * small corpus, so their vocabularies and their cuts can be compared on the same text.
+ *
+ * Each kind is split into its untrained stages (`untrainedTokeniser`) and its trainer (`tokeniserTrainer`), which
+ * `suiteTokeniser` joins with `trainTokeniser`. The subword sizes are matched: byte-level BPE and SentencePiece BPE
+ * get the requested vocabulary size plus their 256 byte tokens.
  */
 
 import { definer, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -34,7 +38,9 @@ import {
   type UntrainedTokeniser,
 } from 'aifn-compute/text/pipeline'
 
-/** The tokenisers of the suite, from finest to coarsest units. */
+/**
+ * The tokenisers of the suite, in display order: characters and bytes, Treebank words, then the five subword models.
+ */
 export const TOKENISER_KINDS = [
   'character',
   'byte',
@@ -46,10 +52,10 @@ export const TOKENISER_KINDS = [
   'sentencePiece',
 ] as const
 
-/** A tokeniser of the suite. */
+/** A tokeniser of the suite, one of `TOKENISER_KINDS`. */
 export type TokeniserKind = (typeof TOKENISER_KINDS)[number]
 
-/** Display names. */
+/** The display name of each tokeniser of the suite, with the model it follows. */
 export const TOKENISER_LABELS: Readonly<Record<TokeniserKind, string>> = {
   character: 'characters',
   byte: 'bytes (ByT5)',
@@ -82,8 +88,8 @@ export interface SuiteOptions {
 }
 
 /**
- * A short corpus about tokenisation (original prose), with contractions, numbers, hyphens and some accented words, for
- * training the suite in a browser in well under a second.
+ * A short corpus about tokenisation (original prose, 28 sentences), with contractions, numbers, hyphens and some
+ * accented words, small enough to train the whole suite in a browser in a few seconds.
  */
 export const TOKENISER_CORPUS: readonly string[] = [
   'A tokeniser turns text into a sequence of tokens, and a vocabulary turns each token into an integer id.',
@@ -116,10 +122,31 @@ export const TOKENISER_CORPUS: readonly string[] = [
   'Lower, lowest, newer, newest, wider and widest are the classic examples of subword units.',
 ]
 
+/**
+ * The special tokens of a kind's trainer: BERT's `[PAD]`, `[UNK]`, `[CLS]`, `[SEP]` and `[MASK]` for WordPiece,
+ * otherwise `<unk>`, `<s>` and `</s>`.
+ *
+ * @param kind The tokeniser kind (only `'wordPiece'` is told apart).
+ * @returns The special tokens, in id order.
+ */
 const specials = (kind: TokeniserKind): string[] =>
   kind === 'wordPiece' ? ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]'] : ['<unk>', '<s>', '</s>']
 
-/** The stages of a suite tokeniser before training (its model is trained by {@link tokeniserTrainer}). */
+/**
+ * The stages of a suite tokeniser before training: its normaliser, pre-tokeniser, post-processor and decoder, as its
+ * namesake has them. The model is added by training with {@link tokeniserTrainer}; the byte tokeniser needs no
+ * training, and its stages here are those of `byteTokeniser` without the model.
+ *
+ * @param kind Which tokeniser of the suite.
+ * @param options The suite's options; only `splitDigits` (BPE, byte-level BPE and SentencePiece BPE), `pattern`
+ *   (byte-level BPE) and `lowercaseWords` (Treebank words) are read here.
+ * @returns The stages, with no model.
+ *
+ * @example The stages of BERT's WordPiece before training
+ * const u = untrainedTokeniser('wordPiece')
+ * print('normalisers', u.normaliser.normalisers.map((n) => n.type))
+ * print('pre-tokeniser', u.preTokeniser.type, '; decoder', u.decoder.type)
+ */
 export function untrainedTokeniser(kind: TokeniserKind, options: SuiteOptions = {}): UntrainedTokeniser {
   const digits = options.splitDigits ? [digitsPreTokeniser(true)] : []
   const seq = (...ps: Parameters<typeof preTokeniserSequence>) =>
@@ -162,7 +189,21 @@ export function untrainedTokeniser(kind: TokeniserKind, options: SuiteOptions = 
   }
 }
 
-/** The trainer of a suite tokeniser at a vocabulary size. */
+/**
+ * The trainer of a suite tokeniser at a vocabulary size: the model type, its special tokens and its training
+ * settings (character-level BPE stops merging once the most frequent pair is seen fewer than twice).
+ *
+ * @param kind Which tokeniser of the suite.
+ * @param vocabularySize The vocabulary size of the subword models. Byte-level BPE and SentencePiece BPE are given 256
+ *   more, for their byte tokens; the character and word-level trainers have no size cap and ignore it.
+ * @param options The suite's options; only `wordMinCount` (the word-level trainer's minimum count) is read here.
+ * @returns The trainer, for `trainTokeniser`. The byte kind gets a word-level trainer, which `suiteTokeniser` never
+ *   uses.
+ *
+ * @example Byte-level BPE holds the 256 bytes on top of the size
+ * print(tokeniserTrainer('bpe', 300))
+ * print(tokeniserTrainer('byteLevelBpe', 300))
+ */
 export function tokeniserTrainer(kind: TokeniserKind, vocabularySize = 400, options: SuiteOptions = {}): Trainer {
   switch (kind) {
     case 'character':
@@ -184,7 +225,25 @@ export function tokeniserTrainer(kind: TokeniserKind, vocabularySize = 400, opti
   }
 }
 
-/** One tokeniser of the suite, trained on `corpus`. */
+/**
+ * One tokeniser of the suite, trained on `corpus`: the stages of {@link untrainedTokeniser} with the model learned
+ * by the trainer of {@link tokeniserTrainer}. The byte tokeniser is fixed, and ignores the corpus.
+ *
+ * @param kind Which tokeniser of the suite.
+ * @param corpus The training texts, one document per entry.
+ * @param options The suite's options: the subword vocabulary size (default 400), the byte-level split, digit
+ *   splitting, and the word-level minimum count and lower-casing.
+ * @returns The trained tokeniser.
+ *
+ * @example BPE learns the common endings first
+ * const bpe = suiteTokeniser('bpe', TOKENISER_CORPUS.slice(0, 10), { vocabularySize: 80 })
+ * print('first merges', bpe.model.merges.slice(0, 6).map((m) => m.merged))
+ * print('vocabulary size', bpe.model.vocabulary.tokens.length)
+ *
+ * @example A lower-cased Treebank word vocabulary
+ * const words = suiteTokeniser('word', TOKENISER_CORPUS.slice(0, 4), { lowercaseWords: true })
+ * print(words.model.vocabulary.tokens.slice(0, 12))
+ */
 export function suiteTokeniser(kind: TokeniserKind, corpus: readonly string[], options: SuiteOptions = {}): Tokeniser {
   if (kind === 'byte') return byteTokeniser({ eos: false })
   return trainTokeniser(
@@ -194,7 +253,19 @@ export function suiteTokeniser(kind: TokeniserKind, corpus: readonly string[], o
   )
 }
 
-/** Every tokeniser of the suite, trained on `corpus` (default {@link TOKENISER_CORPUS}). */
+/**
+ * Every tokeniser of the suite, each trained on the same corpus by {@link suiteTokeniser}.
+ *
+ * @param corpus The training texts, one document per entry (default {@link TOKENISER_CORPUS}).
+ * @param options The suite's options, shared by every tokeniser.
+ * @returns The trained tokenisers, keyed by kind.
+ *
+ * @example Vocabulary sizes of the suite on a tiny corpus
+ * const corpus = ['low low low lower lower newest newest newest widest', 'the newest and the widest are lower']
+ * const suite = tokeniserSuite(corpus, { vocabularySize: 30 })
+ * for (const k of TOKENISER_KINDS) print(TOKENISER_LABELS[k], suite[k].model.vocabulary.tokens.length)
+ * print('BPE pieces', suite.bpe.model.vocabulary.tokens.slice(1).join(' '))
+ */
 export function tokeniserSuite(
   corpus: readonly string[] = TOKENISER_CORPUS,
   options: SuiteOptions = {},
