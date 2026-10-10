@@ -1,10 +1,12 @@
 /**
- * A continuous normalising flow on 2-d points (Chen et al., 2018, §4; FFJORD, Grathwohl et al., 2019): x′ = f_θ(t, x)
- * carries the standard normal at t = 0 to the data at t = 1, and the instantaneous change of variables gives the log
- * density, log p₁(x) = log 𝒩(z(0)) + ∫₀¹ tr(∂f/∂x) dt along the trajectory through x (solved from t = 1 back to 0).
+ * A continuous normalising flow on 2-d points (Chen et al., 2018, §4; FFJORD, Grathwohl et al., 2019):
+ * $\zvec' = f_{\thetavec}(t, \zvec)$ carries the standard normal at $t = 0$ to the data at $t = 1$, and the
+ * instantaneous change of variables gives the log density along the trajectory $\zvec(t)$ through $\xvec$ (solved from
+ * $t = 1$ back to 0):
+ * $\log p_1(\xvec) = \log \Gauss(\zvec(0); \zeros, \Imat) - \int_0^1 \trace(\partial f / \partial \zvec) \, dt$.
  * The trace is exact (two forward products in 2-d) or Hutchinson's estimate; the RNODE regularisers (Finlay et al.,
  * 2020) penalise the kinetic energy and the Jacobian's Frobenius norm. Streamed for a worker with samples moving
- * through the flow and the density p_t on a grid at every frame time.
+ * through the flow and the density $p_t$ on a grid at every frame time.
  */
 
 import { traceProbe, type OdeFlowOptions, type ProbeKind, type TraceEstimator } from 'aifn-compute/dynamics/ode'
@@ -34,7 +36,7 @@ const LOG_2PI = Math.log(2 * Math.PI)
 
 /** Options of {@link cnf}. */
 export type CnfOptions = {
-  /** Hidden width of the field's two-layer MLP f(t, x). Default 32. */
+  /** Hidden width of the field's two-layer MLP $f(t, \zvec)$. Default 32. */
   hidden?: number
   /** Activation of the field. Default tanh. */
   activation?: 'tanh' | 'softplus'
@@ -44,25 +46,62 @@ export type CnfOptions = {
 
 /** A CNF on 2-d points. */
 export type Cnf = {
+  /** The time-dependent `OdeBlock` around the field's MLP. */
   block: OdeBlockLayer<Params[]>
+  /** Fresh parameters of the field, drawn from a stream. */
   init(s: Stream): Params[]
   /**
-   * log p_t(x) for rows x [B, 2] at time t ∈ (0, 1], with the divergence `estimator` (a probe [B, 2] for Hutchinson's),
-   * and the RNODE integrals from 0 to t.
+   * $\log p_t(\xvec)$ $[B]$ for rows $\xvec$ $[B, 2]$ at time $t \in (0, 1]$ (option `t`, default 1), with the
+   * divergence `estimator` (default exact; a `probe` $[B, 2]$ for Hutchinson's), and with `regularise` the RNODE
+   * integrals from 0 to $t$, per row; `solver` overrides the block's.
    */
   logDensity(
     params: Params[],
     x: Value,
     options?: { t?: number; estimator?: TraceEstimator; probe?: Value; regularise?: boolean; solver?: OdeFlowOptions },
   ): { logDensity: Value; kinetic?: Value; jacobianFrobenius?: Value }
-  /** Base points z [B, 2] carried to the given times (each in [0, 1], increasing from 0). */
+  /** Base points $\zvec$ $[B, 2]$ carried to the given times (each in $[0, 1]$, increasing from 0). */
   sample(params: Params[], z: Value, times: readonly number[], solver?: OdeFlowOptions): Value[]
 }
 
-/** log 𝒩(z; 0, I) per row of z [B, 2]. */
+/**
+ * The base log density $\log \Gauss(\zvec; \zeros, \Imat)$ per row.
+ *
+ * @param z The points, $[B, 2]$.
+ * @returns The $B$ log densities.
+ */
 const baseLogDensity = (z: Value): Value => sub(mul(-0.5, sum(square(z), 1)), LOG_2PI)
 
-/** A continuous normalising flow with a time-dependent MLP field (FFJORD's free-form Jacobian). */
+/**
+ * A continuous normalising flow with a time-dependent MLP field (FFJORD's free-form Jacobian): the field is
+ * `Mlp([3, hidden, hidden, 2])` on $(\zvec, t)$, solved by RK4 with step 0.1 unless `solver` says otherwise. The log
+ * density is differentiable in the parameters, by backprop or by the adjoint as `solver.gradient` selects.
+ *
+ * @param options The field's width and activation, and the solver; see `CnfOptions`.
+ * @returns The flow: its block, initialiser, log density and sampler.
+ *
+ * @example At any parameters the density integrates to one: the change of variables at work
+ * const flow = cnf({ hidden: 8 })
+ * const params = flow.init(stream(0))
+ * // A grid over [-5, 5]^2 with spacing h: the sum of p times h^2 approximates the integral
+ * const g = 21
+ * const h = 10 / (g - 1)
+ * const points = []
+ * for (let i = 0; i < g; i++) for (let j = 0; j < g; j++) points.push([-5 + j * h, -5 + i * h])
+ * const logp = toArray(flow.logDensity(params, tensor(points)).logDensity)
+ * print('integral of p_1:', logp.reduce((a, v) => a + Math.exp(v), 0) * h * h)
+ *
+ * @example Hutchinson's estimate of the trace is unbiased: one probe per copy of a point, averaged
+ * const flow = cnf({ hidden: 8 })
+ * const params = flow.init(stream(0))
+ * print('exact:', flow.logDensity(params, tensor([[1, -1]])).logDensity)
+ * const x = tensor(Array.from({ length: 400 }, () => [1, -1]))
+ * // Rademacher probes: random signs
+ * const probe = tensor(toArray(normal(stream(1), 0, 1, { shape: [400, 2] })).map((row) => row.map(Math.sign)))
+ * const estimates = toArray(flow.logDensity(params, x, { estimator: 'hutchinson', probe }).logDensity)
+ * print('three single-probe estimates:', estimates.slice(0, 3))
+ * print('mean of 400:', estimates.reduce((a, v) => a + v, 0) / 400)
+ */
 export function cnf(options: CnfOptions = {}): Cnf {
   const { hidden = 32, activation = 'tanh', solver = {} } = options
   const block = OdeBlock(Mlp([3, hidden, hidden, 2], { activation, init: xavierUniform() }), {
@@ -101,19 +140,25 @@ export function cnf(options: CnfOptions = {}): Cnf {
 export type CnfRunOptions = CnfOptions & {
   /** The trace in training: exact or Hutchinson's. Default exact. */
   estimator?: TraceEstimator
+  /** The kind of Hutchinson's probes, in training and in the checkpoints' estimates. Default `'rademacher'`. */
   probe?: ProbeKind
-  /** Weights of the kinetic-energy and Jacobian-Frobenius regularisers. Default 0. */
+  /** Weight of the kinetic-energy regulariser, the mean of $\int_0^1 \norm{f(t, \zvec)}^2 \, dt$. Default 0. */
   kinetic?: number
+  /** Weight of the Jacobian-Frobenius regulariser (Hutchinson's estimate, one probe per point). Default 0. */
   jacobian?: number
   /** Keep only the points with this label (e.g. one colour of a checkerboard). Default all. */
   keepLabel?: number
+  /** Optimiser steps. Default 300. */
   steps?: number
+  /** Minibatch size (at most $n$). Default 128. */
   batchSize?: number
+  /** Adam's step size. Default 0.01. */
   learningRate?: number
   /** Rescale gradients whose global norm exceeds this (keeps late Adam steps from spiking). Default 1. */
   clipNorm?: number
+  /** Seed of the initialisation, minibatches, probes and base samples. Default 0. */
   seed?: number
-  /** Frame times on [0, 1]. Default 11. */
+  /** Frame times on $[0, 1]$. Default 11. */
   frames?: number
   /** Base samples carried through the flow. Default 600. */
   samples?: number
@@ -121,21 +166,26 @@ export type CnfRunOptions = CnfOptions & {
   grid?: number
   /** Side of the quiver grid. Default 11. */
   fieldGrid?: number
+  /** Checkpoints over the run (from step 0). Default 10. */
   checkpoints?: number
 }
 
 /** A checkpoint of a CNF run. */
 export type CnfCheckpoint = {
+  /** The optimiser step it was taken at. */
   step: number
   /** Negative log-likelihood per point on the whole set (exact trace), nats. */
   nll: number
-  /** Hutchinson's estimate of the NLL on a batch over several probes: mean and standard deviation; and exact. */
+  /**
+   * Hutchinson's estimate of the NLL on a batch of up to 128 points, over six probes: their mean and standard
+   * deviation, and the exact NLL of the same batch.
+   */
   hutchinson: { mean: number; sd: number; exact: number }
-  /** Samples at each frame time: [frames × samples × 2]. */
+  /** Samples at each frame time: $[\text{frames} \times \text{samples} \times 2]$. */
   samples: Float64Array
-  /** log p_t on the grid at each frame time: [frames][g²] (row-major, y outer). */
+  /** $\log p_t$ on the grid at each frame time: $[g^2]$ per frame (row-major, $y$ outer). */
   density: Float64Array[]
-  /** The field on the quiver grid at each frame time: [frames][g² × 2]. */
+  /** The field on the quiver grid at each frame time: $[g^2 \times 2]$ per frame. */
   field: Float64Array[]
   /** Forward evaluations of one solve of the samples. */
   evaluations: number
@@ -143,27 +193,59 @@ export type CnfCheckpoint = {
 
 /** A snapshot of a CNF run. */
 export type CnfRun = {
+  /** The steps the run was asked for. */
   steps: number
+  /** The steps taken so far. */
   done: number
+  /** True on the last snapshot. */
   finished: boolean
+  /** The message of the error that ended the run early, or null. */
   error: string | null
+  /** The trace estimator of training. */
   estimator: TraceEstimator
+  /** How the training gradient goes through the solver. */
   gradientMethod: 'backprop' | 'adjoint'
+  /** The standardised training points, $[n \times 2]$. */
   data: Float64Array
+  /** Half-width of the plotting square (at least 3). */
   box: number
+  /** The frame times on $[0, 1]$. */
   times: Float64Array
+  /** The density grid's axis. */
   gridAxis: Float64Array
+  /** The quiver grid's axis. */
   fieldAxis: Float64Array
-  /** Per iteration: minibatch loss (NLL plus regularisers), evaluations forward and backward, wall milliseconds. */
+  /** Per iteration: the minibatch loss (NLL plus regularisers). */
   loss: Float64Array
+  /** Per iteration: function evaluations of the forward solves. */
   nfeForward: Float64Array
+  /** Per iteration: function evaluations of the backward pass (backprop's replay the forward). */
   nfeBackward: Float64Array
+  /** Per iteration: wall milliseconds. */
   wallMs: Float64Array
+  /** The checkpoints so far. */
   checkpoints: CnfCheckpoint[]
 }
 
 /**
- * Train a CNF on 2-d points by maximum likelihood and yield snapshots (about every twentieth of the run and at the end).
+ * Train a CNF on 2-d points by maximum likelihood and yield snapshots (about every twentieth of the run and at the
+ * end): Adam on minibatches of the standardised points, with the gradient's global norm clipped. Checkpoints are
+ * evenly spaced from step 0. An error during training ends the run with a finished snapshot carrying its message.
+ * Deterministic in `seed` (wall times aside).
+ *
+ * @param data The points `x` $[n, 2]$, and labels `y` $[n]$ when `keepLabel` is to select some of them.
+ * @param options The field and solver, the trace estimator and probes, the regularisers, the optimisation (steps,
+ *   minibatch, step size, clipping, seed) and what checkpoints record; see `CnfRunOptions`.
+ * @returns A generator of `CnfRun` snapshots; the last has `finished` set.
+ *
+ * @example The negative log-likelihood of points near a line falls as the flow learns it
+ * const z = toArray(normal(stream(0), 0, 1, { shape: [32, 2] }))
+ * const data = { x: tensor(z.map(([a, b]) => [a, a + 0.2 * b])) }
+ * const options = { hidden: 8, steps: 12, learningRate: 0.05, solver: { stepSize: 0.5 }, checkpoints: 1 }
+ * let run
+ * for (const r of cnfRun(data, { ...options, frames: 2, samples: 4, grid: 2, fieldGrid: 2 })) run = r
+ * print('NLL per point at steps 0 and 12:', run.checkpoints.map((c) => c.nll))
+ * print('Hutchinson at step 12 (mean, sd, exact):', run.checkpoints.at(-1).hutchinson)
  */
 export function* cnfRun(data: { x: Tensor; y?: Tensor }, options: CnfRunOptions = {}): Generator<CnfRun, CnfRun> {
   const {

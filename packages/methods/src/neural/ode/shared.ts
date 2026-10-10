@@ -1,6 +1,6 @@
 /**
- * Helpers shared by the neural ODE runs: work counters fed by `onSolve`, standardised data, grids and flat arrays for a
- * worker to post.
+ * Internal helpers shared by the neural ODE runs: work counters fed by `onSolve`, standardised data, grids and flat
+ * arrays for a worker to post.
  */
 
 import type { OdeSolveInfo } from 'aifn-compute/dynamics/ode'
@@ -8,11 +8,17 @@ import { fromData, toFlat, unwrap, type Tensor, type Value } from 'aifn-compute/
 
 /** Function evaluations of the solves since the last `take`, split into forward and backward. */
 export type WorkCounter = {
+  /** The solver's `onSolve` callback: adds each solve's evaluations to the forward or the backward count. */
   onSolve: (info: OdeSolveInfo) => void
   /** The counts since the last call, reset. Backprop's backward pass replays the tape: it counts as the forward. */
   take: (gradient: 'backprop' | 'adjoint' | 'none') => { forward: number; backward: number }
 }
 
+/**
+ * A fresh counter of function evaluations, both counts at 0.
+ *
+ * @returns The counter: pass its `onSolve` to the solver, and `take` the counts after each step.
+ */
 export function workCounter(): WorkCounter {
   let forward = 0
   let backward = 0
@@ -30,14 +36,31 @@ export function workCounter(): WorkCounter {
   }
 }
 
-/** A value's entries as a Float64Array. */
+/**
+ * A value's entries as a `Float64Array`.
+ *
+ * @param v A number or a tensor (traced values are unwrapped).
+ * @returns Its entries in row-major order, a copy.
+ */
 export const flatOf = (v: Value): Float64Array =>
   typeof v === 'number' ? Float64Array.of(v) : Float64Array.from(toFlat(unwrap(v) as Tensor))
 
-/** The scalar of a rank-0 value or number. */
+/**
+ * The scalar of a rank-0 value or number.
+ *
+ * @param v A number or a tensor; for a larger tensor, its first entry is read.
+ * @returns The number.
+ */
 export const scalarOf = (v: Value): number => flatOf(v)[0]
 
-/** Rows centred and scaled so the overall standard deviation is `scale` (default 1); returns the tensor [n, d]. */
+/**
+ * Rows centred per column and scaled by one factor, so the overall standard deviation (over all $n d$ entries) is
+ * `scale`.
+ *
+ * @param x The data, $[n, d]$; not modified.
+ * @param scale The standard deviation wanted.
+ * @returns The standardised data, a new $[n, d]$ tensor (only centred when every entry is the same).
+ */
 export function standardise(x: Tensor, scale = 1): Tensor {
   const [n, d] = x.shape
   const a = Float64Array.from(toFlat(x))
@@ -54,11 +77,24 @@ export function standardise(x: Tensor, scale = 1): Tensor {
   return fromData(a, [n, d])
 }
 
-/** Evenly spaced values from a to b (m of them). */
+/**
+ * Evenly spaced values from `a` to `b`, both included.
+ *
+ * @param a The first value.
+ * @param b The last value.
+ * @param m How many values; with 1, just `a`.
+ * @returns The `m` values.
+ */
 export const spaced = (a: number, b: number, m: number): number[] =>
   Array.from({ length: m }, (_, i) => (m === 1 ? a : a + ((b - a) * i) / (m - 1)))
 
-/** A square grid on [−box, box]²: its axis and the points [g², 2] in row-major order (y outer, x inner). */
+/**
+ * A square grid on $[-b, b]^2$: its axis and its points in row-major order ($y$ outer, $x$ inner).
+ *
+ * @param box The half-width $b$ of the square.
+ * @param g The points per side.
+ * @returns The `axis` of $g$ values, and the `points` as a $[g^2, 2]$ tensor of $(x, y)$ rows.
+ */
 export function planeGrid(box: number, g: number): { axis: Float64Array; points: Tensor } {
   const axis = Float64Array.from(spaced(-box, box, g))
   const pts = new Float64Array(g * g * 2)
@@ -70,12 +106,22 @@ export function planeGrid(box: number, g: number): { axis: Float64Array; points:
   return { axis, points: fromData(pts, [g * g, 2]) }
 }
 
-/** The half-width of a square holding every row of a [n, 2] array, with a margin, rounded up to a half. */
+/**
+ * The half-width of a square holding every point, with a margin, rounded up to a multiple of $\frac{1}{2}$.
+ *
+ * @param x The coordinates of the points, flat (any dimension: the largest absolute entry is used).
+ * @param margin The factor the largest absolute coordinate is multiplied by.
+ * @returns The half-width, or 1 when every coordinate is 0.
+ */
 export function boxOf(x: Float64Array, margin = 1.25): number {
   let m = 0
   for (const v of x) m = Math.max(m, Math.abs(v))
   return Math.ceil(m * margin * 2) / 2 || 1
 }
 
-/** The wall clock in milliseconds. */
+/**
+ * The wall clock in milliseconds: `performance.now()` where it exists, else `Date.now()`.
+ *
+ * @returns The time, for differences only.
+ */
 export const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now())

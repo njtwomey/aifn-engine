@@ -1,8 +1,12 @@
 /**
  * Streamed training of the neural ODE family on small problems, for a worker: a classifier on 2-d points (nested
- * circles, moons, …) or a regressor on the reflection g(x) = −x (Dupont et al., 2019, §3), with the trajectories, the
- * field and the decision function at checkpoints, the work of every iteration (function evaluations forward and
+ * circles, moons, …) or a regressor on the reflection $g(x) = -x$ (Dupont et al., 2019, §3), with the trajectories,
+ * the field and the decision function at checkpoints, the work of every iteration (function evaluations forward and
  * backward, wall time) and, at checkpoints, the adjoint gradient against backprop's.
+ *
+ * Training is Adam on minibatches by `trainingLoop`, with the gradient's global norm clipped, and the loss is the
+ * cross-entropy of the readout's logits or the mean squared error of its prediction, plus the RNODE regularisers
+ * (Finlay et al., 2020) when they are weighted. Runs are deterministic in their seed, wall times aside.
  */
 
 import type { OdeFlowOptions, OdeSolveInfo } from 'aifn-compute/dynamics/ode'
@@ -19,12 +23,22 @@ import { adamRule, type UpdateRule } from 'aifn-compute/optim/first-order'
 import { odeModel, type OdeModel, type OdeModelKind, type OdeModelParams } from './models'
 import { boxOf, flatOf, now, planeGrid, scalarOf, spaced, standardise, workCounter } from './shared'
 
-/** The data of a run: points x [n, d] and integer labels y [n] (classification) or targets y [n, d] (regression). */
+/**
+ * The data of a run: points `x` $[n, d]$, and integer labels `y` $[n]$ (classification) or targets `y` $[n, d]$
+ * (regression).
+ */
 export type OdeRunData = { x: Tensor; y?: Tensor }
 
 /**
- * The reflection g(x) = −x on [−1, 1] (Dupont et al., 2019, §3): a 1-d neural ODE cannot fit it, since its flow is
- * an increasing map of the line (trajectories cannot cross), while one extra dimension lets x rotate past −x.
+ * The reflection $g(x) = -x$ on $[-1, 1]$ (Dupont et al., 2019, §3): a 1-d neural ODE cannot fit it, since its flow is
+ * an increasing map of the line (trajectories cannot cross), while one extra dimension lets $x$ rotate past $-x$.
+ *
+ * @param n The number of points, evenly spaced from $-1$ to 1.
+ * @returns The points `x` $[n, 1]$ and their targets `y` $= -x$, $[n, 1]$.
+ *
+ * @example The points and their reflections
+ * const d = reflectionData(5)
+ * print('x:', d.x, ' y:', d.y)
  */
 export function reflectionData(n = 40): OdeRunData {
   const xs = spaced(-1, 1, n)
@@ -39,9 +53,24 @@ export function reflectionData(n = 40): OdeRunData {
 
 /**
  * A disc inside a ring (Dupont et al., 2019, §3, the concentric-spheres function in 2-d): points uniform on the disc
- * r ≤ r₁ (label 0) and on the annulus r₂ ≤ r ≤ r₃ (label 1). The classes are filled regions, so a flow of the plane
- * (a homeomorphism) cannot make them linearly separable: a plain 2-d neural ODE can only squeeze the ring through
- * itself approximately, while one extra dimension lifts the disc out.
+ * $r \le r_1$ (label 0) and on the annulus $r_2 \le r \le r_3$ (label 1). The classes are filled regions, so a flow of
+ * the plane (a homeomorphism) cannot make them linearly separable: a plain 2-d neural ODE can only squeeze the ring
+ * through itself approximately, while one extra dimension lifts the disc out.
+ *
+ * @param s The stream the radii and angles are drawn from.
+ * @param n The number of points, shared between the classes in proportion to their areas (the disc's points first).
+ * @param radii The radii $r_1 < r_2 < r_3$: the disc's, and the annulus's inner and outer.
+ * @returns The points `x` $[n, 2]$ and their labels `y` $[n]$ (int32).
+ *
+ * @example Every point of class 0 is inside $r_1$, every point of class 1 between $r_2$ and $r_3$
+ * const d = discInRing(stream(0), 200)
+ * const x = toArray(d.x)
+ * const y = toArray(d.y)
+ * const r = x.map(([a, b]) => Math.hypot(a, b))
+ * for (const k of [0, 1]) {
+ *   const rk = r.filter((_, i) => y[i] === k)
+ *   print(`class ${k}: ${rk.length} points, radius from`, Math.min(...rk), 'to', Math.max(...rk))
+ * }
  */
 export function discInRing(
   s: Stream,
@@ -67,25 +96,41 @@ export function discInRing(
 
 /** Options of {@link odeRun}; plain data, so a worker task can carry them. */
 export type OdeRunOptions = {
+  /** The member of the family. Default `'node'`. */
   kind?: OdeModelKind
+  /** Default classification when `y` holds one label per point, regression otherwise. */
   task?: 'classification' | 'regression'
   /** The solver and gradient method (ignored by the ResNet). Default RK4, step 0.1, backprop. */
   solver?: OdeFlowOptions
+  /** Hidden width of the field's MLP. Default 32. */
   hidden?: number
+  /** Zero-padded extra dimensions of an augmented NODE. Default 1 (`anode` only). */
   augment?: number
+  /** The field takes the time. Default false. */
   timeDependent?: boolean
   /** Blocks of the ResNet. Default 10. */
   depth?: number
-  /** Weights of the kinetic-energy and Jacobian-Frobenius regularisers (RNODE). Default 0. */
+  /**
+   * Weight of the kinetic-energy regulariser of RNODE (Finlay et al., 2020), the mean over the batch of
+   * $\int_0^1 \norm{f(t, \zvec)}^2 \, dt$. Default 0. Not applied to a ResNet.
+   */
   kinetic?: number
+  /**
+   * Weight of RNODE's Jacobian-Frobenius regulariser, Hutchinson's estimate (one Rademacher probe) of
+   * $\int_0^1 \norm{\partial f / \partial \zvec}_F^2 \, dt$. Default 0. Not applied to a ResNet.
+   */
   jacobian?: number
+  /** Optimiser steps. Default 300. */
   steps?: number
+  /** Minibatch size (at most $n$). Default 128. */
   batchSize?: number
+  /** Adam's step size. Default 0.01. */
   learningRate?: number
   /** Rescale gradients whose global norm exceeds this (keeps late Adam steps from spiking). Default 1. */
   clipNorm?: number
+  /** Seed of the initialisation and the minibatches. Default 0. */
   seed?: number
-  /** Times at which trajectories are sampled on [0, 1]. Default 21. */
+  /** Times at which trajectories are sampled on $[0, 1]$. Default 21. */
   frames?: number
   /** Points whose trajectories are drawn. Default 160. */
   shown?: number
@@ -101,75 +146,134 @@ export type OdeRunOptions = {
 
 /** The adjoint against backprop at a checkpoint, on a fixed batch. */
 export type GradientComparison = {
-  /** ‖g_adjoint − g_backprop‖ / ‖g_backprop‖. */
+  /**
+   * $\norm{\gvec_{\text{adjoint}} - \gvec_{\text{backprop}}} / \norm{\gvec_{\text{backprop}}}$, over every
+   * parameter.
+   */
   relativeError: number
-  /** The largest |x₀ reconstructed by the backward solve − x₀ kept|, over the batch. */
+  /**
+   * The largest entry of $\lvert \hat\zvec(0) - \zvec(0) \rvert$ over the batch: the start the adjoint's backward
+   * solve reconstructs, against the one kept.
+   */
   reconstructionError: number
-  /** Function evaluations of each gradient: backprop's forward (its backward replays them); the adjoint's both ways. */
+  /** Function evaluations of backprop's gradient: its forward solve (its backward pass replays them). */
   backpropEvaluations: number
+  /** Function evaluations of the adjoint's forward solve. */
   adjointForward: number
+  /** Function evaluations of the adjoint's backward solve. */
   adjointBackward: number
-  /** Floats held for the backward pass (an estimate): every recorded evaluation's inputs and activations for
-   * backprop; the checkpointed states and one evaluation for the adjoint. */
+  /** Floats held for backprop's backward pass (an estimate): every recorded evaluation's inputs and activations. */
   backpropMemory: number
+  /** Floats held for the adjoint's backward pass (an estimate): the checkpointed states and one evaluation. */
   adjointMemory: number
 }
 
 /** A checkpoint of a run. */
 export type OdeCheckpoint = {
+  /** The optimiser step it was taken at. */
   step: number
-  /** Loss on the whole set (without regularisers) and accuracy (classification) or mean squared error. */
+  /** Loss on the whole set (without regularisers). */
   loss: number
+  /** Accuracy on the whole set (classification) or the mean squared error (regression). */
   metric: number
-  /** States of the shown points at each frame time: [frames × shown × stateDim], row-major. */
+  /** States of the shown points at each frame time: $[\text{frames} \times \text{shown} \times S]$, row-major. */
   paths: Float64Array
-  /** The field on the quiver grid at each frame time (one frame when autonomous): [frames][g² × 2], or null. */
+  /**
+   * The field: for a 2-d state, on the quiver grid, $[g^2 \times 2]$ per frame time (one frame when autonomous); for a
+   * 1-d state, one array over the $(t, x)$ grid of $(1, f)$ pairs, $x$ outer; null for a ResNet, a SONODE or a larger
+   * state.
+   */
   field: Float64Array[] | null
-  /** P(class 1) on the decision grid ([g²], row-major, y outer), or the prediction on `curveX` (regression). */
+  /**
+   * $P(\text{class } 1)$ on the decision grid ($[g^2]$, row-major, $y$ outer) for 2-d classification, the prediction on
+   * the 61 points of `decisionAxis` for regression, or null.
+   */
   decision: Float64Array | null
   /** Forward evaluations of one solve of the shown points (0 for a ResNet: it takes `depth` blocks). */
   evaluations: number
+  /** The adjoint's gradient against backprop's, or null when not compared (or for a ResNet). */
   gradient: GradientComparison | null
 }
 
 /** A snapshot of a run. */
 export type OdeRun = {
+  /** The member of the family trained. */
   kind: OdeModelKind
+  /** The task. */
   task: 'classification' | 'regression'
+  /** How the training gradient goes through the solver. */
   gradientMethod: 'backprop' | 'adjoint'
+  /** The steps the run was asked for. */
   steps: number
+  /** The steps taken so far. */
   done: number
+  /** True on the last snapshot. */
   finished: boolean
+  /** The message of the error that ended the run early, or null. */
   error: string | null
+  /** The data's dimension $d$. */
   dim: number
+  /** The ODE state's dimension $S$. */
   stateDim: number
+  /** Classes of a classifier (at least 2), or 0 for regression. */
   classes: number
-  /** Standardised data [n × dim] and labels or targets. */
+  /** The data as trained on, $[n \times d]$: standardised for classification, as given for regression. */
   data: Float64Array
+  /** The labels $[n]$ (zeros for regression). */
   labels: Int32Array
+  /** The targets, $[n \times d]$ (empty for classification). */
   targets: Float64Array
   /** Indices of the shown points. */
   shown: Int32Array
-  /** The frame times on [0, 1]. */
+  /** The frame times on $[0, 1]$. */
   times: Float64Array
-  /** Half-width of the plotting square (2-d) or of the x range (1-d). */
+  /** Half-width of the plotting square (2-d) or of the $x$ range (1-d). */
   box: number
-  /** The quiver grid's axis (plane: both axes; 1-d state: x, with `fieldTimes` as the other axis). */
+  /** The quiver grid's axis (plane: both axes, spanning twice the box; 1-d state: $x$, with `fieldTimes` the other). */
   fieldAxis: Float64Array
+  /** The times of the 1-d field's $(t, x)$ grid, on $[0, 1]$. */
   fieldTimes: Float64Array
-  /** The decision grid's axis (2-d data) or the regression curve's x. */
+  /** The decision grid's axis (2-d data) or the regression curve's $x$. */
   decisionAxis: Float64Array
-  /** Per iteration: minibatch loss (with regularisers), evaluations forward and backward, wall milliseconds. */
+  /** Per iteration: the minibatch loss (with regularisers). */
   loss: Float64Array
+  /** Per iteration: function evaluations of the forward solves (`depth` for a ResNet). */
   nfeForward: Float64Array
+  /** Per iteration: function evaluations of the backward pass (backprop's replay the forward). */
   nfeBackward: Float64Array
+  /** Per iteration: wall milliseconds. */
   wallMs: Float64Array
+  /** The checkpoints so far. */
   checkpoints: OdeCheckpoint[]
 }
 
 /**
  * Train a member of the neural ODE family on `data` and yield snapshots (about every twentieth of the run and at the
- * end); checkpoints are evenly spaced from step 0. Deterministic in `seed` (wall times aside).
+ * end); checkpoints are evenly spaced from step 0. Classification data is standardised; regression data is kept at its
+ * scale. An error during training ends the run with a finished snapshot carrying its message. Deterministic in `seed`
+ * (wall times aside).
+ *
+ * @param data The points `x` $[n, d]$ and their labels or targets `y`, as `reflectionData` and `discInRing` make them.
+ * @param options The model (kind, width, padding, time dependence, depth, solver), the regularisers, the optimisation
+ *   (steps, minibatch, step size, clipping, seed) and what checkpoints record; see `OdeRunOptions`.
+ * @returns A generator of `OdeRun` snapshots; the last has `finished` set.
+ *
+ * @example A 1-d neural ODE cannot fit $g(x) = -x$; one extra dimension can
+ * const options = { hidden: 8, steps: 20, learningRate: 0.05, solver: { stepSize: 0.25 }, checkpoints: 1 }
+ * const small = { compareGradients: false, frames: 2, shown: 2, fieldGrid: 3 }
+ * for (const kind of ['node', 'anode']) {
+ *   let run
+ *   for (const r of odeRun(reflectionData(10), { ...options, ...small, kind })) run = r
+ *   print(`${kind}: loss at step 0`, run.loss[0], ' at step 20', run.loss[20])
+ * }
+ * const x = toArray(reflectionData(10).x).map(([v]) => v)
+ * print('the floor for an increasing map, the mean of x^2:', x.reduce((a, v) => a + v * v, 0) / 10)
+ *
+ * @example The adjoint's gradient agrees with backprop's, with less memory
+ * const options = { hidden: 8, steps: 2, solver: { stepSize: 0.25 }, checkpoints: 1 }
+ * let run
+ * for (const r of odeRun(reflectionData(10), { ...options, frames: 2, shown: 2, fieldGrid: 3 })) run = r
+ * print(run.checkpoints.at(-1).gradient)
  */
 export function* odeRun(data: OdeRunData, options: OdeRunOptions = {}): Generator<OdeRun, OdeRun> {
   const {
@@ -449,7 +553,16 @@ export function* odeRun(data: OdeRunData, options: OdeRunOptions = {}): Generato
   return snapshot(steps, true)
 }
 
-/** Total entries of a parameter tree (for captions). */
+/**
+ * The total number of entries of a parameter tree, for captions.
+ *
+ * @param params The parameters, as a model's `init` returns them.
+ * @returns The number of scalars over all leaves.
+ *
+ * @example The field and readout of a small classifier
+ * const model = odeModel({ kind: 'node', dim: 2, classes: 2, hidden: 8 })
+ * print('parameters:', parameterCount(model.init(stream(0))))
+ */
 export function parameterCount(params: Params): number {
   return treeLeaves(params).reduce((s, l) => s + flatOf(l.value as Value).length, 0)
 }

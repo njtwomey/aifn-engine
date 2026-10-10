@@ -2,9 +2,9 @@
  * The forward-evaluation study of stochastic vector field mixtures (Twomey, Kozłowski & Santos-Rodríguez, 2020, §4.3,
  * fig. 11): train several models on one dataset, then solve every instance's realised path alone with Dormand–Prince
  * and count its function evaluations (NFE), at several tolerances. The NFE usually reported for a model is that of
- * solving a whole batch as one system, which the hardest instances set; the per-instance distribution shows how many
- * instances needed far fewer. The variance of each instance's VF along its path (VLoss, eq. 9, per instance) is
- * recorded beside its NFE: aligned VFs (eq. 16) leave the embedded error estimate near zero, so large steps pass.
+ * solving a whole batch as one system, with one step size for all; the per-instance distribution shows how many
+ * instances needed fewer. The variance of each instance's VF along its path (VLoss, eq. 9, per instance) is recorded
+ * beside its NFE: aligned VFs (eq. 16) leave the embedded error estimate near zero, so large steps pass.
  */
 
 import { child, stream } from 'aifn-compute/foundation/random'
@@ -17,10 +17,15 @@ import { instanceWork, realisation, realisedVariance, samplePaths } from './samp
 
 /** One model of a study: its label, configuration and losses. */
 export type NfeStudyModel = {
+  /** Its name in the results. */
   label: string
+  /** Components $K$. Default 1. */
   components?: number
+  /** SVF units. Default false. */
   stochastic?: boolean
+  /** The selection method. Default `'pick-and-stick'`. */
   selection?: ComponentSelection
+  /** The losses it trains with. Default the predictive loss alone. */
   losses?: SvfmLossSettings
 }
 
@@ -34,23 +39,32 @@ export const NFE_STUDY_MODELS: readonly NfeStudyModel[] = [
 
 /** Options of {@link nfeStudy}; plain data. */
 export type NfeStudyOptions = {
+  /** The models, trained in turn. Default `NFE_STUDY_MODELS`. */
   models?: readonly NfeStudyModel[]
   /** Training of every model (task, grid, steps, …; the model fields are set per model). */
   training?: Omit<SvfmRunOptions, 'components' | 'stochastic' | 'selection' | 'losses'>
-  /** Relative tolerances of the sweep (atol = rtol / 100). Default 1e-2 … 1e-6. */
+  /**
+   * Relative tolerances of the sweep (the absolute tolerance is a hundredth of each). Default $10^{-2}, 10^{-3}, \dots,
+   * 10^{-6}$.
+   */
   tolerances?: readonly number[]
-  /** Instances measured (spread over the data). Default all, at most 1000. */
+  /** Instances measured (spread evenly over the data). Default all, at most 1000. */
   instances?: number
+  /** Seed of the runs (model $k$ trains with `seed + k`) and of the realisations. Default 0. */
   seed?: number
 }
 
 /** A trained model's measurements. */
 export type NfeStudyResult = {
+  /** The model's label. */
   label: string
-  /** Accuracy (classification) or NaN, and the unweighted TLoss and VLoss on the whole set. */
+  /** Accuracy on the whole set at the end of training (classification), or NaN. */
   accuracy: number
+  /** The unweighted TLoss on the whole set at the end of training. */
   transport: number
+  /** The unweighted VLoss on the whole set at the end of training. */
   variance: number
+  /** Wall milliseconds of training, checkpoints included. */
   trainMs: number
   /** NFE of each instance alone, one array per tolerance. */
   perInstance: Int32Array[]
@@ -62,23 +76,48 @@ export type NfeStudyResult = {
 
 /** A snapshot of a study. */
 export type NfeStudy = {
+  /** What the study is doing. */
   phase: 'training' | 'measuring' | 'done'
-  /** The model being trained or measured, and its training progress. */
+  /** The index of the model being trained or measured. */
   current: number
+  /** Its training progress: the steps taken. */
   step: number
+  /** The steps of each model's training. */
   steps: number
+  /** The models' labels. */
   labels: string[]
+  /** The relative tolerances of the sweep. */
   tolerances: number[]
-  /** Indices of the measured instances and their labels (colours). */
+  /** Indices of the measured instances. */
   instances: Int32Array
+  /** Their colour groups (filled once the first model is trained). */
   groups: Int32Array
+  /** The results of the models measured so far. */
   results: NfeStudyResult[]
+  /** The last training error, prefixed by its model's label, or null. */
   error: string | null
 }
 
 /**
- * Train each model in turn on `data`, then measure per-instance and batch NFE over the tolerances and the realised
- * VF variance. Yields progress while training and after each measurement.
+ * Train each model in turn on `data` with `svfmRun`, then measure per-instance and batch NFE over the tolerances
+ * (`instanceWork`) and the realised VF variance (`realisedVariance`, on mean paths for VF units and sampled ones for
+ * SVF units). Yields progress while training and after each measurement. A model that ends with no parameters stops the
+ * study, which then returns without yielding again.
+ *
+ * @param data The run data, as for `svfmRun`.
+ * @param options The models, their shared training options, the tolerances, the instances and the seed; see
+ *   `NfeStudyOptions`.
+ * @returns A generator of `NfeStudy` snapshots; the last has `phase` `'done'`.
+ *
+ * @example TVLoss lowers the variance of each instance's VF along its path
+ * const data = endpointTask({ x: tensor([[-1], [-0.5], [0.5], [1]]), y: tensor([-2, -1, 1, 2]) })
+ * const models = [{ label: 'VF' }, { label: 'VF + TVLoss', losses: { transport: true, variance: true } }]
+ * const options = { models, training: { steps: 10, hidden: 8, grid: 2 }, tolerances: [1e-3] }
+ * let study
+ * for (const s of nfeStudy(data, options)) study = s
+ * for (const r of study.results) {
+ *   print(r.label, 'NFE per instance:', r.perInstance[0], ' batch:', r.batch[0], ' VF variance:', r.fieldVariance)
+ * }
  */
 export function* nfeStudy(data: SvfmRunData, options: NfeStudyOptions = {}): Generator<NfeStudy, NfeStudy> {
   const { models = NFE_STUDY_MODELS, training = {}, tolerances = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], seed = 0 } = options

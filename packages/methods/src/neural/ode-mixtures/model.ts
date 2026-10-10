@@ -1,28 +1,34 @@
 /**
  * Stochastic vector field mixtures (SVFM; Twomey, Kozłowski & Santos-Rodríguez, 2020, "Neural ODEs with stochastic
- * vector field mixtures", ECAI): a neural ODE ∇h(t) = f(h(t), t; θ) (eq. 1) whose vector field (VF) is one of K
- * components f⁽ᵏ⁾, with component membership π(t) ∈ △ᴷ, and whose components may be stochastic.
+ * vector field mixtures", ECAI): a neural ODE $\nabla \hvec(t) = f(\hvec(t), t; \thetavec)$ (eq. 1) whose vector
+ * field (VF) is one of $K$ components $f^{(k)}$, with component membership $\pivec(t) \in \Delta^K$, and whose
+ * components may be stochastic.
  *
- * - **VF unit** (fig. 2a): f⁽ᵏ⁾(h, t) is an MLP.
- * - **SVF unit** (fig. 3, eqs. 6–7): a shared representation f_z = g_z(h, t) gives the mean and variance of the VF's
- *   direction u ~ N_s(μ⁽ᵘ⁾, τ⁽ᵘ⁾) on the sphere and of its log length, log v ~ N(log μ⁽ᵛ⁾, τ⁽ᵛ⁾); a sample of the VF is
- *   ∇h = v·u. The network outputs a VF a, decomposed into its orientation μ⁽ᵘ⁾ = a/‖a‖ and length μ⁽ᵛ⁾ = ‖a‖, and the
- *   two variances. N_s is read as a projected normal: u = normalise(μ⁽ᵘ⁾ + √τ⁽ᵘ⁾ P ε) with P = I − μ⁽ᵘ⁾μ⁽ᵘ⁾ᵀ, so
- *   u·μ⁽ᵘ⁾ > 0 always (the paper's directional preservation).
- * - **Component selection** on a grid t₀ < t₁ < … < t_T: *pick and stick* holds π(tᵢ) = π(t₀) = f_{π_t0}(h(t₀), t₀)
- *   (eq. 2); *forward filtering* (eqs. 3–5) has emission ψ(tᵢ) = f_ψ(h(tᵢ), tᵢ) ∈ △ᴷ and transition Ψ(tᵢ) =
- *   f_Ψ(h(tᵢ), tᵢ) with rows in △ᴷ, and π(tᵢ) ∝ Ψ(tᵢ)ᵀ(ψ(tᵢ) ⊙ π(tᵢ₋₁)).
+ * - **VF unit** (fig. 2a): $f^{(k)}(\hvec, t)$ is an MLP.
+ * - **SVF unit** (fig. 3, eqs. 6–7): a shared representation $f_z = g_z(\hvec, t)$ gives the mean and variance of the
+ *   VF's direction $\uvec \sim \Gauss_s(\muvec^{(u)}, \tau^{(u)})$ on the sphere and of its log length,
+ *   $\log v \sim \Gauss(\log \mu^{(v)}, \tau^{(v)})$; a sample of the VF is $\nabla \hvec = v \uvec$. The network
+ *   outputs a VF $\avec$, decomposed into its orientation $\muvec^{(u)} = \avec / \norm{\avec}$ and length
+ *   $\mu^{(v)} = \norm{\avec}$, and the two variances. $\Gauss_s$ is read as a projected normal:
+ *   $\uvec = \operatorname{normalise}(\muvec^{(u)} + \sqrt{\tau^{(u)}} \Pmat \epsilonvec)$ with
+ *   $\Pmat = \Imat - \muvec^{(u)} \muvec^{(u)\top}$, so $\uvec^\top \muvec^{(u)} > 0$ always (the paper's
+ *   directional preservation).
+ * - **Component selection** on a grid $t_0 < t_1 < \dots < t_T$: *pick and stick* holds
+ *   $\pivec(t_i) = \pivec(t_0) = f_{\pi_{t_0}}(\hvec(t_0), t_0)$ (eq. 2); *forward filtering* (eqs. 3–5) has emission
+ *   $\psivec(t_i) = f_\psi(\hvec(t_i), t_i) \in \Delta^K$ and transition $\Psimat(t_i) = f_\Psi(\hvec(t_i), t_i)$
+ *   with rows in $\Delta^K$, and $\pivec(t_i) \propto \Psimat(t_i)^\top (\psivec(t_i) \odot \pivec(t_{i-1}))$.
  *
- * Two computations share the parameters. `propagate` carries, for each component k, the state reached under it and
- * the spread of its stochastic VF's samples over the interval (moments: m_k′ = E[∇h⁽ᵏ⁾], r_k′ = the VF's standard
- * deviation per coordinate, which adds linearly because a sample keeps its noise for the whole solve), so the output at
- * tᵢ is the mixture Σₖ πₖ(tᵢ) N(m_k(tᵢ), (r_k² + σ₀²) I) of eq. 10. Under forward filtering, ψ_j and row j of Ψ are
- * evaluated on the state reached under component j, and the component-conditioned states are re-mixed with the same
- * joint weights (moment matching). `realisedField` evaluates one sampled path's VF (§3: a frozen uniform picks the
- * component from π, frozen normals sample the SVF), for trajectories and the per-instance work of a solve.
+ * Two computations share the parameters. `propagate` carries, for each component $k$, the state reached under it and
+ * the spread of its stochastic VF's samples over the interval (moments: $\mvec_k' = \expect[\nabla \hvec^{(k)}]$,
+ * $r_k'$ the VF's standard deviation per coordinate, which adds linearly because a sample keeps its noise for the whole
+ * solve), so the output at $t_i$ is the mixture $\sum_k \pi_k(t_i) \Gauss(\mvec_k(t_i), (r_k^2 + \sigma_0^2)\Imat)$
+ * of eq. 10. Under forward filtering, $\psi_j$ and row $j$ of $\Psimat$ are evaluated on the state reached under
+ * component $j$, and the component-conditioned states are re-mixed with the same joint weights (moment matching).
+ * `realisedRhs` (in `sampling.ts`) evaluates one sampled path's VF (§3: a frozen uniform picks the component from
+ * $\pivec$, frozen normals sample the SVF), for trajectories and the per-instance work of a solve.
  *
- * Augmentation (fig. 6, the A- models; Dupont, Doucet & Teh, 2019) pads h with zeros. A context c (e.g. the time of
- * day as (cos, sin)) is appended to the input of every network.
+ * Augmentation (fig. 6, the A- models; Dupont, Doucet & Teh, 2019) pads $\hvec$ with zeros. A context $\cvec$ (e.g.
+ * the time of day as $(\cos, \sin)$) is appended to the input of every network.
  */
 
 import type { Scalar } from 'aifn-compute/foundation/contracts'
@@ -62,7 +68,7 @@ import { heUniform, xavierUniform } from 'aifn-compute/nn/init'
 import { odeFlow, type OdeFlowMethod, type OdeSolveInfo } from 'aifn-compute/dynamics/ode'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** How the component membership π(t) is specified over the integration interval (§2.1). */
+/** How the component membership $\pivec(t)$ is specified over the integration interval (§2.1). */
 export type ComponentSelection = 'pick-and-stick' | 'forward-filtering'
 
 /** Field activations; the paper uses rectified units (§4.1.3). */
@@ -70,13 +76,13 @@ export type FieldActivation = 'relu' | 'tanh' | 'softplus'
 
 /** Options of {@link svfm}; plain data. */
 export type SvfmOptions = {
-  /** Dimension D of the data h(t₀) = x. */
+  /** Dimension $D$ of the data $\hvec(t_0) = \xvec$. */
   dim: number
-  /** Components K of the mixture (1: a single VF). Default 1. */
+  /** Components $K$ of the mixture (1: a single VF). Default 1. */
   components?: number
   /** SVF units (fig. 3) rather than VF units (fig. 2a). Default false. */
   stochastic?: boolean
-  /** Default `'pick-and-stick'`. */
+  /** How $\pivec(t)$ evolves over the grid. Default `'pick-and-stick'`. */
   selection?: ComponentSelection
   /** Zero-padded extra state dimensions (the A- models of fig. 6). Default 0. */
   augment?: number
@@ -86,98 +92,128 @@ export type SvfmOptions = {
   hidden?: number
   /** Hidden layers (the paper: 1 or 2). Default 2. */
   layers?: number
-  /** Default `'relu'`. */
+  /** The activation of the component VFs' hidden layers. Default `'relu'`. */
   activation?: FieldActivation
-  /** Classes of a classifier readout (a linear map of h(t_T) to logits), or 0 to read the state. Default 0. */
+  /** Classes of a classifier readout (a linear map of $\hvec(t_T)$ to logits), or 0 to read the state. Default 0. */
   classes?: number
-  /** Grid intervals T on [0, 1]: π is updated and the trajectory losses sum at t₁ … t_T. Default 10. */
+  /**
+   * Grid intervals $T$ on $[0, 1]$: $\pivec$ is updated and the trajectory losses sum at $t_1, \dots, t_T$. Default
+   * 10.
+   */
   grid?: number
   /** The differentiable solver within each interval. Default RK4. */
   method?: OdeFlowMethod
-  /** Step of a fixed-step solver (≤ the grid spacing). Default 0.05. */
+  /** Step of a fixed-step solver (at most the grid spacing). Default 0.05. */
   stepSize?: number
-  /** Tolerances of Dormand–Prince. */
+  /** Relative tolerance of Dormand–Prince. Default $10^{-3}$. */
   rtol?: number
+  /** Absolute tolerance of Dormand–Prince. Default $10^{-5}$. */
   atol?: number
-  /** The largest variance τ⁽ᵘ⁾, τ⁽ᵛ⁾ of an SVF (τ = maxVariance·sigmoid(·)). Default 0.5. */
+  /**
+   * The largest variance $\tau^{(u)}, \tau^{(v)}$ of an SVF ($\tau = \tau_{\max} \operatorname{sigmoid}(\cdot)$, with
+   * $\tau_{\max}$ this value). Default 0.5.
+   */
   maxVariance?: number
-  /** Initial bias of the SVF variance heads (default −5: τ starts near 0). */
+  /** Initial bias of the SVF variance heads (default $-5$: $\tau$ starts near 0). */
   varianceBias?: number
-  /** Learn τ⁽ᵘ⁾, τ⁽ᵛ⁾ from the state, or hold them at maxVariance·sigmoid(varianceBias). Default true. */
+  /**
+   * Learn $\tau^{(u)}, \tau^{(v)}$ from the state, or hold them at $\tau_{\max} \operatorname{sigmoid}(b)$, $b$ the
+   * `varianceBias`. Default true.
+   */
   learnVariance?: boolean
   /** The component VFs share their hidden layers (a trunk) and differ in their output layers. Default false. */
   sharedTrunk?: boolean
-  /** The VFs take t as an input, f(h(t), t) (eq. 1), or are autonomous, f(h(t)). Default true. */
+  /** The VFs take $t$ as an input, $f(\hvec(t), t)$ (eq. 1), or are autonomous, $f(\hvec(t))$. Default true. */
   timeDependent?: boolean
-  /** π(t₀) (eq. 2): a function f_{π_t0} of (h(t₀), t₀) (`'state'`) or a learned constant. Default `'state'`. */
+  /**
+   * $\pivec(t_0)$ (eq. 2): a function $f_{\pi_{t_0}}$ of $(\hvec(t_0), t_0)$ (`'state'`) or a learned constant.
+   * Default `'state'`.
+   */
   prior?: 'state' | 'constant'
   /**
-   * Hidden units, hidden layers (0: linear, a softmax of an affine map) and activation of the π networks f_{π_t0}, f_ψ
-   * and f_Ψ. π only chooses which field; the fields carry the dynamics, so π stays simple: defaults linear (0 layers),
-   * 8 units when a layer is used.
+   * Hidden units of the $\pivec$ networks $f_{\pi_{t_0}}$, $f_\psi$ and $f_\Psi$, when they have a hidden layer.
+   * $\pivec$ only chooses which field; the fields carry the dynamics, so $\pivec$ stays simple. Default 8.
    */
   piHidden?: number
+  /** Hidden layers of the $\pivec$ networks (0: linear, a softmax of an affine map). Default 0. */
   piLayers?: number
+  /** Activation of the $\pivec$ networks' hidden layers. Default the fields' `activation`. */
   piActivation?: FieldActivation
-  /** The softmax temperature of π(t₀). Default 1. */
+  /** The softmax temperature of $\pivec(t_0)$. Default 1. */
   temperature?: number
-  /** Forward filtering: emissions ψ learned (eq. 4) or uniform. Default learned. */
+  /** Forward filtering: emissions $\psivec$ learned (eq. 4) or uniform. Default learned. */
   emissions?: 'learned' | 'uniform'
-  /** Forward filtering: transitions Ψ learned (eq. 3) or fixed. Default learned. */
+  /** Forward filtering: transitions $\Psimat$ learned (eq. 3) or fixed. Default learned. */
   transitions?: 'learned' | 'fixed'
   /** The probability of staying in a component: fixed transitions keep it; learned ones start at it. Default 0.9. */
   stickiness?: number
 }
 
-/** A stack of K MLPs evaluated together: weights [K, in, out] and biases [K, 1, out] per layer. */
+/**
+ * A stack of $K$ MLPs evaluated together, one entry per layer: `weight` $[K, \text{in}, \text{out}]$ and `bias`
+ * $[K, 1, \text{out}]$ (leading size 1 for a layer shared by the $K$).
+ */
 export type StackedMlpParams = { weight: Tensor; bias: Tensor }[]
 
 /** Parameters of an SVFM. Networks absent from a configuration are empty. */
 export type SvfmParams = {
-  /** The K component networks (VF: out S; SVF: out S + 2, the mean VF and the two variances). */
+  /** The $K$ component networks (VF: $S$ outputs; SVF: $S + 2$, the mean VF and the two variances' logits). */
   fields: StackedMlpParams
-  /** f_{π_t0} (eq. 2): logits over components at (h(t₀), t₀); empty when K = 1. */
+  /** $f_{\pi_{t_0}}$ (eq. 2): logits over components at $(\hvec(t_0), t_0)$; empty when $K = 1$. */
   prior: StackedMlpParams
-  /** f_ψ (eq. 4) and f_Ψ (eq. 3): emission logits [K] and transition logits [K × K]; empty unless forward filtering. */
+  /** $f_\psi$ (eq. 4): emission logits $[K]$; empty unless forward filtering with learned emissions. */
   emission: StackedMlpParams
+  /** $f_\Psi$ (eq. 3): transition logits $[K \times K]$; empty unless forward filtering with learned transitions. */
   transition: StackedMlpParams
-  /** Classifier readout [S, classes] and [classes]; empty for state outputs. */
+  /** Classifier readout: `weight` $[S, \text{classes}]$ and `bias` $[\text{classes}]$; empty for state outputs. */
   readout: { weight?: Tensor; bias?: Tensor }
-  /** log σ₀, the output noise floor of the mixture density (eq. 10). */
+  /** $\log \sigma_0$, the output noise floor of the mixture density (eq. 10); starts at $\log 0.1$. */
   logNoise: Tensor
 }
 
-/** The moments `propagate` carries, at every grid time t₀ … t_T. */
+/** The moments `propagate` carries, at every grid time $t_0, \dots, t_T$. */
 export type Propagation = {
-  /** Grid times t₀ … t_T. */
+  /** Grid times $t_0, \dots, t_T$. */
   times: number[]
-  /** Component-conditioned states m_k(tᵢ) [K, B, S] after the update at tᵢ (what interval i + 1 starts from). */
+  /**
+   * Component-conditioned states $\mvec_k(t_i)$ $[K, B, S]$ after the update at $t_i$ (what interval $i + 1$ starts
+   * from).
+   */
   states: Value[]
-  /** The same before the update at tᵢ (where interval i ended; equal to `states` under pick and stick). */
+  /** The same before the update at $t_i$ (where interval $i$ ended; equal to `states` under pick and stick). */
   arrived: Value[]
-  /** Spread r_k(tᵢ) [K, B] after the update. */
+  /** Spread $r_k(t_i)$ $[K, B]$ after the update. */
   spread: Value[]
-  /** log π(tᵢ) [B, K]. */
+  /** $\log \pivec(t_i)$ $[B, K]$. */
   logWeights: Value[]
-  /** The mean VF E[∇h⁽ᵏ⁾] at the arrived states, for i = 1 … T ([K, B, S]); index 0 holds the field at t₀. */
+  /**
+   * The mean VF $\expect[\nabla \hvec^{(k)}]$ at the arrived states, for $i = 1, \dots, T$ ($[K, B, S]$); index 0
+   * holds the field at $t_0$.
+   */
   fields: Value[]
 }
 
 /** An SVFM, ready to train. */
 export type Svfm = {
+  /** The options with their defaults filled in. */
   options: Required<SvfmOptions>
-  /** State dimension S = D + augment. */
+  /** State dimension $S = D + \text{augment}$. */
   stateDim: number
+  /** Fresh parameters drawn from a stream (see `svfm` for the initialisation). */
   init(s: Stream): SvfmParams
-  /** h(t₀): x [B, D] padded with zeros to [B, S]. */
+  /** $\hvec(t_0)$: $\xvec$ $[B, D]$ padded with zeros to $[B, S]$. */
   lift(x: Value): Value
-  /** The mean VF and its spread rate per component at time t on states z [K, B, S]: [K, B, S] and [K, B]. */
+  /**
+   * The mean VF and its spread rate per component at time $t$ on states $\zvec$ $[K, B, S]$ with context $[B, C]$ or
+   * null: $[K, B, S]$ and $[K, B]$ (the spread rate is 0 for VF units).
+   */
   moments(params: SvfmParams, t: Scalar, z: Value, c: Value | null): { mean: Value; sd: Value }
-  /** log π(t₀) [B, K] (eq. 2) at h(t₀) [B, S]. */
+  /** $\log \pivec(t_0)$ $[B, K]$ (eq. 2) at $\hvec(t_0)$ $[B, S]$ (zeros $[B, 1]$ when $K = 1$). */
   prior(params: SvfmParams, h: Value, c: Value | null): Value
   /**
-   * Forward filtering at tᵢ (eq. 5) on component-conditioned states [K, B, S] with spreads [K, B]: the new log π
-   * [B, K] and the re-mixed states and spreads.
+   * Forward filtering at $t_i$ (eq. 5) from $\log \pivec(t_{i-1})$ $[B, K]$, on component-conditioned states
+   * $[K, B, S]$ with spreads $[K, B]$: the new $\log \pivec$ $[B, K]$ and the re-mixed states and spreads. Returns its
+   * inputs unchanged unless forward filtering with $K > 1$.
    */
   filter(
     params: SvfmParams,
@@ -187,28 +223,59 @@ export type Svfm = {
     spread: Value,
     c: Value | null,
   ): { logWeights: Value; states: Value; spread: Value }
-  /** The moments over the grid from x [B, D] (see the module comment). */
+  /** The moments over the grid from $\xvec$ $[B, D]$ (see the file comment); `onSolve` sees every solve. */
   propagate(params: SvfmParams, x: Value, c: Value | null, onSolve?: (info: OdeSolveInfo) => void): Propagation
-  /** Mixture output at a grid time over the first D coordinates: log π [B, K], means [B, K, D], log σ [B, K, D]. */
+  /**
+   * Mixture output at grid time $i$ over the first $D$ coordinates: $\log \pivec$ $[B, K]$, means $[B, K, D]$ and
+   * $\log \sigma$ $[B, K, D]$, with $\sigma^2 = r_k^2 + \sigma_0^2$.
+   */
   output(params: SvfmParams, p: Propagation, i: number): { logWeights: Value; means: Value; logScales: Value }
-  /** Classifier log-likelihoods log p(y = c | component k) at t_T: [B, K, classes] (probit-scaled for SVF units). */
+  /**
+   * Classifier log-likelihoods $\log p(y = c \mid k)$ at $t_T$: $[B, K, \text{classes}]$ (probit-scaled for SVF
+   * units). Throws `DomainError` without a readout.
+   */
   classLogLikelihoods(params: SvfmParams, p: Propagation): Value
 }
 
 /**
  * The prior's logits are its network's output times this factor. Under Adam the factor slows the prior's learning by
  * the same amount, so the components specialise (each target picks the component that serves it best, as in EM)
- * before π(t₀) commits; a prior that saturates first gates a component off everywhere, and it never recovers.
+ * before $\pivec(t_0)$ commits; a prior that saturates first gates a component off everywhere, and it never recovers.
  */
 const PRIOR_RATE = 0.2
 
+/**
+ * The layer sizes of an MLP.
+ *
+ * @param inF The number of inputs.
+ * @param hidden The units of each hidden layer.
+ * @param layers The number of hidden layers (0 for an affine map).
+ * @param out The number of outputs.
+ * @returns The sizes, inputs first.
+ */
 const mlpSizes = (inF: number, hidden: number, layers: number, out: number) => [
   inF,
   ...Array.from({ length: layers }, () => hidden),
   out,
 ]
 
-/** Initialise K stacked MLPs of the given sizes (He-uniform hidden layers, Xavier-uniform output, zero biases). */
+/**
+ * Initialise $K$ stacked MLPs of the given sizes: He-uniform hidden layers, a Xavier-uniform output layer and zero
+ * biases.
+ *
+ * @param s The stream the weights are drawn from.
+ * @param K The number of MLPs.
+ * @param sizes The layer sizes, inputs first, outputs last.
+ * @param outScale The gain of the output layer's Xavier-uniform draw (0 gives zero output weights).
+ * @param sharedTrunk Draw the hidden layers once (leading size 1, shared by the $K$ MLPs); the output layer is per MLP.
+ * @returns The layers' parameters.
+ *
+ * @example Three MLPs of sizes 2, 4, 1, with and without a shared trunk
+ * const own = stackedMlpInit(stream(0), 3, [2, 4, 1])
+ * print('weights:', own.map((l) => l.weight.shape), ' biases:', own.map((l) => l.bias.shape))
+ * const shared = stackedMlpInit(stream(0), 3, [2, 4, 1], 1, true)
+ * print('shared trunk weights:', shared.map((l) => l.weight.shape))
+ */
 export function stackedMlpInit(
   s: Stream,
   K: number,
@@ -231,10 +298,29 @@ export function stackedMlpInit(
   })
 }
 
+/**
+ * Apply an activation.
+ *
+ * @param a The activation.
+ * @param x The pre-activations.
+ * @returns The activations, with the shape of `x`.
+ */
 const activate = (a: FieldActivation, x: Value): Value =>
   a === 'relu' ? relu(x) : a === 'tanh' ? tanh(x) : softplus(x)
 
-/** K stacked MLPs on inputs [K, B, in] → [K, B, out]; a [B, in] input is shared by all K. */
+/**
+ * Evaluate $K$ stacked MLPs at once, by batched matrix products (differentiable).
+ *
+ * @param params The layers, as `stackedMlpInit` makes them.
+ * @param x The inputs: $[K, B, \text{in}]$, one batch per MLP, or $[B, \text{in}]$, shared by all $K$.
+ * @param activation The activation after every layer but the last.
+ * @returns The outputs, $[K, B, \text{out}]$.
+ *
+ * @example Three MLPs evaluated on the same two inputs
+ * const params = stackedMlpInit(stream(0), 3, [2, 4, 1])
+ * const y = stackedMlp(params, tensor([[1, 0], [0, 1]]), 'tanh')
+ * print('outputs:', y.shape, y)
+ */
 export function stackedMlp(params: StackedMlpParams, x: Value, activation: FieldActivation): Value {
   let h = x
   params.forEach((layer, l) => {
@@ -244,7 +330,14 @@ export function stackedMlp(params: StackedMlpParams, x: Value, activation: Field
   return h
 }
 
-/** The inputs [.., S + 1 + C] of a network: the state, the time and the context (broadcast over leading axes). */
+/**
+ * The inputs of a network: the state, the time and the context, joined on the last axis.
+ *
+ * @param z The states, $[B, S]$ or $[K, B, S]$.
+ * @param t The time, repeated for every row.
+ * @param c The context $[B, C]$, repeated over the $K$ components when `z` has them, or null for none.
+ * @returns The inputs, with the leading axes of `z` and $S + 1 + C$ columns.
+ */
 function inputsOf(z: Value, t: Scalar, c: Value | null): Value {
   const shape = shapeOfValue(z)
   const lead = shape.slice(0, -1)
@@ -257,9 +350,20 @@ function inputsOf(z: Value, t: Scalar, c: Value | null): Value {
 }
 
 /**
- * The SVF unit's heads (eqs. 6–7) from its raw outputs [.., S + 2]: the VF a whose orientation μ⁽ᵘ⁾ = a/‖a‖ and length
- * μ⁽ᵛ⁾ = ‖a‖ are the means (the paper's decomposition of a VF into length and orientation), and the variances τ⁽ᵘ⁾,
- * τ⁽ᵛ⁾ = maxVariance·sigmoid(·). The length vanishes with a, so the VF stays continuous where its orientation is undefined.
+ * The SVF unit's heads (eqs. 6–7) from its raw outputs: the VF $\avec$ whose orientation
+ * $\muvec^{(u)} = \avec / \norm{\avec}$ and length $\mu^{(v)} = \norm{\avec}$ are the means (the paper's
+ * decomposition of a VF into length and orientation), and the variances
+ * $\tau^{(u)}, \tau^{(v)} = \tau_{\max} \operatorname{sigmoid}(\cdot)$ of the last two outputs. The length vanishes
+ * with $\avec$, so the VF stays continuous where its orientation is undefined. Differentiable.
+ *
+ * @param raw The unit's outputs, $[\dots, S + 2]$: the VF $\avec$ in the first $S$, then the two variances' logits.
+ * @param S The state dimension.
+ * @param maxVariance The largest variance $\tau_{\max}$.
+ * @returns `vector`, $\avec$ $[\dots, S]$; `length2`, $\norm{\avec}^2$ $[\dots]$; and `tauU` and `tauV`, $[\dots]$.
+ *
+ * @example The VF $(3, 4)$ has orientation $(0.6, 0.8)$ and length 5; logits of 0 give half the largest variance
+ * const h = svfHeads(tensor([[3, 4, 0, 0]]), 2)
+ * print('vector', h.vector, ' squared length', h.length2, ' tauU', h.tauU, ' tauV', h.tauV)
  */
 export function svfHeads(raw: Value, S: number, maxVariance = 0.5) {
   const lead = Array(shapeOfValue(raw).length - 1).fill(null)
@@ -272,7 +376,33 @@ export function svfHeads(raw: Value, S: number, maxVariance = 0.5) {
   return { vector: a, length2, tauU: mul(maxVariance, sigmoid(at(0))), tauV: mul(maxVariance, sigmoid(at(1))) }
 }
 
-/** A stochastic vector field mixture (see the module comment). */
+/**
+ * A stochastic vector field mixture (see the file comment), or with one deterministic component the plain neural ODE
+ * baseline. The component networks are `layers` hidden layers of `hidden` units, initialised by `stackedMlpInit` with
+ * output gain 0.5; the $\pivec$ networks are affine by default, the prior's with gain 1 (or a learned constant), the
+ * emissions' and transitions' with gain 0.1, and learned transitions start at the `stickiness`. An SVF's variance
+ * heads start at `varianceBias`, so the components first specialise as deterministic VFs would. Everything is
+ * differentiable in the parameters, through the solver by backprop.
+ *
+ * @param options The data's dimension, the mixture (components, units, selection), the networks, the grid and solver,
+ *   the variances and the $\pivec$ networks; see `SvfmOptions`. Throws `DomainError` when `components` or `grid` is not
+ *   a positive integer.
+ * @returns The model: its options, initialiser, and the moments, prior, filter, propagation and outputs.
+ *
+ * @example A mixture's component weights: constant under pick and stick, moving under forward filtering
+ * const x = tensor([[1, 0], [0, 1]])
+ * for (const selection of ['pick-and-stick', 'forward-filtering']) {
+ *   const model = svfm({ dim: 2, components: 2, selection, grid: 4 })
+ *   const p = model.propagate(model.init(stream(0)), x, null)
+ *   print(selection, 'pi of the first point at t_0 ... t_4:', p.logWeights.map((w) => toArray(exp(w))[0]))
+ * }
+ *
+ * @example The spread of SVF units grows from 0 over the grid
+ * const model = svfm({ dim: 2, components: 3, stochastic: true, varianceBias: 0 })
+ * const p = model.propagate(model.init(stream(0)), tensor([[1, 0], [0, 1]]), null)
+ * print('states at t_T:', p.states.at(-1).shape)
+ * print('spread r_k at t_0 and t_T:', p.spread[0], p.spread.at(-1))
+ */
 export function svfm(options: SvfmOptions): Svfm {
   const o: Required<SvfmOptions> = {
     components: 1,
@@ -533,6 +663,14 @@ export function svfm(options: SvfmOptions): Svfm {
   }
 }
 
-/** A value's entries as a Float64Array. */
+/**
+ * A value's entries as a `Float64Array`.
+ *
+ * @param v A number or a tensor (traced values are unwrapped).
+ * @returns Its entries in row-major order, a copy.
+ *
+ * @example A matrix and a number, flattened
+ * print(flatOf(tensor([[1, 2], [3, 4]])), flatOf(5))
+ */
 export const flatOf = (v: Value): Float64Array =>
   typeof v === 'number' ? Float64Array.of(v) : Float64Array.from(toFlat(unwrap(v) as Tensor))

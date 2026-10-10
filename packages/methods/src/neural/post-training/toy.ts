@@ -94,7 +94,10 @@ export type PostTrainingSnapshot = {
   logpChosen?: number
   /** DPO: the mean log-probability of the rejected responses (`logps/rejected`). */
   logpRejected?: number
-  /** DPO: the mean of $\beta(\log$-ratio$_w - \log$-ratio$_l)$, the implicit reward margin (`rewards/margins`). */
+  /**
+   * DPO: the mean implicit reward margin $\beta(\rho_w - \rho_l)$ over the pairs (`rewards/margins`), with $\rho$ the
+   * log-ratio $\log \pi_{\thetavec} - \log \pi_{\thetavec_0}$ of the chosen ($w$) and rejected ($l$) response.
+   */
   margin?: number
   /** DPO: the share of pairs whose implicit reward favours the chosen response (`rewards/accuracies`). */
   accuracy?: number
@@ -159,7 +162,8 @@ function checkIndices(indices: ArrayLike<number>, K: Size, what: string): void {
  *
  * @example DPO raises the chosen response and lowers the rejected one
  * const policy = { features: [[1, 0], [0, 1], [1, 1], [-1, 0]], theta0: [0, 0] }
- * const trace = postTrainingTrace(policy, { method: 'dpo', pairs: [{ chosen: 2, rejected: 3 }], beta: 0.5, learningRate: 0.05, steps: 100, seed: 1 })
+ * const pairs = [{ chosen: 2, rejected: 3 }]
+ * const trace = postTrainingTrace(policy, { method: 'dpo', pairs, beta: 0.5, learningRate: 0.05, steps: 100, seed: 1 })
  * for (const s of [trace[0], trace[100]]) print(`step ${s.step}: probs`, s.probs, ' margin', s.margin, ' KL', s.kl)
  *
  * @example SFT on one target, and the entropy it removes
@@ -169,7 +173,8 @@ function checkIndices(indices: ArrayLike<number>, K: Size, what: string): void {
  *
  * @example GRPO moves mass to the rewarded responses
  * const policy = { features: [[1, 0], [0, 1], [1, 1], [-1, 0]], theta0: [0, 0] }
- * const trace = postTrainingTrace(policy, { method: 'grpo', rewards: [0, 1, 1, 0], groupSize: 8, learningRate: 0.05, steps: 100, seed: 1 })
+ * const options = { method: 'grpo', rewards: [0, 1, 1, 0], groupSize: 8, learningRate: 0.05, steps: 100, seed: 1 }
+ * const trace = postTrainingTrace(policy, options)
  * print('start', trace[0].probs, ' after 100 steps', trace[100].probs)
  */
 export function postTrainingTrace(policy: ToyPolicy, options: PostTrainingOptions): PostTrainingSnapshot[] {

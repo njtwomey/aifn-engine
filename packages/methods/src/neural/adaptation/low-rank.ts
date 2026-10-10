@@ -2,16 +2,17 @@
  * Low-rank adaptation of a weight change: a target $\Delta\Wmat$ ($m \times n$) fitted by a scaled product
  * $s\,\Bmat\Amat$ of a $m \times r$ and a $r \times n$ factor, by first-order training from LoRA's or PiSSA's start.
  *
- * LoRA (Hu et al., 2022) freezes a pretrained weight $\Wmat_0$ and learns $\Wmat_0 + s\,\Bmat\Amat$, with $\Bmat = \mathbf{0}$
- * and $\Amat$ random at the start, so training begins exactly at the pretrained model. The scale is $s = \alpha / r$
- * (`'inverse'`, Hu et al.) or $s = \alpha / \sqrt{r}$ (`'inverse-sqrt'`, rank-stabilised LoRA, Kalajdzievski, 2023,
- * which keeps the update's size stable as $r$ grows). PiSSA (Meng et al., 2024) starts the adapter at the principal
- * singular directions instead. Here the frozen weight plays no part: the fit is of the change alone, minimising
+ * LoRA (Hu et al., 2022) freezes a pretrained weight $\Wmat_0$ and learns $\Wmat_0 + s\,\Bmat\Amat$, with
+ * $\Bmat = \mathbf{0}$ and $\Amat$ random at the start, so training begins exactly at the pretrained model. The scale
+ * is $s = \alpha / r$ (`'inverse'`, Hu et al.) or $s = \alpha / \sqrt{r}$ (`'inverse-sqrt'`, rank-stabilised LoRA,
+ * Kalajdzievski, 2023, which keeps the update's size stable as $r$ grows). PiSSA (Meng et al., 2024) starts the adapter
+ * at the principal singular directions instead. Here the frozen weight plays no part: the fit is of the change alone,
+ * minimising
  *
  * $$\mathcal{L}(\Bmat, \Amat) = \tfrac{1}{2}\lVert s\,\Bmat\Amat - \Delta\Wmat \rVert_F^2,$$
  *
- * whose least value over rank-$r$ products is $\frac{1}{2}\sum_{i > r} \sigma_i^2$, the energy of the singular values of
- * $\Delta\Wmat$ past the $r$th (Eckart and Young, 1936). The gradients are written out by hand in `lowRankLoss`,
+ * whose least value over rank-$r$ products is $\frac{1}{2}\sum_{i > r} \sigma_i^2$, the energy of the singular values
+ * of $\Delta\Wmat$ past the $r$th (Eckart and Young, 1936). The gradients are written out by hand in `lowRankLoss`,
  * $\nabla_{\Bmat}\mathcal{L} = s\,\Rmat\Amat^\top$ and $\nabla_{\Amat}\mathcal{L} = s\,\Bmat^\top\Rmat$ with
  * $\Rmat = s\,\Bmat\Amat - \Delta\Wmat$ (the tests check them against the engine's autodiff), and stepped by
  * `aifn-compute/optim/first-order`'s `sgdRule` or `adamRule`.
@@ -47,11 +48,11 @@ export type LowRankTargetOptions = {
 }
 
 /**
- * A random $n \times n$ orthogonal matrix, uniform (Haar): the $\Qmat$ of a Gaussian matrix's QR factorisation with each
- * column's sign set by the diagonal of $\Rmat$ (Mezzadri, 2007).
+ * A random $n \times n$ orthogonal matrix, uniform (Haar): the $\Qmat$ of a Gaussian matrix's QR factorisation with
+ * each column's sign set by the diagonal of $\Rmat$ (Mezzadri, 2007).
  *
- * @param s The seed, as a stream name.
- * @param n The size.
+ * @param s The stream the Gaussian matrix is drawn from.
+ * @param n The size $n$.
  * @returns The matrix, row-major.
  */
 function randomOrthogonal(s: ReturnType<typeof stream>, n: Size): F64 {
@@ -119,7 +120,10 @@ export function lowRankTarget(options: LowRankTargetOptions): Tensor {
 export type LowRankFitOptions = {
   /** The rank $r$ of the adapter, from 1 to $\min(m, n)$. */
   rank: Size
-  /** The scale $s$: $\alpha / r$ (`'inverse'`, LoRA) or $\alpha / \sqrt{r}$ (`'inverse-sqrt'`, rank-stabilised LoRA). */
+  /**
+   * The scale $s$: $\alpha / r$ (`'inverse'`, LoRA) or $\alpha / \sqrt{r}$ (`'inverse-sqrt'`, rank-stabilised
+   * LoRA).
+   */
   scale: 'inverse' | 'inverse-sqrt'
   /** The scale's numerator $\alpha$. */
   alpha: number
@@ -130,10 +134,11 @@ export type LowRankFitOptions = {
   /** The number of steps. */
   steps: Size
   /**
-   * The start: `'lora'`, $\Bmat = \mathbf{0}$ and $\Amat$ uniform on $\pm 1/\sqrt{n}$ (PEFT's default, Kaiming uniform with
-   * $a = \sqrt{5}$), so $s\,\Bmat\Amat = \mathbf{0}$; `'pissa'`, the factors of the target's best rank-$r$
+   * The start: `'lora'`, $\Bmat = \mathbf{0}$ and $\Amat$ uniform on $\pm 1/\sqrt{n}$ (PEFT's default, Kaiming uniform
+   * with $a = \sqrt{5}$), so $s\,\Bmat\Amat = \mathbf{0}$; `'pissa'`, the factors of the target's best rank-$r$
    * approximation, $\Bmat = \Umat_r (\Smat_r / s)^{1/2}$ and $\Amat = (\Smat_r / s)^{1/2} \Vmat_r^\top$, so
-   * $s\,\Bmat\Amat = \Umat_r \Smat_r \Vmat_r^\top$, the optimum.
+   * $s\,\Bmat\Amat = \Umat_r \Smat_r \Vmat_r^\top$, the optimum (for a negative $s$ the roots are of
+   * $\Smat_r / \lvert s \rvert$ and $\Bmat$ carries the sign).
    */
   init: 'lora' | 'pissa'
   /** The seed of LoRA's random $\Amat$ (unused by PiSSA). */
@@ -156,11 +161,17 @@ export type LowRankCheckpoint = {
 
 /** The result of `lowRankFit`. */
 export type LowRankFitResult = {
-  /** The loss $\frac{1}{2}\lVert s\,\Bmat\Amat - \Delta\Wmat \rVert_F^2$ before each step and after the last: `steps + 1` values. */
+  /**
+   * The loss $\frac{1}{2}\lVert s\,\Bmat\Amat - \Delta\Wmat \rVert_F^2$ before each step and after the last:
+   * `steps + 1` values.
+   */
   losses: Float64Array
   /** The checkpoints, by step. */
   checkpoints: LowRankCheckpoint[]
-  /** The least loss any rank-$r$ update can reach, $\frac{1}{2}\sum_{i > r} \sigma_i^2$ over the target's singular values. */
+  /**
+   * The least loss any rank-$r$ update can reach, $\frac{1}{2}\sum_{i > r} \sigma_i^2$ over the target's singular
+   * values.
+   */
   floor: number
   /** The scale $s$ used. */
   scale: number
@@ -238,8 +249,8 @@ export function lowRankLoss(target: MatrixLike, B: MatrixLike, A: MatrixLike, sc
 
 /**
  * The singular values of $\Bmat\Amat$ from the $r \times r$ core of the two QR factorisations: with
- * $\Bmat = \Qmat_B \Rmat_B$ and $\Amat^\top = \Qmat_A \Rmat_A$, $\Bmat\Amat = \Qmat_B (\Rmat_B \Rmat_A^\top) \Qmat_A^\top$
- * has the singular values of $\Rmat_B \Rmat_A^\top$.
+ * $\Bmat = \Qmat_B \Rmat_B$ and $\Amat^\top = \Qmat_A \Rmat_A$,
+ * $\Bmat\Amat = \Qmat_B (\Rmat_B \Rmat_A^\top) \Qmat_A^\top$ has the singular values of $\Rmat_B \Rmat_A^\top$.
  *
  * @param B The left factor, $m \times r$, row-major.
  * @param A The right factor, $r \times n$, row-major.
@@ -263,8 +274,8 @@ function productSpectrum(B: F64, A: F64, m: Size, r: Size, n: Size, s: number): 
  * floor $\frac{1}{2}\sum_{i > r} \sigma_i^2$ as the adapter's spectrum grows towards the target's first $r$ singular
  * values; how fast depends on the scale convention, which with plain gradient descent sets the effective step size
  * ($s^2$ times the learning rate). From PiSSA's start the gradient is zero up to rounding, so gradient descent stays
- * put, but Adam, which divides each step by the gradient's own size, drifts away from the floor by steps of the learning
- * rate. The same options give the same result.
+ * put, but Adam, which divides each step by the gradient's own size, drifts away from the floor by steps of the
+ * learning rate. The same options give the same result.
  *
  * @param target The change $\Delta\Wmat$, $m \times n$.
  * @param options The rank, the scale convention and $\alpha$, the optimiser and its step size, the number of steps, the

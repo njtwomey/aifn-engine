@@ -1,8 +1,10 @@
 /**
- * Grokking (Power, Burda, Edwards, Babuschkin and Misra, 2022): a network trained on part of the table of a ∘ b mod p
- * fits its training pairs early, then, under weight decay, generalises to the held-out pairs much later. The model
- * here is the small embedding MLP that groks fastest in a browser: a shared embedding E [p, d] of the residues, the
- * concatenation [E_a, E_b] through one ReLU layer of `width` units, and logits over the p answers. Full-batch AdamW
+ * Grokking (Power, Burda, Edwards, Babuschkin and Misra, 2022): a network trained on part of the table of
+ * $a \circ b \bmod p$ fits its training pairs early, then, under weight decay, generalises to the held-out pairs much
+ * later. The model here is the small embedding MLP that groks fastest in a browser: a shared embedding $\Emat$
+ * ($p \times d$) of the residues, the concatenation $[\evec_a, \evec_b]$ of rows $a$ and $b$ through one ReLU layer
+ * of `width` units, and logits over the $p$ answers,
+ * $\zvec = \operatorname{relu}([\evec_a, \evec_b] \Wmat_1 + \bvec_1) \Wmat_2 + \bvec_2$. Full-batch AdamW
  * (Loshchilov and Hutter, 2019) shrinks every weight a little per step, which favours the low-norm solution that
  * generalises; on addition that solution represents residues by a few Fourier frequencies (Nanda, Chan, Lieberum, Smith
  * and Steinhardt, 2023; Gromov, 2023, "Grokking modular arithmetic"). A 1-layer transformer groks on the same data
@@ -34,30 +36,51 @@ import { childContext, tap, type Context } from 'aifn-compute/nn/layers'
 import { methodTraining } from 'aifn-compute/nn/training'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** Parameters of the modular MLP: embedding [p, d], hidden layer [2d, width] + [width], output [width, p] + [p]. */
+/**
+ * Parameters of the modular MLP: the `embedding` $\Emat$ ($p \times d$), the `hidden` layer $\Wmat_1$
+ * ($2d \times$ `width`) and its `hiddenBias` $\bvec_1$ (`width`), and the `out` layer $\Wmat_2$ (`width` $\times p$)
+ * and its `outBias` $\bvec_2$ ($p$).
+ */
 export type ModularMlpParams = { embedding: Tensor; hidden: Tensor; hiddenBias: Tensor; out: Tensor; outBias: Tensor }
 
 /** The architecture of the modular MLP. */
 export type ModularMlpConfig = {
-  /** The modulus p (residues in and answers out). */
+  /** The modulus $p$ (residues in and answers out). */
   p: Size
-  /** Embedding width d (default 32). */
+  /** Embedding width $d$ (default 32). */
   embed?: Size
   /** Hidden ReLU units (default 128). */
   width?: Size
 }
 
-/** Pairs as two int32 columns a and b [n]. */
+/** Pairs as two int32 columns `a` and `b`, $n$ values each: the operands of each row. */
 export type Pairs = { readonly a: Tensor; readonly b: Tensor }
 
-/** The modular MLP: initialise parameters; logits [n, p] for pairs (hidden units tapped at `hidden`). */
+/** The modular MLP: initialise parameters; logits for pairs. */
 export type ModularMlp = {
+  /** The architecture, with the defaults filled in. */
   readonly config: Required<ModularMlpConfig>
+  /** Fresh parameters from stream `s`. */
   init(s: Stream): ModularMlpParams
+  /**
+   * The logits, $n \times p$, of $n$ pairs. With a tapping context it records the hidden units at `hidden` and the
+   * logits at `logits`.
+   */
   apply(params: ModularMlpParams, pairs: Pairs, ctx?: Context): Value
 }
 
-/** The embedding MLP for a ∘ b mod p (see the module comment). Initialised at variance 1/fan-in throughout. */
+/**
+ * The embedding MLP for $a \circ b \bmod p$ (see the file comment). Weights are drawn from $\Gauss(0, 1/m)$ with $m$
+ * the fan-in ($d$ for the embedding, $2d$ for the hidden layer, `width` for the output); biases start at zero.
+ *
+ * @param config The modulus $p$, the embedding width and the hidden width.
+ * @returns The model: its full configuration, `init` and `apply`.
+ *
+ * @example Logits over the five residues for two pairs
+ * const model = ModularMlp({ p: 5, embed: 4, width: 8 })
+ * const pairs = pairsOf({ x: tensor([[1, 2], [3, 4]]) })
+ * print('logits:', model.apply(model.init(stream(0)), pairs))
+ */
 export function ModularMlp(config: ModularMlpConfig): ModularMlp {
   const c = { embed: 32, width: 128, ...config }
   const { p, embed: d, width } = c
@@ -80,7 +103,19 @@ export function ModularMlp(config: ModularMlpConfig): ModularMlp {
   }
 }
 
-/** Pairs from a modular-arithmetic part: features x [n, 2] (a and b) and labels y [n]. */
+/**
+ * Pairs from a modular-arithmetic part: its features `x` ($n \times 2$, the operands $a$ and $b$ of each row) as two
+ * int32 columns. The labels are not read.
+ *
+ * @param part A part of the table, with `x` ($n \times 2$).
+ * @returns The columns `a` and `b`.
+ *
+ * @example Four rows of the table of addition mod 5
+ * const rows = [[0, 1], [2, 2], [3, 4], [4, 4]]
+ * const pairs = pairsOf({ x: tensor(rows) })
+ * print('a:', pairs.a, ' b:', pairs.b)
+ * print('(a + b) mod 5:', rows.map(([a, b]) => (a + b) % 5))
+ */
 export function pairsOf(part: { readonly x: Tensor }): Pairs {
   const v = toFlat(part.x)
   const n = v.length / 2
@@ -96,7 +131,13 @@ export function pairsOf(part: { readonly x: Tensor }): Pairs {
   }
 }
 
-/** Accuracy and mean cross-entropy of logits [n, p] against labels y [n]. */
+/**
+ * Accuracy and mean cross-entropy of logits against labels; a prediction is the largest logit (the first on a tie).
+ *
+ * @param logits The logits, $n \times p$.
+ * @param y The labels, $n$ residues.
+ * @returns The share predicted right, and the mean cross-entropy in nats.
+ */
 function score(logits: Tensor, y: Tensor): { accuracy: number; loss: number } {
   const z = toFlat(logits)
   const labels = toFlat(y)
@@ -121,21 +162,31 @@ function score(logits: Tensor, y: Tensor): { accuracy: number; loss: number } {
 
 /** The curves of a grokking run, one entry per recorded step. */
 export type GrokkingCurves = {
+  /** The recorded steps, from 0. */
   readonly steps: number[]
+  /** Accuracy on the training pairs. */
   readonly trainAccuracy: number[]
+  /** Accuracy on the held-out pairs. */
   readonly testAccuracy: number[]
+  /** Mean cross-entropy on the training pairs (without the weight penalty). */
   readonly trainLoss: number[]
+  /** Mean cross-entropy on the held-out pairs. */
   readonly testLoss: number[]
-  /** The global parameter norm ‖θ‖₂. */
+  /** The global parameter norm $\norm{\thetavec}_2$, biases and embedding included. */
   readonly weightNorm: number[]
 }
 
 /** A snapshot of `grokkingRun`: the curves so far and the parameters at every checkpoint. */
 export type GrokkingSnapshot = {
+  /** Steps taken. */
   readonly step: Size
+  /** Steps in the whole run, or the step it stopped at once L-BFGS has converged. */
   readonly steps: Size
+  /** The model's architecture. */
   readonly config: Required<ModularMlpConfig>
+  /** The curves so far. */
   readonly curves: GrokkingCurves
+  /** The parameters at step 0, every `checkpointEvery` steps and the last. */
   readonly checkpoints: readonly { readonly step: Size; readonly params: ModularMlpParams }[]
 }
 
@@ -144,17 +195,20 @@ export type GrokkingRunOptions = Omit<ModularMlpConfig, 'p'> & {
   /** Full-batch AdamW steps or L-BFGS iterations (default 1500). */
   steps?: Size
   /**
-   * `adamw` (default) or `lbfgs`: full-batch L-BFGS on the cross-entropy plus the coupled penalty (λ/2)‖θ‖², the
-   * weight decay's fixed point, which it reaches directly rather than by the slow drift that grokking rides.
+   * `adamw` (default) or `lbfgs`: full-batch L-BFGS on the cross-entropy plus the coupled penalty
+   * $(\lambda/2)\norm{\thetavec}^2$, the weight decay's fixed point, which it reaches directly rather than by the slow
+   * drift that grokking rides.
    */
   method?: 'adamw' | 'lbfgs'
-  /** L-BFGS's memory m (default 10). */
+  /** L-BFGS's memory $m$ (default 10). */
   memory?: Size
-  /** AdamW's step size (default 0.01) and decoupled weight decay λ (default 2). */
+  /** AdamW's step size (default 0.01). */
   stepSize?: number
+  /** The weight decay $\lambda$ (default 2): AdamW's decoupled decay, or L-BFGS's penalty weight. */
   weightDecay?: number
-  /** Record the curves every this many steps (default 10) and keep a checkpoint every `checkpointEvery` (default 50). */
+  /** Record the curves every this many steps (default 10), and at the last step. */
   recordEvery?: Size
+  /** Keep a checkpoint, and yield a snapshot, every this many steps (default 50), and at the last step. */
   checkpointEvery?: Size
   /** The root stream's seed (default 'grokking'). */
   seed?: string | number
@@ -163,7 +217,32 @@ export type GrokkingRunOptions = Omit<ModularMlpConfig, 'p'> & {
 /**
  * Train the modular MLP by full-batch AdamW on the training pairs of a modular-arithmetic table (`aifn-methods/data`'s
  * `modularArithmetic`), yielding a snapshot at every checkpoint (step 0 first) with the training and test accuracy,
- * loss and weight norm so far.
+ * loss and weight norm so far. AdamW uses $\beta_2 = 0.98$, as in Nanda et al.'s runs; with `method: 'lbfgs'` the run
+ * stops early once L-BFGS converges. Throws `DomainError` when either part has no labels. Deterministic from the seed.
+ *
+ * @param data The modulus $p$, and the training and held-out parts, each with features `x` ($n \times 2$) and labels
+ *   `y` (required).
+ * @param options The architecture, the method, the steps, the optimiser's settings, the recording and checkpoint
+ *   intervals and the seed.
+ * @returns A generator of snapshots, one per checkpoint.
+ *
+ * @example Addition mod 7: the training pairs are fitted first
+ * const p = 7
+ * const rows = []
+ * for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) rows.push([a, b, (a + b) % p])
+ * const order = Array.from(toFlat(permutation(stream(0), rows.length)))
+ * const part = (ids) => ({
+ *   x: tensor(ids.map((i) => rows[i].slice(0, 2))),
+ *   y: fromData(Int32Array.from(ids, (i) => rows[i][2]), [ids.length]),
+ * })
+ * const data = { p, train: part(order.slice(0, 35)), test: part(order.slice(35)) }
+ * const options = { embed: 8, width: 32, steps: 100, recordEvery: 25, checkpointEvery: 25, stepSize: 0.03 }
+ * let last
+ * for (const s of grokkingRun(data, { ...options, weightDecay: 1 })) last = s
+ * print('step:', last.curves.steps)
+ * print('train accuracy:', last.curves.trainAccuracy)
+ * print('test accuracy:', last.curves.testAccuracy)
+ * print('weight norm:', last.curves.weightNorm)
  */
 export function* grokkingRun(
   data: {

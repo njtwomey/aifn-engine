@@ -1,15 +1,21 @@
 /**
  * The n-gram language model with interpolated Kneser–Ney smoothing (Kneser and Ney, 1995; in the interpolated and
- * modified forms of Chen and Goodman, 1999). The probability of token w after the context h (the last n − 1 tokens) is
+ * modified forms of Chen and Goodman, 1999). The probability of token $w$ after the context $h$ (the last $n - 1$
+ * tokens) is
  *
- *   P(w | h) = max(c(h w) − D, 0) / c(h ·) + γ(h) · P(w | h′),
+ * $$P(w \mid h) = \frac{\max(c(h w) - D, 0)}{c(h\, \cdot)} + \gamma(h)\, P(w \mid h'),$$
  *
- * where h′ drops the oldest token of h and γ(h) = Σ_{w′ : c(h w′) > 0} min(D, c(h w′)) / c(h ·) is the mass the
- * discount freed, so every distribution sums to one. Lower orders use continuation counts N₁₊(• h′ w), the number of
- * distinct tokens seen before h′ w, instead of raw counts: a token that occurs often but only after one context gets a
- * small lower-order probability. The unigram level interpolates with the uniform distribution, so every token has
- * positive probability. Discounts are D = n₁/(n₁ + 2n₂) per order from the counts of counts (Ney, Essen and Kneser,
- * 1994), or with `modified` three discounts D₁, D₂, D₃₊ by count (Chen and Goodman, 1999).
+ * where $h'$ drops the oldest token of $h$ and $\gamma(h) = \sum_{w' : c(h w') > 0} \min(D, c(h w')) / c(h\, \cdot)$
+ * is the mass the discount freed, so every distribution sums to one. Lower orders use continuation counts
+ * $N_{1+}(\bullet\, h' w)$, the number of distinct tokens seen before $h' w$, instead of raw counts: a token that
+ * occurs often but only after one context gets a small lower-order probability. The unigram level interpolates with
+ * the uniform distribution $1 / V$, so every token has positive probability, and a context never seen falls back to
+ * the next order down entirely. Near the start of a sequence, where fewer than $n - 1$ tokens precede $w$, the
+ * highest order available uses raw counts.
+ *
+ * Discounts are $D = n_1 / (n_1 + 2 n_2)$ per order from the counts of counts, $n_k$ the number of n-grams seen
+ * exactly $k$ times (Ney, Essen and Kneser, 1994), or with `modified` three discounts $D_1$, $D_2$, $D_{3+}$ by count
+ * (Chen and Goodman, 1999). With no n-gram seen once or none seen twice, every discount of that order is $0.5$.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -22,21 +28,46 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 /** A corpus as token ids over a vocabulary. */
 export type TokenCorpus = { readonly ids: readonly number[]; readonly vocabulary: Vocabulary }
 
-/** Counts by context (ids joined by commas) and next token. */
+/** Counts by context (its ids joined by commas, the empty string for none) and next token. */
 type Table = Map<string, Map<number, number>>
 
-/** The discount of a count: one value, or D₁, D₂, D₃₊. */
+/**
+ * The discounts $D_1$, $D_2$, $D_{3+}$ of a count of one, two, and three or more; all three equal unless modified.
+ */
 type Discount = readonly [number, number, number]
 
+/**
+ * The key of a context in a `Table`.
+ *
+ * @param ids The context's token ids, oldest first.
+ * @returns The ids joined by commas.
+ */
 const keyOf = (ids: readonly number[]) => ids.join(',')
 
+/**
+ * Add to the count of token `w` after a context, creating the context's row if it has none. Modifies `table`.
+ *
+ * @param table The counts to add to.
+ * @param context The context's key, from `keyOf`.
+ * @param w The next token's id.
+ * @param by The amount to add.
+ */
 function add(table: Table, context: string, w: number, by = 1) {
   let row = table.get(context)
   if (!row) table.set(context, (row = new Map()))
   row.set(w, (row.get(w) ?? 0) + by)
 }
 
-/** Discounts from the counts of counts of a table (Chen and Goodman, 1999, eq. 26; Ney et al., 1994). */
+/**
+ * Discounts from the counts of counts of a table (Chen and Goodman, 1999, eq. 26; Ney et al., 1994):
+ * $Y = n_1 / (n_1 + 2 n_2)$, and with `modified` $D_k = k - (k + 1) Y n_{k+1} / n_k$ for $k = 1, 2, 3$. A modified
+ * discount that is not positive, or not finite, is replaced by $Y$; each is capped at its count. Both fall back to
+ * $0.5$ when $n_1$ or $n_2$ is 0.
+ *
+ * @param table The counts of one order, raw or continuation.
+ * @param modified Whether to give three discounts by count (modified Kneser–Ney) rather than one.
+ * @returns $D_1$, $D_2$, $D_{3+}$.
+ */
 function discountsOf(table: Table, modified: boolean): Discount {
   const n = [0, 0, 0, 0, 0]
   for (const row of table.values()) for (const c of row.values()) if (c <= 4) n[c]++
@@ -52,24 +83,48 @@ function discountsOf(table: Table, modified: boolean): Discount {
   ]
 }
 
+/**
+ * The discount that applies to a count.
+ *
+ * @param d The order's discounts.
+ * @param c The count of the n-gram.
+ * @returns 0 for a count of 0 or less, else $D_1$, $D_2$ or $D_{3+}$ by count.
+ */
 const discountFor = (d: Discount, c: number) => (c <= 0 ? 0 : c === 1 ? d[0] : c === 2 ? d[1] : d[2])
 
 /** A fitted Kneser–Ney language model. */
 export type KneserNeyModel = Scores<Tensor> & {
+  /** The estimator kind. */
   readonly kind: 'model'
+  /** The estimator's name. */
   readonly name: 'kneser-ney'
+  /** The $n$ of the n-grams. */
   readonly order: Size
+  /** The vocabulary size $V$. */
   readonly vocabularySize: Size
+  /** The corpus's vocabulary. */
   readonly vocabulary: Vocabulary
-  /** Discounts (D₁, D₂, D₃₊; equal unless modified) of the raw counts and of the continuation counts, by order 1…n. */
+  /**
+   * Discounts ($D_1$, $D_2$, $D_{3+}$; equal unless modified) of the raw counts by order $1, \dots, n$, and of the
+   * continuation counts by order $1, \dots, n - 1$.
+   */
   readonly discounts: { readonly counts: readonly Discount[]; readonly continuation: readonly Discount[] }
-  /** P(w | context) for every w, [V] (uses the last n − 1 tokens of the context, fewer at the start). */
+  /**
+   * $P(w \mid \text{context})$ for every $w$, $V$ values (uses the last $n - 1$ tokens of the context, fewer at the
+   * start).
+   */
   distribution(context: readonly number[]): number[]
-  /** log P(· | prefix) as a logits function for `aifn-compute/nn/decoding`. */
+  /** $\log P(\cdot \mid \text{prefix})$ as a logits function for `aifn-compute/nn/decoding`. */
   readonly logits: LogitsFn
-  /** Per-token perplexity exp(−(1/N) Σ log P(w_t | w_{<t})) of a sequence (each token given those before it). */
+  /**
+   * Per-token perplexity $\exp\bigl(-\frac{1}{N} \sum_t \log P(w_t \mid w_{<t})\bigr)$ of a sequence of $N$ tokens
+   * (each token given those before it).
+   */
   perplexity(ids: readonly number[]): number
-  /** Next-token log-probabilities for contexts [N, k] of ids: [N, V]. */
+  /**
+   * Next-token log-probabilities for contexts `[N, k]` of ids: `[N, V]`. A one-dimensional tensor of $N$ values is read
+   * as $N$ empty contexts.
+   */
   score(contexts: Tensor): Tensor
 }
 
@@ -81,7 +136,26 @@ export type KneserNeyOptions = {
   modified?: boolean
 }
 
-/** An interpolated Kneser–Ney n-gram language model, fitted by counting a token corpus. */
+/**
+ * An interpolated Kneser–Ney n-gram language model, fitted by counting a token corpus. Throws `DomainError` for an
+ * order below 1.
+ *
+ * @param options The order $n$ and whether to use modified Kneser–Ney.
+ * @returns The estimator; `fit` counts the corpus and returns the model.
+ *
+ * @example A trigram model of a repeating string
+ * const corpus = charCorpus('abcabcabcabcabcabcabcabd')
+ * const lm = kneserNey({ order: 3 }).fit(corpus)
+ * print('alphabet:', corpus.vocabulary.tokens)
+ * print('P(next | "ab"):', lm.distribution(encodeChars(corpus, 'ab')))
+ * print('perplexity of "abcabc":', lm.perplexity(encodeChars(corpus, 'abcabc')))
+ * print('perplexity of "acbacb":', lm.perplexity(encodeChars(corpus, 'acbacb')))
+ *
+ * @example Plain and modified discounts of the nursery rhymes, by order
+ * const corpus = charCorpus()
+ * print('plain:', kneserNey().fit(corpus).discounts.counts)
+ * print('modified:', kneserNey({ modified: true }).fit(corpus).discounts.counts)
+ */
 export function kneserNey(options: KneserNeyOptions = {}): Estimator<TokenCorpus, KneserNeyModel> {
   const { order = 3, modified = false } = options
   if (!(order >= 1)) throw new DomainError('kneserNey', `kneserNey: order ${order} must be at least 1`)

@@ -5,7 +5,7 @@
  * Serving: the weights and key–value cache at a given precision, and the decoding throughput a device's memory
  * bandwidth and arithmetic allow (the roofline argument: generating one token reads every weight once, so small-batch
  * decoding is bound by bandwidth, not FLOPs). Kaplan et al. (2020) count $2N$ FLOPs per token for $N$ parameters; the
- * KV cache holds $2 \cdot \text{layers} \cdot \text{heads} \cdot \text{head size}$ values per token.
+ * KV cache holds $2 \cdot \text{layers} \cdot \text{key–value heads} \cdot \text{head size}$ values per token.
  *
  * Fine-tuning follows the derivations of the AI Field Notes on QLoRA ("QLoRA and the memory cost of fine-tuning") and
  * on bootstrapping a language model for a new task. The model state is $16\Psi$ bytes for full fine-tuning with
@@ -20,29 +20,35 @@
 
 /** A decoder-only transformer, for counting. */
 export interface TransformerShape {
-  /** Parameters N. */
+  /** Parameters $N$. */
   parameters: number
+  /** Transformer blocks $L$. */
   layers: number
-  /** Key–value heads (fewer than query heads under grouped-query attention) and their size. */
+  /** Key–value heads (fewer than query heads under grouped-query attention). */
   kvHeads: number
+  /** The size of each head $d_h$. */
   headDim: number
 }
 
 /** A serving configuration. */
 export interface ServingSetup {
-  /** Bits per weight (16, 8, 4, …) and per cached key or value. */
+  /** Bits per weight (16, 8, 4 and so on). */
   weightBits: number
+  /** Bits per cached key or value. */
   kvBits: number
-  /** Sequences decoded together and tokens held per sequence. */
+  /** Sequences decoded together. */
   batch: number
+  /** Tokens held in the cache per sequence. */
   context: number
 }
 
 /** A device, for the roofline. */
 export interface Device {
-  /** Memory in GB ($10^9$ bytes), bandwidth in GB/s and peak dense throughput in TFLOP/s at the compute precision. */
+  /** Memory in GB ($10^9$ bytes). */
   memoryGb: number
+  /** Memory bandwidth in GB/s. */
   bandwidthGbs: number
+  /** Peak dense throughput in TFLOP/s at the compute precision. */
   tflops: number
 }
 
@@ -50,8 +56,12 @@ export interface Device {
 export interface ServingMemory {
   /** Bytes of weights: $N \cdot \text{bits} / 8$. */
   weights: number
-  /** Bytes of KV cache: $2 \cdot \text{layers} \cdot \text{kvHeads} \cdot \text{headDim} \cdot \text{context} \cdot \text{batch} \cdot \text{kvBits} / 8$. */
+  /**
+   * Bytes of KV cache: $2 L\, h_{kv} d_h \cdot \text{context} \cdot \text{batch} \cdot \text{kvBits} / 8$, for $L$
+   * layers of $h_{kv}$ key–value heads of size $d_h$.
+   */
   kvCache: number
+  /** Bytes of weights and cache together. */
   total: number
   /** Whether the total fits the device. */
   fits: boolean
@@ -68,7 +78,7 @@ export interface ServingMemory {
  * @example An 8B model in 16 and 4 bits
  * const llama = { parameters: 8.03e9, layers: 32, kvHeads: 8, headDim: 128 }
  * for (const weightBits of [16, 4]) {
- *   const m = servingMemory(llama, { weightBits, kvBits: 16, batch: 8, context: 4096 }, { memoryGb: 24, bandwidthGbs: 1000, tflops: 165 })
+ *   const m = servingMemory(llama, { weightBits, kvBits: 16, batch: 8, context: 4096 }, { memoryGb: 24 })
  *   print(`${weightBits}-bit weights: ${(m.total / 1e9).toFixed(1)} GB, fits 24 GB: ${m.fits}`)
  * }
  */
@@ -85,22 +95,27 @@ export function servingMemory(
 
 /** Decoding throughput bounds of one step (one token for each sequence of the batch). */
 export interface DecodeThroughput {
-  /** Seconds per step if bound by memory traffic (weights once + every sequence's cache) and by arithmetic (2N per token). */
+  /** Seconds per step if bound by memory traffic: the weights once and every sequence's full cache. */
   memoryTime: number
+  /** Seconds per step if bound by arithmetic: $2N$ FLOPs per token. */
   computeTime: number
-  /** The step time, the larger of the two, and tokens per second over the batch. */
+  /** The step time, the larger of the two. */
   stepTime: number
+  /** Tokens per second over the batch. */
   tokensPerSecond: number
-  /** Which bound is active, and the arithmetic intensity (FLOPs per byte read) of a step. */
+  /** Which bound is active (memory on a tie). */
   bound: 'memory' | 'compute'
+  /** The arithmetic intensity (FLOPs per byte read) of a step. */
   intensity: number
   /** The batch above which decoding becomes compute-bound on this device (ignoring the cache). */
   ridgeBatch: number
 }
 
 /**
- * The roofline estimate of decoding throughput: one step reads every weight and every sequence's cache once and does
- * $2N$ FLOPs per sequence, and takes the longer of the memory time and the compute time.
+ * The roofline estimate of decoding throughput: one step reads every weight and every sequence's cache once (the
+ * cache taken full, at `context` tokens) and does $2N$ FLOPs per sequence, and takes the longer of the memory time and
+ * the compute time. Decoding turns compute-bound above the ridge batch
+ * $B^* = \text{peak FLOP/s} \cdot \text{weight bytes} / (\text{bandwidth} \cdot 2N)$.
  *
  * @param model The model's parameter count, layers, key–value heads and head size.
  * @param setup The bits per weight and per cached value, the batch and the context length in tokens.
@@ -170,8 +185,9 @@ export interface FineTuningSetup {
   rank?: number
   /** The linear layers that carry adapters (default all seven). */
   targets?: readonly AdapterTarget[]
-  /** Sequences per micro-batch $b$, and tokens per sequence $s$ (the longest the data holds). */
+  /** Sequences per micro-batch $b$. */
   microBatch: number
+  /** Tokens per sequence $s$ (the longest the data holds). */
   sequence: number
   /** Gradient checkpointing: store each layer's input only and recompute the layer in the backward pass. */
   checkpointing: boolean
@@ -205,6 +221,7 @@ export interface FineTuningMemory {
   activations: number
   /** The 32-bit logits of one micro-batch (0 with a chunked loss). */
   logits: number
+  /** The sum of the parts. */
   total: number
   /** Whether the run fits the device: the total, or with `paged` the total less the optimiser state. */
   fits: boolean
@@ -224,8 +241,9 @@ export interface FineTuningCompute {
 
 /** A fine-tuning run's data and hardware, for its compute and price. */
 export interface FineTuningRun {
-  /** Tokens per epoch (prompt and completion), and epochs. */
+  /** Tokens per epoch (prompt and completion). */
   tokens: number
+  /** Passes over the data. */
   epochs: number
   /** Model FLOP utilisation, the fraction of peak reached (e.g. 0.3). */
   mfu: number
@@ -295,7 +313,8 @@ function projections(shape: TransformerTrainShape): Record<AdapterTarget, [numbe
  * @example What QLoRA quantises in Llama 3.1 8B and 70B
  * for (const [name, shape] of [['8B', LLAMA_3_1_8B], ['70B', LLAMA_3_1_70B]]) {
  *   const linear = linearParameters(shape)
- *   print(`${name}: ${(linear / 1e9).toFixed(2)}e9 linear weights, ${((shape.parameters - linear) / 1e9).toFixed(2)}e9 embeddings`)
+ *   const rest = shape.parameters - linear
+ *   print(`${name}: ${(linear / 1e9).toFixed(2)}e9 linear weights, ${(rest / 1e9).toFixed(2)}e9 embeddings`)
  * }
  */
 export function linearParameters(shape: TransformerTrainShape): number {
@@ -350,12 +369,14 @@ export function adapterParameters(
  *
  * @example Full fine-tuning, LoRA and QLoRA of Llama 3.1 8B
  * for (const method of ['full', 'lora', 'qlora']) {
- *   const m = fineTuningMemory(LLAMA_3_1_8B, { method, microBatch: 8, sequence: 1024, checkpointing: true, logits: 'chunked' }, { memoryGb: 24 })
+ *   const setup = { method, microBatch: 8, sequence: 1024, checkpointing: true, logits: 'chunked' }
+ *   const m = fineTuningMemory(LLAMA_3_1_8B, setup, { memoryGb: 24 })
  *   print(`${method}: ${(m.total / 1e9).toFixed(1)} GB, fits a 24 GB device: ${m.fits}`)
  * }
  *
  * @example Where the memory of a LoRA run goes
- * const m = fineTuningMemory(LLAMA_3_1_8B, { method: 'lora', microBatch: 8, sequence: 1024, checkpointing: true, logits: 'full' })
+ * const setup = { method: 'lora', microBatch: 8, sequence: 1024, checkpointing: true, logits: 'full' }
+ * const m = fineTuningMemory(LLAMA_3_1_8B, setup)
  * for (const part of ['weights', 'adapterState', 'optimiserState', 'gradients', 'activations', 'logits'])
  *   print(`${part}: ${(m[part] / 1e9).toFixed(2)} GB`)
  */
@@ -424,7 +445,8 @@ export function fineTuningMemory(
  * @example The bootstrapping note's LoRA run
  * // 4,000 tickets of 630 tokens, 3 epochs, on an H100 (990 TFLOP/s dense bf16) at 30% utilisation and $3 an hour.
  * const setup = { method: 'lora', microBatch: 8, sequence: 1024, checkpointing: true, logits: 'chunked' }
- * const c = fineTuningCompute(LLAMA_3_1_8B, setup, { tokens: 4000 * 630, epochs: 3, mfu: 0.3, peakFlops: 990e12, pricePerHour: 3 })
+ * const run = { tokens: 4000 * 630, epochs: 3, mfu: 0.3, peakFlops: 990e12, pricePerHour: 3 }
+ * const c = fineTuningCompute(LLAMA_3_1_8B, setup, run)
  * print('FLOPs per token:', c.flopsPerToken, ' total:', c.flops)
  * print(`${(c.seconds / 60).toFixed(1)} minutes, $${c.cost.toFixed(2)}`)
  */

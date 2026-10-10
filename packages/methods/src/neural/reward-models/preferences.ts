@@ -9,8 +9,8 @@
  * regression without an intercept on the differences $\phivec(\xvec_w) - \phivec(\xvec_l)$.
  *
  * Best-of-$n$ sampling draws $n$ responses and keeps the one the proxy reward ranks highest. As $n$ grows the policy
- * moves away from the base distribution, by at most $\log n - (n - 1)/n$ in KL divergence (Beirami et al., 2025), and the
- * proxy reward rises without limit; when the proxy is misspecified the gold reward rises, peaks and then falls, the
+ * moves away from the base distribution, by at most $\log n - (n - 1)/n$ in KL divergence (Beirami et al., 2025), and
+ * the proxy reward rises without limit; when the proxy is misspecified the gold reward rises, peaks and then falls, the
  * over-optimisation that Gao et al. (2023) measure.
  */
 

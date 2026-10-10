@@ -4,6 +4,9 @@
  * causally, and the loss is the next-token cross-entropy at the answer positions only, so the model is never asked to
  * predict a random prompt. Accuracy is teacher-forced: an example is exact when the most probable next token is right
  * at every answer position, which is when greedy decoding from the prompt reproduces the answer.
+ *
+ * With $w_i$ the weight of position $i$ (1 at an answer token, else 0) and $\ell_i$ its cross-entropy, the loss is
+ * $\sum_i w_i \ell_i / \max(1, \sum_i w_i)$, in nats per answer token.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -27,12 +30,27 @@ import { adamRule } from 'aifn-compute/optim/first-order'
 import { Gpt, type GptConfig, type GptParams } from './gpt'
 
 /**
- * Examples of a prompt–answer task as padded rows: tokens [n, L], next-token targets [n, L] and weights [n, L], 1 at
- * the positions whose target is an answer token (the shape of `sequenceTasks`' examples).
+ * Examples of a prompt–answer task as padded rows: `tokens` ($n \times L$ ids), next-token `targets` ($n \times L$,
+ * the tokens shifted left by one) and `weights` ($n \times L$), 1 at the positions whose target is an answer token
+ * (the shape of `sequenceTasks`' examples).
  */
 export type TaskExamples = { readonly tokens: Tensor; readonly targets: Tensor; readonly weights: Tensor }
 
-/** The weighted mean next-token cross-entropy (nats per answer token) of logits [N, T, V]. */
+/**
+ * The weighted mean next-token cross-entropy (nats per answer token): $\sum_i w_i \ell_i / \max(1, \sum_i w_i)$
+ * over every position $i$ (differentiable in the logits).
+ *
+ * @param logits The logits, $N \times T \times V$.
+ * @param targets The target ids, $N \times T$.
+ * @param weights The weight $w_i$ of each position, $N \times T$: 1 at answer positions, 0 elsewhere.
+ * @returns The weighted mean cross-entropy, a scalar.
+ *
+ * @example Only the weighted position counts
+ * const logits = fromData(Float64Array.from([0, 0, 0, 0, 5, 0, 0, 0, 5]), [1, 3, 3])
+ * const targets = fromData(Int32Array.from([0, 1, 1]), [1, 3])
+ * print('the answer position only:', taskLoss(logits, targets, tensor([[0, 1, 0]])))
+ * print('every position:', taskLoss(logits, targets, tensor([[1, 1, 1]])))
+ */
 export function taskLoss(logits: Value, targets: Tensor, weights: Tensor): Value {
   const V = shapeOfValue(logits).at(-1)!
   const each = softmaxCrossEntropy(reshape(logits, [-1, V]), reshape(targets, [-1]) as Tensor, { reduction: 'none' })
@@ -52,13 +70,34 @@ export type TaskTrainingOptions = {
   batchSize?: Size
   /** Adam's step size (default 0.003). */
   stepSize?: number
-  /** Decoupled weight decay λ (AdamW; default 0). */
+  /** Decoupled weight decay $\lambda$ (AdamW; default 0, plain Adam). */
   weightDecay?: number
   /** Rescale gradients above this global norm (default 1). */
   clipNorm?: number
 }
 
-/** Minibatch AdamW on `taskLoss`, as a traceable `trainingLoop`. */
+/**
+ * Minibatch AdamW on `taskLoss` (Adam when the weight decay is 0), as a traceable `trainingLoop`, with gradients
+ * clipped to a global norm. Each epoch shuffles the rows; the batch size is capped at the number of rows.
+ *
+ * @param model The GPT; its context must be at least the row length $L$.
+ * @param examples The training rows.
+ * @param options The batch size, step size, weight decay and clipping norm.
+ * @returns The algorithm, to run with `run` or `trace` from `{ params }`.
+ *
+ * @example Learn to copy one letter
+ * const one = (rows) => fromData(Int32Array.from(rows.flat()), [rows.length, rows[0].length])
+ * const ex = {
+ *   tokens: one([[0, 3, 1, 3], [0, 4, 1, 4]]),
+ *   targets: one([[3, 1, 3, 2], [4, 1, 4, 2]]),
+ *   weights: tensor([[0, 0, 1, 1], [0, 0, 1, 1]]),
+ * }
+ * const model = Gpt({ vocabulary: 5, context: 4, width: 8, layers: 1, heads: 2 })
+ * const alg = taskTraining(model, ex, { stepSize: 0.05 })
+ * const tr = trace(alg, { params: model.init(stream(0)) }, 30, { every: 10, record: { loss: (s) => s.loss } })
+ * print('step:', tr.index)
+ * print('loss:', tr.series.loss)
+ */
 export function taskTraining(
   model: Gpt,
   examples: TaskExamples,
@@ -74,10 +113,36 @@ export function taskTraining(
   })
 }
 
-/** Teacher-forced accuracy: the share of answer tokens predicted right, and of examples right at every one. */
+/**
+ * Teacher-forced accuracy: `token`, the share of answer tokens predicted right; `exact`, the share of examples right
+ * at every one; and `loss`, the mean cross-entropy per answer token. Each is 0 when there is nothing to score.
+ */
 export type TaskAccuracy = { readonly token: number; readonly exact: number; readonly loss: number }
 
-/** The accuracy and loss of a GPT on the first `limit` examples (default all), evaluated in chunks of 64 rows. */
+/**
+ * The teacher-forced accuracy and loss of a GPT on the first `limit` examples (default all), evaluated in chunks of
+ * 64 rows. A prediction is the most probable next token; an example with no answer positions counts as exact.
+ *
+ * @param model The GPT.
+ * @param params Its parameters.
+ * @param examples The rows to score.
+ * @param limit How many rows to score, from the first (default all of them).
+ * @returns The token and exact accuracies and the loss.
+ *
+ * @example A copy task before and after training
+ * // Rows "^ x = x ." over the vocabulary ^ = . a b, with weight on the answer and the full stop.
+ * const one = (rows) => fromData(Int32Array.from(rows.flat()), [rows.length, rows[0].length])
+ * const ex = {
+ *   tokens: one([[0, 3, 1, 3], [0, 4, 1, 4]]),
+ *   targets: one([[3, 1, 3, 2], [4, 1, 4, 2]]),
+ *   weights: tensor([[0, 0, 1, 1], [0, 0, 1, 1]]),
+ * }
+ * const model = Gpt({ vocabulary: 5, context: 4, width: 8, layers: 1, heads: 2 })
+ * const params = model.init(stream(0))
+ * print('untrained:', taskAccuracy(model, params, ex))
+ * const trained = run(taskTraining(model, ex, { stepSize: 0.05 }), { params }, 30, { stream: stream(1) }).params
+ * print('after 30 steps:', taskAccuracy(model, trained, ex))
+ */
 export function taskAccuracy(model: Gpt, params: GptParams, examples: TaskExamples, limit?: Size): TaskAccuracy {
   const [n, L] = examples.tokens.shape
   const m = Math.min(n, limit ?? n)
@@ -121,18 +186,27 @@ export function taskAccuracy(model: Gpt, params: GptParams, examples: TaskExampl
 
 /** A checkpoint of `taskTrainingRun`: the parameters after `step` updates and their accuracy on both splits. */
 export type TaskCheckpoint = {
+  /** Updates taken. */
   readonly step: Size
+  /** The parameters after `step` updates. */
   readonly params: GptParams
+  /** Accuracy and loss on the first `evaluate` training rows. */
   readonly train: TaskAccuracy
+  /** Accuracy and loss on the first `evaluate` test rows. */
   readonly test: TaskAccuracy
 }
 
 /** A snapshot of `taskTrainingRun`: the steps so far, every step's minibatch loss, and every checkpoint. */
 export type TaskSnapshot = {
+  /** Steps taken. */
   readonly step: Size
+  /** Steps in the whole run. */
   readonly steps: Size
+  /** The minibatch loss at the start and after each step so far: `step` $+ 1$ values. */
   readonly losses: readonly number[]
+  /** The model's full configuration. */
   readonly config: Required<GptConfig>
+  /** Every checkpoint so far, the last at `step`. */
   readonly checkpoints: readonly TaskCheckpoint[]
 }
 
@@ -151,7 +225,27 @@ export type TaskTrainingRunOptions = Omit<GptConfig, 'vocabulary' | 'context'> &
 
 /**
  * Train a tiny GPT on a prompt–answer task, yielding a snapshot at every checkpoint (step 0 first): a generator, so a
- * worker can stream the run to a page that plays the checkpoints. The context is the row length of the data.
+ * worker can stream the run to a page that plays the checkpoints. The context is the row length of the data, and the
+ * run is deterministic from its seed.
+ *
+ * @param data The task: its vocabulary (whose length sets the model's), and its training and test rows.
+ * @param options The architecture (without vocabulary and context), the training options, the number of steps, the
+ *   checkpoint interval, the rows scored per checkpoint and the seed.
+ * @returns A generator of snapshots, one per checkpoint.
+ *
+ * @example A copy task, checkpointed every ten steps
+ * const one = (rows) => fromData(Int32Array.from(rows.flat()), [rows.length, rows[0].length])
+ * const split = {
+ *   tokens: one([[0, 3, 1, 3], [0, 4, 1, 4]]),
+ *   targets: one([[3, 1, 3, 2], [4, 1, 4, 2]]),
+ *   weights: tensor([[0, 0, 1, 1], [0, 0, 1, 1]]),
+ * }
+ * const data = { vocabulary: ['^', '=', '.', 'a', 'b'], train: split, test: split }
+ * const options = { width: 8, layers: 1, heads: 2, steps: 30, every: 10, stepSize: 0.05, seed: 0 }
+ * for (const s of taskTrainingRun(data, options)) {
+ *   const c = s.checkpoints.at(-1)
+ *   print('step', s.step, ' loss', s.losses.at(-1), ' exact on train', c.train.exact)
+ * }
  */
 export function* taskTrainingRun(
   data: { readonly vocabulary: readonly string[]; readonly train: TaskExamples; readonly test: TaskExamples },

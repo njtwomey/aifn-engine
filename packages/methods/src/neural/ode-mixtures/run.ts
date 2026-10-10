@@ -3,8 +3,8 @@
  * (Twomey, Kozłowski & Santos-Rodríguez, 2020): classification of 2-d points (moons, nested circles, XOR), the 1-d
  * failure cases of fig. 1 (crossing, splitting, scaling: an end target per start), and forecasting paths with FLoss.
  * Each checkpoint holds realised paths of the shown points (§3: frozen randomness per path), the component posterior
- * along them, the predictive mixtures on the grid, each component's mean VF, the prior π(t₀) over the inputs, and the
- * per-instance work of solving the realised paths with Dormand–Prince.
+ * along them, the predictive mixtures on the grid, each component's mean VF, the prior $\pivec(t_0)$ over the inputs,
+ * and the per-instance work of solving the realised paths with Dormand–Prince.
  */
 
 import { treeLeaves } from 'aifn-compute/foundation/pytree'
@@ -36,50 +36,65 @@ import { DomainError, NumericalError } from 'aifn-compute/foundation/errors'
 /** The kinds of problem a run trains on. */
 export type SvfmTask = 'classification' | 'endpoint' | 'forecast'
 
-/**
- * The data of a run: starts x [n, D]; class labels y [n] (classification) or end targets y [n] / [n, D] (endpoint);
- * for forecasting, sampled paths [n, M, D] at `pathTimes` [M] on [0, 1] (x is then their first sample); `context`
- * [n, C] (e.g. the time of day) and `groups` [n] (colours; labels by default).
- */
+/** The data of a run, as `classificationTask`, `endpointTask` and `walkTask` make it. */
 export type SvfmRunData = {
+  /** Starts $\xvec$, $[n, D]$ (for forecasting, the paths' first samples). */
   x: Tensor
+  /** Class labels $[n]$ (int32: classification) or end targets $[n]$ or $[n, D]$ (endpoint). */
   y?: Tensor
+  /** Sampled paths $[n, M, D]$ (forecasting). */
   paths?: Tensor
+  /** The paths' $M$ sample times on $[0, 1]$ (default evenly spaced). */
   pathTimes?: readonly number[]
+  /** Context $[n, C]$ (e.g. the time of day), given to every network. */
   context?: Tensor
+  /** Colour groups $[n]$ (default the labels, or zeros). */
   groups?: Tensor
 }
 
 /** Options of {@link svfmRun}; plain data. */
 export type SvfmRunOptions = {
+  /** Default forecasting with `paths`, classification with int32 `y`, endpoint otherwise. */
   task?: SvfmTask
-  /** Components K, SVF units, the selection method and augmentation (fig. 6's lattice). */
+  /** Components $K$ (fig. 6's lattice). Default 1. */
   components?: number
+  /** SVF units rather than VF units. Default false. */
   stochastic?: boolean
+  /** The selection method. Default `'pick-and-stick'`. */
   selection?: ComponentSelection
+  /** Zero-padded extra state dimensions. Default 0. */
   augment?: number
-  /** The largest SVF variance τ. Default 0.5. */
+  /** The largest SVF variance $\tau_{\max}$. Default 0.5. */
   maxVariance?: number
   /**
-   * Further architecture (`svfm` options): the π networks (prior kind, width, depth, activation, temperature, emissions,
-   * transitions, stickiness), shared trunk, time dependence, the variance heads, the training solver.
+   * Further architecture (`svfm` options): the $\pivec$ networks (prior kind, width, depth, activation, temperature,
+   * emissions, transitions, stickiness), shared trunk, time dependence, the variance heads, the training solver.
    */
   architecture?: Omit<
     SvfmOptions,
     'dim' | 'components' | 'stochastic' | 'selection' | 'augment' | 'context' | 'classes'
   >
+  /** Hidden units per layer of the component VFs. Default 32. */
   hidden?: number
+  /** Hidden layers of the component VFs. Default 1. */
   layers?: number
+  /** Activation of the component VFs. Default `'relu'`. */
   activation?: FieldActivation
-  /** Grid intervals T on [0, 1]. Default 5. */
+  /** Grid intervals $T$ on $[0, 1]$. Default 5. */
   grid?: number
-  /** RK4 step within the grid during training. Default 0.2 (one step per interval at T = 5). */
+  /** RK4 step within the grid during training. Default $1/T$ (one step per interval). */
   stepSize?: number
+  /** The losses (`svfmObjective`). Default the predictive loss alone. */
   losses?: SvfmLossSettings
+  /** Optimiser steps. Default 300. */
   steps?: number
+  /** Minibatch size (at most $n$). Default 50. */
   batchSize?: number
+  /** Adam's step size. Default 0.01. */
   learningRate?: number
+  /** Rescale gradients whose global norm exceeds this. Default 1. */
   clipNorm?: number
+  /** Seed of the initialisation, the minibatches and the realised paths. Default 0. */
   seed?: number
   /** Standardise the data (centre, unit overall sd). Default true except for the 1-d endpoint tasks. */
   standardise?: boolean
@@ -87,86 +102,156 @@ export type SvfmRunOptions = {
   shown?: number
   /** Frames per grid interval of the drawn paths. Default 4. */
   framesPerInterval?: number
-  /** Side of the field grid and of the input rasters. Defaults 13 and 32. */
+  /** Side of the field grid. Default 13. */
   fieldGrid?: number
+  /** Side of the 2-d input rasters (1-d data uses 61 points). Default 32. */
   decisionGrid?: number
-  /** Dormand–Prince tolerance of the per-instance work at checkpoints. Default 1e-4. */
+  /** Dormand–Prince's relative tolerance at checkpoints (the absolute one is a hundredth of it). Default $10^{-4}$. */
   rtol?: number
+  /** Checkpoints over the run (from step 0). Default 12. */
   checkpoints?: number
 }
 
 /** A checkpoint of a run. */
 export type SvfmCheckpoint = {
+  /** The optimiser step it was taken at. */
   step: number
-  /** Losses on the whole set: predictive, TLoss, VLoss (unweighted), and accuracy (classification) or NaN. */
+  /** The predictive loss on the whole set. */
   predictive: number
+  /** TLoss on the whole set, unweighted. */
   transport: number
+  /** VLoss on the whole set, unweighted. */
   variance: number
+  /** Accuracy on the whole set (classification), or NaN. */
   accuracy: number
-  /** Realised paths of the shown points [frames × P × S]. */
+  /** Realised paths of the $P$ shown points, $[\text{frames} \times P \times S]$. */
   paths: Float64Array
-  /** π along them at the grid times [(T + 1) × P × K] and the component followed per interval [T × P]. */
+  /** $\pivec$ along them at the grid times, $[(T + 1) \times P \times K]$. */
   weights: Float64Array
+  /** The component each shown point followed per interval, $[T \times P]$. */
   components: Int32Array
-  /** The predictive mixture of the shown points at each grid time: π, mean, sd [(T + 1) × P × K × (2D + 1)]. */
+  /**
+   * The predictive mixture of the shown points at each grid time: weight, mean and standard deviation,
+   * $[(T + 1) \times P \times K \times (2D + 1)]$.
+   */
   mixture: Float64Array
-  /** Each component's mean VF on the field grid at each grid time [K][T + 1][g² × S] (2-d), or over (t, x) (1-d). */
+  /**
+   * Each component's mean VF in the data's $D$ coordinates at each grid time, `fields[k][i]`: on the field grid,
+   * $[g^2 \times D]$ (2-d), or along the $x$ axis, $[g]$ (1-d).
+   */
   fields: Float64Array[][]
-  /** π(t₀) over the input raster [g² × K] (2-d) or the x axis (1-d); empty when K = 1. */
+  /** $\pivec(t_0)$ over the input raster, $[g^2 \times K]$ (2-d), or along the $x$ axis (1-d); empty when $K = 1$. */
   prior: Float64Array
-  /** P(class 1) over the input raster (classification), else empty. */
+  /** $P(\text{class } 1)$ over the input raster (2-d classification), else empty. */
   decision: Float64Array
-  /** NFE of each shown point's realised path solved alone, and of all of them as one batch. */
+  /** NFE of each shown point's realised path solved alone. */
   nfe: Int32Array
+  /** NFE of the shown points' realised paths solved as one batch. */
   batchNfe: number
 }
 
 /** A snapshot of a run. */
 export type SvfmRun = {
+  /** The task trained on. */
   task: SvfmTask
+  /** The steps the run was asked for. */
   steps: number
+  /** The steps taken so far. */
   done: number
+  /** True on the last snapshot. */
   finished: boolean
+  /** The message of the error that ended the run early (a non-finite loss among them), or null. */
   error: string | null
+  /** The data's dimension $D$. */
   dim: number
+  /** The state's dimension $S$. */
   stateDim: number
+  /** Components $K$. */
   components: number
+  /** SVF units or VF units. */
   stochastic: boolean
+  /** The selection method. */
   selection: ComponentSelection
+  /** Classes (at least 2) of a classification task, else 0. */
   classes: number
+  /** The number of parameters of the model. */
   parameters: number
-  /** Data in model coordinates [n × D], with the map back: original = shift + scale · model. */
+  /** Data in model coordinates, $[n \times D]$; the original is `shift` plus `scale` times it. */
   data: Float64Array
+  /** The per-coordinate shift of the standardisation, $[D]$ (zeros without it). */
   shift: Float64Array
+  /** The overall scale of the standardisation (1 without it). */
   scale: number
-  /** Colour groups [n] and the shown points' indices [P]. */
+  /** Colour groups, $[n]$. */
   groups: Int32Array
+  /** The shown points' indices, $[P]$. */
   shown: Int32Array
-  /** End targets [n × D] (endpoint) or grid targets of the shown points [P × (T + 1) × D] (forecast). */
+  /**
+   * End targets $[n \times D]$ (endpoint) or grid targets of the shown points $[P \times (T + 1) \times D]$ (forecast),
+   * in model coordinates; empty for classification.
+   */
   targets: Float64Array
-  /** Grid times and frame times on [0, 1]. */
+  /** Grid times on $[0, 1]$. */
   gridTimes: Float64Array
+  /** Frame times of the realised paths on $[0, 1]$. */
   frameTimes: Float64Array
-  /** Half-width of the drawing box in model coordinates (2-d), or of the x range (1-d), and its centre. */
+  /**
+   * Half-width of the drawing box in model coordinates, centred on 0 (2-d), or of the $x$ range (1-d); it holds the
+   * data and the targets.
+   */
   box: number
-  /** The field grid's axis (2-d: both axes; 1-d: x, against `gridTimes`) and the raster's axis. */
+  /** The field grid's axis (2-d: both axes; 1-d: $x$, against `gridTimes`). */
   fieldAxis: Float64Array
+  /** The input raster's axis. */
   rasterAxis: Float64Array
-  /** Per iteration: the minibatch objective and wall milliseconds. */
+  /** Per iteration: the minibatch objective. */
   loss: Float64Array
+  /** Per iteration: wall milliseconds. */
   wallMs: Float64Array
+  /** The checkpoints so far. */
   checkpoints: SvfmCheckpoint[]
   /** The trained parameters (on the finished snapshot only). */
   params: SvfmParams | null
 }
 
+/**
+ * The wall clock in milliseconds: `performance.now()` where it exists, else `Date.now()`.
+ *
+ * @returns The time, for differences only.
+ */
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+/**
+ * Evenly spaced values from `a` to `b`, both included.
+ *
+ * @param a The first value.
+ * @param b The last value.
+ * @param m How many values; with 1, just `a`.
+ * @returns The `m` values.
+ */
 const spaced = (a: number, b: number, m: number): number[] =>
   Array.from({ length: m }, (_, i) => (m === 1 ? a : a + ((b - a) * i) / (m - 1)))
 
 /**
  * Train an SVFM (or a baseline) on `data` and yield snapshots (about every twentieth of the run and at the end);
- * checkpoints are evenly spaced from step 0. Deterministic in `seed` (wall times aside).
+ * checkpoints are evenly spaced from step 0. The data is standardised (one shift per coordinate, one overall scale,
+ * paths included) unless the task is 1-d endpoint regression, and the objective (`svfmObjective`) is minimised by Adam
+ * on minibatches with the gradient's global norm clipped. Invalid loss settings throw `DomainError` before training,
+ * as does FLoss without a forecasting task; an error during training, a non-finite loss among them, ends the run with a
+ * finished snapshot carrying its message. Deterministic in `seed` (wall times aside).
+ *
+ * @param data The starts and the labels, targets or paths, with optional context and groups; see `SvfmRunData`.
+ * @param options The task, the model (components, units, selection, augmentation, widths, grid, `architecture`), the
+ *   losses, the optimisation and what checkpoints record; see `SvfmRunOptions`.
+ * @returns A generator of `SvfmRun` snapshots; the last has `finished` set and carries the trained parameters.
+ *
+ * @example A single VF learns to scale its starts: the loss falls
+ * const data = endpointTask({ x: tensor([[-1], [-0.5], [0.5], [1]]), y: tensor([-2, -1, 1, 2]) })
+ * const options = { steps: 20, learningRate: 0.05, hidden: 8, grid: 2, checkpoints: 1, shown: 2, fieldGrid: 3 }
+ * let run
+ * for (const r of svfmRun(data, options)) run = r
+ * print('loss at steps 0, 10, 20:', [0, 10, 20].map((k) => run.loss[k]))
+ * const last = run.checkpoints.at(-1)
+ * print('NFE of the shown points, alone and as one batch:', last.nfe, last.batchNfe)
  */
 export function* svfmRun(data: SvfmRunData, options: SvfmRunOptions = {}): Generator<SvfmRun, SvfmRun> {
   const task: SvfmTask =

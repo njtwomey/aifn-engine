@@ -1,11 +1,13 @@
 /**
  * Training a small MLP by full-batch L-BFGS against first-order methods, for a worker. Every optimiser starts from the
- * same initial weights and minimises the same objective, the mean loss on the whole training set plus (λ/2)‖W‖² over
- * the weight matrices: L-BFGS (Liu & Nocedal, 1989) and plain gradient descent on the full batch through compute's
- * `fullBatchTraining`, Adam (Kingma & Ba, 2015) and SGD on minibatches through `trainingLoop`. Each run records, per
- * iteration, the full-set objective, its gradient norm and the work done in full-data gradient evaluations (an L-BFGS
- * line search evaluates the loss and gradient several times; a minibatch step costs its share b/n); L-BFGS also records
- * its step length, its evaluations per iteration and the curvature sᵀy of each pair.
+ * same initial weights and minimises the same objective, the mean loss on the whole training set plus
+ * $\frac{\lambda}{2}\sum_l \lVert \Wmat_l \rVert_F^2$ over the weight matrices $\Wmat_l$ (biases unpenalised): L-BFGS
+ * (Liu and Nocedal, 1989) and plain gradient descent on the full batch through compute's `fullBatchTraining`, Adam
+ * (Kingma and Ba, 2015) and SGD on minibatches through `trainingLoop`. Each run records, per iteration, the full-set
+ * objective, its gradient norm and the work done in full-data gradient evaluations (an L-BFGS line search evaluates
+ * the loss and gradient several times; a minibatch step costs its share $b/n$); L-BFGS also records its step length,
+ * its line-search evaluations per iteration and the curvature $\svec^\top\yvec$ of each pair, with
+ * $\svec = \thetavec_{t} - \thetavec_{t-1}$ and $\yvec$ the change in the gradient.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -34,24 +36,47 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** The optimisers compared, in their fixed order (and colour slots). */
 export const COMPARISON_OPTIMISERS = ['lbfgs', 'gradient-descent', 'adam', 'sgd'] as const
+/** One of the optimisers compared: full-batch L-BFGS or gradient descent, or minibatch Adam or SGD. */
 export type ComparisonOptimiser = (typeof COMPARISON_OPTIMISERS)[number]
 
-/** The task: binary classification of points x [n, 2] by labels y ∈ {0, 1}, or regression of y on x [n, 1]. */
+/**
+ * The task: binary classification of points $\xvec_i \in \reals^d$ by labels $y_i \in \{0, 1\}$ (binary cross-entropy
+ * on one logit), or regression of $y_i \in \reals$ on $\xvec_i$ (mean squared error).
+ */
 export type ComparisonTask = 'classification' | 'regression'
 
 /** The network: an MLP of `depth` hidden layers of `width` units with one output (a logit or a value). */
 export type ComparisonNetwork = {
+  /** The number of input features $d$. */
   inputs: Size
+  /** The number of units in each hidden layer. */
   width: Size
+  /** The number of hidden layers. */
   depth: Size
+  /** The activation after each hidden layer (the output layer has none). */
   activation: Extract<ActivationName, 'tanh' | 'gelu' | 'relu'>
 }
 
-/** The MLP of a network configuration (Xavier-uniform weights, zero biases) and the map from θ back to its parameters. */
+/**
+ * The MLP of a network configuration (Xavier-uniform weights, zero biases) and the map from a flat parameter vector
+ * $\thetavec$ back to its parameter tree.
+ *
+ * @param network The input size, the hidden width and depth, and the activation.
+ * @returns The model, whose `init` draws the weights; `unravel`, which reads a flat $\thetavec$ as the model's
+ *   parameters; and `size`, the number of parameters (weights and biases).
+ *
+ * @example Two hidden layers of 8 tanh units, with every parameter 0.1
+ * const { model, unravel, size } = comparisonModel({ inputs: 2, width: 8, depth: 2, activation: 'tanh' })
+ * print(model.label, ' parameters:', size)
+ * const params = unravel(new Float64Array(size).fill(0.1))
+ * print('output at (1, 1):', model.apply(params, tensor([[1, 1]])))
+ */
 export function comparisonModel(network: ComparisonNetwork): {
+  /** The MLP, with Xavier-uniform weights and zero biases from its `init`. */
   model: Layer<Params[]>
-  /** The parameter tree of a flat θ (in `ravel` order). */
+  /** The parameter tree of a flat $\thetavec$ (in `ravel` order). */
   unravel: (theta: ArrayLike<number>) => Params[]
+  /** The number of parameters, the length of $\thetavec$. */
   size: Size
 } {
   const { inputs, width, depth, activation } = network
@@ -63,67 +88,112 @@ export function comparisonModel(network: ComparisonNetwork): {
 
 /** Options of `fullBatchComparison`. */
 export type ComparisonOptions = {
+  /** Classification (binary cross-entropy on one logit) or regression (mean squared error). */
   task: ComparisonTask
+  /** The hidden width and depth and the activation; the input size is the number of columns of the data's `x`. */
   network: Omit<ComparisonNetwork, 'inputs'>
-  /** The optimisers to train, each from the same initial weights (default all four). */
+  /** The optimisers to train, in this order, each from the same initial weights (default all four). */
   optimisers?: readonly ComparisonOptimiser[]
   /** At most this many iterations per optimiser (default 300). */
   iterations?: Size
-  /** L-BFGS memory m (default 10) and gradient-norm tolerance (default 1e-6). */
+  /** The L-BFGS memory $m$, the number of curvature pairs kept (default 10). */
   memory?: Size
+  /** The gradient-norm tolerance at which L-BFGS and gradient descent stop as converged (default 1e-6). */
   tolerance?: number
-  /** Fixed step sizes: gradient descent (default 0.3), Adam (default 0.01), SGD (default 0.1). */
+  /** The fixed step size of gradient descent (default 0.3). */
   gdStep?: number
+  /** The step size of Adam (default 0.01). */
   adamStep?: number
+  /** The step size of SGD (default 0.1). */
   sgdStep?: number
-  /** Minibatch size of Adam and SGD (default 32). */
+  /** Minibatch size of Adam and SGD, clamped to between 1 and the number of examples (default 32). */
   batchSize?: Size
-  /** The L2 strength λ in (λ/2)‖W‖² (default 0). */
+  /**
+   * The L2 strength $\lambda$ in $\frac{\lambda}{2}\sum_l \lVert \Wmat_l \rVert_F^2$, over the weight matrices only
+   * (default 0, no penalty).
+   */
   l2?: number
-  /** The seed of the initial weights (default 0). */
+  /** The seed of the initial weights and of the runs' own draws, such as the minibatches (default 0). */
   seed?: number
-  /** At most this many parameter checkpoints per optimiser (default 120). */
+  /**
+   * About this many parameter checkpoints per optimiser (default 120): one every `ceil(iterations / checkpoints)`
+   * iterations from iteration 0, and the last.
+   */
   checkpoints?: Size
 }
 
-/** One optimiser's run, recorded at every iteration (minibatch methods: at most about 400 records). */
+/** One optimiser's run, recorded at every iteration from 0, so at most `iterations + 1` records. */
 export type ComparisonRun = {
+  /** The optimiser of the run. */
   optimiser: ComparisonOptimiser
   /** Iterations (updates) at each record. */
   iteration: number[]
-  /** Full-data gradient evaluations used by each record. */
+  /**
+   * Full-data gradient evaluations used by each record, cumulative: the optimiser's own count for L-BFGS and gradient
+   * descent, and $b/n$ per minibatch drawn for Adam and SGD.
+   */
   evaluations: number[]
-  /** The full-set objective (mean loss + L2) and its gradient norm. */
+  /** The full-set objective (mean loss plus the L2 penalty) at each record. */
   loss: number[]
+  /** The Euclidean norm of the full-set objective's gradient at each record. */
   gradNorm: number[]
-  /** L-BFGS only, per iteration 1, 2, …: the accepted step length α, the loss evaluations of the line search, sᵀy, and whether the pair was skipped. */
+  /** L-BFGS only, per iteration $1, 2, \dots$: the accepted step length $\alpha$ (NaN when not reported). */
   stepSize: number[]
+  /** L-BFGS only, per iteration: the loss and gradient evaluations of the line search (NaN when not reported). */
   lineEvaluations: number[]
+  /**
+   * L-BFGS only, per iteration: the curvature $\svec^\top\yvec$ of the step, with $\svec$ the change in $\thetavec$
+   * and $\yvec$ the change in the gradient.
+   */
   curvature: number[]
+  /** L-BFGS only, per iteration: whether the curvature pair was skipped rather than stored. */
   skipped: boolean[]
-  /** θ at checkpoints (in `ravel` order), with their iterations. */
+  /** $\thetavec$ at checkpoints (in `ravel` order), with their iterations. */
   checkpoints: { iteration: number; theta: Float64Array }[]
-  /** Training accuracy (classification) or RMSE (regression) at the last record. */
+  /**
+   * Training accuracy (classification, a logit above 0 read as label 1) or RMSE (regression) at the end of the run;
+   * NaN until it ends.
+   */
   score: number
-  /** Milliseconds spent in the optimiser's steps (records excluded). */
+  /** Milliseconds spent in the optimiser's `init` and steps (records excluded). */
   ms: number
-  /** Why the run ended: the iteration budget, convergence, a stalled line search or divergence. */
+  /**
+   * Why the run ended: the iteration budget, convergence, a stalled line search or divergence; `null` while it runs.
+   */
   stop: 'budget' | 'converged' | 'stalled' | 'diverged' | null
 }
 
 /** A snapshot of `fullBatchComparison`: the runs so far (the current one partial). */
 export type ComparisonSnapshot = {
+  /** The task, as in the options. */
   task: ComparisonTask
+  /** The network, with its input size taken from the data. */
   network: ComparisonNetwork
+  /** The number of parameters of the network. */
   parameterCount: Size
+  /** The number of training examples $n$. */
   examples: Size
-  /** Iterations done over every optimiser, and the total budget. */
+  /**
+   * Iterations done over every optimiser so far; a finished run counts its whole budget, even when it stopped early.
+   */
   done: Size
+  /** The total budget, `iterations` times the number of optimisers. */
   total: Size
+  /**
+   * One run per optimiser started: shallow copies, whose arrays are the generator's own and keep growing after the
+   * snapshot (posting it to another thread copies them).
+   */
   runs: ComparisonRun[]
 }
 
-/** (λ/2) Σ‖W‖² over the weight matrices (biases unpenalised) of MLP parameters. */
+/**
+ * The penalty $\frac{\lambda}{2}\sum_l \lVert \Wmat_l \rVert_F^2$ over the weight matrices of MLP parameters (biases
+ * unpenalised; differentiable).
+ *
+ * @param params The MLP's parameters, one tree per layer; layers without a `weight` (activations) add nothing.
+ * @param l2 The strength $\lambda$.
+ * @returns The penalty, as a value that gradients can flow through.
+ */
 function weightPenalty(params: Params[], l2: number): Value {
   let total: Value = 0
   for (const layer of params) {
@@ -134,9 +204,38 @@ function weightPenalty(params: Params[], l2: number): Value {
 }
 
 /**
- * Train a small MLP by each optimiser in turn, from the same initial weights, on the whole of `data` (x [n, d], y [n]),
- * yielding a snapshot every few iterations. Classification uses binary cross-entropy on one logit; regression the mean
- * squared error.
+ * Train a small MLP by each optimiser in turn, from the same initial weights, on the whole of `data` ($\Xmat$ of
+ * $n \times d$, $\yvec$ of $n$), yielding a snapshot every few iterations. Classification uses binary cross-entropy on
+ * one logit; regression the mean squared error. L-BFGS and gradient descent stop early when they converge (gradient
+ * norm below `tolerance`), diverge or stall; Adam and SGD stop early only when they diverge. Deterministic from `seed`.
+ * Throws `DomainError` when `data` has no targets.
+ *
+ * @param data The training set: `x`, the $n \times d$ inputs, and `y`, the $n$ targets (labels 0 or 1 for
+ *   classification), in any shape with $n$ values. `y` is required despite being optional in the type.
+ * @param options The task and network, the optimisers, the iteration budget, the L-BFGS memory and tolerance, the step
+ *   sizes, the minibatch size, the L2 strength, the seed and the number of checkpoints.
+ * @returns A generator of snapshots: one every `max(5, ceil(iterations / 25))` iterations, one at the end of each
+ *   optimiser's run, and a final one. Each holds every run so far, the current one partial.
+ *
+ * @example Four optimisers on a small classification problem
+ * const x = normals(stream(1), [40, 2])
+ * const y = tensor(toArray(x).map(([a, b]) => (a * b > 0 ? 1 : 0)))
+ * const options = { task: 'classification', network: { width: 8, depth: 1, activation: 'tanh' }, iterations: 40 }
+ * let last
+ * for (const snapshot of fullBatchComparison({ x, y }, options)) last = snapshot
+ * for (const run of last.runs)
+ *   print(run.optimiser, ' loss', run.loss.at(-1), ' evaluations', run.evaluations.at(-1), ' accuracy', run.score)
+ *
+ * @example The L-BFGS line search on a regression
+ * const x = normals(stream(2), [30, 1])
+ * const y = tensor(toArray(x).map(([a]) => Math.sin(2 * a)))
+ * const network = { width: 8, depth: 1, activation: 'tanh' }
+ * const options = { task: 'regression', network, optimisers: ['lbfgs'], iterations: 10 }
+ * const snapshots = [...fullBatchComparison({ x, y }, options)]
+ * const run = snapshots.at(-1).runs[0]
+ * print('step lengths:', run.stepSize)
+ * print('line-search evaluations:', run.lineEvaluations)
+ * print('curvature:', run.curvature)
  */
 export function* fullBatchComparison(
   data: { readonly x: Tensor; readonly y?: Tensor },

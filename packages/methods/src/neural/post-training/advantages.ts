@@ -34,7 +34,10 @@ export type AdvantageOptions = {
   baseline?: Baseline
   /** The scale (default `'group-std'` for one group, `'batch-std'` for a batch). */
   scale?: Scale
-  /** The standard deviation's divisor $G - \mathrm{ddof}$: 0 for the population form, 1 for the sample form (default 0). */
+  /**
+   * The standard deviation's divisor $G - \mathrm{ddof}$: 0 for the population form, 1 for the sample form
+   * (default 0).
+   */
   ddof?: 0 | 1
   /** Added to the standard deviation before dividing, so a group of equal rewards gives zeros (default $10^{-4}$). */
   eps?: number

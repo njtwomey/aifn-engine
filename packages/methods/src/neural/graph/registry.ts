@@ -1,4 +1,6 @@
-/** The models and algorithms of `aifn-methods/neural/graph`: semi-supervised node classification with a two-layer GNN. */
+/**
+ * The models and algorithms of `aifn-methods/neural/graph`: semi-supervised node classification with a two-layer GNN.
+ */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as nodes from './node-classification'

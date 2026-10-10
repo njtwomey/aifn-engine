@@ -2,13 +2,14 @@
  * Realised paths of a stochastic vector field mixture and the work of solving them (Twomey, Kozłowski &
  * Santos-Rodríguez, 2020, §3 and §4.3). One realisation per instance freezes its randomness for the whole solve, as the
  * paper does by recording the random state at the start and resetting it whenever samples are drawn: a uniform picks
- * the component by the inverse CDF of π (once under pick and stick, at every grid time under forward filtering, where π
- * is filtered on the path itself), and normals sample the SVF's direction and length (the reparameterisation trick).
- * `mean` realisations take the most probable component and the mean VF.
+ * the component by the inverse CDF of $\pivec$ (once under pick and stick, at every grid time under forward filtering,
+ * where $\pivec$ is filtered on the path itself), and normals sample the SVF's direction and length (the
+ * reparameterisation trick). `mean` realisations take the most probable component and the mean VF.
  *
  * The number of function evaluations (NFE) of a solve is measured per instance with `dormandPrinceRows` (each instance
- * solved alone, as in fig. 11) and for the whole batch as one system (the "traditional" NFE, set by the hardest
- * instances).
+ * solved alone, as in fig. 11) and for the whole batch as one system (the "traditional" NFE: one step size for all,
+ * chosen on the root-mean-square error over every coordinate). Instances are rows of a row-major `Float64Array`
+ * throughout.
  */
 
 import { dormandPrinceRows, type RowsRhs } from 'aifn-compute/dynamics/ode'
@@ -16,18 +17,29 @@ import { child, normals, units, type Stream } from 'aifn-compute/foundation/rand
 import { fromData, mul, ones, toFlat } from 'aifn-compute/foundation/tensor'
 import { flatOf, stackedMlp, type Svfm, type SvfmParams } from './model'
 
-/** Sampled paths, or mean paths. */
+/** Sampled paths (`'sample'`), or mean paths (`'mean'`: the most probable component and the mean VF). */
 export type RealisationMode = 'sample' | 'mean'
 
 /** The frozen randomness of one realisation per instance. */
 export type Realisation = {
   /** A uniform per instance, for the component draws. */
   u: Float64Array
-  /** Normals per instance [n × (S + 1)]: S for the direction, one for the log length. */
+  /** Normals per instance, $[n \times (S + 1)]$: $S$ for the direction, one for the log length. */
   eps: Float64Array
 }
 
-/** Draw a realisation for n instances of state dimension S. */
+/**
+ * Draw a realisation for $n$ instances of state dimension $S$.
+ *
+ * @param s The stream to draw from (its children `'components'` and `'field'`).
+ * @param n The number of instances.
+ * @param S The state dimension, `stateDim` of the model.
+ * @returns A uniform and $S + 1$ normals per instance.
+ *
+ * @example Three instances of a 2-d state
+ * const r = realisation(stream(0), 3, 2)
+ * print('uniforms:', r.u, ' normals:', r.eps.length)
+ */
 export function realisation(s: Stream, n: number, S: number): Realisation {
   return {
     u: units(child(s, 'components'), n),
@@ -35,7 +47,16 @@ export function realisation(s: Stream, n: number, S: number): Realisation {
   }
 }
 
-/** The component an instance follows: the inverse CDF of π at its uniform, or the most probable one. */
+/**
+ * The component an instance follows: the inverse CDF of $\pivec$ at its uniform, or the most probable one.
+ *
+ * @param pi The weights of every instance, $[n \times K]$.
+ * @param at The offset of this instance's $K$ weights in `pi`.
+ * @param K The number of components.
+ * @param u The instance's uniform (unused for `'mean'`).
+ * @param mode `'sample'` for the inverse CDF, `'mean'` for the most probable component.
+ * @returns The component's index; the last one if rounding leaves the cumulative weights below `u`.
+ */
 function pick(pi: Float64Array, at: number, K: number, u: number, mode: RealisationMode): number {
   if (mode === 'mean') {
     let best = 0
@@ -51,8 +72,30 @@ function pick(pi: Float64Array, at: number, K: number, u: number, mode: Realisat
 }
 
 /**
- * The realised VF of each row: component `comps[row]`, sampled with the row's frozen normals (or its mean). Rows are
- * instances of the batch the realisation was drawn for; `context` is [n × C] or null.
+ * The realised VF of each row: component `comps[row]`, sampled with the row's frozen normals (or its mean). For an SVF
+ * unit the direction is $\uvec = \operatorname{normalise}(\muvec^{(u)} + \sqrt{\tau^{(u)}} \Pmat \epsilonvec)$ with
+ * $\Pmat = \Imat - \muvec^{(u)} \muvec^{(u)\top}$ and the length $\norm{\avec} e^{\sqrt{\tau^{(v)}} \varepsilon}$; the
+ * mean VF is $\avec \, e^{\tau^{(v)}/2}$, as `moments` has it. Plain arithmetic: not differentiable.
+ *
+ * @param model The SVFM.
+ * @param params Its parameters.
+ * @param comps The component each instance follows, $[n]$.
+ * @param real The frozen randomness of the $n$ instances.
+ * @param mode `'sample'` for the realised VF, `'mean'` for the mean VF.
+ * @param context The instances' context, $[n \times C]$, or null.
+ * @returns A right-hand side for `dormandPrinceRows`: given each row's time, the rows' states ($[m \times S]$) and
+ *   which instances they are, the VF at each row, $[m \times S]$.
+ *
+ * @example The mean VF of each row is the `moments` mean of its component
+ * const model = svfm({ dim: 2, components: 2, stochastic: true, learnVariance: false, varianceBias: 0 })
+ * const params = model.init(stream(0))
+ * const real = realisation(stream(1), 2, 2)
+ * const comps = Int32Array.of(0, 1)
+ * const at = [Float64Array.of(0, 0), Float64Array.of(1, 0, 0, 1), Int32Array.of(0, 1)]
+ * print('sampled VF:', realisedRhs(model, params, comps, real, 'sample', null)(...at))
+ * print('mean VF:', realisedRhs(model, params, comps, real, 'mean', null)(...at))
+ * const z = tensor([[[1, 0], [0, 1]], [[1, 0], [0, 1]]])
+ * print('moments (component 0, row 0; component 1, row 1):', model.moments(params, 0, z, null).mean)
  */
 export function realisedRhs(
   model: Svfm,
@@ -111,13 +154,35 @@ export function realisedRhs(
   }
 }
 
-/** π at the grid start for every instance [n × K] (eq. 2), and the filter update on realised states (eq. 5). */
+/**
+ * $\pivec(t_0)$ for every instance (eq. 2).
+ *
+ * @param model The SVFM.
+ * @param params Its parameters.
+ * @param h The instances' lifted states, $[n \times S]$.
+ * @param n The number of instances.
+ * @param context Their context, $[n \times C]$, or null.
+ * @returns The weights, $[n \times K]$.
+ */
 function priorOf(model: Svfm, params: SvfmParams, h: Float64Array, n: number, context: Float64Array | null) {
   const S = model.stateDim
   const c = context ? fromData(context, [n, model.options.context]) : null
   return Float64Array.from(flatOf(model.prior(params, fromData(h, [n, S]), c)), Math.exp)
 }
 
+/**
+ * The forward-filtering update (eq. 5) on realised states: every component is taken to be at the instance's state, so
+ * $\psivec$ and $\Psimat$ are evaluated on the path itself.
+ *
+ * @param model The SVFM, with forward filtering.
+ * @param params Its parameters.
+ * @param t The grid time of the update.
+ * @param pi The weights before it, $[n \times K]$.
+ * @param h The instances' states at $t$, $[n \times S]$.
+ * @param n The number of instances.
+ * @param context Their context, $[n \times C]$, or null.
+ * @returns The weights after it, $[n \times K]$.
+ */
 function filterOn(
   model: Svfm,
   params: SvfmParams,
@@ -142,9 +207,11 @@ function filterOn(
 
 /** Options of {@link samplePaths} and {@link instanceWork}. */
 export type RealisedOptions = {
+  /** Sampled or mean paths. Default `'sample'`. */
   mode?: RealisationMode
-  /** Dormand–Prince tolerances. Defaults 1e-4 and 1e-6. */
+  /** Dormand–Prince's relative tolerance. Default $10^{-4}$. */
   rtol?: number
+  /** Dormand–Prince's absolute tolerance. Default $10^{-6}$. */
   atol?: number
   /** Frames per grid interval of the recorded path. Default 4. */
   framesPerInterval?: number
@@ -152,21 +219,41 @@ export type RealisedOptions = {
   maxSteps?: number
 }
 
-/** Realised paths of n instances. */
+/** Realised paths of $n$ instances. */
 export type RealisedPaths = {
-  /** Frame times on [0, 1]. */
+  /** Frame times on $[0, 1]$. */
   times: Float64Array
-  /** States at each frame [frames × n × S]. */
+  /** States at each frame, $[\text{frames} \times n \times S]$. */
   paths: Float64Array
-  /** The component followed in each grid interval [T × n]. */
+  /** The component followed in each grid interval, $[T \times n]$. */
   components: Int32Array
-  /** π at each grid time [(T + 1) × n × K]. */
+  /** $\pivec$ at each grid time, $[(T + 1) \times n \times K]$. */
   weights: Float64Array
 }
 
 /**
- * The realised paths of instances x [n × D] (row-major) with context [n × C] or null, recorded at
- * `framesPerInterval` frames per grid interval (each frame interval solved by Dormand–Prince).
+ * The realised paths of instances, recorded at `framesPerInterval` frames per grid interval, each frame interval
+ * solved by Dormand–Prince with every instance's step size controlled on its own. Under forward filtering $\pivec$ is
+ * filtered on the path at every grid time and the component redrawn from the instance's frozen uniform; a solve
+ * continues across the grid time where the component is kept, and restarts its step size where it changes.
+ *
+ * @param model The SVFM.
+ * @param params Its parameters.
+ * @param x The starts, $[n \times D]$ row-major.
+ * @param context The instances' context, $[n \times C]$, or null.
+ * @param real The frozen randomness of the $n$ instances, from `realisation`.
+ * @param options The mode, the tolerances, the frames per interval and the step limit; see `RealisedOptions`.
+ * @returns The frame times, the states, the components followed and $\pivec$ along the paths.
+ *
+ * @example Under forward filtering $\pivec$ moves along the path, and an instance may switch component
+ * const model = svfm({ dim: 2, components: 2, selection: 'forward-filtering', grid: 4 })
+ * const x = Float64Array.of(1, 0, 0, 1, -1, -1)
+ * const real = realisation(stream(1), 3, 2)
+ * const paths = samplePaths(model, model.init(stream(0)), x, null, real, { framesPerInterval: 2 })
+ * print('frame times:', paths.times)
+ * print('component of each point per interval:', paths.components)
+ * print('pi of the first point at t_0 ... t_4:', [0, 1, 2, 3, 4].map((i) => paths.weights.slice(i * 6, i * 6 + 2)))
+ * print('end states:', paths.paths.slice(-6))
  */
 export function samplePaths(
   model: Svfm,
@@ -216,21 +303,37 @@ export function samplePaths(
   return { times, paths, components, weights }
 }
 
-/** The work of solving n instances. */
+/** The work of solving $n$ instances. */
 export type InstanceWork = {
   /** NFE of each instance solved alone (fig. 11's histograms). */
   perInstance: Int32Array
   /** NFE of the batch solved as one system: one step size for all, error measured over every coordinate. */
   batch: number
-  /** End states [n × S]. */
+  /** End states of the instances solved alone, $[n \times S]$. */
   final: Float64Array
 }
 
 /**
- * The NFE of solving each instance's realised path on [0, 1] with Dormand–Prince. Pick and stick and a single VF solve
- * the whole interval at once; forward filtering stops at each grid time to filter π on the path, and continues the
- * solve (step size and last evaluation kept) where the instance keeps its component, restarting it where the
- * component changes.
+ * The NFE of solving each instance's realised path on $[0, 1]$ with Dormand–Prince, alone and as one batch. Pick and
+ * stick and a single VF solve the whole interval at once; forward filtering stops at each grid time to filter $\pivec$
+ * on the path, and continues the solve (step size and last evaluation kept) where the instance keeps its component,
+ * restarting it where the component changes (in the batch, where any instance's does).
+ *
+ * @param model The SVFM.
+ * @param params Its parameters.
+ * @param x The starts, $[n \times D]$ row-major.
+ * @param context The instances' context, $[n \times C]$, or null.
+ * @param real The frozen randomness of the $n$ instances, from `realisation`.
+ * @param options The mode, the tolerances and the step limit (`framesPerInterval` is not used); see
+ *   `RealisedOptions`.
+ * @returns The NFE of each instance alone and of the batch, and the end states.
+ *
+ * @example Solved alone, most instances of an SVFM need fewer evaluations than the batch
+ * const model = svfm({ dim: 2, components: 3, stochastic: true, varianceBias: 0 })
+ * const x = Float64Array.from(toArray(normal(stream(2), 0, 1, { shape: [12, 2] })).flat())
+ * const w = instanceWork(model, model.init(stream(0)), x, null, realisation(stream(1), 12, 2))
+ * print('NFE per instance:', w.perInstance)
+ * print('NFE of the batch as one system:', w.batch)
  */
 export function instanceWork(
   model: Svfm,
@@ -292,7 +395,31 @@ export function instanceWork(
   return { perInstance: alone.work, batch: together.batchWork, final: alone.h }
 }
 
-/** The variance of each instance's realised VF along its path at the grid times (eq. 9 per instance) [n]. */
+/**
+ * The variance of each instance's realised VF along its path at the grid times (eq. 9 per instance):
+ * $\frac{1}{T} \sum_{i=1}^T \norm{\fvec_i - \bar\fvec}^2$, with $\fvec_i$ the VF of the component followed in
+ * interval $i$ at the state reached at $t_i$, and $\bar\fvec$ their mean.
+ *
+ * @param model The SVFM.
+ * @param params Its parameters.
+ * @param paths The realised paths, from `samplePaths`.
+ * @param context The instances' context, $[n \times C]$, or null.
+ * @param real The realisation the paths were drawn with.
+ * @param framesPerInterval The frames per grid interval the paths were recorded at (so grid time $t_i$ is frame
+ *   $i \cdot$ `framesPerInterval`).
+ * @param mode Sampled or mean VFs, as the paths were drawn.
+ * @returns The variance of each instance, $[n]$.
+ *
+ * @example A constant field has none; the field $f = t$ has the variance of $t_i = i/4$
+ * const model = svfm({ dim: 1, layers: 0, grid: 4 })
+ * const constant = { ...model.init(stream(0)), fields: [{ weight: zeros([1, 2, 1]), bias: tensor([[[0.5]]]) }] }
+ * const timed = { ...constant, fields: [{ weight: tensor([[[0], [1]]]), bias: tensor([[[0]]]) }] }
+ * const real = realisation(stream(1), 2, 1)
+ * for (const [name, params] of [['f = 0.5:', constant], ['f = t:', timed]]) {
+ *   const paths = samplePaths(model, params, Float64Array.of(0, 1), null, real, { framesPerInterval: 2 })
+ *   print(name, realisedVariance(model, params, paths, null, real, 2))
+ * }
+ */
 export function realisedVariance(
   model: Svfm,
   params: SvfmParams,

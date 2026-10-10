@@ -3,16 +3,21 @@
  * variants of its later relatives, and the coverage problem on which reinforcement learning with verifiable rewards
  * sharpens a policy rather than teaching it new strategies (Yue et al., 2025).
  *
- * A problem gives each prompt $x$ the logits of its $K$ actions as a function of shared parameters $\thetavec$, and a
- * reward for each prompt and action. Each step samples a group of $G$ actions per prompt from the current policy
- * $\pi_{\mathrm{old}}$, scores them by `groupAdvantages`, and takes one or more optimiser steps on the clipped surrogate
+ * A problem gives each prompt $x$ the logits of its $K$ actions as a function of shared parameters $\thetavec$, and
+ * a reward for each prompt and action. Each step samples a group of $G$ actions per prompt from the current
+ * policy $\pi_{\mathrm{old}}$, scores them by `groupAdvantages`, and takes one or more optimiser steps on the
+ * clipped surrogate
  *
- * $$\mathcal{L}(\thetavec) = -\frac{1}{N} \sum_i \min\bigl(\rho_i A_i,\ \operatorname{clip}(\rho_i, 1 - \epsilon_{\mathrm{low}}, 1 + \epsilon_{\mathrm{high}}) A_i\bigr) + \beta\, \frac{1}{N} \sum_i k_3(i),$$
+ * $$
+ * \mathcal{L}(\thetavec) = -\frac{1}{N} \sum_i \min\bigl(\rho_i A_i,
+ * \ \operatorname{clip}(\rho_i, 1 - \epsilon_{\mathrm{low}}, 1 + \epsilon_{\mathrm{high}}) A_i\bigr)
+ * + \beta\, \frac{1}{N} \sum_i k_3(i),
+ * $$
  *
- * where $\rho_i = \pi_{\thetavec}(a_i \mid x_i) / \pi_{\mathrm{old}}(a_i \mid x_i)$ and $k_3$ is Schulman's estimator of
- * $\mathrm{KL}(\pi_{\thetavec} \,\|\, \pi_{\mathrm{ref}})$ at the sample, $\pi_{\mathrm{ref}}$ the policy at the start.
- * Each response is one action, so the per-token aggregations coincide. The gradient comes from `valueAndGrad` and the
- * step from `aifn-compute/optim/first-order`'s `adamRule` or `sgdRule`.
+ * where $\rho_i = \pi_{\thetavec}(a_i \mid x_i) / \pi_{\mathrm{old}}(a_i \mid x_i)$ and $k_3$ is Schulman's estimator
+ * of $\mathrm{KL}(\pi_{\thetavec} \,\|\, \pi_{\mathrm{ref}})$ at the sample, $\pi_{\mathrm{ref}}$ the policy at the
+ * start. Each response is one action, so the per-token aggregations coincide. The gradient comes from `valueAndGrad`
+ * and the step from `aifn-compute/optim/first-order`'s `adamRule` or `sgdRule`.
  *
  * Samples of the same action for the same prompt share $\rho$, so the surrogate is evaluated per prompt on $K$-vectors:
  * $\sum_{i: a_i = a} \min(\rho_a A_i, c_a A_i) = \min(\rho_a, c_a) P_a + \max(\rho_a, c_a) N_a$, with $c_a$ the clipped
@@ -407,7 +412,8 @@ export interface CoverageOptions {
  *
  * @example How often each strategy solves a prompt
  * const problem = coverageProblem({ prompts: 40, strategies: 8, density: 0.25, seed: 1 })
- * const solved = Array.from({ length: 8 }, (_, s) => Array.from({ length: 40 }, (_, x) => problem.reward(x, s)).reduce((a, b) => a + b, 0))
+ * const solvedBy = (s) => Array.from({ length: 40 }, (_, x) => problem.reward(x, s)).reduce((a, b) => a + b, 0)
+ * const solved = Array.from({ length: 8 }, (_, s) => solvedBy(s))
  * print('prompts solved by each strategy:', solved)
  */
 export function coverageProblem(options: CoverageOptions): GroupPolicyProblem & { solves: Uint8Array } {
@@ -438,7 +444,8 @@ export function coverageProblem(options: CoverageOptions): GroupPolicyProblem & 
  * const problem = coverageProblem({ prompts: 40, strategies: 8, density: 0.25, seed: 1 })
  * const trace = [...grpoTrace(problem, new Float64Array(8), { groupSize: 8, learningRate: 0.1, seed: 1 }, 80)]
  * const passAt = (probs, k) => solveProbabilities(problem, probs).reduce((a, p) => a + passAtKExact(p, k), 0) / 40
- * for (const k of [1, 16, 256]) print(`pass@${k}: start`, passAt(trace[0].probs, k), ' trained', passAt(trace[80].probs, k))
+ * for (const k of [1, 16, 256])
+ *   print(`pass@${k}: start`, passAt(trace[0].probs, k), ' trained', passAt(trace[80].probs, k))
  */
 export function solveProbabilities(problem: GroupPolicyProblem, probs: readonly ArrayLike<number>[]): Float64Array {
   return Float64Array.from({ length: problem.prompts }, (_, x) => {
