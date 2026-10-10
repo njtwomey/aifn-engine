@@ -1,18 +1,20 @@
 /**
- * System identification: discrete-time models fitted to an input sequence u and an output sequence y.
+ * System identification: discrete-time models fitted to an input sequence $u$ and an output sequence $y$.
  *
- * - `arx`: the ARX model A(q)y = B(q)u + e by linear least squares, with its loss, FPE and AIC for order selection.
- * - `predictionErrorMethod`: the prediction-error method (PEM) for the polynomial family A(q)y = B(q)/F(q)·u + C(q)e
- *   (ARX, ARMAX, output error and their mixtures) as a step algorithm: damped Gauss–Newton (Levenberg–Marquardt) on the
- *   mean squared one-step prediction error, its gradient obtained by filtering, as in Ljung (1999), "System
- *   Identification: Theory for the User", 2nd ed., §10.2. `polynomialModel` runs it; `armax` and `outputError` name the
- *   usual structures.
+ * - `arx`: the ARX model $A(q)y = B(q)u + e$ by linear least squares, with its loss, FPE and AIC for order selection.
+ * - `predictionErrorMethod`: the prediction-error method (PEM) for the polynomial family
+ *   $A(q)y = (B(q)/F(q))u + C(q)e$ (ARX, ARMAX, output error and their mixtures) as a step algorithm: damped
+ *   Gauss–Newton (Levenberg–Marquardt) on the mean squared one-step prediction error, its gradient obtained by
+ *   filtering, as in Ljung (1999), "System Identification: Theory for the User", 2nd ed., §10.2. `polynomialModel` runs
+ *   it; `armax` and `outputError` name the usual structures.
  * - `n4sid`: subspace identification of a state-space model (Van Overschee & De Moor, 1994, "N4SID: subspace
  *   algorithms for the identification of combined deterministic–stochastic systems", Automatica 30(1)): the oblique
  *   projection of future outputs onto past data along future inputs, its SVD (whose singular values choose the order),
- *   A and C from the shift invariance of the extended observability matrix, then B, D and x₀ by least squares.
+ *   $\Amat$ and $\Cmat$ from the shift invariance of the extended observability matrix, then $\Bmat$, $\Dmat$ and
+ *   $\xvec_0$ by least squares.
  *
- * Polynomials are ascending in the delay operator q⁻¹: A = [1, a₁, …, a_na]; B's first nk coefficients are zero.
+ * Polynomials are ascending in the delay operator $q^{-1}$: $A = [1, a_1, \dots, a_{n_a}]$; $B$'s first $n_k$
+ * coefficients are zero. Fitted models carry their transfer functions as discrete `LtiSystem`s.
  */
 
 import { eigh, lstsq } from 'aifn-compute/numerics/linalg'
@@ -33,38 +35,78 @@ import type { MatrixLike, Scalar, Size, Status, VectorLike } from 'aifn-compute/
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 import { stateSpace, transferFunction, type LtiOf, type StateSpaceForm, type TransferFunctionForm } from './system'
 
+/** A dense float64 array. */
 type F64 = dense.F64
 
+/**
+ * A float64 vector tensor of a list of numbers (copied).
+ *
+ * @param a The values.
+ * @returns A tensor of shape $[n]$.
+ */
 const vec = (a: ArrayLike<number>): Vector => fromData(Float64Array.from(a), [a.length])
 
-/** y filtered by b/a (ascending q⁻¹ coefficients), zero initial conditions. */
+/**
+ * A sequence filtered by $b/a$ (ascending $q^{-1}$ coefficients), zero initial conditions (`linearFilter`).
+ *
+ * @param b The numerator, ascending in $q^{-1}$.
+ * @param a The denominator, ascending in $q^{-1}$, $a_0 \ne 0$.
+ * @param x The sequence; not modified.
+ * @returns The filtered sequence, as long as `x`.
+ */
 function filt(b: ArrayLike<number>, a: ArrayLike<number>, x: F64): F64 {
   return Float64Array.from(
     toFlat(linearFilter(Float64Array.from(b), Float64Array.from(a), fromData(x, [x.length])) as Tensor),
   )
 }
 
-/** x delayed by d samples (zeros shifted in). */
+/**
+ * A sequence delayed by $d$ samples (zeros shifted in).
+ *
+ * @param x The sequence; not modified.
+ * @param d The delay in samples, $d \ge 0$.
+ * @returns $x(t - d)$, as long as `x`.
+ */
 function delay(x: F64, d: number): F64 {
   const out = new Float64Array(x.length)
   for (let t = d; t < x.length; t++) out[t] = x[t - d]
   return out
 }
 
-/** The product of two ascending polynomials. */
+/**
+ * The product of two ascending polynomials.
+ *
+ * @param a The first polynomial's coefficients.
+ * @param b The second polynomial's coefficients.
+ * @returns The coefficients of the product, `a.length + b.length - 1` of them.
+ */
 function polyMulAsc(a: readonly number[], b: readonly number[]): number[] {
   const out = new Array<number>(a.length + b.length - 1).fill(0)
   a.forEach((x, i) => b.forEach((y, j) => (out[i + j] += x * y)))
   return out
 }
 
-/** True when every root of the monic ascending polynomial [1, c₁, …] (in q⁻¹) lies strictly inside the unit circle. */
+/**
+ * True when every root of the monic ascending polynomial $[1, c_1, \dots]$ (in $q^{-1}$) lies strictly inside the unit
+ * circle (by a margin of $10^{-9}$).
+ *
+ * @param c The coefficients, ascending in $q^{-1}$, leading 1.
+ * @returns Whether the polynomial is stable; a constant is.
+ */
 function isStable(c: readonly number[]): boolean {
   if (c.length < 2) return true
   // In powers of z: zⁿ + c₁zⁿ⁻¹ + … + cₙ has the same coefficients in descending order.
   return toFlat(complexAbs(roots(Float64Array.from(c)))).every((m) => m < 1 - 1e-9)
 }
 
+/**
+ * The output and input sequences as float64 arrays, checked to have equal lengths (`ShapeError` otherwise).
+ *
+ * @param y The output sequence.
+ * @param u The input sequence.
+ * @param where The caller's name, for error messages.
+ * @returns `y` and `u` as arrays.
+ */
 function readSeries(y: VectorLike, u: VectorLike, where: string): { y: F64; u: F64 } {
   const ys = dense.toF64(y, `${where} y`)
   const us = dense.toF64(u, `${where} u`)
@@ -74,32 +116,54 @@ function readSeries(y: VectorLike, u: VectorLike, where: string): { y: F64; u: F
 
 // ── ARX by least squares ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The orders of a polynomial model: na, nb, nc, nf coefficients and an input delay of nk samples (nk ≥ 0). */
+/**
+ * The orders of a polynomial model: `na`, `nb`, `nc`, `nf` coefficients (each default 0 but `nb`) and an input delay of
+ * `nk` samples ($n_k \ge 0$, default 1).
+ */
 export type PolynomialOrders = { na?: Size; nb: Size; nc?: Size; nf?: Size; nk?: Size }
 
-/** A fitted polynomial model A(q)y = B(q)/F(q)·u + C(q)e. */
+/** A fitted polynomial model $A(q)y = (B(q)/F(q))u + C(q)e$; the polynomials are ascending in $q^{-1}$. */
 export type PolynomialModel = {
-  /** Ascending q⁻¹ coefficients, monic A, C, F; B with nk leading zeros. */
+  /** The monic autoregressive polynomial $A$. */
   A: number[]
+  /** The input polynomial $B$, with $n_k$ leading zeros. */
   B: number[]
+  /** The monic noise polynomial $C$ ($[1]$ for ARX and output error). */
   C: number[]
+  /** The monic input-denominator polynomial $F$ ($[1]$ for ARX and ARMAX). */
   F: number[]
-  /** The input-to-output model G = B/(AF), discrete with the given dt. */
+  /** The input-to-output model $G = B/(AF)$, discrete with the given `dt`. */
   system: LtiOf<TransferFunctionForm>
-  /** The noise model H = C/A. */
+  /** The noise model $H = C/A$. */
   noise: LtiOf<TransferFunctionForm>
-  /** The one-step prediction errors ε(t). */
+  /** The one-step prediction errors $\varepsilon(t)$, one per sample. */
   residuals: Vector
-  /** Mean squared prediction error V = (1/N)Σε² over the fitted samples (the estimate of the noise variance λ). */
+  /**
+   * Mean squared prediction error $V = (1/N)\sum_t \varepsilon(t)^2$ over the fitted samples (the estimate of the
+   * noise variance $\lambda$).
+   */
   loss: Scalar
-  /** Akaike's final prediction error, V(1 + d/N)/(1 − d/N), with d parameters. */
+  /** Akaike's final prediction error, $V(1 + d/N)/(1 - d/N)$, with $d$ parameters. */
   fpe: Scalar
-  /** Akaike's information criterion, N log V + 2d. */
+  /** Akaike's information criterion, $N \log V + 2d$. */
   aic: Scalar
-  /** Number of estimated parameters d. */
+  /** Number of estimated parameters $d$. */
   parameters: Size
 }
 
+/**
+ * The `PolynomialModel` of fitted polynomials: its systems, loss and criteria.
+ *
+ * @param A The monic $A$, ascending.
+ * @param B The $B$, ascending with its leading zeros.
+ * @param C The monic $C$, ascending.
+ * @param F The monic $F$, ascending.
+ * @param eps The prediction errors over the whole record.
+ * @param from The first sample counted in the loss (earlier ones lack a full regressor); $N$ is the samples from it.
+ * @param dt The sampling interval of the returned systems.
+ * @returns The model, with $d$ counting the free coefficients (the nonzero-led part of $B$, and the rest past the
+ *   leading 1s).
+ */
 function finishModel(
   A: number[],
   B: number[],
@@ -130,6 +194,12 @@ function finishModel(
   }
 }
 
+/**
+ * The number of leading zeros of a coefficient list.
+ *
+ * @param b The coefficients.
+ * @returns How many coefficients from the start are exactly 0 (all of them for an all-zero list).
+ */
 function leadingZeros(b: readonly number[]): number {
   let k = 0
   while (k < b.length && b[k] === 0) k++
@@ -137,9 +207,27 @@ function leadingZeros(b: readonly number[]): number {
 }
 
 /**
- * The ARX model y(t) + a₁y(t−1) + … + a_na y(t−na) = b₁u(t−nk) + … + b_nb u(t−nk−nb+1) + e(t), fitted by linear least
- * squares on the samples t ≥ max(na, nk + nb − 1) (Ljung, 1999, §7.3). The prediction error is linear in the
- * parameters, so the fit is one solve. `dt` (default 1) labels the returned systems.
+ * The ARX model
+ * $y(t) + a_1 y(t-1) + \dots + a_{n_a} y(t-n_a) = b_1 u(t-n_k) + \dots + b_{n_b} u(t-n_k-n_b+1) + e(t)$, fitted by
+ * linear least squares on the samples $t \ge \max(n_a, n_k + n_b - 1)$ (Ljung, 1999, §7.3). The prediction error is
+ * linear in the parameters, so the fit is one solve. Throws `DomainError` for negative orders or too few samples
+ * (no more than $n_a + n_b$ usable rows), `ShapeError` when `y` and `u` differ in length.
+ *
+ * @param y The output sequence.
+ * @param u The input sequence, as long as `y`.
+ * @param orders The orders: `na` (default 0), `nb` and the delay `nk` (default 1); `nc` and `nf` are ignored.
+ * @param options The sampling interval of the returned systems.
+ * @param options.dt The `dt` that labels the returned systems.
+ * @returns The fitted model; its loss is over the samples used in the fit.
+ *
+ * @example Recover $y(t) = 0.5y(t-1) + u(t-1)$ exactly from noiseless data
+ * const u = toArray(normals(stream(0), 200))
+ * const y = u.map(() => 0)
+ * for (let t = 1; t < 200; t++) y[t] = 0.5 * y[t - 1] + u[t - 1]
+ * const fit = arx(y, u, { na: 1, nb: 1 })
+ * print('A =', fit.A, ' B =', fit.B)
+ * print('loss =', fit.loss, ' parameters =', fit.parameters)
+ * print('system =', fit.system.repr)
  */
 export function arx(
   y: VectorLike,
@@ -183,31 +271,43 @@ export function arx(
 export interface PredictionErrorState extends Status {
   /** Steps taken. */
   t: Size
-  /** The parameters θ = (a, b, c, f). */
+  /** The parameters $\thetavec = (a, b, c, f)$: the free coefficients of $A$, $B$, $C$, $F$ in that order. */
   theta: Vector
-  /** The loss V(θ) = (1/N) Σ ε(t, θ)². */
+  /** The loss $V(\thetavec) = (1/N) \sum_t \varepsilon(t, \thetavec)^2$ over all $N$ samples. */
   loss: Scalar
-  /** The gradient norm ‖∂V/∂θ‖. */
+  /** The gradient norm $\lVert \partial V/\partial\thetavec \rVert$. */
   gradNorm: Scalar
-  /** The Levenberg–Marquardt damping μ. */
+  /** The Levenberg–Marquardt damping $\mu$ for the next step. */
   damping: Scalar
-  /** Rejected trial steps in this step (a step increased the loss or made C or F unstable). */
+  /** Rejected trial steps in this step (a step increased the loss or made $C$ or $F$ unstable). */
   rejected: Size
+  /** True when the relative decrease of the loss in this step was below `tolerance`. */
   converged: boolean
+  /** True when 20 trial steps in a row were rejected; $\thetavec$ is then unchanged. */
   stalled: boolean
 }
 
 /** Options for `predictionErrorMethod`. */
 export type PredictionErrorOptions = {
-  /** Stop when the relative decrease of V falls below this. Default 1e-10. */
+  /** Stop when the relative decrease of $V$ falls below this. Default 1e-10. */
   tolerance?: Scalar
-  /** The initial damping μ₀. Default 1e-3 (relative to the mean diagonal of JᵀJ). */
+  /**
+   * The initial damping $\mu_0$. Default 1e-3 (relative to each diagonal entry of $\Jmat^\top\Jmat$, which it
+   * multiplies).
+   */
   damping?: Scalar
 }
 
-/** The orders, resolved. */
+/** The orders, resolved: every one present, as `resolve` returns them. */
 type Orders = { na: number; nb: number; nc: number; nf: number; nk: number }
 
+/**
+ * The orders with their defaults filled in (`na`, `nc`, `nf` 0; `nk` 1), checked to be non-negative integers with
+ * $n_b \ge 1$ (`DomainError` otherwise).
+ *
+ * @param orders The orders as given.
+ * @returns Every order.
+ */
 function resolve(orders: PolynomialOrders): Orders {
   const o = { na: orders.na ?? 0, nb: orders.nb, nc: orders.nc ?? 0, nf: orders.nf ?? 0, nk: orders.nk ?? 1 }
   if (Object.values(o).some((v) => !(Number.isInteger(v) && v >= 0)))
@@ -216,6 +316,13 @@ function resolve(orders: PolynomialOrders): Orders {
   return o
 }
 
+/**
+ * The polynomials of a parameter vector.
+ *
+ * @param theta The parameters $(a, b, c, f)$, $n_a + n_b + n_c + n_f$ values.
+ * @param o The orders.
+ * @returns $A$, $C$, $F$ with their leading 1, and $B$ with its $n_k$ leading zeros, all ascending.
+ */
 function unpack(theta: ArrayLike<number>, o: Orders) {
   let k = 0
   const take = (n: number) => Array.from({ length: n }, () => theta[k++])
@@ -231,7 +338,17 @@ function unpack(theta: ArrayLike<number>, o: Orders) {
   }
 }
 
-/** The prediction errors and their Jacobian ∂ε/∂θ (N × d, row-major) at θ. */
+/**
+ * The prediction errors $\varepsilon = (Ay - (B/F)u)/C$ and their Jacobian $\partial\varepsilon/\partial\thetavec$
+ * ($N \times d$, row-major) at $\thetavec$, the columns by filtering as in `predictionErrorMethod`.
+ *
+ * @param theta The parameters $\thetavec$.
+ * @param o The orders.
+ * @param y The output sequence, $N$ samples.
+ * @param u The input sequence, $N$ samples.
+ * @param jacobian Whether to compute the Jacobian (`J` is `null` otherwise).
+ * @returns `eps`, the $N$ prediction errors, and `J`, the Jacobian or `null`.
+ */
 function predictionErrors(theta: ArrayLike<number>, o: Orders, y: F64, u: F64, jacobian: boolean) {
   const { A, B, C, F } = unpack(theta, o)
   const N = y.length
@@ -260,15 +377,39 @@ function predictionErrors(theta: ArrayLike<number>, o: Orders, y: F64, u: F64, j
   return { eps, J }
 }
 
+/**
+ * The mean of the squares of a sequence.
+ *
+ * @param e The sequence.
+ * @returns $(1/N)\sum_t e_t^2$.
+ */
 const meanSquare = (e: F64) => e.reduce((s, v) => s + v * v, 0) / e.length
 
 /**
- * The prediction-error method for A(q)y = B(q)/F(q)·u + C(q)e as a traceable algorithm (Ljung, 1999, §10.2). The
- * one-step predictor's error is ε = (A y − (B/F) u)/C; each step solves the damped Gauss–Newton system
- * (JᵀJ + μ·diag(JᵀJ)) δ = −Jᵀε, with J = ∂ε/∂θ obtained by filtering (∂ε/∂aᵢ = y(t−i)/C, ∂ε/∂bᵢ = −u(t−nk−i)/(CF),
- * ∂ε/∂cᵢ = −ε(t−i)/C, ∂ε/∂fᵢ = w(t−i)/(CF) with w = (B/F)u). A step that raises the loss or leaves C or F with a root
- * on or outside the unit circle is rejected and μ grows; an accepted one shrinks μ. `init` takes `{ theta0 }`, default
- * an ARX fit of the same na and nb (zeros for c and f).
+ * The prediction-error method for $A(q)y = (B(q)/F(q))u + C(q)e$ as a traceable algorithm (Ljung, 1999, §10.2). The
+ * one-step predictor's error is $\varepsilon = (Ay - (B/F)u)/C$; each step solves the damped Gauss–Newton system
+ * $(\Jmat^\top\Jmat + \mu \diag(\Jmat^\top\Jmat))\deltavec = -\Jmat^\top\varepsilonvec$, with
+ * $\Jmat = \partial\varepsilon/\partial\thetavec$ obtained by filtering
+ * ($\partial\varepsilon/\partial a_i = y(t-i)/C$, $\partial\varepsilon/\partial b_i = -u(t-n_k-i)/(CF)$,
+ * $\partial\varepsilon/\partial c_i = -\varepsilon(t-i)/C$, $\partial\varepsilon/\partial f_i = w(t-i)/(CF)$ with
+ * $w = (B/F)u$). A step that raises the loss or leaves $C$ or $F$ with a root on or outside the unit circle is
+ * rejected and $\mu$ grows fourfold; an accepted one divides $\mu$ by 3. `init` takes `{ theta0 }`, default an ARX
+ * fit of the same $n_a$, $n_b$ and $n_k$ (zeros for $c$ and $f$).
+ *
+ * @param y The output sequence.
+ * @param u The input sequence, as long as `y`.
+ * @param orders The orders `na`, `nb` ($\ge 1$), `nc`, `nf` and `nk`.
+ * @param options The stopping tolerance and initial damping.
+ * @returns The algorithm, to run with `run` or step through; `theta0` must hold $n_a + n_b + n_c + n_f$ values.
+ *
+ * @example An ARMAX model $y(t) = 0.7y(t-1) + u(t-1) + 0.5(e(t) + 0.5e(t-1))$, estimated step by step
+ * const u = toArray(normals(stream(0), 1000))
+ * const e = toArray(normals(stream(1), 1000))
+ * const y = u.map(() => 0)
+ * for (let t = 1; t < 1000; t++) y[t] = 0.7 * y[t - 1] + u[t - 1] + 0.5 * (e[t] + 0.5 * e[t - 1])
+ * const s = run(predictionErrorMethod(y, u, { na: 1, nb: 1, nc: 1 }), {}, 20)
+ * print('theta =', s.theta)
+ * print('loss =', s.loss, ' steps =', s.t, ' converged =', s.converged)
  */
 export function predictionErrorMethod(
   y: VectorLike,
@@ -345,8 +486,24 @@ export function predictionErrorMethod(
 }
 
 /**
- * A polynomial model A(q)y = B(q)/F(q)·u + C(q)e fitted by the prediction-error method (`predictionErrorMethod`, at
+ * A polynomial model $A(q)y = (B(q)/F(q))u + C(q)e$ fitted by the prediction-error method (`predictionErrorMethod`, at
  * most `maxSteps` steps, default 100).
+ *
+ * @param y The output sequence.
+ * @param u The input sequence, as long as `y`.
+ * @param orders The orders `na`, `nb` ($\ge 1$), `nc`, `nf` and `nk`.
+ * @param options The `PredictionErrorOptions`, with `dt` (default 1) for the returned systems, `maxSteps` (default
+ *   100) and `theta0`, the starting parameters (default an ARX fit).
+ * @returns The fitted model (its loss over all samples), with the steps taken and whether the method converged.
+ *
+ * @example The same ARMAX data through the general structure
+ * const u = toArray(normals(stream(0), 1000))
+ * const e = toArray(normals(stream(1), 1000))
+ * const y = u.map(() => 0)
+ * for (let t = 1; t < 1000; t++) y[t] = 0.7 * y[t - 1] + u[t - 1] + 0.5 * (e[t] + 0.5 * e[t - 1])
+ * const fit = polynomialModel(y, u, { na: 1, nb: 1, nc: 1 })
+ * print('A =', fit.A, ' B =', fit.B, ' C =', fit.C)
+ * print('steps =', fit.steps, ' converged =', fit.converged, ' loss =', fit.loss)
  */
 export function polynomialModel(
   y: VectorLike,
@@ -362,7 +519,25 @@ export function polynomialModel(
   return { ...finishModel(A, B, C, F, eps, 0, options.dt ?? 1), steps: s.t, converged: s.converged }
 }
 
-/** The ARMAX model A(q)y = B(q)u + C(q)e by the prediction-error method. */
+/**
+ * The ARMAX model $A(q)y = B(q)u + C(q)e$ by the prediction-error method (`polynomialModel` with $n_f = 0$).
+ *
+ * @param y The output sequence.
+ * @param u The input sequence, as long as `y`.
+ * @param orders The orders `na`, `nb`, `nc` and the delay `nk` (default 1).
+ * @param options The `PredictionErrorOptions`, with `dt` (default 1) and `maxSteps` (default 100).
+ * @returns The fitted model, with the steps taken and whether the method converged.
+ *
+ * @example Coloured noise biases ARX ($a \approx 0.78$); ARMAX models it and recovers $a = 0.7$
+ * const u = toArray(normals(stream(0), 2000))
+ * const e = toArray(normals(stream(1), 2000))
+ * const y = u.map(() => 0)
+ * for (let t = 1; t < 2000; t++) y[t] = 0.7 * y[t - 1] + u[t - 1] + e[t] + 0.5 * e[t - 1]
+ * print('ARX A =', arx(y, u, { na: 1, nb: 1 }).A)
+ * const fit = armax(y, u, { na: 1, nb: 1, nc: 1 })
+ * print('ARMAX A =', fit.A, ' C =', fit.C)
+ * print('noise model =', fit.noise.repr)
+ */
 export function armax(
   y: VectorLike,
   u: VectorLike,
@@ -372,7 +547,26 @@ export function armax(
   return polynomialModel(y, u, orders, options)
 }
 
-/** The output-error model y = B(q)/F(q)·u + e by the prediction-error method. */
+/**
+ * The output-error model $y = (B(q)/F(q))u + e$ by the prediction-error method (`polynomialModel` with
+ * $n_a = n_c = 0$).
+ *
+ * @param y The output sequence.
+ * @param u The input sequence, as long as `y`.
+ * @param orders The orders `nb`, `nf` and the delay `nk` (default 1).
+ * @param options The `PredictionErrorOptions`, with `dt` (default 1) and `maxSteps` (default 100).
+ * @returns The fitted model, with the steps taken and whether the method converged.
+ *
+ * @example White noise on the output of $x(t) = 0.8x(t-1) + u(t-1)$: $B/F = q^{-1}/(1 - 0.8q^{-1})$
+ * const u = toArray(normals(stream(0), 300))
+ * const e = toArray(normals(stream(1), 300))
+ * const x = u.map(() => 0)
+ * for (let t = 1; t < 300; t++) x[t] = 0.8 * x[t - 1] + u[t - 1]
+ * const y = x.map((v, t) => v + 0.1 * e[t])
+ * const fit = outputError(y, u, { nb: 1, nf: 1 })
+ * print('B =', fit.B, ' F =', fit.F)
+ * print('loss =', fit.loss)
+ */
 export function outputError(
   y: VectorLike,
   u: VectorLike,
@@ -386,30 +580,39 @@ export function outputError(
 
 /** Options for `n4sid`. */
 export type N4sidOptions = {
-  /** The model order n; default: the largest gap in the logarithms of the singular values. */
+  /** The model order $n$; default: the largest gap in the logarithms of the singular values. */
   order?: Size
-  /** Block rows i of the Hankel matrices (past and future horizon); default 10. Needs i > n. */
+  /** Block rows $i$ of the Hankel matrices (past and future horizon); default 10. Needs $i > n$. */
   horizon?: Size
   /** Sampling interval of the returned system. Default 1. */
   dt?: Scalar
-  /** The largest order the automatic choice considers. Default horizon − 1. */
+  /** The largest order the automatic choice considers. Default $i - 1$. */
   maxOrder?: Size
 }
 
 /** A state-space model identified by `n4sid`. */
 export type SubspaceModel = {
+  /** The identified system $(\Amat, \Bmat, \Cmat, \Dmat)$, discrete with the given `dt`. */
   system: LtiOf<StateSpaceForm>
   /** The singular values of the oblique projection, descending: the order is read from their drop. */
   singularValues: Vector
+  /** The order $n$ used, given or chosen. */
   order: Size
-  /** The initial state of the fitted simulation. */
+  /** The initial state $\xvec_0$ of the fitted simulation. */
   x0: Vector
-  /** The simulated output of the model from x0 (N × p) and its mean squared error against y. */
+  /** The simulated output of the model from $\xvec_0$ ($N \times p$). */
   simulated: Matrix
+  /** The mean squared error of `simulated` against $y$, over all $Np$ values. */
   loss: Scalar
 }
 
-/** A sequence as an N × k matrix (a vector is one channel). */
+/**
+ * A sequence as an $N \times k$ matrix (a vector is one channel).
+ *
+ * @param x The sequence: a vector, or a matrix with one row per sample (nested rows or a 2-d tensor).
+ * @param where The caller's name, for error messages.
+ * @returns `d`, the row-major data, the samples `N` and the channels `k`.
+ */
 function channels(x: MatrixLike | VectorLike, where: string): { d: F64; N: number; k: number } {
   const shape = (x as { shape?: readonly number[] }).shape
   const nested = !shape && typeof (x as ArrayLike<unknown>)[0] === 'object'
@@ -421,7 +624,16 @@ function channels(x: MatrixLike | VectorLike, where: string): { d: F64; N: numbe
   return { d, N: d.length, k: 1 }
 }
 
-/** The block Hankel matrix with `blocks` block rows of the k-channel sequence s, starting at block `from`: (blocks·k) × j. */
+/**
+ * The block Hankel matrix with `blocks` block rows of the $k$-channel sequence $s$, starting at block `from`.
+ *
+ * @param s The sequence, row-major $N \times k$.
+ * @param k The channels.
+ * @param from The sample of the top-left block.
+ * @param blocks The block rows.
+ * @param j The columns: block row $b$, column $c$ holds sample $\text{from} + b + c$.
+ * @returns The matrix, row-major, $(\text{blocks} \cdot k) \times j$.
+ */
 function hankel(s: F64, k: number, from: number, blocks: number, j: number): F64 {
   const out = new Float64Array(blocks * k * j)
   for (let b = 0; b < blocks; b++)
@@ -430,7 +642,17 @@ function hankel(s: F64, k: number, from: number, blocks: number, j: number): F64
   return out
 }
 
-/** X minus its projection onto the row space of U: X − X Uᵀ(UUᵀ)⁻¹U (rows × j). */
+/**
+ * $\Xmat$ minus its projection onto the row space of $\Umat$: $\Xmat - \Xmat\Umat^\top(\Umat\Umat^\top)^{-1}\Umat$
+ * (the inverse by least squares).
+ *
+ * @param X The matrix $\Xmat$, row-major, $r_x \times j$.
+ * @param rx Its rows.
+ * @param U The matrix $\Umat$, row-major, $r_u \times j$.
+ * @param ru Its rows (0 leaves $\Xmat$ unchanged).
+ * @param j The columns of both.
+ * @returns The projected $\Xmat$, row-major, $r_x \times j$.
+ */
 function projectOut(X: F64, rx: number, U: F64, ru: number, j: number): F64 {
   if (ru === 0) return Float64Array.from(X)
   const UUt = dense.matMul(U, dense.transpose(U, ru, j), ru, j, ru)
@@ -442,13 +664,35 @@ function projectOut(X: F64, rx: number, U: F64, ru: number, j: number): F64 {
 }
 
 /**
- * Subspace identification of x_{k+1} = Ax_k + Bu_k, y_k = Cx_k + Du_k from inputs u (N × m, or a vector) and outputs
- * y (N × p) by N4SID (Van Overschee & De Moor, 1994). With block Hankel matrices of i past and i future rows, the
- * oblique projection O = Y_f /_{U_f} W_p of the future outputs onto the past data W_p = [U_p; Y_p] along the future
- * inputs equals Γᵢ X̂_f, the extended observability matrix times a state sequence. Its SVD O = USVᵀ gives the order (the
- * number of singular values clearly above the rest) and Γᵢ = U₁S₁^{1/2}; C is Γᵢ's first block row and A solves the
- * shift equation Γ↑A = Γ↓ in least squares. With A and C fixed the output is linear in (B, D, x₀), which are fitted by
- * least squares on the whole record.
+ * Subspace identification of $\xvec_{k+1} = \Amat\xvec_k + \Bmat\uvec_k$, $\yvec_k = \Cmat\xvec_k + \Dmat\uvec_k$
+ * from inputs $u$ ($N \times m$, or a vector) and outputs $y$ ($N \times p$) by N4SID (Van Overschee & De Moor,
+ * 1994). With block Hankel matrices of $i$ past and $i$ future rows, the oblique projection
+ * $\Omat = \Ymat_f /_{\Umat_f} \Wmat_p$ of the future outputs onto the past data $\Wmat_p = [\Umat_p; \Ymat_p]$ along
+ * the future inputs equals $\Gammamat_i \hat\Xmat_f$, the extended observability matrix times a state sequence. Its
+ * SVD $\Omat = \Umat\Smat\Vmat^\top$ gives the order (the number of singular values clearly above the rest) and
+ * $\Gammamat_i = \Umat_1\Smat_1^{1/2}$; $\Cmat$ is $\Gammamat_i$'s first block row and $\Amat$ solves the shift
+ * equation $\underline{\Gammamat}\Amat = \overline{\Gammamat}$ (the matrix without its last, and without its first,
+ * block row) in least squares. With $\Amat$ and $\Cmat$ fixed the output is linear in $(\Bmat, \Dmat, \xvec_0)$,
+ * which are fitted by least squares on the whole record. The model is deterministic: no noise model or Kalman gain is
+ * returned.
+ *
+ * Throws `ShapeError` when `y` and `u` differ in length, and `DomainError` when there are too few samples for the
+ * horizon ($N - 2i + 1 < 2i(m + p)$) or the order is not in $1, \dots, i - 1$.
+ *
+ * @param y The outputs, $N \times p$ (a vector for one output).
+ * @param u The inputs, $N \times m$ (a vector for one input).
+ * @param options The order, horizon, sampling interval and largest automatic order.
+ * @returns The system, the singular values that chose its order, the fitted initial state and the simulated output.
+ *
+ * @example A noiseless second-order system: two singular values stand out, and the poles $0.9 \pm 0.2i$ return
+ * const sys = stateSpace({ A: [[0.9, 0.2], [-0.2, 0.9]], B: [1, 0], C: [1, 1], dt: 1 })
+ * const u = toArray(normals(stream(0), 200))
+ * const y = toArray(respond(sys, (time) => u[Math.round(time)], { tEnd: 199 }).y).map((r) => r[0])
+ * const model = n4sid(y, u, { horizon: 5 })
+ * print('order =', model.order)
+ * print('singular values =', model.singularValues)
+ * print('poles =', poles(model.system))
+ * print('true poles =', poles(sys))
  */
 export function n4sid(
   y: MatrixLike | VectorLike,
@@ -578,7 +822,24 @@ export function n4sid(
   }
 }
 
-/** The order-selection curve of ARX models: loss, FPE and AIC for na = nb = 1 … maxOrder (nk fixed). */
+/**
+ * The order-selection curve of ARX models: loss, FPE and AIC for $n_a = n_b = 1, \dots, $ `maxOrder` ($n_k$ fixed),
+ * each by `arx`.
+ *
+ * @param y The output sequence.
+ * @param u The input sequence, as long as `y`.
+ * @param options The orders to try.
+ * @param options.maxOrder The largest $n_a = n_b$ tried.
+ * @param options.nk The input delay of every model.
+ * @returns One row per order: the order, the loss, the FPE and the AIC.
+ *
+ * @example A second-order system with a little noise: the loss and AIC drop at order 2, then level off
+ * const u = toArray(normals(stream(0), 500))
+ * const e = toArray(normals(stream(1), 500))
+ * const y = u.map(() => 0)
+ * for (let t = 2; t < 500; t++) y[t] = 1.5 * y[t - 1] - 0.7 * y[t - 2] + u[t - 1] + 0.5 * u[t - 2] + 0.1 * e[t]
+ * for (const row of arxOrderSelection(y, u, { maxOrder: 4 })) print(row)
+ */
 export function arxOrderSelection(
   y: VectorLike,
   u: VectorLike,

@@ -1,24 +1,30 @@
 /**
- * `aifn-compute/systems`: the one linear time-invariant system type, `LtiSystem` (tf, zpk, ss, sos; continuous or discrete),
- * shared by `aifn-compute/signal`'s filters and `aifn-compute/dynamics`' control.
+ * `aifn-compute/systems`: the one linear time-invariant system type, `LtiSystem` (tf, zpk, ss, sos; continuous or
+ * discrete), shared by `aifn-compute/signal`'s filters and `aifn-compute/dynamics`' control.
  *
  * - Construction: `transferFunction`, `zerosPolesGain`, `stateSpace`, `secondOrderSections`.
  * - Conversion (exact): `toTransferFunction`, `toZerosPolesGain`, `toStateSpace`, `toSecondOrderSections`, `convert`.
- * - Analysis: `poles`, `systemZeros`, `stability`, `dimensions`; `controllability`, `observability` (Kalman rank tests),
- *   `controllabilityGramian`, `observabilityGramian`.
+ * - Analysis: `poles`, `systemZeros`, `stability`, `dimensions`; `controllability`, `observability` (Kalman rank
+ *   tests), `controllabilityGramian`, `observabilityGramian`.
  * - Responses: `frequencyResponse` (a `Spectrum`), `responseAt`, `frequencyGrid`, `bode`, `margins`; `simulate` (a
  *   traceable algorithm; exact between samples for held inputs), `respond`, `stepResponse`, `impulseResponse`,
  *   `initialResponse`.
- * - New systems: `discretise` (zoh, Euler, Tustin; its A and B by the differentiable `discretiseSsm`, which
- *   `aifn-compute/nn/sequence` uses too), `stateFeedback`, `series`, `parallel`, `feedback`.
+ * - New systems: `discretise` (zoh, Euler, Tustin; its $\bar\Amat$ and $\bar\Bmat$ by the differentiable
+ *   `discretiseSsm`, which `aifn-compute/nn/sequence` uses too), `stateFeedback`, `series`, `parallel`, `feedback`.
  * - Feedback design: `placePoles` (multi-input robust pole placement, Kautsky–Nichols–Van Dooren).
- * - Stability criteria: `routhArray` (Routh–Hurwitz, with the ε and auxiliary-polynomial cases), `nyquist` (the plot
- *   with indentations and the encirclement count, Z = N + P), `rootLocus` (branches, asymptotes, breakaway points,
- *   stability crossings) and `closedLoopPolesAt`.
+ * - Stability criteria: `routhArray` (Routh–Hurwitz, with the $\varepsilon$ and auxiliary-polynomial cases), `nyquist`
+ *   (the plot with indentations and the encirclement count, $Z = N + P$), `rootLocus` (branches, asymptotes, breakaway
+ *   points, stability crossings) and `closedLoopPolesAt`.
  * - Identification: `arx` (least squares) and `arxOrderSelection`, the prediction-error method for the polynomial
  *   family (`predictionErrorMethod`, a step algorithm; `polynomialModel`, `armax`, `outputError`) and `n4sid`
  *   (subspace identification of a state-space model).
- * - Zeros, poles and responses are complex128 tensors (`ComplexLike` inputs, from `aifn-compute/numerics/polynomial`).
+ * - Registries: `systemsFunctions` and `systemsAlgorithms`, the module's functions and algorithms keyed by name.
+ *
+ * Zeros, poles and responses are complex128 tensors (`ComplexLike` inputs, from `aifn-compute/numerics/polynomial`).
+ * A continuous transfer function is in descending powers of $s$, a discrete one in ascending powers of $z^{-1}$, as
+ * scipy. Functions that need a state realise any representation in controllable canonical form first, and those that
+ * take a SISO view read channel 0 to 0 of a MIMO state-space system unless told otherwise. Invalid arguments throw
+ * `DomainError` or `ShapeError`.
  */
 
 export type { LtiSystem, Representation } from 'aifn-compute/foundation/contracts'

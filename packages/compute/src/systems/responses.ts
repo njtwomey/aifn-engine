@@ -1,6 +1,12 @@
 /**
- * Responses of an `LtiSystem`: the frequency response H(iω) or H(e^{iω}) as a `Spectrum`, Bode data and stability
- * margins, and time responses (simulation as a traceable algorithm; step, impulse and initial-condition responses).
+ * Responses of an `LtiSystem`: the frequency response $H(i\omega)$ or $H(e^{i\omega})$ as a `Spectrum`, Bode data and
+ * stability margins, and time responses (simulation as a traceable algorithm; step, impulse and initial-condition
+ * responses).
+ *
+ * Frequencies are in rad/s for a continuous system and rad/sample for a discrete one, and a delay $\tau$ enters as
+ * $e^{-i\omega\tau}$. Time responses sample a continuous system every `dt` with the input held over each step, which
+ * is exact for such inputs; a discrete system steps by its own `dt`. A MIMO state-space system is evaluated on one
+ * channel at a time (`ChannelOptions`) in the frequency domain, and on all its inputs and outputs in time.
  *
  * Sources: Ogata (2010), "Modern Control Engineering", 5th ed., §7-2 (Bode diagrams) and §7-6 (gain and phase
  * margins); Van Loan (1978), "Computing integrals involving the matrix exponential" (the exact zero-order-hold step);
@@ -45,9 +51,14 @@ import { discretise } from './transform'
 // ── Frequency response ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * H at the points x (complex128, any shape), in the system's own form: products over roots (zpk) or sections (sos),
- * else the SISO rational function num(x)/den(x) by Horner's rule (`polyval`). Compositions of primitives, so
- * differentiable in x and in traced coefficients.
+ * $H$ at the points $x$ (complex128, any shape), in the system's own form: products over roots (zpk) or sections
+ * (sos), else the SISO rational function $\mathrm{num}(x)/\mathrm{den}(x)$ by Horner's rule (`polyval`).
+ * Compositions of primitives, so differentiable in $x$ and in traced coefficients. The delay is not applied.
+ *
+ * @param sys The system.
+ * @param x The points $s$ or $z$ to evaluate at, complex128.
+ * @param channel The input and output of a MIMO state-space system.
+ * @returns $H(x)$, complex128 of the shape of `x`.
  */
 function evaluate(sys: LtiSystem, x: Value, channel: ChannelOptions): Value {
   const r = sys.repr
@@ -71,31 +82,75 @@ function evaluate(sys: LtiSystem, x: Value, channel: ChannelOptions): Value {
   return div(polyval(num, x), polyval(den, x))
 }
 
-/** The evaluation points for frequencies w: iω for a continuous system, e^{iω} for a discrete one (complex128). */
+/**
+ * The evaluation points for frequencies $\omega$: $i\omega$ for a continuous system, $e^{i\omega}$ for a discrete one
+ * (complex128).
+ *
+ * @param sys The system, whose domain decides the map.
+ * @param w The frequencies $\omega$ (real, any shape).
+ * @returns The points, complex128 of the shape of `w`.
+ */
 function pointsAt(sys: LtiSystem, w: Value): Value {
   return sys.domain === 'discrete' ? expj(w) : complex(mul(0, w), w)
 }
 
-/** H(iω) or H(e^{iω}) at the frequencies w, the delay τ included as e^{−iωτ}: complex128 of w's shape. */
+/**
+ * $H(i\omega)$ or $H(e^{i\omega})$ at the frequencies $\omega$, the delay $\tau$ included as $e^{-i\omega\tau}$.
+ *
+ * @param sys The system.
+ * @param w The frequencies $\omega$ (real, any shape): rad/s, or rad/sample for a discrete system.
+ * @param channel The input and output of a MIMO state-space system.
+ * @returns The response, complex128 of the shape of `w`.
+ */
 function responseValues(sys: LtiSystem, w: Value, channel: ChannelOptions = {}): Value {
   const h = evaluate(sys, pointsAt(sys, w), channel)
   return sys.delay ? mul(h, expj(mul(-sys.delay, w))) : h
 }
 
 /**
- * The response H at one frequency ω, as a function returning `{ re, im }`: continuous systems at s = iω (ω in rad/s),
- * discrete ones at z = e^{iω} (ω in rad/sample). A delay τ multiplies by e^{−iωτ}. For many frequencies use
- * `frequencyResponse`, which evaluates them in one pass.
+ * The response $H$ at one frequency $\omega$, as a function returning `{ re, im }`: continuous systems at
+ * $s = i\omega$ ($\omega$ in rad/s), discrete ones at $z = e^{i\omega}$ ($\omega$ in rad/sample). A delay $\tau$
+ * multiplies by $e^{-i\omega\tau}$. For many frequencies use `frequencyResponse`, which evaluates them in one pass.
+ *
+ * @param sys The system.
+ * @param channel The input and output of a MIMO state-space system.
+ * @returns A function of $\omega$ giving $H$ there as a complex number.
+ *
+ * @example The lag $1/(s + 1)$ at $\omega = 1$ is $1/(1 + i)$, and 1 at DC
+ * const H = responseAt(transferFunction([1], [1, 1]))
+ * print('H(i) =', H(1))
+ * print('H(0) =', H(0))
+ *
+ * @example An integrator with a delay of 0.5 s: $e^{-0.5i}/i$
+ * const H = responseAt(transferFunction([1], [1, 0], { delay: 0.5 }))
+ * print('H(i) =', H(1))
  */
 export function responseAt(sys: LtiSystem, channel: ChannelOptions = {}): (w: Scalar) => ComplexNumber {
   return (w) => complexItem(responseValues(sys, tensor([w]), channel) as Tensor)
 }
 
 /**
- * The frequency response at the frequencies `w` as a `Spectrum` (`quantity: 'response'`, complex128 values [n]):
- * H(iω) with ω in rad/s for a continuous system, H(e^{iω}) with ω in rad/sample for a discrete one (`fs` = 1/dt is
- * recorded). `freqz` in `aifn-compute/signal/filters` gives the evenly spaced discrete grid and Hz. Magnitude, phase and dB
- * come from `aifn-compute/signal`'s `magnitude`, `phase` and `decibels` (or `complexAbs`/`angle` directly).
+ * The frequency response at the frequencies `w` as a `Spectrum` (`quantity: 'response'`, complex128 values of shape
+ * $[n]$): $H(i\omega)$ with $\omega$ in rad/s for a continuous system, $H(e^{i\omega})$ with $\omega$ in rad/sample
+ * for a discrete one (`fs`, $1/dt$, is recorded). `freqz` in `aifn-compute/signal/filters` gives the evenly spaced
+ * discrete grid and Hz. Magnitude, phase and dB come from `aifn-compute/signal`'s `magnitude`, `phase` and `decibels`
+ * (or `complexAbs`/`angle` directly).
+ *
+ * @param sys The system.
+ * @param w The $n$ frequencies $\omega$, stored as the spectrum's `f`.
+ * @param channel The input and output of a MIMO state-space system.
+ * @returns The response as a one-sided `Spectrum`.
+ *
+ * @example The lag $1/(s + 1)$ at DC, its corner and a decade above
+ * const r = frequencyResponse(transferFunction([1], [1, 1]), [0, 1, 10])
+ * print('axis =', r.axis)
+ * print('H =', r.values)
+ * print('|H| =', complexAbs(r.values))
+ *
+ * @example The two-tap moving average passes DC and nulls the Nyquist frequency $\omega = \pi$
+ * const r = frequencyResponse(transferFunction([0.5, 0.5], [1], { dt: 0.01 }), [0, Math.PI / 2, Math.PI])
+ * print('|H| =', complexAbs(r.values))
+ * print('fs =', r.fs)
  */
 export function frequencyResponse(sys: LtiSystem, w: VectorLike, channel: ChannelOptions = {}): Spectrum {
   const ws = dense.toF64(w, 'frequencyResponse')
@@ -115,8 +170,16 @@ export function frequencyResponse(sys: LtiSystem, w: VectorLike, channel: Channe
 
 /**
  * A logarithmic frequency grid for a continuous system: two decades either side of the poles and zeros (their
- * nonzero moduli, and 1/τ for a delay), or 10⁻² … 10² rad/s when there are none, with `n` points (default 500). For a
- * discrete system: three decades below π up to π rad/sample.
+ * nonzero moduli, and $1/\tau$ for a delay), or $10^{-2}$ to $10^2$ rad/s when there are none. For a discrete
+ * system: from three decades below $\pi$ up to $\pi$ rad/sample.
+ *
+ * @param sys The system.
+ * @param n The number of points, at least 2.
+ * @returns $n$ log-spaced frequencies, ascending.
+ *
+ * @example Around the lag's pole at 1 rad/s, and up to Nyquist for a discrete system
+ * print('lag =', frequencyGrid(transferFunction([1], [1, 1]), 5))
+ * print('discrete =', frequencyGrid(transferFunction([1], [1, -0.5], { dt: 1 }), 4))
  */
 export function frequencyGrid(sys: LtiSystem, n: Size = 500): Vector {
   if (sys.domain === 'discrete') {
@@ -142,18 +205,35 @@ export function frequencyGrid(sys: LtiSystem, n: Size = 500): Vector {
 export type Bode = {
   /** Frequencies (rad/s, or rad/sample for a discrete system). */
   w: Vector
-  /** |H|. */
+  /** $\lvert H \rvert$. */
   magnitude: Vector
-  /** 20 log₁₀ |H|. */
+  /** $20 \log_{10} \lvert H \rvert$. */
   magnitudeDb: Vector
-  /** Phase in degrees, unwrapped to be continuous in ω (a delay adds −ωτ exactly, not modulo 360°). */
+  /**
+   * Phase in degrees, unwrapped to be continuous in $\omega$ (a delay adds $-\omega\tau$ exactly, not modulo
+   * $360^\circ$).
+   */
   phase: Vector
 }
 
 /**
  * Bode data over a frequency grid (default `frequencyGrid(sys)`). The rational part's phase starts at its principal
  * value at the first frequency and is unwrapped between grid points (as numpy's `unwrap`, like scipy's `bode`); the
- * delay's phase −ωτ·180/π is added analytically, so a fine grid is needed only for the rational part.
+ * delay's phase $-\omega\tau \cdot 180/\pi$ is added analytically, so a fine grid is needed only for the rational
+ * part. SISO (channel 0 to 0 of a MIMO state-space system).
+ *
+ * @param sys The system.
+ * @param w The frequencies (rad/s, or rad/sample when discrete); default `frequencyGrid(sys)`.
+ * @returns The frequencies with the magnitude, the magnitude in dB and the phase in degrees at each.
+ *
+ * @example The lag $1/(s + 1)$: $-3$ dB and $-45^\circ$ at the corner, $-20$ dB a decade above
+ * const b = bode(transferFunction([1], [1, 1]), [0.1, 1, 10])
+ * print('dB =', b.magnitudeDb)
+ * print('phase =', b.phase)
+ *
+ * @example A delay of 1 s adds $-\omega \cdot 180/\pi$ degrees, unwrapped
+ * const b = bode(transferFunction([1], [1, 1], { delay: 1 }), [1, 10])
+ * print('phase =', b.phase)
  */
 export function bode(sys: LtiSystem, w?: VectorLike): Bode {
   const ws = dense.toF64(w ?? frequencyGrid(sys), 'bode')
@@ -180,28 +260,50 @@ export function bode(sys: LtiSystem, w?: VectorLike): Bode {
 
 /** Stability margins of an open loop L under unity negative feedback. */
 export type Margins = {
-  /** The gain margin 1/|L(iω_pc)| at the phase crossover with the smallest margin (Infinity if none). */
+  /**
+   * The gain margin $1/\lvert L(i\omega_{pc}) \rvert$ at the phase crossover with the smallest margin (Infinity if
+   * none).
+   */
   gainMargin: Scalar
+  /** The gain margin in dB, $20 \log_{10}$ of `gainMargin`. */
   gainMarginDb: Scalar
-  /** Phase crossover frequency ω_pc (NaN if none). */
+  /** Phase crossover frequency $\omega_{pc}$ (NaN if none). */
   phaseCrossover: Scalar
-  /** The phase margin 180° + ∠L(iω_gc) at the gain crossover with the smallest margin (Infinity if none). */
+  /**
+   * The phase margin $180^\circ + \angle L(i\omega_{gc})$, in degrees, at the gain crossover with the smallest margin
+   * (Infinity if none).
+   */
   phaseMargin: Scalar
-  /** Gain crossover frequency ω_gc (NaN if none). */
+  /** Gain crossover frequency $\omega_{gc}$ (NaN if none). */
   gainCrossover: Scalar
-  /** The delay margin, phaseMargin·π/180/ω_gc: the extra delay that destabilises the loop (Infinity if none). */
+  /**
+   * The delay margin, $\text{phaseMargin} \cdot \pi/180/\omega_{gc}$: the extra delay that destabilises the loop
+   * (Infinity with no gain crossover, 0 when the phase margin is not positive).
+   */
   delayMargin: Scalar
-  /** Every crossing found on the grid, refined. */
+  /** Every gain crossover found on the grid, refined. */
   gainCrossovers: Vector
+  /** Every phase crossover found on the grid, refined. */
   phaseCrossovers: Vector
 }
 
 /**
- * Gain and phase margins of an open-loop system L (Ogata, 2010, §7-6): gain crossovers where |L| = 1 and phase
- * crossovers where ∠L = −180° (mod 360°). Crossings are bracketed on a fine logarithmic grid (default
- * `frequencyGrid(L, 4000)`) and refined by Brent's method; the reported margins are the smallest over all crossings,
- * as python-control's `stability_margins`. Meaningful when the closed loop's stability is decided by these crossings
- * (e.g. a stable, minimum-phase L).
+ * Gain and phase margins of an open-loop system $L$ (Ogata, 2010, §7-6): gain crossovers where $\lvert L \rvert = 1$
+ * and phase crossovers where $\angle L = -180^\circ$ (mod $360^\circ$). Crossings are bracketed on a fine logarithmic
+ * grid (default `frequencyGrid(L, 4000)`) and refined by Brent's method; the reported margins are the smallest over
+ * all crossings, as python-control's `stability_margins`. Meaningful when the closed loop's stability is decided by
+ * these crossings (e.g. a stable, minimum-phase $L$).
+ *
+ * @param L The open loop, under unity negative feedback.
+ * @param w The grid on which crossings are bracketed (ascending); default 4000 points of `frequencyGrid`. A crossing
+ *   outside it is not found.
+ * @returns The margins, their crossover frequencies, and every crossover found.
+ *
+ * @example $L = 1/(s(s + 1)(s + 2))$: gain margin 6 at $\omega = \sqrt 2$, phase margin about $53.4^\circ$
+ * const m = margins(transferFunction([1], [1, 3, 2, 0]))
+ * print('gain margin =', m.gainMargin, ' at', m.phaseCrossover)
+ * print('phase margin =', m.phaseMargin, ' at', m.gainCrossover)
+ * print('delay margin =', m.delayMargin)
  */
 export function margins(L: LtiSystem, w?: VectorLike): Margins {
   const grid = Array.from(dense.toF64(w ?? frequencyGrid(L, 4000), 'margins'))
@@ -276,24 +378,28 @@ export function margins(L: LtiSystem, w?: VectorLike): Margins {
 
 // ── Time responses ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The input to a simulation: a constant, or u(time, x) (which may be state feedback, e.g. u = −Kx). */
+/**
+ * The input to a simulation: a constant (a number drives every input, a vector gives one value per input), or a
+ * function $u(\text{time}, \xvec)$ called at the start of each step (which may be state feedback, e.g.
+ * $\uvec = -\Kmat\xvec$).
+ */
 export type Input = Scalar | VectorLike | ((time: Scalar, x: Vector) => Scalar | VectorLike)
 
 /** The state of `simulate`. */
 export interface SimulationState extends Status {
-  /** Steps taken k. */
+  /** Steps taken $k$. */
   t: Size
-  /** The time k·dt. */
+  /** The time $k \cdot dt$. */
   time: Scalar
-  /** The state x(time). */
+  /** The state $\xvec$ at `time`. */
   x: Vector
-  /** The input applied from time to time + dt (held constant over the step). */
+  /** The input applied from `time` to `time + dt` (held constant over the step). */
   u: Vector
-  /** The output y = Cx + Du. */
+  /** The output $\yvec = \Cmat\xvec + \Dmat\uvec$. */
   y: Vector
-  /** Set once time ≥ `tEnd`. */
+  /** Set once `time` reaches `tEnd`. */
   terminated: boolean
-  /** True once some component of x is not finite. */
+  /** True once some component of $\xvec$ is not finite. */
   diverged: boolean
 }
 
@@ -303,11 +409,23 @@ export type SimulationOptions = {
   dt?: Scalar
   /** Stop at this time (inclusive). Omitted, the run lasts as many steps as the runner asks for. */
   tEnd?: Scalar
-  /** Apply the input over the first step only (an impulse of area u for a continuous system: height u/dt). */
+  /**
+   * Apply the input over the first step only (for a continuous system an impulse of area $u$: height $u/dt$).
+   */
   impulse?: boolean
 }
 
-/** One sampled step: the discretised matrices and the state record. */
+/**
+ * One sampled step: the discretised matrices and the state record. A continuous system is discretised by zero-order
+ * hold with the step `options.dt`; a discrete one keeps its own `dt`. Throws `DomainError` for a continuous system
+ * without a positive `dt`, an input of the wrong length, or an `x0` of the wrong length.
+ *
+ * @param sys The system (realised in state space).
+ * @param input The input, a constant or a function of time and state.
+ * @param options The step, the end time and whether the input is an impulse.
+ * @returns `start` (the state at step 0 from an optional `x0`, default zeros), `advance` (one step), the dimensions
+ *   `n`, `m`, `p` and the step `dt`.
+ */
 function stepper(sys: LtiSystem, input: Input, options: SimulationOptions) {
   const ss = toStateSpace(sys)
   const dt = sys.dt ?? options.dt
@@ -360,10 +478,32 @@ function stepper(sys: LtiSystem, input: Input, options: SimulationOptions) {
 
 /**
  * Simulates a system driven by `input` as a traceable algorithm. A continuous system is advanced exactly for an input
- * held constant over each step (zero-order hold, x_{k+1} = A_d x_k + B_d u_k; Van Loan, 1978), so the only
- * approximation is the hold itself; a discrete system steps by its own recursion. `init` takes `{ x0 }` (default
- * zeros). The input is evaluated at the start of each step from (time, x), so state feedback is closed exactly at the
- * sampling instants. The run stops (`terminated`) at `tEnd`.
+ * held constant over each step (zero-order hold, $\xvec_{k+1} = \Amat_d\xvec_k + \Bmat_d\uvec_k$; Van Loan, 1978), so
+ * the only approximation is the hold itself; a discrete system steps by its own recursion. `init` takes `{ x0 }`
+ * (default zeros). The input is evaluated at the start of each step from $(\text{time}, \xvec)$, so state feedback is
+ * closed exactly at the sampling instants. The run stops (`terminated`) at `tEnd`.
+ *
+ * @param sys The system, in any representation (realised in state space; `x0` is in that realisation's state).
+ * @param input The input: a constant, or a function of time and state. Default 0 (the free response).
+ * @param options The step (required for a continuous system), the end time and the impulse flag.
+ * @returns The algorithm, to run with `run` or step through.
+ *
+ * @example The lag $1/(s + 1)$ after 10 steps of 0.1 s of a unit step: $1 - e^{-1}$
+ * const lag = transferFunction([1], [1, 1])
+ * const s = run(simulate(lag, 1, { dt: 0.1 }), {}, 10)
+ * print('time =', s.time, ' y =', s.y)
+ * print('1 - exp(-1) =', 1 - Math.exp(-1))
+ *
+ * @example State feedback $u = -2x_1 - 3x_2$ on the double integrator, from $\xvec_0 = (1, 0)$
+ * const integrator = stateSpace({ A: [[0, 1], [0, 0]], B: [0, 1], C: [1, 0] })
+ * const control = (time, x) => {
+ *   const [position, velocity] = toArray(x)
+ *   return -2 * position - 3 * velocity
+ * }
+ * const s = run(simulate(integrator, control, { dt: 0.01, tEnd: 5 }), { x0: [1, 0] }, 1000)
+ * print('time =', s.time, ' terminated =', s.terminated)
+ * print('x =', s.x)
+ * print('exact x =', [2 * Math.exp(-5) - Math.exp(-10), -2 * Math.exp(-5) + 2 * Math.exp(-10)])
  */
 export function simulate(
   sys: LtiSystem,
@@ -376,21 +516,42 @@ export function simulate(
 
 /** A sampled response: times, outputs, states and inputs stacked over time. */
 export type Response = {
-  /** Times, length T. */
+  /** Times, length $T$. */
   t: Vector
-  /** Outputs, T×p. */
+  /** Outputs, $T \times p$. */
   y: Matrix
-  /** States, T×n. */
+  /** States, $T \times n$. */
   x: Matrix
-  /** Inputs, T×m. */
+  /** Inputs, $T \times m$. */
   u: Matrix
+  /** True when the state stopped being finite; the record ends at that sample. */
   diverged: boolean
 }
 
-/** Options for `respond`. */
+/**
+ * Options for `respond`: `dt`, the step of a continuous system (a discrete one uses its own); `tEnd`, the last time;
+ * `x0`, the initial state (default zeros); `impulse`, apply the input over the first step only.
+ */
 export type RespondOptions = { dt?: Scalar; tEnd: Scalar; x0?: VectorLike; impulse?: boolean }
 
-/** The response to `input` up to `tEnd` (scipy's `lsim` for a held input): `simulate` run and stacked. */
+/**
+ * The response to `input` up to `tEnd` (scipy's `lsim` for a held input): `simulate` run and stacked, at the
+ * $T = \operatorname{round}(t_\text{end}/dt) + 1$ times $0, dt, \dots$; it stops early if the state diverges.
+ *
+ * @param sys The system.
+ * @param input The input: a constant, or a function of time and state.
+ * @param options The horizon, step, initial state and impulse flag.
+ * @param options.dt The step of a continuous system (required for one); a discrete system uses its own `dt`.
+ * @param options.tEnd The last time.
+ * @param options.x0 The initial state, in the state-space realisation of `sys`; default zeros.
+ * @param options.impulse Apply the input over the first step only (height $u/dt$ for a continuous system).
+ * @returns The times, outputs, states and inputs stacked over time.
+ *
+ * @example The lag $1/(s + 1)$ driven by $u = 2$: $y = 2(1 - e^{-t})$
+ * const r = respond(transferFunction([1], [1, 1]), 2, { dt: 0.5, tEnd: 2 })
+ * print('t =', r.t)
+ * print('y =', r.y)
+ */
 export function respond(sys: LtiSystem, input: Input, { dt, tEnd, x0, impulse }: RespondOptions): Response {
   const { start, advance, n, m, p, dt: step } = stepper(sys, input, { dt, tEnd, impulse })
   const T = Math.round(tEnd / step) + 1
@@ -418,10 +579,32 @@ export function respond(sys: LtiSystem, input: Input, { dt, tEnd, x0, impulse }:
   }
 }
 
-/** Options for the standard responses: the horizon, the step of a continuous system, and the input channel. */
+/**
+ * Options for the standard responses: `tEnd`, the horizon; `dt`, the step of a continuous system; `input`, the input
+ * channel (default 0).
+ */
 export type StandardResponseOptions = { tEnd: Scalar; dt?: Scalar; input?: Size }
 
-/** The unit-step response from rest on input `input` (default 0): u_j(t) = 1 for t ≥ 0. */
+/**
+ * The unit-step response from rest on input `input` (default 0): $u_j(t) = 1$ for $t \ge 0$, the other inputs 0.
+ * Exact at the samples, the step being held.
+ *
+ * @param sys The system.
+ * @param options The horizon and step.
+ * @param options.tEnd The last time.
+ * @param options.dt The step of a continuous system (required for one); a discrete system uses its own `dt`.
+ * @param options.input The input $j$ that steps.
+ * @returns The response, all outputs.
+ *
+ * @example The lag $1/(s + 1)$: $1 - e^{-t}$ at $t = 0, 1, 2, 3$
+ * const r = stepResponse(transferFunction([1], [1, 1]), { tEnd: 3, dt: 1 })
+ * print('t =', r.t)
+ * print('y =', r.y)
+ *
+ * @example The critically damped $1/(s + 1)^2$: $1 - (1 + t)e^{-t}$
+ * const r = stepResponse(transferFunction([1], [1, 2, 1]), { tEnd: 2, dt: 1 })
+ * print('y =', r.y)
+ */
 export function stepResponse(sys: LtiSystem, { tEnd, dt, input = 0 }: StandardResponseOptions): Response {
   const m = toStateSpace(sys).repr.B.shape[1]
   const u = new Float64Array(m)
@@ -430,8 +613,21 @@ export function stepResponse(sys: LtiSystem, { tEnd, dt, input = 0 }: StandardRe
 }
 
 /**
- * The unit-impulse response from rest on input `input`. Continuous: x(0⁺) = B e_j and u = 0 afterwards (exact; the
- * D δ(t) term is omitted). Discrete: u_0 = e_j, then 0.
+ * The unit-impulse response from rest on input `input`. Continuous: $\xvec(0^+) = \Bmat\evec_j$ and $\uvec = \zeros$
+ * afterwards (exact; the $\Dmat\delta(t)$ term is omitted). Discrete: $\uvec_0 = \evec_j$, then $\zeros$.
+ *
+ * @param sys The system.
+ * @param options The horizon and step.
+ * @param options.tEnd The last time.
+ * @param options.dt The step of a continuous system (required for one); a discrete system uses its own `dt`.
+ * @param options.input The input $j$ that receives the impulse.
+ * @returns The response, all outputs.
+ *
+ * @example The lag $1/(s + 1)$ gives $e^{-t}$; the moving average gives its two taps
+ * const r = impulseResponse(transferFunction([1], [1, 1]), { tEnd: 2, dt: 1 })
+ * print('y =', r.y)
+ * const d = impulseResponse(transferFunction([0.5, 0.5], [1], { dt: 1 }), { tEnd: 3 })
+ * print('moving average =', d.y)
  */
 export function impulseResponse(sys: LtiSystem, { tEnd, dt, input = 0 }: StandardResponseOptions): Response {
   const ss = toStateSpace(sys).repr
@@ -447,7 +643,22 @@ export function impulseResponse(sys: LtiSystem, { tEnd, dt, input = 0 }: Standar
   return respond(sys, 0, { dt, tEnd, x0 })
 }
 
-/** The free response from `x0` with zero input. */
+/**
+ * The free response from `x0` with zero input.
+ *
+ * @param sys The system.
+ * @param x0 The initial state, in the state-space realisation of `sys`.
+ * @param options The horizon and step.
+ * @param options.tEnd The last time.
+ * @param options.dt The step of a continuous system (required for one); a discrete system uses its own `dt`.
+ * @returns The response.
+ *
+ * @example Two modes from $\xvec_0 = (1, 1)$: $y = e^{-t} + e^{-2t}$, exact at the samples
+ * const sys = stateSpace({ A: [[-1, 0], [0, -2]], B: [1, 1], C: [1, 1] })
+ * const r = initialResponse(sys, [1, 1], { tEnd: 1, dt: 0.5 })
+ * print('y =', r.y)
+ * print('exact =', [0, 0.5, 1].map((t) => Math.exp(-t) + Math.exp(-2 * t)))
+ */
 export function initialResponse(sys: LtiSystem, x0: VectorLike, { tEnd, dt }: { tEnd: Scalar; dt?: Scalar }): Response {
   return respond(sys, 0, { dt, tEnd, x0 })
 }

@@ -1,10 +1,10 @@
 /**
  * Stability criteria that decide closed-loop stability without solving for the poles: the Routh–Hurwitz array of a
- * characteristic polynomial, and the Nyquist plot of an open loop L with its encirclements of −1.
+ * characteristic polynomial, and the Nyquist plot of an open loop $L$ with its encirclements of $-1$.
  *
  * Sources: Routh (1877), "A Treatise on the Stability of a Given State of Motion"; Hurwitz (1895), Math. Ann. 46;
  * Nyquist (1932), "Regeneration theory", Bell Syst. Tech. J. 11; Ogata (2010), "Modern Control Engineering", 5th ed.,
- * §5-6 (Routh's criterion, its two special cases) and §7-5 (the Nyquist criterion, Z = N + P).
+ * §5-6 (Routh's criterion, its two special cases) and §7-5 (the Nyquist criterion, $Z = N + P$).
  */
 
 import { dense, fromData, toComplexFlat, type Matrix, type Vector } from 'aifn-compute/foundation/tensor'
@@ -17,7 +17,7 @@ import { responseAt } from './responses'
 
 /** The Routh array of a polynomial and what its first column says. */
 export type RouthArray = {
-  /** The array, one row per power sⁿ, …, s⁰, padded with zeros to ⌈(n + 1)/2⌉ columns. */
+  /** The array, one row per power $s^n, \dots, s^0$, padded with zeros to $\lceil (n + 1)/2 \rceil$ columns. */
   rows: Matrix
   /** The first column. */
   firstColumn: Vector
@@ -25,24 +25,53 @@ export type RouthArray = {
   rightHalfPlane: Size
   /** Roots on the imaginary axis, counted from the auxiliary polynomials (0 unless a row vanished). */
   imaginaryAxis: Size
-  /** Roots in the open left half-plane: degree − right − imaginary. */
+  /** Roots in the open left half-plane: the degree less the right-half-plane and imaginary-axis counts. */
   leftHalfPlane: Size
-  /** True when every root is in the open left half-plane. */
+  /**
+   * True when every root is in the open left half-plane: no sign change, no vanished row and no $\varepsilon$
+   * substitution (a zero in the first column means a root on the axis or to its right).
+   */
   stable: boolean
-  /** Rows whose leading entry was zero (the rest not) and was replaced by ε. */
+  /** Rows whose leading entry was zero (the rest not) and was replaced by $\varepsilon$. */
   epsilonRows: Size[]
   /** Rows that vanished and were replaced by the derivative of the auxiliary polynomial above them. */
   auxiliaryRows: Size[]
 }
 
 /**
- * The Routh array of a(s) = a₀sⁿ + a₁sⁿ⁻¹ + … + aₙ (descending coefficients, a₀ ≠ 0 after stripping leading zeros).
- * Row k + 2 is built from the two rows above it, r[k+2][j] = (r[k+1][0]·r[k][j+1] − r[k][0]·r[k+1][j+1]) / r[k+1][0].
- * The number of sign changes in the first column is the number of roots with positive real part (Routh, 1877). Two
- * special cases: a zero leading entry with a nonzero row is replaced by a small ε > 0 (`epsilon`, default 1e-9 times
- * the largest coefficient); a row of zeros means the roots of the auxiliary polynomial of the row above (even or odd)
- * are symmetric about the origin, and the row is replaced by that polynomial's derivative. Roots of an auxiliary
- * polynomial that are not counted by sign changes below it lie on the imaginary axis.
+ * The Routh array of $a(s) = a_0 s^n + a_1 s^{n-1} + \dots + a_n$ (descending coefficients, $a_0 \ne 0$ after
+ * stripping leading zeros). Row $k + 2$ is built from the two rows above it,
+ * $r_{k+2,j} = (r_{k+1,0} r_{k,j+1} - r_{k,0} r_{k+1,j+1}) / r_{k+1,0}$. The number of sign changes in the first
+ * column is the number of roots with positive real part (Routh, 1877). Two special cases: a zero leading entry with a
+ * nonzero row is replaced by a small $\varepsilon > 0$; a row of zeros means the roots of the auxiliary polynomial of
+ * the row above (even or odd) are symmetric about the origin, and the row is replaced by that polynomial's
+ * derivative. Roots of an auxiliary polynomial that are not counted by sign changes below it lie on the imaginary axis
+ * (counted for the first vanished row). Throws `DomainError` for a polynomial of degree below 1.
+ *
+ * @param coefficients The coefficients of $a(s)$, highest power first.
+ * @param options The substitute for a zero leading entry.
+ * @param options.epsilon The $\varepsilon$ put in place of a zero leading entry; default $10^{-9}$ times the largest
+ *   absolute coefficient.
+ * @returns The array, its first column, the root counts by region and the rows where a special case applied.
+ *
+ * @example $s^4 + 2s^3 + 3s^2 + 4s + 5$: two sign changes, two roots in the right half-plane
+ * const r = routhArray([1, 2, 3, 4, 5])
+ * print('rows =', r.rows)
+ * print('first column =', r.firstColumn)
+ * print('right half-plane =', r.rightHalfPlane, ' stable =', r.stable)
+ *
+ * @example $(s + 1)(s^2 + 1)$: the $s^1$ row vanishes; the auxiliary $s^2 + 1$ puts two roots on the imaginary axis
+ * const r = routhArray([1, 1, 1, 1])
+ * print('auxiliary rows =', r.auxiliaryRows)
+ * print('imaginary axis =', r.imaginaryAxis, ' left =', r.leftHalfPlane)
+ * print('rows =', r.rows)
+ *
+ * @example A zero leading entry replaced by $\varepsilon$: two sign changes, confirmed by the roots
+ * const r = routhArray([1, 1, 2, 2, 3])
+ * print('epsilon rows =', r.epsilonRows)
+ * print('first column =', r.firstColumn)
+ * print('right half-plane =', r.rightHalfPlane)
+ * print('roots =', poles(transferFunction([1], [1, 1, 2, 2, 3])))
  */
 export function routhArray(coefficients: VectorLike, { epsilon }: { epsilon?: Scalar } = {}): RouthArray {
   const a = stripLeading(Array.from(dense.toF64(coefficients, 'routhArray')))
@@ -113,43 +142,75 @@ export function routhArray(coefficients: VectorLike, { epsilon }: { epsilon?: Sc
 
 // ── Nyquist ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** A Nyquist plot of an open loop and what it says about the closed loop 1/(1 + L). */
+/** A Nyquist plot of an open loop and what it says about the closed loop $1/(1 + L)$. */
 export type Nyquist = {
-  /** Contour frequencies, increasing from −ω_max to ω_max (rad/s; rad/sample from −π to π for a discrete system). */
+  /**
+   * Contour frequencies, increasing from $-\omega_\text{max}$ to $\omega_\text{max}$ (rad/s; rad/sample from $-\pi$
+   * to $\pi$ for a discrete system).
+   */
   w: Vector
-  /** Re L along the contour. */
+  /** $\operatorname{Re} L$ along the contour. */
   re: Vector
-  /** Im L along the contour. */
+  /** $\operatorname{Im} L$ along the contour. */
   im: Vector
-  /** Net clockwise encirclements of the point −1 by L over the closed contour: N. */
+  /** Net clockwise encirclements of the point $-1$ by $L$ over the closed contour: $N$. */
   encirclements: number
-  /** Open-loop poles inside the contour (right half-plane, or outside the unit circle): P. */
+  /** Open-loop poles inside the contour (right half-plane, or outside the unit circle): $P$. */
   openLoopUnstable: Size
-  /** Closed-loop poles inside the contour: Z = N + P. */
+  /** Closed-loop poles inside the contour: $Z = N + P$. */
   closedLoopUnstable: number
-  /** True when Z = 0. */
+  /** True when $Z = 0$. */
   stable: boolean
-  /** Contour points closest to −1: the minimum of |1 + L|, the inverse of the peak sensitivity. */
+  /**
+   * The distance of the contour from $-1$: the minimum of $\lvert 1 + L \rvert$ over the points computed, the inverse
+   * of the peak sensitivity.
+   */
   minimumDistance: Scalar
 }
 
 /** Options for `nyquist`. */
 export type NyquistOptions = {
-  /** Positive frequencies to start from (default: `frequencyGrid`-like, 400 log-spaced points). */
+  /**
+   * Positive frequencies to start from, mirrored to negative ones (continuous systems only). Default 400 log-spaced
+   * points from three decades below the smallest nonzero pole or zero modulus to three decades above the largest.
+   */
   w?: VectorLike
-  /** Radius of the indentation around poles on the imaginary axis (or unit circle), relative to the scale. */
+  /**
+   * Radius of the indentation around poles on the imaginary axis (or unit circle), relative to the scale: the
+   * smallest nonzero pole or zero modulus (at least $10^{-3}$) for a continuous system, 1 for a discrete one. Default
+   * $10^{-4}$.
+   */
   indent?: Scalar
-  /** Maximum angle (radians) between neighbouring points of 1 + L before the grid is refined. Default π/8. */
+  /** Maximum angle (radians) between neighbouring points of $1 + L$ before the grid is refined. Default $\pi/8$. */
   maxTurn?: Scalar
 }
 
 /**
- * The Nyquist plot of an open loop L(s) under unity negative feedback (Nyquist, 1932). The contour runs up the
- * imaginary axis s = iω, ω from −ω_max to ω_max, indented to the right of any imaginary-axis pole by a small
- * semicircle, and closes through the right half-plane at infinity, where a proper L is constant. For a discrete system
- * the contour is the unit circle z = e^{iω}, indented outward around poles on it. N, the net clockwise encirclements of
- * −1, is the winding number of 1 + L, computed from its phase along a grid refined until neighbouring points turn by at
- * most `maxTurn`. The closed loop has Z = N + P poles inside the contour, P being the open loop's (Ogata, 2010, §7-5).
+ * The Nyquist plot of an open loop $L(s)$ under unity negative feedback (Nyquist, 1932). The contour runs up the
+ * imaginary axis $s = i\omega$, $\omega$ from $-\omega_\text{max}$ to $\omega_\text{max}$, indented to the right of
+ * any imaginary-axis pole by a small semicircle, and closes through the right half-plane at infinity, where a proper
+ * $L$ is constant. For a discrete system the contour is the unit circle $z = e^{i\omega}$, indented outward around
+ * poles on it. $N$, the net clockwise encirclements of $-1$, is the winding number of $1 + L$, computed from its phase
+ * along a grid refined until neighbouring points turn by at most `maxTurn`. The closed loop has $Z = N + P$ poles
+ * inside the contour, $P$ being the open loop's (Ogata, 2010, §7-5).
+ *
+ * @param L The SISO open loop (a delay is included in its values).
+ * @param options The starting grid, the indentation radius and the refinement angle.
+ * @returns The contour's frequencies and values of $L$, the counts $N$, $P$ and $Z$, and the distance from $-1$.
+ *
+ * @example $L = 10/(s + 1)^3$ encircles $-1$ twice: two unstable closed-loop poles
+ * const n = nyquist(transferFunction([10], [1, 3, 3, 1]))
+ * print('N =', n.encirclements, ' P =', n.openLoopUnstable, ' Z =', n.closedLoopUnstable)
+ * print('closed-loop poles =', poles(feedback(transferFunction([10], [1, 3, 3, 1]))))
+ *
+ * @example An unstable open loop $2/(s - 1)$ is stabilised: one counter-clockwise encirclement cancels $P = 1$
+ * const n = nyquist(transferFunction([2], [1, -1]))
+ * print('N =', n.encirclements, ' P =', n.openLoopUnstable, ' stable =', n.stable)
+ *
+ * @example An integrator in the loop, $1/(s(s + 1))$: the contour is indented around $s = 0$
+ * const n = nyquist(transferFunction([1], [1, 1, 0]))
+ * print('N =', n.encirclements, ' stable =', n.stable, ' points =', n.w.shape)
+ * print('min |1 + L| =', n.minimumDistance)
  */
 export function nyquist(L: LtiSystem, options: NyquistOptions = {}): Nyquist {
   const discrete = L.domain === 'discrete'
@@ -256,7 +317,14 @@ export function nyquist(L: LtiSystem, options: NyquistOptions = {}): Nyquist {
   }
 }
 
-/** L at a complex point x (s or z) off the contour: num(x)/den(x) by Horner's rule, times the delay. */
+/**
+ * $L$ at a complex point $x$ ($s$ or $z$) off the contour: $\mathrm{num}(x)/\mathrm{den}(x)$ by Horner's rule, times
+ * the delay ($e^{-s\tau}$, or $z^{-d}$ for a discrete delay of $d$ samples).
+ *
+ * @param L The SISO system.
+ * @param x The point, as `{ re, im }`; not a root of the denominator.
+ * @returns $L(x)$ as `{ re, im }`.
+ */
 function evalRational(L: LtiSystem, x: { re: number; im: number }): { re: number; im: number } {
   const { num, den } = rationalOf(L)
   const horner = (c: readonly number[]) => {

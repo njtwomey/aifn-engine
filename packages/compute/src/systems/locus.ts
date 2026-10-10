@@ -1,6 +1,9 @@
 /**
- * The root locus: the closed-loop poles of 1 + kL(s) = 0 as the gain k runs from 0 to ∞ (Evans, 1948, "Graphical
- * analysis of control systems", Trans. AIEE 67; Ogata, 2010, "Modern Control Engineering", 5th ed., §6-2).
+ * The root locus: the closed-loop poles of $1 + kL(s) = 0$ as the gain $k$ runs from 0 to $\infty$ (Evans, 1948,
+ * "Graphical analysis of control systems", Trans. AIEE 67; Ogata, 2010, "Modern Control Engineering", 5th ed., §6-2).
+ *
+ * With $L = N/D$ the closed-loop poles are the roots of $D + kN$, found by `roots` at each gain; the same holds for a
+ * discrete $L(z)$, whose stability boundary is the unit circle instead of the imaginary axis.
  */
 
 import { roots } from 'aifn-compute/numerics/polynomial'
@@ -10,24 +13,33 @@ import type { ComplexNumber, LtiSystem, Scalar, Size, VectorLike } from 'aifn-co
 import { DomainError } from 'aifn-compute/foundation/errors'
 import { rationalOf, stripLeading } from './system'
 
-/** One point where branches meet on the real axis and leave it (or arrive): s and the gain there. */
+/** One point where branches meet on the real axis and leave it (or arrive): `s`, the point, and `gain`, $k$ there. */
 export type LocusPoint = { s: Scalar; gain: Scalar }
 
-/** A branch crossing into the other half-plane (continuous) or across the unit circle (discrete). */
+/**
+ * A branch crossing into the other half-plane (continuous) or across the unit circle (discrete): `gain`, the $k$ of the
+ * crossing, and `at`, the crossing point in the upper half-plane.
+ */
 export type LocusCrossing = { gain: Scalar; at: ComplexNumber }
 
-/** The root locus of an open loop L = N/D under negative feedback with gain k. */
+/** The root locus of an open loop $L = N/D$ under negative feedback with gain $k$. */
 export type RootLocus = {
   /** The gains, increasing from 0. */
   gains: Vector
-  /** The closed-loop poles: branches[j][i] is branch j at gains[i]; branches are continuous in k. */
+  /** The closed-loop poles: `branches[j][i]` is branch $j$ at `gains[i]`; branches are continuous in $k$. */
   branches: ComplexNumber[][]
-  /** The open-loop poles (k = 0) and zeros (where finite branches end as k → ∞). */
+  /** The open-loop poles, where the branches start ($k = 0$). */
   openLoopPoles: ComplexNumber[]
+  /** The open-loop zeros, where the finite branches end as $k \to \infty$. */
   openLoopZeros: ComplexNumber[]
-  /** The asymptotes of the n − m branches that go to infinity: centroid σ = (Σp − Σz)/(n − m) and angles (radians). */
+  /**
+   * The asymptotes of the $n - m$ branches that go to infinity: centroid $\sigma = (\sum p - \sum z)/(n - m)$ (NaN when
+   * $n = m$) and angles (radians).
+   */
   asymptotes: { centroid: Scalar; angles: Scalar[] }
-  /** Breakaway and break-in points: real s with dk/ds = 0 and k = −D(s)/N(s) > 0. */
+  /**
+   * Breakaway and break-in points, ascending: real $s$ with $dk/ds = 0$ and $k = -D(s)/N(s) > 0$.
+   */
   breakaway: LocusPoint[]
   /** Gains at which a branch crosses the stability boundary, refined by Brent's method. */
   crossings: LocusCrossing[]
@@ -35,15 +47,32 @@ export type RootLocus = {
 
 /** Options for `rootLocus`. */
 export type RootLocusOptions = {
-  /** Gains to evaluate (sorted ascending; 0 is prepended if missing). Default: 0 and 300 log-spaced gains. */
+  /**
+   * Gains to evaluate, finite and non-negative (sorted here; 0 is prepended if missing). Default: 0 and `points - 1`
+   * log-spaced gains from $10^{-3}$ to $10^3$ times a characteristic gain.
+   */
   gains?: VectorLike
-  /** Points for the default grid. Default 300. */
+  /** Points for the default grid, 0 included. Default 300. */
   points?: Size
 }
 
+/**
+ * A real polynomial at a real point, by Horner's rule.
+ *
+ * @param c The coefficients, descending.
+ * @param x The point.
+ * @returns The value.
+ */
 const polyAt = (c: readonly number[], x: number) => c.reduce((acc, a) => acc * x + a, 0)
 
-/** The closed-loop characteristic polynomial D + kN, both descending, aligned on the right. */
+/**
+ * The closed-loop characteristic polynomial $D + kN$, both descending, aligned on the right.
+ *
+ * @param num The numerator $N$, descending.
+ * @param den The denominator $D$, descending.
+ * @param k The gain.
+ * @returns The coefficients of $D + kN$, descending, leading zeros stripped.
+ */
 function characteristic(num: readonly number[], den: readonly number[], k: number): number[] {
   const n = Math.max(num.length, den.length)
   const out = new Array<number>(n).fill(0)
@@ -52,7 +81,12 @@ function characteristic(num: readonly number[], den: readonly number[], k: numbe
   return stripLeading(out)
 }
 
-/** The roots of a real polynomial as complex numbers (none for a constant). */
+/**
+ * The roots of a real polynomial as complex numbers (none for a constant).
+ *
+ * @param c The coefficients, descending; leading zeros are ignored.
+ * @returns The roots as `{ re, im }`.
+ */
 function rootsOf(c: readonly number[]): ComplexNumber[] {
   const s = stripLeading([...c])
   if (s.length < 2) return []
@@ -62,6 +96,10 @@ function rootsOf(c: readonly number[]): ComplexNumber[] {
 /**
  * Match the roots `next` to the previous points of each branch by a greedy nearest pairing, so branches stay
  * continuous. With equal counts every branch gets one root.
+ *
+ * @param prev The last point of each branch.
+ * @param next The roots at the new gain.
+ * @returns The new point of each branch, in the order of `prev`; a branch left without a root keeps its last point.
  */
 function track(prev: readonly ComplexNumber[], next: readonly ComplexNumber[]): ComplexNumber[] {
   const out = new Array<ComplexNumber>(prev.length)
@@ -83,7 +121,15 @@ function track(prev: readonly ComplexNumber[], next: readonly ComplexNumber[]): 
   return out
 }
 
-/** A default gain grid: from 10⁻³ to 10³ times a characteristic gain, log-spaced, with 0 in front. */
+/**
+ * A default gain grid: from $10^{-3}$ to $10^3$ times a characteristic gain $k_0$, log-spaced, with 0 in front.
+ * $k_0$ is $\lvert D(r)/N(r) \rvert$ at $r$, the largest pole or zero modulus (at least 1), or 1 if that is 0.
+ *
+ * @param num The numerator $N$, descending.
+ * @param den The denominator $D$, descending.
+ * @param points The number of gains, 0 included.
+ * @returns The gains, ascending.
+ */
 function defaultGains(num: readonly number[], den: readonly number[], points: number): number[] {
   // The characteristic gain: |D/N| at a characteristic radius of the poles and zeros.
   const r = Math.max(
@@ -98,11 +144,29 @@ function defaultGains(num: readonly number[], den: readonly number[], points: nu
 }
 
 /**
- * The root locus of a SISO open loop L(s) = N(s)/D(s) (or L(z)): the roots of D + kN for each gain k (Evans, 1948).
- * Branches start at the n open-loop poles; m of them end at the zeros and n − m leave along asymptotes at angles
- * (2q + 1)π/(n − m) from the centroid (Σpᵢ − Σzⱼ)/(n − m). Breakaway points are the real roots of N′D − ND′ = 0 with
- * a positive gain k = −D/N there. Crossings of the stability boundary (the imaginary axis, or the unit circle for a
- * discrete system) are bracketed on the gain grid and refined.
+ * The root locus of a SISO open loop $L(s) = N(s)/D(s)$ (or $L(z)$): the roots of $D + kN$ for each gain $k$ (Evans,
+ * 1948). Branches start at the $n$ open-loop poles; $m$ of them end at the zeros and $n - m$ leave along asymptotes at
+ * angles $(2q + 1)\pi/(n - m)$ from the centroid $(\sum_i p_i - \sum_j z_j)/(n - m)$. Breakaway points are the real
+ * roots of $N'D - ND' = 0$ with a positive gain $k = -D/N$ there. Crossings of the stability boundary (the imaginary
+ * axis, or the unit circle for a discrete system) are bracketed on the gain grid and refined by Brent's method.
+ * Throws `DomainError` for a zero or improper open loop, or a negative or non-finite gain.
+ *
+ * @param L The SISO open loop $L = N/D$, proper.
+ * @param options The gains to evaluate, or the size of the default grid.
+ * @returns The gains, the branches over them, the open-loop poles and zeros, the asymptotes, the breakaway points and
+ *   the boundary crossings.
+ *
+ * @example $L = 1/(s(s + 1)(s + 2))$: breakaway near $-0.42$, and the crossing at $k = 6$, $s = i\sqrt 2$
+ * const locus = rootLocus(transferFunction([1], [1, 3, 2, 0]))
+ * print('asymptotes =', locus.asymptotes)
+ * print('breakaway =', locus.breakaway)
+ * print('crossings =', locus.crossings)
+ * print('branches =', locus.branches.length, ' gains =', locus.gains.shape)
+ *
+ * @example A discrete loop $1/(z^2 - 0.7z + 0.1)$ leaves the unit circle when $0.1 + k = 1$
+ * const locus = rootLocus(transferFunction([0, 0, 1], [1, -0.7, 0.1], { dt: 1 }), { points: 100 })
+ * print('crossings =', locus.crossings)
+ * print('breakaway =', locus.breakaway)
  */
 export function rootLocus(L: LtiSystem, options: RootLocusOptions = {}): RootLocus {
   const { num: n0, den: d0 } = rationalOf(L)
@@ -185,7 +249,18 @@ export function rootLocus(L: LtiSystem, options: RootLocusOptions = {}): RootLoc
   }
 }
 
-/** The closed-loop poles of 1 + kL = 0 at one gain k (the roots of D + kN). */
+/**
+ * The closed-loop poles of $1 + kL = 0$ at one gain $k$ (the roots of $D + kN$).
+ *
+ * @param L The SISO open loop $L = N/D$.
+ * @param gain The gain $k$.
+ * @returns The closed-loop poles as `{ re, im }`.
+ *
+ * @example $L = 1/(s(s + 2))$: a double pole at $-1$ when $k = 1$, then $-1 \pm i$ at $k = 2$
+ * const L = transferFunction([1], [1, 2, 0])
+ * print('k = 1:', closedLoopPolesAt(L, 1))
+ * print('k = 2:', closedLoopPolesAt(L, 2))
+ */
 export function closedLoopPolesAt(L: LtiSystem, gain: Scalar): ComplexNumber[] {
   const { num, den } = rationalOf(L)
   return rootsOf(characteristic(stripLeading([...num]), stripLeading([...den]), gain))

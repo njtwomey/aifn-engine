@@ -2,6 +2,9 @@
  * Multi-input pole placement by the robust eigenstructure assignment of Kautsky, Nichols & Van Dooren (1985, "Robust
  * pole assignment in linear state feedback", Int. J. Control 41(5)), method 0, as scipy's
  * `place_poles(method='KNV0')`, extended to complex-conjugate poles.
+ *
+ * The gain $\Kmat$ is for the feedback $\uvec = -\Kmat\xvec$, so that $\Amat - \Bmat\Kmat$ has the requested
+ * eigenvalues. Matrices are dense row-major arrays inside; a complex pair is carried as two real columns.
  */
 
 import { eig, eigh, factorDense, lstsq, qr, solveFactored, svd } from 'aifn-compute/numerics/linalg'
@@ -10,11 +13,15 @@ import { dense, fromData, imagPart, realPart, toFlat, type Matrix, type Tensor }
 import type { MatrixLike, Scalar, Size } from 'aifn-compute/foundation/contracts'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
+/** A dense row-major float64 array. */
 type F64 = dense.F64
 
 /** Options for `placePoles`. */
 export type PlacePolesOptions = {
-  /** Stop when |det X| changes by a relative amount below this between sweeps. Default 1e-3 (scipy's). */
+  /**
+   * Stop when $\lvert \det \Xmat \rvert$ changes by a relative amount below this between sweeps. Default 1e-3
+   * (scipy's); at most 1.
+   */
   rtol?: Scalar
   /** Most sweeps over the eigenvector columns. Default 30. */
   maxIterations?: Size
@@ -22,30 +29,45 @@ export type PlacePolesOptions = {
 
 /** The result of `placePoles`. */
 export type PolePlacementResult = {
-  /** The gain K (m × n): u = −Kx gives eig(A − BK) = the requested poles. */
+  /** The gain $\Kmat$ ($m \times n$): $\uvec = -\Kmat\xvec$ gives $\Amat - \Bmat\Kmat$ the requested poles. */
   K: Matrix
-  /** The requested poles in the solver's order (real ones ascending, then each conjugate pair, negative part first). */
+  /**
+   * The requested poles in the solver's order (real ones ascending, then each conjugate pair, negative imaginary part
+   * first), complex128.
+   */
   requested: Tensor
-  /** The eigenvalues of A − BK actually obtained, complex128, sorted as `eig`. */
+  /** The eigenvalues of $\Amat - \Bmat\Kmat$ actually obtained, complex128, sorted as `eig`. */
   closedLoop: Tensor
   /**
-   * The closed-loop eigenvector matrix X (n × n, complex128, unit columns, column j for `requested[j]`). The method
-   * maximises |det X|, i.e. makes X as well conditioned as it can, so the placed poles are insensitive to perturbation.
+   * The closed-loop eigenvector matrix $\Xmat$ ($n \times n$, complex128, unit columns, column $j$ for
+   * `requested[j]`). The method maximises $\lvert \det \Xmat \rvert$, i.e. makes $\Xmat$ as well conditioned as it
+   * can, so the placed poles are insensitive to perturbation.
    */
   X: Tensor
-  /** The condition number of X (κ₂); the bound on how far a perturbation of A − BK moves the poles. */
+  /**
+   * The condition number $\kappa_2(\Xmat)$; the bound on how far a perturbation of $\Amat - \Bmat\Kmat$ moves the
+   * poles.
+   */
   conditioning: Scalar
-  /** Sweeps taken (0 when B has full row rank or rank 1: nothing to optimise). */
+  /** Sweeps taken (0 when $\Bmat$ has full row rank or rank 1: nothing to optimise). */
   iterations: Size
-  /** The last relative change of |det X| (NaN when there was nothing to optimise). */
+  /** The last relative change of $\lvert \det \Xmat \rvert$ (NaN when there was nothing to optimise). */
   change: Scalar
   /** True when the change fell below `rtol` (or there was nothing to optimise). */
   converged: boolean
 }
 
+/** A pole as a complex number. */
 type Pole = { re: number; im: number }
 
-/** Real poles ascending, then conjugate pairs (negative imaginary part first, by real part), as scipy. */
+/**
+ * Real poles ascending, then conjugate pairs (negative imaginary part first, by real part), as scipy. A pole is real
+ * when its imaginary part is within $10^{-12}$ of the largest modulus (at least 1); throws `DomainError` when a
+ * complex pole has no conjugate.
+ *
+ * @param poles The requested poles, in any order.
+ * @returns The poles reordered, each pair as $a - ib$ then $a + ib$, real ones with imaginary part exactly 0.
+ */
 function orderPoles(poles: Pole[]): Pole[] {
   const size = Math.max(1, ...poles.map((p) => Math.hypot(p.re, p.im)))
   const isReal = (p: Pole) => Math.abs(p.im) <= 1e-12 * size
@@ -64,12 +86,29 @@ function orderPoles(poles: Pole[]): Pole[] {
   return out
 }
 
-/** A full QR's Q (m × m, row-major). */
+/**
+ * A full QR's $\Qmat$ ($m \times m$, row-major).
+ *
+ * @param a The matrix, row-major, $m \times n$.
+ * @param m Its rows.
+ * @param n Its columns.
+ * @returns The orthogonal factor $\Qmat$ of the complete QR, $m \times m$; its last $m - n$ columns span the
+ *   orthogonal complement of the columns of `a` when they are independent.
+ */
 function fullQ(a: F64, m: number, n: number): F64 {
   return dense.data(qr(fromData(a, [m, n]), { mode: 'complete' }).Q)
 }
 
-/** Columns [from, to) of a row-major r × c matrix. */
+/**
+ * Columns `from` to `to - 1` of a row-major $r \times c$ matrix.
+ *
+ * @param a The matrix, row-major.
+ * @param r Its rows.
+ * @param c Its columns.
+ * @param from The first column taken.
+ * @param to One past the last column taken.
+ * @returns The columns, row-major, $r \times (\text{to} - \text{from})$.
+ */
 function columns(a: F64, r: number, c: number, from: number, to: number): F64 {
   const w = to - from
   const out = new Float64Array(r * w)
@@ -77,27 +116,71 @@ function columns(a: F64, r: number, c: number, from: number, to: number): F64 {
   return out
 }
 
-/** log |det X| of a row-major square matrix (−∞ when singular). */
+/**
+ * $\log \lvert \det \Xmat \rvert$ of a row-major square matrix ($-\infty$ when singular).
+ *
+ * @param x The matrix $\Xmat$, row-major, $n^2$ values.
+ * @param n Its order.
+ * @returns The log of the absolute determinant, by LU.
+ */
 function logAbsDet(x: F64, n: number): number {
   return factorDense(x, n).logAbsDet
 }
 
 /**
- * State-feedback gain K with eig(A − BK) equal to the requested poles, for a controllable pair (A, B) with m ≥ 1
- * inputs. With several inputs the gain is not unique: the freedom is in the closed-loop eigenvectors, and the
- * Kautsky–Nichols–Van Dooren method 0 chooses them to make the eigenvector matrix X as well conditioned as possible.
+ * State-feedback gain $\Kmat$ with $\operatorname{eig}(\Amat - \Bmat\Kmat)$ equal to the requested poles, for a
+ * controllable pair $(\Amat, \Bmat)$ with $m \ge 1$ inputs. With several inputs the gain is not unique: the freedom
+ * is in the closed-loop eigenvectors, and the Kautsky–Nichols–Van Dooren method 0 chooses them to make the eigenvector
+ * matrix $\Xmat$ as well conditioned as possible.
  *
- * B = [U₀ U₁][Z; 0] (QR, rank r). Each eigenvector x_j must lie in S_j = ker U₁ᵀ(A − λ_j I) (an r-dimensional space for a
- * controllable pair), because then A − BK = XΛX⁻¹ is solvable for K: K = −Z⁻¹U₀ᵀ(XΛX⁻¹ − A). Method 0 sweeps over the
- * columns, replacing x_j by the unit vector of S_j closest to orthogonal to the other columns: the projection onto
- * S_j of the normal to their span. Each such replacement can only increase |det X| (for unit columns, |det X| ≤ 1 with
- * equality for orthonormal X), and the sweeps stop when |det X| changes by less than `rtol` relative.
+ * $\Bmat = [\Umat_0, \Umat_1] \begin{bmatrix} \Zmat \\ \zeros \end{bmatrix}$ (QR, rank $r$). Each eigenvector
+ * $\xvec_j$ must lie in $\Scal_j = \ker \Umat_1^\top(\Amat - \lambda_j \Imat)$ (an $r$-dimensional space for a
+ * controllable pair), because then $\Amat - \Bmat\Kmat = \Xmat\Lambdamat\Xmat^{-1}$ is solvable for $\Kmat$:
+ * $\Kmat = -\Zmat^{-1}\Umat_0^\top(\Xmat\Lambdamat\Xmat^{-1} - \Amat)$. Method 0 sweeps over the columns, replacing
+ * $\xvec_j$ by the unit vector of $\Scal_j$ closest to orthogonal to the other columns: the projection onto
+ * $\Scal_j$ of the normal to their span. Each such replacement can only increase $\lvert \det \Xmat \rvert$ (for
+ * unit columns, $\lvert \det \Xmat \rvert \le 1$ with equality for orthonormal $\Xmat$), and the sweeps stop when
+ * $\lvert \det \Xmat \rvert$ changes by less than `rtol` relative.
  *
- * Real poles follow scipy's KNV0 step for step. A complex pair λ, λ̄ (scipy's KNV0 rejects them) is held as the real
- * columns [Re x, Im x], with S_j realified to {(xᵣ, xᵢ) : U₁ᵀ[(A − aI)xᵣ + b xᵢ] = 0, U₁ᵀ[(A − aI)xᵢ − b xᵣ] = 0} for
- * λ = a + ib; the update picks the unit (xᵣ, xᵢ) in it that maximises |det X| with the other n − 2 columns fixed (an
- * extreme eigenvector of a 2r × 2r symmetric form), the pair analogue of the real update. When B has full row rank, K is found by least squares and X = I; with one input K is
- * unique (as Ackermann's formula) and no sweep is needed.
+ * Real poles follow scipy's KNV0 step for step. A complex pair $\lambda, \bar\lambda$ (scipy's KNV0 rejects them) is
+ * held as the real columns $[\operatorname{Re} \xvec, \operatorname{Im} \xvec]$, with $\Scal_j$ realified to the
+ * pairs $(\xvec_r, \xvec_i)$ with $\Umat_1^\top[(\Amat - a\Imat)\xvec_r + b\xvec_i] = \zeros$ and
+ * $\Umat_1^\top[(\Amat - a\Imat)\xvec_i - b\xvec_r] = \zeros$ for $\lambda = a + ib$; the update picks the unit
+ * $(\xvec_r, \xvec_i)$ in it that maximises $\lvert \det \Xmat \rvert$ with the other $n - 2$ columns fixed (an
+ * extreme eigenvector of a $2r \times 2r$ symmetric form), the pair analogue of the real update. When $\Bmat$ has
+ * full row rank, $\Kmat$ is found by least squares and $\Xmat = \Imat$; with one input $\Kmat$ is unique (as
+ * Ackermann's formula) and no sweep is needed.
+ *
+ * Throws `DomainError` when $\Amat$ is not square, the number of poles is not $n$, a complex pole lacks its conjugate,
+ * a pole is repeated more than $\rank \Bmat$ times, $\Bmat$ has dependent columns, or $\Xmat$ comes out singular
+ * (typically an uncontrollable pair).
+ *
+ * @param plant The pair to place: `A` ($n \times n$) and `B` ($n \times m$, a matrix even for one input).
+ * @param poles The $n$ requested closed-loop poles, complex ones with their conjugates.
+ * @param options The stopping rule of the sweeps.
+ * @param options.rtol Stop when the relative change of $\lvert \det \Xmat \rvert$ over a sweep falls below this (and
+ *   $\lvert \det \Xmat \rvert$ is above $\sqrt{\varepsilon}$); at most 1.
+ * @param options.maxIterations The most sweeps; at least 1. Reaching it leaves `converged` false.
+ * @returns The gain, the poles requested and obtained, the eigenvector matrix and its conditioning, and the sweeps'
+ *   convergence.
+ *
+ * @example One input: the double integrator's gain for poles $-1$ and $-2$ is unique, $\Kmat = [2, 3]$
+ * const r = placePoles({ A: [[0, 1], [0, 0]], B: [[0], [1]] }, [-1, -2])
+ * print('K =', r.K)
+ * print('closed loop =', r.closedLoop)
+ *
+ * @example A complex pair $-1 \pm i$ gives $s^2 + 2s + 2$, so $\Kmat = [2, 2]$
+ * const r = placePoles({ A: [[0, 1], [0, 0]], B: [[0], [1]] }, [{ re: -1, im: 1 }, { re: -1, im: -1 }])
+ * print('K =', r.K)
+ * print('requested =', r.requested)
+ *
+ * @example Two inputs on a triple integrator: the sweeps choose a well-conditioned $\Xmat$
+ * const A = [[0, 1, 0], [0, 0, 1], [0, 0, 0]]
+ * const B = [[0, 0], [1, 0], [0, 1]]
+ * const r = placePoles({ A, B }, [-1, -2, -3])
+ * print('K =', r.K)
+ * print('closed loop =', r.closedLoop)
+ * print('conditioning =', r.conditioning, ' iterations =', r.iterations, ' converged =', r.converged)
  */
 export function placePoles(
   plant: { A: MatrixLike; B: MatrixLike },
