@@ -1,25 +1,40 @@
 /**
  * The Porter stemmer as published (Porter 1980, "An algorithm for suffix stripping", Program 14(3)): five steps of
  * suffix rules `(condition) S1 → S2`, each step firing at most the rule with the longest matching suffix, with
- * conditions on the measure m of the remaining stem. Words of one or two letters are left alone, as in Porter's own
+ * conditions on the measure $m$ of the remaining stem. Words of one or two letters are left alone, as in Porter's own
  * implementation. The later revisions (Porter2/Snowball, the "logi" and "bli" rules of the C release) are not applied.
  */
 
 /** One rule that fired: the step (`1a` … `5b`), the rule as written in the paper, and the word before and after. */
 export interface PorterStep {
+  /** The step the rule belongs to: `1a`, `1b`, `1c`, `2`, `3`, `4`, `5a` or `5b`. */
   readonly step: string
+  /** The rule in the paper's notation, e.g. `(m>0) EED → EE`, with `∅` for an empty suffix. */
   readonly rule: string
+  /** The lower-cased word before the rule fired. */
   readonly before: string
+  /** The word after the rule fired. */
   readonly after: string
 }
 
 /** A stem with the rules that produced it. */
 export interface PorterTrace {
+  /** The word as given, case kept. */
   readonly word: string
+  /** Its stem, lower-cased. */
   readonly stem: string
+  /** The rules that fired, in order; empty when the word was left alone. */
   readonly steps: readonly PorterStep[]
 }
 
+/**
+ * Whether the letter at `i` is a consonant in Porter's sense: any letter but a, e, i, o, u, and y unless it follows a
+ * consonant.
+ *
+ * @param w The lower-case word.
+ * @param i The index of the letter in `w`.
+ * @returns True for a consonant, false for a vowel.
+ */
 function isConsonant(w: string, i: number): boolean {
   const c = w[i]
   if ('aeiou'.includes(c)) return false
@@ -28,23 +43,61 @@ function isConsonant(w: string, i: number): boolean {
   return true
 }
 
-/** The consonant/vowel pattern of a word in Porter's sense, e.g. "trouble" → "CCVVCCV". */
+/**
+ * The consonant/vowel pattern of a word in Porter's sense, e.g. "trouble" gives "CCVVCCV". A "y" after a consonant
+ * counts as a vowel.
+ *
+ * @param word The word, in lower case (an upper-case letter counts as a consonant).
+ * @returns One `C` or `V` per UTF-16 code unit of `word`.
+ *
+ * @example The letter y can be either
+ * print('trouble', consonantVowelForm('trouble'))
+ * print('syzygy ', consonantVowelForm('syzygy'))
+ * print('toy    ', consonantVowelForm('toy'))
+ */
 export function consonantVowelForm(word: string): string {
   let out = ''
   for (let i = 0; i < word.length; i++) out += isConsonant(word, i) ? 'C' : 'V'
   return out
 }
 
-/** Porter's measure m of a stem: the number of VC pairs in its form [C](VC)^m[V] ("tree" 0, "trouble" 1, "oaten" 2). */
+/**
+ * Porter's measure $m$ of a stem: the number of VC pairs in its form $[C](VC)^m[V]$, with runs of consonants and runs
+ * of vowels each counted as one.
+ *
+ * @param stem The stem, in lower case.
+ * @returns The measure $m \ge 0$.
+ *
+ * @example The measures of Porter's paper
+ * for (const w of ['tr', 'tree', 'trouble', 'oats', 'troubles', 'oaten', 'private']) print(w, porterMeasure(w))
+ */
 export function porterMeasure(stem: string): number {
   const form = consonantVowelForm(stem).replace(/C+/g, 'C').replace(/V+/g, 'V')
   return (form.match(/VC/g) ?? []).length
 }
 
+/**
+ * Porter's condition `*v*`: the stem contains a vowel.
+ *
+ * @param s The stem, in lower case.
+ * @returns True when some letter of `s` is a vowel.
+ */
 const hasVowel = (s: string) => consonantVowelForm(s).includes('V')
+/**
+ * Porter's condition `*d`: the stem ends with a double consonant ("hopp", "fall").
+ *
+ * @param s The stem, in lower case.
+ * @returns True when the last two letters are the same consonant.
+ */
 const endsDoubleConsonant = (s: string) =>
   s.length >= 2 && s[s.length - 1] === s[s.length - 2] && isConsonant(s, s.length - 1)
-/** *o: the stem ends consonant–vowel–consonant, and the last consonant is not w, x or y ("hop", "fil"). */
+/**
+ * Porter's condition `*o`: the stem ends consonant, vowel, consonant, and the last consonant is not w, x or y ("hop",
+ * "fil").
+ *
+ * @param s The stem, in lower case.
+ * @returns True when the condition holds; false for a stem of fewer than three letters.
+ */
 const endsCvc = (s: string) => {
   const n = s.length
   return n >= 3 && isConsonant(s, n - 3) && !isConsonant(s, n - 2) && isConsonant(s, n - 1) && !'wxy'.includes(s[n - 1])
@@ -87,9 +140,26 @@ const STEP4: readonly Rule[] = 'al ance ence er ic able ible ant ement ment ent 
   .split(' ')
   .map((s): Rule => [s, ''])
 
+/**
+ * A suffix as the paper writes it in a rule: upper case, and `∅` for the empty suffix.
+ *
+ * @param s The suffix, in lower case.
+ * @returns The suffix for display.
+ */
 const upper = (s: string) => s.toUpperCase() || '∅'
 
-/** Porter's stemmer with the rules that fired, step by step. */
+/**
+ * Porter's stemmer with the rules that fired, step by step. The word is lower-cased first; a word of one or two
+ * letters, or one with a character outside a to z, is returned lower-cased with no steps.
+ *
+ * @param word The word to stem.
+ * @returns The word, its stem, and the rules that fired in order.
+ *
+ * @example The steps that take "generalizations" to its stem
+ * const t = porterStemTrace('generalizations')
+ * for (const s of t.steps) print(s.step, s.rule, ':', s.before, '→', s.after)
+ * print('stem =', t.stem)
+ */
 export function porterStemTrace(word: string): PorterTrace {
   const original = word
   let w = word.toLowerCase()
@@ -155,7 +225,16 @@ export function porterStemTrace(word: string): PorterTrace {
   return { word: original, stem: w, steps }
 }
 
-/** The Porter stem of one word (lower-cased; words that are not all letters a–z are returned lower-cased). */
+/**
+ * The Porter stem of one word, by the rules of the 1980 paper. The word is lower-cased; a word of one or two letters,
+ * or one with a character outside a to z, is returned lower-cased and otherwise unchanged.
+ *
+ * @param word The word to stem.
+ * @returns Its stem, in lower case. Stems need not be words ("ponies" gives "poni").
+ *
+ * @example A handful of words
+ * for (const w of ['running', 'caresses', 'ponies', 'relational', 'Hopping', 'sky']) print(w, '→', porterStem(w))
+ */
 export function porterStem(word: string): string {
   return porterStemTrace(word).stem
 }

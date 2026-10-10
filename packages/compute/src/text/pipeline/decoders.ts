@@ -8,7 +8,11 @@
 import { byteAlphabet } from 'aifn-compute/text/subword'
 import { byteOfToken } from './models'
 
-/** A decoder stage. */
+/**
+ * A decoder stage, tagged by `type`; its fields are the arguments of the factory of the same name (`metaspace`:
+ * `replacement` and `prependScheme`; `wordPiece`: `prefix` and `cleanup`; `strip`: `content`, `left` and `right`;
+ * `replace`: `pattern` and `content`; `endOfWord`: `suffix`; `sequence`: `decoders`).
+ */
 export type Decoder =
   | { readonly type: 'byteLevel' }
   | { readonly type: 'metaspace'; readonly replacement: string; readonly prependScheme: 'always' | 'first' | 'never' }
@@ -20,12 +24,31 @@ export type Decoder =
   | { readonly type: 'endOfWord'; readonly suffix: string }
   | { readonly type: 'sequence'; readonly decoders: readonly Decoder[] }
 
-/** Byte symbols back to bytes, decoded as UTF-8 (invalid sequences become U+FFFD). */
+/**
+ * Byte symbols back to bytes, decoded as UTF-8 (invalid sequences become U+FFFD). The tokens are joined first, so the
+ * result is one string; a character that is not a byte symbol is kept as its own UTF-8 bytes.
+ *
+ * @returns The decoder.
+ *
+ * @example GPT-2 tokens back to text, and half a character
+ * print(applyDecoder(byteLevelDecoder(), ['Hey', 'Ġfriend', ',', 'ĠcafÃ©', '!']))
+ * print(applyDecoder(byteLevelDecoder(), ['caf', 'Ã']))
+ */
 export function byteLevelDecoder(): Decoder {
   return { type: 'byteLevel' }
 }
 
-/** "▁" back to spaces, dropping the space the pre-tokeniser put before the first word. */
+/**
+ * "▁" back to spaces, dropping the space the pre-tokeniser put before the first word.
+ *
+ * @param options `replacement` (default "▁"), and `prependScheme` (default `always`): unless `never`, a leading space
+ *   of the first token is dropped.
+ * @returns The decoder.
+ *
+ * @example SentencePiece pieces back to text
+ * print(JSON.stringify(applyDecoder(metaspaceDecoder(), ['▁Hey', '▁fri', 'end', '!'])))
+ * print(JSON.stringify(applyDecoder(metaspaceDecoder({ prependScheme: 'never' }), ['▁Hey', '▁friend'])))
+ */
 export function metaspaceDecoder(
   options: { replacement?: string; prependScheme?: 'always' | 'first' | 'never' } = {},
 ): Decoder {
@@ -36,37 +59,101 @@ export function metaspaceDecoder(
   }
 }
 
-/** Join "##" continuations to the piece before and space the rest; `cleanup` removes spaces before punctuation. */
+/**
+ * Join "##" continuations to the piece before and space the rest; `cleanup` removes spaces before punctuation.
+ *
+ * @param options `prefix` (default `##`), and `cleanup` (default true), Hugging Face's clean-up: no space before
+ *   `.`, `?`, `!` and `,`, and contractions such as `n't` and `'s` rejoined.
+ * @returns The decoder.
+ *
+ * @example With and without the clean-up
+ * print(applyDecoder(wordPieceDecoder(), ['the', 'mat', '##s', ',', 'they', 'do', "n't", '.']))
+ * print(applyDecoder(wordPieceDecoder({ cleanup: false }), ['the', 'mat', '##s', '.']))
+ */
 export function wordPieceDecoder(options: { prefix?: string; cleanup?: boolean } = {}): Decoder {
   return { type: 'wordPiece', prefix: options.prefix ?? '##', cleanup: options.cleanup ?? true }
 }
 
-/** Runs of `<0xNN>` byte tokens back to the characters their bytes encode. */
+/**
+ * Runs of `<0xNN>` byte tokens back to the characters their bytes encode. A run that is not valid UTF-8 becomes one
+ * U+FFFD per byte; other tokens pass through.
+ *
+ * @returns The decoder.
+ *
+ * @example A complete character, and a lone byte
+ * print(applyDecoder(byteFallbackDecoder(), ['caf', '<0xC3>', '<0xA9>']))
+ * print(applyDecoder(byteFallbackDecoder(), ['a', '<0xC3>', 'b']))
+ */
 export function byteFallbackDecoder(): Decoder {
   return { type: 'byteFallback' }
 }
 
-/** Join every token into one string. */
+/**
+ * Join every token into one string.
+ *
+ * @returns The decoder.
+ *
+ * @example Fused, against no decoder (joined by spaces)
+ * print(applyDecoder(fuseDecoder(), ['lo', 'w', 'er']))
+ * print(applyDecoder(null, ['lo', 'w', 'er']))
+ */
 export function fuseDecoder(): Decoder {
   return { type: 'fuse' }
 }
 
-/** Remove up to `left` copies of `content` from the start of each token and `right` from its end. */
+/**
+ * Remove up to `left` copies of `content` from the start of each token and `right` from its end.
+ *
+ * @param content The string to remove.
+ * @param left The most copies removed from the start of each token.
+ * @param right The most copies removed from the end of each token.
+ * @returns The decoder.
+ *
+ * @example One leading space off each token, and two trailing underscores
+ * print(JSON.stringify(applyDecoder(stripDecoder(' ', 1, 0), [' Hey', ' friend'])))
+ * print(applyDecoder(stripDecoder('_', 0, 2), ['ab__', 'c___']))
+ */
 export function stripDecoder(content: string, left: number, right: number): Decoder {
   return { type: 'strip', content, left, right }
 }
 
-/** Replace a pattern (regular-expression source) in each token. */
+/**
+ * Replace a pattern (regular-expression source) in each token.
+ *
+ * @param pattern The regular expression's source, compiled with the `gu` flags.
+ * @param content The literal replacement.
+ * @returns The decoder.
+ *
+ * @example The SentencePiece marker to spaces
+ * print(JSON.stringify(applyDecoder(replaceDecoder('▁', ' '), ['▁Hey', '▁friend'])))
+ */
 export function replaceDecoder(pattern: string, content: string): Decoder {
   return { type: 'replace', pattern, content }
 }
 
-/** The end-of-word symbol of character-level BPE ("</w>") becomes a space, and nothing after the last token. */
+/**
+ * The end-of-word symbol of character-level BPE ("</w>") becomes a space, and nothing after the last token.
+ *
+ * @param suffix The end-of-word symbol.
+ * @returns The decoder.
+ *
+ * @example Sennrich-style tokens back to words
+ * print(JSON.stringify(applyDecoder(endOfWordDecoder(), ['low', 'er</w>', 'low', 'est</w>'])))
+ */
 export function endOfWordDecoder(suffix = '</w>'): Decoder {
   return { type: 'endOfWord', suffix }
 }
 
-/** Decoders applied in order. */
+/**
+ * Decoders applied in order, each to the token strings the one before returned.
+ *
+ * @param decoders The decoders, first applied first.
+ * @returns The decoder.
+ *
+ * @example LLaMA's decoder: markers to spaces, bytes back, fused, the first space stripped
+ * const d = decoderSequence(replaceDecoder('▁', ' '), byteFallbackDecoder(), fuseDecoder(), stripDecoder(' ', 1, 0))
+ * print(JSON.stringify(applyDecoder(d, ['▁caf', '<0xC3>', '<0xA9>', '▁ok'])))
+ */
 export function decoderSequence(...decoders: Decoder[]): Decoder {
   return { type: 'sequence', decoders }
 }
@@ -76,6 +163,13 @@ const lossy = new TextDecoder('utf-8', { fatal: false })
 
 let fromSymbol: Map<string, number> | null = null
 
+/**
+ * Apply one decoder to a list of token strings.
+ *
+ * @param d The decoder.
+ * @param tokens The token strings; not modified.
+ * @returns The decoded strings, whose concatenation is the text.
+ */
 function decodeOne(d: Decoder, tokens: readonly string[]): string[] {
   switch (d.type) {
     case 'byteLevel': {
@@ -143,6 +237,12 @@ function decodeOne(d: Decoder, tokens: readonly string[]): string[] {
 }
 
 // Hugging Face's WordPiece clean-up, applied to each decoded token.
+/**
+ * The clean-up of `wordPieceDecoder`: no space before `.`, `?`, `!` and `,`, and contractions rejoined.
+ *
+ * @param s A decoded token, with the space put before it.
+ * @returns It with the spaces before punctuation and contractions removed.
+ */
 function cleanup(s: string): string {
   return s
     .replaceAll(' .', '.')
@@ -158,7 +258,16 @@ function cleanup(s: string): string {
     .replaceAll(" 're", "'re")
 }
 
-/** Decode token strings to text with a decoder (none: the tokens joined by spaces, as Hugging Face does). */
+/**
+ * Decode token strings to text with a decoder (none: the tokens joined by spaces, as Hugging Face does).
+ *
+ * @param d The decoder, or null.
+ * @param tokens The token strings, in order.
+ * @returns The text.
+ *
+ * @example WordPiece tokens back to text
+ * print(applyDecoder(wordPieceDecoder(), ['un', '##want', '##ed', 'cat', '##s', '!']))
+ */
 export function applyDecoder(d: Decoder | null, tokens: readonly string[]): string {
   return d ? decodeOne(d, tokens).join('') : tokens.join(' ')
 }

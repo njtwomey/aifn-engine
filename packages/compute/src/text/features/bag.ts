@@ -8,15 +8,20 @@ import { buildVocabulary, tokenCounts, tokenId, vocabularyOf, type Vocabulary } 
 
 /** A document–term matrix with the vocabulary of its columns. */
 export interface BagOfWords {
+  /** The tag `'bag-of-words'`. */
   readonly kind: 'bag-of-words'
   /** Counts or presence (float64 [D, V]). */
   readonly matrix: Tensor
+  /** The vocabulary: column $j$ counts the token with id $j$. */
   readonly vocabulary: Vocabulary
 }
 
 /** Options of {@link bagOfWords}. */
 export interface BagOfWordsOptions {
-  /** The columns; default built from the documents, in code-point order, without specials (as `CountVectorizer`). */
+  /**
+   * The columns; default built from the documents, in code-unit order (code-point order outside the astral planes),
+   * without specials (as `CountVectorizer`).
+   */
   vocabulary?: Vocabulary
   /** Presence (1/0) instead of counts (default false). */
   binary?: boolean
@@ -29,8 +34,23 @@ export interface BagOfWordsOptions {
 }
 
 /**
- * The document–term matrix of tokenised documents. A token outside the vocabulary is counted in the unknown column if
- * the vocabulary has one, and ignored otherwise.
+ * The document–term matrix of tokenised documents, as scikit-learn's `CountVectorizer` on pre-tokenised input. A token
+ * outside the vocabulary is counted in the unknown column if the vocabulary has one, and ignored otherwise.
+ *
+ * @param documents The tokenised documents, one row each.
+ * @param options The vocabulary (or how to build one) and whether to record presence; see {@link BagOfWordsOptions}.
+ * @returns The matrix (float64 [D, V]) and the vocabulary of its columns.
+ *
+ * @example Counts and presence
+ * const docs = [['the', 'cat', 'sat'], ['the', 'cat', 'saw', 'the', 'cat'], ['a', 'dog']]
+ * const b = bagOfWords(docs)
+ * print('terms ', b.vocabulary.tokens)
+ * print('counts', b.matrix)
+ * print('binary', bagOfWords(docs, { binary: true }).matrix)
+ *
+ * @example Dropping terms in every document but one, as `max_df`
+ * const docs = [['the', 'cat', 'sat'], ['the', 'cat', 'saw', 'the', 'cat'], ['the', 'dog']]
+ * print(bagOfWords(docs, { maxDocumentShare: 0.5 }).vocabulary.tokens)
  */
 export function bagOfWords(documents: readonly (readonly string[])[], options: BagOfWordsOptions = {}): BagOfWords {
   let vocabulary = options.vocabulary

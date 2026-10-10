@@ -42,6 +42,12 @@ const WORDS =
   '|(?:\\.(?:\\s*\\.){1,})' +
   '|(?:\\S)'
 
+/**
+ * The alternatives of the tokeniser's regular expression, in the order they are tried.
+ *
+ * @param phone Whether the phone-number alternative is included (after URLs, before emoticons).
+ * @returns The alternatives as regular-expression sources, to be joined with `|`.
+ */
 const PARTS = (phone: boolean) => [
   URLS,
   ...(phone ? [PHONE] : []),
@@ -92,6 +98,15 @@ const ENTITIES =
 
 let entities: Map<string, number> | null = null
 
+/**
+ * The text an HTML entity stands for, as NLTK decodes it: a named entity of HTML 4, or a decimal or hexadecimal
+ * reference (0x80 to 0x9F read as Windows-1252). An entity that names nothing, or no valid code point, decodes to the
+ * empty string.
+ *
+ * @param m A match of `ENTITY_RE`: group 1 is `#` or `#x` for a numeric reference (empty for a name), group 2 the `x`
+ *   and group 3 the name or digits.
+ * @returns The decoded character, or the empty string.
+ */
 function entity(m: RegExpExecArray): string {
   entities ??= new Map(
     ENTITIES.split(' ').map((e) => {
@@ -117,7 +132,7 @@ function entity(m: RegExpExecArray): string {
 export interface CasualOptions {
   /** Keep case (default true); otherwise every token but an emoticon is lower-cased. */
   preserveCase?: boolean
-  /** Shorten every run of three or more of one character to three ("waaaaay" → "waaay"; default false). */
+  /** Shorten every run of three or more of one character to three ("waaaaay" becomes "waaay"; default false). */
   reduceLength?: boolean
   /** Remove @-handles (default false). */
   stripHandles?: boolean
@@ -128,6 +143,23 @@ export interface CasualOptions {
 /**
  * Tokenise casual text (NLTK's `TweetTokenizer`), with offsets into the original text: a token produced from decoded
  * entities or shortened runs points at the whole stretch of text it came from.
+ *
+ * @param text The text to tokenise; HTML entities in it are decoded first.
+ * @param options Case, length reduction, handle stripping and phone numbers; see {@link CasualOptions}.
+ * @returns The tokens (decoded and, with the options, lower-cased or shortened), with offsets into `text`.
+ *
+ * @example NLTK's example sentence
+ * print(casualTokenise('This is a cooool #dummysmiley: :-) :-P <3 and some arrows < > -> <--').tokens)
+ *
+ * @example Handles stripped, lengthening reduced, case folded
+ * const t = casualTokenise('@remy This is waaaaayyyy too much for you!!!!!! &amp; :-D', {
+ *   stripHandles: true,
+ *   reduceLength: true,
+ *   preserveCase: false,
+ * })
+ * print(t.tokens)
+ * const k = t.tokens.indexOf('&')
+ * print('"&" comes from', JSON.stringify(t.source.slice(t.offsets.data[2 * k], t.offsets.data[2 * k + 1])))
  */
 export function casualTokenise(text: string, options: CasualOptions = {}): Tokenisation {
   const { preserveCase = true, reduceLength = false, stripHandles = false, phoneNumbers = true } = options

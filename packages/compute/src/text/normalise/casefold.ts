@@ -1,8 +1,13 @@
 /**
+ * Data: the exceptions to "fold as lower case" in Unicode full case folding, the table that `caseFold` reads.
+ */
+
+/**
  * The characters whose Unicode full case folding (CaseFolding.txt, statuses C and F) differs from their lower-case
- * mapping: ß → ss, final sigma → σ, the Greek iota-subscript forms, ligatures such as ﬁ, and Cherokee letters, which
- * fold to upper case. Each entry is `code:code.code…` in hexadecimal. Generated from Python's `str.casefold`
- * (Unicode 15.0) against `str.lower`; every other character folds as its lower case.
+ * mapping: "ß" folds to "ss", final sigma "ς" to "σ", the Greek iota-subscript forms gain an iota, ligatures such as
+ * "ﬁ" split into their letters, and Cherokee letters fold to upper case. Each space-separated entry is
+ * `code:code.code…` in hexadecimal: the code point, then the code points it folds to. Generated from Python's
+ * `str.casefold` (Unicode 15.0) against `str.lower`; every other character folds as its lower case.
  */
 export const FOLDING_EXCEPTIONS =
   'b5:3bc df:73.73 149:2bc.6e 17f:73 1f0:6a.30c 345:3b9 390:3b9.308.301 3b0:3c5.308.301 3c2:3c3 3d0:3b2 3d1:3b8 ' +

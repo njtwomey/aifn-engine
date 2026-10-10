@@ -1,9 +1,32 @@
 /**
- * `aifn-compute/text/pipeline`: tokenisers as pipelines of composable stages, as Hugging Face `tokenizers`. Normalisers
- * (Unicode forms, case, accents, replace, prepend) that keep offsets; pre-tokenisers (white space, punctuation, BERT,
- * digits, regular-expression splits with the GPT-2, cl100k and o200k patterns, Metaspace, ByteLevel, Treebank,
- * casual); models (BPE with byte fallback and BPE-dropout, WordPiece, unigram, word level, character, byte); template
- * post-processing with truncation (stride, overflow) and padding; decoders; training through the pipeline.
+ * `aifn-compute/text/pipeline`: tokenisers as pipelines of composable stages, as Hugging Face `tokenizers`.
+ *
+ * - Assemble and run: `tokeniser` from its stages, `withStages` to swap some, `encodeText` (one text or a pair) and
+ *   `encodeBatch` (padded to the longest), `decodeIds`, `vocabularySize`, `encodingTokenisation` (the first sequence
+ *   as a `Tokenisation`) and `byteTokeniser` (ByT5, ready-made).
+ * - Normalisers that keep offsets: `unicodeNormaliser`, `lowercaseNormaliser`, `caseFoldNormaliser`,
+ *   `stripAccentsNormaliser`, `replaceNormaliser`, `prependNormaliser`, `stripNormaliser`,
+ *   `collapseWhitespaceNormaliser`, `normaliserSequence`; `applyNormaliser` runs one on aligned text.
+ * - Pre-tokenisers: `whitespacePreTokeniser`, `whitespaceSplitPreTokeniser`, `bertPreTokeniser`,
+ *   `punctuationPreTokeniser`, `digitsPreTokeniser`, `splitPreTokeniser` (any pattern, including GPT-2's, cl100k and
+ *   o200k), `metaspacePreTokeniser` (SentencePiece), `byteLevelPreTokeniser` (GPT-2), `treebankPreTokeniser`,
+ *   `casualPreTokeniser`, `preTokeniserSequence`; `applyPreTokeniser` and `splitAligned` run them.
+ * - Models: `bpeStage` (byte fallback, BPE-dropout), `wordPieceStage`, `unigramStage`, `wordLevelStage`,
+ *   `characterStage` and `byteStage`, from a trained state or a given vocabulary (`vocabularyWithIds`, with the ids of
+ *   a `tokenizer.json`); `modelSegment` segments one pre-token; `byteToken`, `byteOfToken` and `BYTE_TOKENS` name the
+ *   `<0xNN>` byte tokens.
+ * - Post-processing: `templateProcessor` and `bertProcessor` add special tokens with type ids; `truncation` (stride,
+ *   overflowing windows) and `padding` (fixed, to the longest, to a multiple); `truncationWindows`, `pairLengths` and
+ *   `addedTokens` are the arithmetic behind them.
+ * - Decoders: `byteLevelDecoder`, `metaspaceDecoder`, `wordPieceDecoder`, `byteFallbackDecoder`, `fuseDecoder`,
+ *   `stripDecoder`, `replaceDecoder`, `endOfWordDecoder`, `decoderSequence`; `applyDecoder` runs one.
+ * - Training through the pipeline: `trainTokeniser` trains the model on the pre-tokens the pipeline cuts
+ *   (`preTokenCounts`); `trainingSteps` and `trainedModel` step through it. The registry: `pipelineAlgorithms` and
+ *   `pipelineFunctions`.
+ *
+ * Every stage is plain data (a tagged object), so a tokeniser can be stored, sent to a worker and rebuilt. Offsets are
+ * in UTF-16 code units of the text as typed, through every normalisation. Failures (a token with no id, a bad
+ * template or stride) throw `DomainError`.
  */
 
 export {

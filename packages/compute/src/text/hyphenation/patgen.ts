@@ -3,10 +3,11 @@
  * Breitenlohner, "PATGEN", 1991). Patterns are learned in levels. Level 1 (odd) adds hyphenating patterns, level 2
  * (even) inhibiting ones that undo level 1's errors, level 3 hyphenating again, and so on. A level runs one pass per
  * pattern length. In a pass, every substring of every dotted training word, with a digit at one of its slots, is a
- * candidate. At an odd level k a candidate is *good* at each gap where it would put a missing hyphen (the gap is a
+ * candidate. At an odd level $k$ a candidate is *good* at each gap where it would put a missing hyphen (the gap is a
  * dictionary hyphen and its current value is even) and *bad* at each gap where it would put a wrong one (not a hyphen,
  * value even). At an even level it is good where it would remove a wrong hyphen and bad where it would remove a right
- * one. A candidate is kept, with digit k, when good·goodWeight − bad·badWeight ≥ threshold. High thresholds keep
+ * one. A candidate is kept, with digit $k$, when
+ * $\text{good} \cdot \text{goodWeight} - \text{bad} \cdot \text{badWeight} \ge \text{threshold}$. High thresholds keep
  * only patterns that are nearly always right, so the levels trade coverage against errors.
  *
  * Gaps outside the margins (`leftMin`, `rightMin`) are neither counted nor hyphenated. Each step of `patgenSteps` is
@@ -21,14 +22,22 @@ import { formatPattern, hyphenationPatterns, patternSlots, type HyphenationPatte
 
 /** A hyphenated training word: its letters and the gaps (after letter i) that take a hyphen. */
 export interface HyphenatedWord {
+  /** The word, in the lower-case letters a to z. */
   readonly word: string
+  /** The gaps that take a hyphen, gap $i$ after letter $i$ (counting from 0), as `parseHyphenated` returns them. */
   readonly hyphens: readonly number[]
 }
 
-/** The selection rule of one level: keep a candidate when good·goodWeight − bad·badWeight ≥ threshold. */
+/**
+ * The selection rule of one level: keep a candidate when
+ * $\text{good} \cdot \text{goodWeight} - \text{bad} \cdot \text{badWeight} \ge \text{threshold}$.
+ */
 export interface PatgenLevel {
+  /** The weight of each gap the candidate would fix. */
   readonly goodWeight: number
+  /** The weight of each gap the candidate would break. */
   readonly badWeight: number
+  /** The least weighted score a candidate needs to be kept. */
   readonly threshold: number
   /** The shortest and longest pattern (letters, counting `.`) of the level's passes. */
   readonly lengths: readonly [number, number]
@@ -56,26 +65,33 @@ export const PATGEN_LEVELS: readonly PatgenLevel[] = [
 
 /** Hyphens found (tp), wrongly inserted (fp) and missed (fn) over a word list. */
 export interface HyphenCounts {
+  /** Dictionary hyphens the patterns find. */
   readonly tp: number
+  /** Hyphens the patterns insert that the dictionary does not have. */
   readonly fp: number
+  /** Dictionary hyphens the patterns miss. */
   readonly fn: number
 }
 
 /** What one pass did. */
 export interface PatgenPass {
+  /** The level, from 1; its digit is the level number. */
   readonly level: number
+  /** The pattern length of the pass, in characters counting `.`. */
   readonly length: number
   /** Candidates with good > 0 that were considered. */
   readonly candidates: number
   /** Patterns kept (digit `level`), in TeX notation, best first. */
   readonly added: readonly string[]
-  /** Total good and bad counts of the kept patterns. */
+  /** Total good count of the kept patterns. */
   readonly good: number
+  /** Total bad count of the kept patterns. */
   readonly bad: number
 }
 
 /** The state of `patgenSteps` after t passes. */
 export interface PatgenState extends Status {
+  /** The patterns learned so far. */
   readonly patterns: HyphenationPatterns
   /** The pass the last step ran (null at step 0). */
   readonly pass: PatgenPass | null
@@ -85,10 +101,24 @@ export interface PatgenState extends Status {
   readonly next: { readonly level: number; readonly length: number } | null
   /** Training counts under the current patterns. */
   readonly counts: HyphenCounts
+  /** True after the last pass, or once `maxPatterns` is reached. */
   readonly done: boolean
 }
 
-/** Hyphen counts of a pattern set over hyphenated words, within the margins. */
+/**
+ * Hyphen counts of a pattern set over hyphenated words, within the margins: how many dictionary hyphens the patterns
+ * find, how many they insert wrongly, and how many they miss.
+ *
+ * @param set The pattern set.
+ * @param words The hyphenated words, as `parseHyphenated` gives them (lower case, a to z).
+ * @param options The margins; gaps outside them are not counted. See {@link LiangOptions}.
+ * @returns The counts over all words.
+ *
+ * @example How well four patterns do on four words
+ * const set = hyphenationPatterns('1ti 1te a1t en1')
+ * const words = ['na-tion', 'pa-tent', 'win-dow', 'ten-der'].map((w) => parseHyphenated(w))
+ * print(hyphenCounts(set, words))
+ */
 export function hyphenCounts(
   set: HyphenationPatterns,
   words: readonly HyphenatedWord[],
@@ -110,11 +140,25 @@ export function hyphenCounts(
   return { tp, fp, fn }
 }
 
+/**
+ * Call `f` on every gap of a word that lies inside the margins.
+ *
+ * @param n The number of letters of the word.
+ * @param options The margins.
+ * @param options.leftMin The fewest letters before a hyphen.
+ * @param options.rightMin The fewest letters after a hyphen.
+ * @param f Called with each gap $i$ (after letter $i$) in increasing order.
+ */
 function forGaps(n: number, { leftMin = 2, rightMin = 3 }: LiangOptions, f: (gap: number) => void) {
   for (let i = Math.max(0, leftMin - 1); i <= n - 1 - rightMin; i++) f(i)
 }
 
-/** The passes of a schedule in order: each level's lengths, shortest first. */
+/**
+ * The passes of a schedule in order: each level's lengths, shortest first.
+ *
+ * @param levels The levels, in order.
+ * @returns One entry per pass: the level (from 1) and the pattern length.
+ */
 function schedule(levels: readonly PatgenLevel[]): { level: number; length: number }[] {
   const out: { level: number; length: number }[] = []
   levels.forEach((l, k) => {
@@ -126,7 +170,24 @@ function schedule(levels: readonly PatgenLevel[]): { level: number; length: numb
 /**
  * PATGEN as a traceable algorithm (see the module comment): step 0 has no patterns; each step runs the next pass
  * (one level and pattern length) over the training words and adds the candidates its level keeps. Finishes after the
- * last pass of the last level, or when `maxPatterns` is reached.
+ * last pass of the last level, or when `maxPatterns` is reached. Throws `DomainError` when there are no levels or a
+ * word is not made of the lower-case letters a to z.
+ *
+ * @param words The training words with their dictionary hyphens.
+ * @param options The levels, the margins and the cap on the number of patterns; see {@link PatgenOptions}.
+ * @returns The algorithm; it takes no start value.
+ *
+ * @example Learn patterns from fourteen words, then hyphenate a new one
+ * const words = ['hy-phen-ation', 'na-tion', 'sta-tion', 'ac-tion', 'mo-tion', 'ra-tion-al', 'pa-per', 'ta-ble',
+ *   'win-dow', 'hap-pen', 'but-ter', 'let-ter', 'pen-cil', 'sis-ter'].map((w) => parseHyphenated(w))
+ * const levels = [
+ *   { goodWeight: 1, badWeight: 1, threshold: 2, lengths: [2, 3] },
+ *   { goodWeight: 1, badWeight: 1, threshold: 1, lengths: [2, 3] },
+ * ]
+ * const s = run(patgenSteps(words, { levels }), undefined, 10)
+ * for (const p of s.passes) print('level', p.level, 'length', p.length, 'added', p.added)
+ * print('training counts', s.counts)
+ * print(markHyphens('mention', liangHyphenate(s.patterns, 'mention').hyphens))
  */
 export function patgenSteps(
   words: readonly HyphenatedWord[],

@@ -1,8 +1,8 @@
 /**
  * The Penn Treebank word tokeniser (Marcus, Santorini & Marcinkiewicz 1993; the sed script of Robert MacIntyre), as
  * NLTK's `TreebankWordTokenizer` applies it: a fixed sequence of regular-expression substitutions that pad
- * punctuation with spaces, turn double quotes into `` and '', split clitics ("don't" → "do n't", "they'll" → "they
- * 'll") and a handful of fused forms ("cannot" → "can not", "gonna" → "gon na"), then split on white space.
+ * punctuation with spaces, turn double quotes into `` and '', split clitics ("don't" to "do n't", "they'll" to "they
+ * 'll") and a handful of fused forms ("cannot" to "can not", "gonna" to "gon na"), then split on white space.
  */
 
 import { fromData } from 'aifn-compute/foundation/tensor'
@@ -74,12 +74,27 @@ export interface TreebankOptions {
   convertParentheses?: boolean
 }
 
+/**
+ * Apply substitution rules in order, each to the result of the one before.
+ *
+ * @param text The text to rewrite.
+ * @param rules Pairs of a regular expression and its replacement string (with `$1`-style references).
+ * @returns The rewritten text.
+ */
 const apply = (text: string, rules: readonly Rule[]) => rules.reduce((t, [re, s]) => t.replace(re, s), text)
 
 /**
  * The Treebank tokens of `text`, as NLTK's `TreebankWordTokenizer().tokenize`: double quotes become `` (opening) and
  * '' (closing), so tokens are not always substrings of the text. Periods are split off only at the end of the text
  * (the tokeniser expects one sentence; "York." mid-text stays whole).
+ *
+ * @param text One sentence of text.
+ * @param options Whether brackets become the Treebank symbols; see {@link TreebankOptions}.
+ * @returns The tokens, in order.
+ *
+ * @example Clitics, quotes and the final period (only the last period is split off), as NLTK
+ * print(treebankTokens('"They\'ll pay $3.50 for New York cheesecake," she said. I cannot wait.'))
+ * print(treebankTokens('(Hello) [world]', { convertParentheses: true }))
  */
 export function treebankTokens(text: string, options: TreebankOptions = {}): string[] {
   let t = apply(text, STARTING_QUOTES)
@@ -100,6 +115,14 @@ export function treebankTokens(text: string, options: TreebankOptions = {}): str
  * Treebank tokens with offsets (NLTK's `span_tokenize`): each token is located in the text from where the last one
  * ended, the converted quotes `` and '' standing for the quote they replaced (", `` or ''). The tokens returned are
  * the substrings of the text, so a converted quote reads as the original quote. Bracket conversion is not applied.
+ * Throws `DomainError` if a token cannot be found in the text.
+ *
+ * @param text One sentence of text.
+ * @returns The tokens as substrings of `text`, with their offsets.
+ *
+ * @example Offsets of the Treebank tokens
+ * const t = treebankTokenise('"Don\'t," she said.')
+ * t.tokens.forEach((tok, k) => print(JSON.stringify(tok), t.offsets.data[2 * k], t.offsets.data[2 * k + 1]))
  */
 export function treebankTokenise(text: string): Tokenisation {
   const raw = treebankTokens(text)

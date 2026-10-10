@@ -1,6 +1,6 @@
 /**
- * The subword tokenisers of `aifn-compute/text/subword`: the three trainers as traceable algorithms (each merge or pruning round
- * a step) beside the one-call functions that run them, and the encoders.
+ * The subword tokenisers of `aifn-compute/text/subword`: the three trainers as traceable algorithms (each merge or
+ * pruning round a step) beside the one-call functions that run them, and the encoders.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

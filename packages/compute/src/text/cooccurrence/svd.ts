@@ -1,9 +1,10 @@
 /**
- * The truncated singular value decomposition A ≈ U_k diag(S_k) V_kᵀ of a word × context or term × document matrix: the
- * best rank-k approximation in Frobenius norm (Eckart & Young 1936), the factorisation behind latent semantic analysis
- * (Deerwester et al. 1990) and SVD word vectors (Levy, Goldberg & Dagan 2015). Small matrices use the full SVD; larger
- * ones find the top k eigenpairs of the Gram matrix of the shorter side by Lanczos (`eigsh`), touching A only through
- * products, and recover the other side's vectors by one product with A.
+ * The truncated singular value decomposition $\Amat \approx \Umat_k \diag(\svec_k) \Vmat_k^\top$ of a word $\times$
+ * context or term $\times$ document matrix: the best rank-$k$ approximation in Frobenius norm (Eckart & Young 1936),
+ * the factorisation behind latent semantic analysis (Deerwester et al. 1990) and SVD word vectors (Levy, Goldberg &
+ * Dagan 2015). Small matrices use the full SVD; larger ones find the top $k$ eigenpairs of the Gram matrix of the
+ * shorter side by Lanczos (`eigsh`), touching $\Amat$ only through products, and recover the other side's vectors by
+ * one product with $\Amat$.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -12,16 +13,20 @@ import { eigsh, svd } from 'aifn-compute/numerics/linalg'
 
 /** A truncated SVD with the share of the squared Frobenius norm each component carries. */
 export interface TruncatedSvd {
+  /** The tag `'truncated-svd'`. */
   readonly kind: 'truncated-svd'
   /** Left singular vectors as columns (float64 [m, k]). */
   readonly U: Tensor
-  /** The k largest singular values, descending (float64 [k]). */
+  /** The $k$ largest singular values, descending (float64 [k]). */
   readonly S: Tensor
   /** Right singular vectors as columns (float64 [n, k]). */
   readonly V: Tensor
-  /** σᵢ² / ‖A‖²_F: the share of the matrix's energy in component i (float64 [k]); the shares of all components sum to 1. */
+  /**
+   * $\sigma_i^2 / \lVert \Amat \rVert_F^2$: the share of the matrix's energy in component $i$ (float64 [k]); the shares
+   * of all components sum to 1. All 0 for a zero matrix.
+   */
   readonly energy: Tensor
-  /** ‖A‖²_F, the sum of all squared singular values. */
+  /** $\lVert \Amat \rVert_F^2$, the sum of all squared singular values (and of all squared entries). */
   readonly total: number
 }
 
@@ -29,9 +34,21 @@ export interface TruncatedSvd {
 const FULL = 64
 
 /**
- * The k largest singular triplets of an m × n matrix. Each pair of singular vectors is signed so that the
+ * The $k$ largest singular triplets of an $m \times n$ matrix. Each pair of singular vectors is signed so that the
  * largest-magnitude entry of its left vector is positive (scikit-learn's `svd_flip`), so results do not depend on the
- * method. A right (left) vector of a zero singular value is left zero when found from the Gram matrix of the other side.
+ * method. A right (left) vector of a zero singular value is left zero when found from the Gram matrix of the other
+ * side. Throws `DomainError` unless $k$ is an integer from 1 to $\min(m, n)$.
+ *
+ * @param matrix The matrix $\Amat$ ($m \times n$), not modified.
+ * @param k The number of singular triplets to keep.
+ * @returns $\Umat_k$, the singular values, $\Vmat_k$, and the energy shares.
+ *
+ * @example A rank-one matrix has all its energy in one component
+ * const A = tensor([[1, 2], [2, 4], [3, 6]])
+ * const r = truncatedSvd(A, 2)
+ * print('S', r.S)
+ * print('energy', r.energy)
+ * print('U (k = 1)', truncatedSvd(A, 1).U, ' V (k = 1)', truncatedSvd(A, 1).V)
  */
 export function truncatedSvd(matrix: MatrixLike, k: number): TruncatedSvd {
   const { data, m, n } = dense.toMatrixF64(matrix, 'truncatedSvd')

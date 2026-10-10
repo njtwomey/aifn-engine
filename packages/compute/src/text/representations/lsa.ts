@@ -1,9 +1,10 @@
 /**
- * Latent semantic analysis (Deerwester et al. 1990): the truncated SVD A ≈ U_k Σ_k V_kᵀ of a term × document (or term ×
- * context) matrix gives each term the coordinates U_k Σ_k and each column V_k Σ_k, and terms are compared by the cosine
- * of their coordinates. Nearest neighbours by cosine, and analogies by vector offset (Mikolov et al. 2013): the answer
- * to a − b + c is the word whose unit vector is closest to â − b̂ + ĉ, the inputs excluded (3CosAdd, Levy & Goldberg
- * 2014).
+ * Latent semantic analysis (Deerwester et al. 1990): the truncated SVD
+ * $\Amat \approx \Umat_k \Sigmamat_k \Vmat_k^\top$ of a term $\times$ document (or term $\times$ context) matrix gives
+ * each term the coordinates $\Umat_k \Sigmamat_k$ and each column $\Vmat_k \Sigmamat_k$, and terms are compared by the
+ * cosine of their coordinates. Nearest neighbours by cosine, and analogies by vector offset (Mikolov et al. 2013): the
+ * answer to $a - b + c$ is the word whose unit vector is closest to $\hat a - \hat b + \hat c$, the inputs excluded
+ * (3CosAdd, Levy & Goldberg 2014).
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -11,20 +12,36 @@ import { dense, fromData, toFlat, type MatrixLike, type Tensor } from 'aifn-comp
 import { truncatedSvd } from 'aifn-compute/text/cooccurrence'
 import { tokenId, type Vocabulary } from 'aifn-compute/text/vocabulary'
 
-/** The latent semantic analysis of a matrix at rank k. */
+/** The latent semantic analysis of a matrix at rank $k$. */
 export interface Lsa {
+  /** The tag `'lsa'`. */
   readonly kind: 'lsa'
-  /** Row (term) coordinates U_k Σ_k (float64 [m, k]). */
+  /** Row (term) coordinates $\Umat_k \Sigmamat_k$ (float64 [m, k]). */
   readonly rows: Tensor
-  /** Column (document or context) coordinates V_k Σ_k (float64 [n, k]). */
+  /** Column (document or context) coordinates $\Vmat_k \Sigmamat_k$ (float64 [n, k]). */
   readonly columns: Tensor
-  /** The k largest singular values (float64 [k]). */
+  /** The $k$ largest singular values (float64 [k]). */
   readonly singularValues: Tensor
-  /** σᵢ² / ‖A‖²_F per component (float64 [k]). */
+  /** $\sigma_i^2 / \lVert \Amat \rVert_F^2$ per component (float64 [k]). */
   readonly energy: Tensor
 }
 
-/** The rank-k latent semantic analysis of a term × column matrix (counts, TF-IDF, PPMI, …). */
+/**
+ * The rank-$k$ latent semantic analysis of a term $\times$ column matrix (counts, TF-IDF, PPMI, ...), by
+ * `truncatedSvd`. Throws `DomainError` unless $k$ is an integer from 1 to the smaller side of the matrix.
+ *
+ * @param matrix The matrix $\Amat$, terms $\times$ documents or terms $\times$ contexts.
+ * @param k The rank: the number of singular values kept.
+ * @returns The term and column coordinates, the singular values and their energy shares.
+ *
+ * @example Two latent dimensions of a small corpus: words of the same documents land together
+ * const docs = [['cat', 'chases', 'mouse'], ['dog', 'chases', 'cat'], ['dog', 'eats', 'bone'], ['cat', 'eats', 'mouse']]
+ * const m = termDocumentMatrix(docs)
+ * const a = lsa(m.matrix, 2)
+ * print('terms', m.terms.tokens)
+ * print('coordinates', a.rows)
+ * print('energy', a.energy)
+ */
 export function lsa(matrix: MatrixLike, k: number): Lsa {
   const { U, S, V, energy } = truncatedSvd(matrix, k)
   const s = toFlat(S)
@@ -38,7 +55,14 @@ export function lsa(matrix: MatrixLike, k: number): Lsa {
   return { kind: 'lsa', rows: scale(U), columns: scale(V), singularValues: S, energy }
 }
 
-/** Rows scaled to unit length; a zero row stays zero. */
+/**
+ * Rows scaled to unit length; a zero row stays zero.
+ *
+ * @param data The matrix, $m \times n$, row-major; not modified.
+ * @param m The number of rows.
+ * @param n The number of columns.
+ * @returns A new row-major array with every non-zero row of unit Euclidean length.
+ */
 function unitRows(data: ArrayLike<number>, m: number, n: number): Float64Array {
   const out = new Float64Array(m * n)
   for (let i = 0; i < m; i++) {
@@ -51,8 +75,15 @@ function unitRows(data: ArrayLike<number>, m: number, n: number): Float64Array {
 }
 
 /**
- * The cosine similarity of every pair of rows (float64 [m, m]), xᵢ·xⱼ / (‖xᵢ‖ ‖xⱼ‖); 0 where either row is zero, so a
- * zero vector is similar to nothing.
+ * The cosine similarity of every pair of rows (float64 [m, m]),
+ * $\xvec_i^\top \xvec_j / (\lVert \xvec_i \rVert \lVert \xvec_j \rVert)$; 0 where either row is zero, so a zero vector
+ * is similar to nothing.
+ *
+ * @param vectors The vectors, one per row ($m \times n$).
+ * @returns The symmetric matrix of cosines, 1 on the diagonal for every non-zero row.
+ *
+ * @example Cosines of three vectors
+ * print(cosineSimilarities(tensor([[1, 0], [1, 1], [0, 0]])))
  */
 export function cosineSimilarities(vectors: MatrixLike): Tensor {
   const { data, m, n } = dense.toMatrixF64(vectors, 'cosineSimilarities')
@@ -69,13 +100,30 @@ export function cosineSimilarities(vectors: MatrixLike): Tensor {
 
 /** A ranked neighbour: its row and its cosine similarity to the query. */
 export interface Neighbour {
+  /** The row's index. */
   readonly index: number
+  /** Its cosine similarity to the query (0 when either is zero). */
   readonly cosine: number
 }
 
 /**
  * The `count` rows with the highest cosine similarity to a query (a row index, or a vector of the same width), most
- * similar first, ties by index. A row-index query excludes itself; `exclude` drops more rows.
+ * similar first, ties by index. A row-index query excludes itself; `exclude` drops more rows. Throws `DomainError` for
+ * a row index out of range or a query vector of the wrong length.
+ *
+ * @param vectors The vectors, one per row ($m \times n$).
+ * @param query A row index, or a vector of $n$ values.
+ * @param options How many neighbours, and which rows to leave out.
+ * @param options.count The number of neighbours returned (default 10).
+ * @param options.exclude Row indices never returned.
+ * @returns The neighbours, most similar first.
+ *
+ * @example The nearest words to "cat" in an LSA space
+ * const docs = [['cat', 'chases', 'mouse'], ['dog', 'chases', 'cat'], ['dog', 'eats', 'bone'], ['cat', 'eats', 'mouse']]
+ * const m = termDocumentMatrix(docs)
+ * const rows = lsa(m.matrix, 2).rows
+ * for (const nb of nearestByCosine(rows, m.terms.tokens.indexOf('cat'), { count: 3 }))
+ *   print(m.terms.tokens[nb.index], nb.cosine)
  */
 export function nearestByCosine(
   vectors: MatrixLike,
@@ -113,12 +161,29 @@ export function nearestByCosine(
 
 /** An answer to an analogy: the word, its row and its cosine similarity to the offset vector. */
 export interface AnalogyAnswer extends Neighbour {
+  /** The answer word. */
   readonly word: string
 }
 
 /**
- * The answers to the analogy a − b + c ("king − man + woman"): the words whose unit vectors are nearest by cosine to
- * â − b̂ + ĉ, the three inputs excluded, best first (3CosAdd). Throws when an input is not a row of the vocabulary.
+ * The answers to the analogy $a - b + c$ ("king" minus "man" plus "woman"): the words whose unit vectors are nearest
+ * by cosine to $\hat a - \hat b + \hat c$, the three inputs excluded, best first (3CosAdd). Throws `DomainError` when
+ * an input is not in the vocabulary, or when the vocabulary's size differs from the number of rows.
+ *
+ * @param vectors The word vectors, one row per word of `vocabulary`.
+ * @param vocabulary The words of the rows, row $i$ the word with id $i$.
+ * @param a The word $a$, whose vector is added.
+ * @param b The word $b$, whose vector is subtracted.
+ * @param c The word $c$, whose vector is added.
+ * @param options How many answers.
+ * @param options.count The number of answers returned (default 5).
+ * @returns The answers, best first.
+ *
+ * @example king is to man as queen is to woman
+ * // Hand-made vectors on two axes, royalty and gender; the rows follow the vocabulary's alphabetical order.
+ * const vocabulary = termDocumentMatrix([['apple', 'king', 'man', 'queen', 'woman']]).terms
+ * const vectors = tensor([[-1, 0.1], [1, 1], [0.1, 1], [1, -1], [0.1, -1]])
+ * for (const x of analogy(vectors, vocabulary, 'king', 'man', 'woman', { count: 2 })) print(x.word, x.cosine)
  */
 export function analogy(
   vectors: MatrixLike,
@@ -146,9 +211,17 @@ export function analogy(
 }
 
 /**
- * A map of the rows' cosine geometry (float64 [m, d], default d = 2): the rows scaled to unit length, centred, and
- * projected on their top d principal axes. Rows that point the same way land together whatever their lengths, so the
- * picture shows what cosine nearest neighbours see. A zero row maps to minus the mean.
+ * A map of the rows' cosine geometry (float64 [m, d], default $d = 2$): the rows scaled to unit length, centred, and
+ * projected on their top $d$ principal axes. Rows that point the same way land together whatever their lengths, so the
+ * picture shows what cosine nearest neighbours see. A zero row maps to the projection of minus the mean. Throws
+ * `DomainError` unless $d$ is an integer from 1 to the smaller side of the matrix.
+ *
+ * @param vectors The vectors, one per row ($m \times n$).
+ * @param dimensions The number $d$ of axes of the map.
+ * @returns The coordinates of each row on the map.
+ *
+ * @example Parallel vectors of different lengths share a point
+ * print(cosineMap(tensor([[1, 0, 0], [3, 0, 0], [0, 1, 0], [0, 0, 2]])))
  */
 export function cosineMap(vectors: MatrixLike, dimensions = 2): Tensor {
   const { data, m, n } = dense.toMatrixF64(vectors, 'cosineMap')

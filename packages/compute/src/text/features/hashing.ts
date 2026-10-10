@@ -2,10 +2,10 @@
  * Feature hashing (Weinberger et al. 2009): a term's column is a hash of its characters, so no vocabulary is stored;
  * a second hash bit gives each term a sign, which makes collisions add zero-mean noise instead of a bias. The hash and
  * conventions are scikit-learn's `HashingVectorizer`: 32-bit MurmurHash3 (x86, seed 0) of the term's UTF-8 bytes,
- * column |h| mod m, sign + for h ≥ 0.
+ * column $\lvert h \rvert \bmod m$, sign $+1$ for $h \ge 0$ and $-1$ otherwise.
  *
  * aifn has no sparse tensor type: `hashedFeatures` gives each document's non-zero columns and values (a sparse row),
- * and `featureHash` the dense [D, m] matrix, for the small m of figures and tests.
+ * and `featureHash` the dense [D, m] matrix, for the small $m$ of figures and tests.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -13,7 +13,19 @@ import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 
 const encoder = new TextEncoder()
 
-/** MurmurHash3 x86 32-bit (Appleby) of the UTF-8 bytes of `text`, as a signed 32-bit integer. */
+/**
+ * MurmurHash3 x86 32-bit (Appleby) of the UTF-8 bytes of `text`, as a signed 32-bit integer: the value of
+ * scikit-learn's `murmurhash3_32(text, seed)`.
+ *
+ * @param text The string to hash, encoded as UTF-8.
+ * @param seed The seed, read as an unsigned 32-bit integer.
+ * @returns The hash, from $-2^{31}$ to $2^{31} - 1$.
+ *
+ * @example The same values as scikit-learn's `murmurhash3_32`
+ * print('hello', murmurHash3('hello'))
+ * print('café ', murmurHash3('café'))
+ * print('hello, seed 1', murmurHash3('hello', 1))
+ */
 export function murmurHash3(text: string, seed = 0): number {
   const bytes = encoder.encode(text)
   const c1 = 0xcc9e2d51
@@ -52,17 +64,28 @@ export function murmurHash3(text: string, seed = 0): number {
 
 /** Options of {@link hashedFeatures} and {@link featureHash}. */
 export interface HashingOptions {
-  /** The number of columns m (default 1024 for `featureHash`, 2²⁰ for `hashedFeatures`). */
+  /** The number of columns $m$ (default 1024 for `featureHash`, $2^{20}$ for `hashedFeatures`). */
   features?: number
   /** Give each term the sign of its hash (default true; false gives unsigned hashing, biased by collisions). */
   signed?: boolean
-  /** Count each term once per document (default false). */
+  /** Count each distinct term once per document, with its sign when `signed` (default false). */
   binary?: boolean
   /** The hash seed (default 0). */
   seed?: number
 }
 
-/** The column and sign of a term under m columns. */
+/**
+ * The column and sign of a term under $m$ columns: $\lvert h \rvert \bmod m$ and the sign of $h$, for $h$ the term's
+ * MurmurHash3.
+ *
+ * @param term The term.
+ * @param features The number of columns $m$.
+ * @param seed The hash seed.
+ * @returns The column, from 0 to $m - 1$, and the sign, $+1$ or $-1$.
+ *
+ * @example Where three words land among 8 columns
+ * for (const w of ['cat', 'dog', 'mat']) print(w, hashColumn(w, 8))
+ */
 export function hashColumn(term: string, features: number, seed = 0): { column: number; sign: number } {
   const h = murmurHash3(term, seed)
   return { column: Math.abs(h) % features, sign: h >= 0 ? 1 : -1 }
@@ -70,7 +93,19 @@ export function hashColumn(term: string, features: number, seed = 0): { column: 
 
 /**
  * The hashed vector of one tokenised document as a sparse row: its non-zero `columns` in increasing order (int32 [k])
- * and their `values` (float64 [k]). Signed terms that cancel in a column leave no entry.
+ * and their `values` (float64 [k]). Signed terms that cancel in a column leave no entry. Throws `DomainError` unless
+ * `features` is a positive integer.
+ *
+ * @param tokens The document's tokens; each occurrence adds its sign to its column (once per distinct term with
+ *   `binary`).
+ * @param options The number of columns (default $2^{20}$), signing, binary counting and seed; see
+ *   {@link HashingOptions}.
+ * @returns The non-zero columns and their values.
+ *
+ * @example A sparse row of $2^{20}$ columns
+ * const r = hashedFeatures(['the', 'cat', 'sat', 'on', 'the', 'mat'])
+ * print('columns', r.columns)
+ * print('values ', r.values)
  */
 export function hashedFeatures(
   tokens: readonly string[],
@@ -93,7 +128,18 @@ export function hashedFeatures(
 
 /**
  * The hashed document–feature matrix (float64 [D, m]), each row normalised by `norm` (default `l2`, as
- * `HashingVectorizer`; `none` keeps signed counts).
+ * `HashingVectorizer`; `none` keeps signed counts). A row of zeros is left as it is. Throws `DomainError` unless
+ * `features` is a positive integer.
+ *
+ * @param documents The tokenised documents, one row each.
+ * @param options The hashing options (see {@link HashingOptions}; `features` defaults to 1024 here) and `norm`, the
+ *   row normalisation: `l2`, `l1` or `none`.
+ * @returns The dense matrix.
+ *
+ * @example Two documents in 8 columns
+ * const docs = [['the', 'cat', 'sat'], ['the', 'dog', 'sat', 'down']]
+ * print('signed counts', featureHash(docs, { features: 8, norm: 'none' }))
+ * print('l2 rows      ', featureHash(docs, { features: 8 }))
  */
 export function featureHash(
   documents: readonly (readonly string[])[],

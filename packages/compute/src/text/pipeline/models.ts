@@ -28,14 +28,19 @@ import { tokenId, type Vocabulary } from 'aifn-compute/text/vocabulary'
 
 /** A token of one pre-token: its string, id and [start, end) range in the pre-token's text. */
 export interface ModelToken {
+  /** The token's string. */
   token: string
+  /** Its id in the model's vocabulary. */
   id: number
+  /** Where its range starts in the pre-token, in UTF-16 code units. */
   start: number
+  /** Where its range ends (exclusive). */
   end: number
 }
 
+/** The fields every model stage has. */
 interface Common {
-  /** Token ↔ id, special tokens included. */
+  /** The tokens and their ids, special tokens included. */
   readonly vocabulary: Vocabulary
   /** The unknown token, or null for none (an uncovered character is then an error). */
   readonly unknown: string | null
@@ -43,9 +48,13 @@ interface Common {
 
 /** A BPE model stage. */
 export interface BpeStage extends Common {
+  /** Marks a BPE stage. */
   readonly type: 'bpe'
+  /** The merges in rank order. */
   readonly merges: readonly BpeMerge[]
+  /** Whether a symbol outside the vocabulary becomes its `<0xNN>` byte tokens. */
   readonly byteFallback: boolean
+  /** Whether consecutive unknown tokens are joined into one. */
   readonly fuseUnknown: boolean
   /** A symbol appended to every pre-token before merging (Sennrich's "</w>"; empty for none). */
   readonly endOfWord: string
@@ -55,33 +64,45 @@ export interface BpeStage extends Common {
 
 /** A WordPiece model stage. */
 export interface WordPieceStage extends Common {
+  /** Marks a WordPiece stage. */
   readonly type: 'wordPiece'
+  /** The continuation prefix, such as `##`. */
   readonly prefix: string
+  /** Pre-tokens longer than this many characters become the unknown token. */
   readonly maxCharacters: number
 }
 
 /** A unigram language-model stage: pieces with log-probabilities (float64 [P]). */
 export interface UnigramStage extends Common {
+  /** Marks a unigram stage. */
   readonly type: 'unigram'
+  /** The pieces of the lattice (no special or byte tokens). */
   readonly pieces: readonly string[]
+  /** The log-probability, or score, of each piece. */
   readonly logProbs: Tensor
+  /** Whether an uncovered character becomes its `<0xNN>` byte tokens. */
   readonly byteFallback: boolean
+  /** Whether consecutive unknown tokens are joined into one. */
   readonly fuseUnknown: boolean
 }
 
 /** A word-level stage: each pre-token is one token, or the unknown token. */
 export interface WordLevelStage extends Common {
+  /** Marks a word-level stage. */
   readonly type: 'wordLevel'
 }
 
 /** A character stage: one token per code point, unknown or byte fallback for unseen characters. */
 export interface CharacterStage extends Common {
+  /** Marks a character stage. */
   readonly type: 'character'
+  /** Whether an unseen character becomes its `<0xNN>` byte tokens. */
   readonly byteFallback: boolean
 }
 
 /** A byte stage (ByT5): one token per UTF-8 byte, ids after the special tokens. */
 export interface ByteStage extends Common {
+  /** Marks a byte stage. */
   readonly type: 'byte'
 }
 
@@ -90,7 +111,15 @@ export type TokeniserModel = BpeStage | WordPieceStage | UnigramStage | WordLeve
 
 // ── Vocabularies and byte tokens ─────────────────────────────────────────────────────────────────────────────────────
 
-/** The byte token of a byte value, SentencePiece's `<0xNN>` (upper-case hexadecimal). */
+/**
+ * The byte token of a byte value, SentencePiece's `<0xNN>` (upper-case hexadecimal).
+ *
+ * @param b The byte value, 0 to 255.
+ * @returns The token.
+ *
+ * @example Three bytes
+ * print(byteToken(0), byteToken(10), byteToken(255))
+ */
 export const byteToken = (b: number): string => `<0x${b.toString(16).toUpperCase().padStart(2, '0')}>`
 
 /** The 256 byte tokens `<0x00>` … `<0xFF>`. */
@@ -98,15 +127,35 @@ export const BYTE_TOKENS: readonly string[] = Array.from({ length: 256 }, (_, b)
 
 const BYTE_RE = /^<0x([0-9A-F]{2})>$/u
 
-/** The byte value of a byte token, or −1. */
+/**
+ * The byte value of a byte token, or $-1$.
+ *
+ * @param t A token string.
+ * @returns The byte value when `t` is exactly `<0xNN>` with upper-case hexadecimal digits, otherwise $-1$.
+ *
+ * @example Only upper-case byte tokens are recognised
+ * print(byteOfToken('<0x0A>'), byteOfToken('<0x0a>'), byteOfToken('a'))
+ * print(byteOfToken(byteToken(200)))
+ */
 export const byteOfToken = (t: string): number => {
   const m = BYTE_RE.exec(t)
   return m ? parseInt(m[1], 16) : -1
 }
 
 /**
- * A vocabulary whose ids are given: a token list (id = position) or a token → id record (ids must be 0 … V − 1).
- * `specials` marks special tokens; `unknown` names the unknown token (or null).
+ * A vocabulary whose ids are given: a token list (the id is the position) or a record from token to id (ids must be
+ * $0, \dots, V - 1$, each once). `specials` marks special tokens; `unknown` names the unknown token (or null). Throws
+ * `DomainError` when the ids are not that range or a token repeats.
+ *
+ * @param tokens The tokens in id order, or a record from token to id (as the `vocab` of a Hugging Face
+ *   `tokenizer.json`).
+ * @param options `specials`, the tokens to mark as special (default none), and `unknown`, the unknown token (default
+ *   null, none; a token not in the list also gives none).
+ * @returns The vocabulary, with zero counts.
+ *
+ * @example From a record of ids
+ * const v = vocabularyWithIds({ '[UNK]': 0, hello: 2, world: 1 }, { specials: ['[UNK]'], unknown: '[UNK]' })
+ * print('tokens =', v.tokens, 'unknown id =', v.unknown)
  */
 export function vocabularyWithIds(
   tokens: readonly string[] | Readonly<Record<string, number>>,
@@ -139,6 +188,12 @@ export function vocabularyWithIds(
   }
 }
 
+/**
+ * The distinct strings of a list, in order of first appearance.
+ *
+ * @param xs The strings.
+ * @returns Them without repeats.
+ */
 const dedupe = (xs: readonly string[]) => [...new Set(xs)]
 
 // ── Constructors ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -156,9 +211,28 @@ export interface ModelOptions {
 }
 
 /**
- * A BPE stage from merges and a vocabulary (a token list, or a token → id record as in a Hugging Face
+ * A BPE stage from merges and a vocabulary (a token list, or a record from token to id as in a Hugging Face
  * `tokenizer.json`), or from a training state (vocabulary: specials, then the 256 byte tokens with byte fallback,
  * then the alphabet and one symbol per merge).
+ *
+ * @param source A state of `bpeSteps`, or `merges` (as pairs, or merges with counts) in rank order with a
+ *   `vocabulary` that must hold every merged symbol a word can reach.
+ * @param options `specials`, `unknown` (default null: a symbol outside the vocabulary is then an error),
+ *   `byteFallback` and `fuseUnknown` (default false), `endOfWord` (default none) and `dropout` (default 0).
+ * @returns The stage.
+ *
+ * @example Two merges, and an unknown character
+ * const model = bpeStage(
+ *   { merges: [['l', 'o'], ['lo', 'w']], vocabulary: ['<unk>', 'l', 'o', 'w', 'e', 'r', 'lo', 'low'] },
+ *   { unknown: '<unk>' },
+ * )
+ * print('lower =', modelSegment(model, 'lower').map((t) => [t.token, t.id]))
+ * print('lowx =', modelSegment(model, 'lowx').map((t) => [t.token, t.id]))
+ *
+ * @example Byte fallback instead of an unknown token
+ * const vocabulary = ['h', 'i', 'hi', ...BYTE_TOKENS]
+ * const model = bpeStage({ merges: [['h', 'i']], vocabulary }, { byteFallback: true })
+ * print(modelSegment(model, 'hié').map((t) => t.token))
  */
 export function bpeStage(
   source:
@@ -197,7 +271,20 @@ export function bpeStage(
   }
 }
 
-/** A WordPiece stage from a vocabulary or a training state (whose vocabulary already lists its specials). */
+/**
+ * A WordPiece stage from a vocabulary or a training state (whose vocabulary already lists its specials).
+ *
+ * @param source A state of `wordPieceSteps`, the tokens in id order, or a record from token to id.
+ * @param options `unknown` (default `[UNK]`), `specials` (default the unknown token alone), `prefix` (default `##`)
+ *   and `maxCharacters` (default 100); `byteFallback` and `fuseUnknown` are ignored.
+ * @returns The stage.
+ *
+ * @example A word-initial piece and continuations, and a word with no match for its end
+ * const model = wordPieceStage(['[UNK]', 'un', 'want', '##want', '##ed'])
+ * print('unwanted =', modelSegment(model, 'unwanted').map((t) => [t.token, t.id]))
+ * print('wanted =', modelSegment(model, 'wanted').map((t) => [t.token, t.id]))
+ * print('wants =', modelSegment(model, 'wants').map((t) => [t.token, t.id]))
+ */
 export function wordPieceStage(
   source: WordPieceState | readonly string[] | Record<string, number>,
   options: ModelOptions & { prefix?: string; maxCharacters?: number } = {},
@@ -221,6 +308,18 @@ export function wordPieceStage(
  * A unigram stage from pieces with log-probabilities (Hugging Face's `[piece, score]` list, in id order; specials and
  * byte tokens in it are kept out of the lattice) or from a training state (vocabulary: specials, byte tokens with
  * byte fallback, then the pieces).
+ *
+ * @param source A state of `unigramLmSteps`, or `[piece, log-probability]` pairs in id order.
+ * @param options `unknown` (default `<unk>`), `specials` (default the unknown token alone), `byteFallback` (default
+ *   false; from a list, its byte tokens must be in it) and `fuseUnknown` (default true).
+ * @returns The stage.
+ *
+ * @example An unknown character keeps its own text, with the unknown id
+ * const model = unigramStage([
+ *   ['<unk>', 0], ['▁', -2], ['h', -3], ['u', -3], ['g', -3], ['hug', -2], ['s', -3], ['▁hug', -1.5],
+ * ])
+ * print('▁hugs =', modelSegment(model, '▁hugs').map((t) => [t.token, t.id]))
+ * print('▁hux =', modelSegment(model, '▁hux').map((t) => [t.token, t.id]))
  */
 export function unigramStage(
   source: UnigramLmState | readonly (readonly [string, number])[],
@@ -255,7 +354,17 @@ export function unigramStage(
   }
 }
 
-/** A word-level stage from a vocabulary (list or record). */
+/**
+ * A word-level stage from a vocabulary (list or record).
+ *
+ * @param vocabulary The words in id order, or a record from word to id.
+ * @param options `unknown` (default `[UNK]`) and `specials` (default the unknown token alone); the others are ignored.
+ * @returns The stage.
+ *
+ * @example A known word, an unknown one
+ * const model = wordLevelStage(['[UNK]', 'the', 'cat', 'sat'])
+ * print(['the', 'dog', 'sat'].map((w) => modelSegment(model, w)[0].token))
+ */
 export function wordLevelStage(
   vocabulary: readonly string[] | Record<string, number>,
   options: ModelOptions = {},
@@ -268,7 +377,19 @@ export function wordLevelStage(
   }
 }
 
-/** A character stage over a list of characters (specials and, with byte fallback, byte tokens first). */
+/**
+ * A character stage over a list of characters (specials and, with byte fallback, byte tokens first).
+ *
+ * @param characters The characters of the vocabulary; repeats are dropped.
+ * @param options `unknown` (default `<unk>`), `specials` (default the unknown token alone) and `byteFallback`
+ *   (default false); `fuseUnknown` is ignored.
+ * @returns The stage.
+ *
+ * @example Byte fallback for an unseen character
+ * const model = characterStage(['a', 'b', 'c'], { byteFallback: true })
+ * print('cab =', modelSegment(model, 'cab').map((t) => [t.token, t.id]))
+ * print('aé =', modelSegment(model, 'aé').map((t) => [t.token, t.id]))
+ */
 export function characterStage(characters: readonly string[], options: ModelOptions = {}): CharacterStage {
   const unknown = options.unknown === undefined ? '<unk>' : options.unknown
   const specials = options.specials ?? (unknown ? [unknown] : [])
@@ -287,6 +408,12 @@ export function characterStage(characters: readonly string[], options: ModelOpti
 /**
  * The byte stage of ByT5 (Xue et al. 2022): the specials (default `<pad>`, `</s>`, `<unk>`, ids 0–2), then the 256
  * bytes. Byte tokens print as the character for printable ASCII (0x20–0x7E) and as `<0xNN>` otherwise.
+ *
+ * @param options `specials`, the special tokens before the bytes; byte $b$ has id $b$ plus their number.
+ * @returns The stage.
+ *
+ * @example One token per byte, ids offset by 3
+ * print(modelSegment(byteStage(), 'hé').map((t) => [t.token, t.id]))
  */
 export function byteStage(options: { specials?: readonly string[] } = {}): ByteStage {
   const specials = options.specials ?? ['<pad>', '</s>', '<unk>']
@@ -323,7 +450,15 @@ const wordPieceCache = new WeakMap<WordPieceStage, WordPieceModel>()
 /**
  * Pieces to tokens with ids: a piece outside the vocabulary becomes its byte tokens (byte fallback, when they are all
  * in the vocabulary) or the unknown token (`text: true` keeps the piece's own text as the token string, with the
- * unknown id, as Hugging Face's unigram does); consecutive unknowns fuse when asked.
+ * unknown id, as Hugging Face's unigram does); consecutive unknowns fuse when asked. Throws `DomainError` when a
+ * piece must be unknown and the vocabulary has no unknown token.
+ *
+ * @param model The stage, whose vocabulary gives the ids.
+ * @param word The pre-token the pieces were cut from, for the text of a piece that falls back.
+ * @param pieces The pieces, with ranges in `word`.
+ * @param o `byteFallback`, `fuse` (join adjacent unknowns), `unknownText` (keep the piece's text as the unknown
+ *   token's string) and `isUnknown`, which marks a piece as unknown whatever its string.
+ * @returns The tokens with ids and ranges; byte tokens of one piece share its range.
  */
 function withIds(
   model: TokeniserModel,
@@ -365,6 +500,12 @@ function withIds(
   return out
 }
 
+/**
+ * The code points of a word as pieces with their ranges.
+ *
+ * @param word The word.
+ * @returns One piece per code point.
+ */
 const codePoints = (word: string): Piece[] => {
   const out: Piece[] = []
   let at = 0
@@ -375,7 +516,27 @@ const codePoints = (word: string): Piece[] => {
   return out
 }
 
-/** Segment one pre-token with a model stage: tokens with ids and ranges in the pre-token. */
+/**
+ * Segment one pre-token with a model stage: tokens with ids and ranges in the pre-token. Throws `DomainError` when a
+ * piece is outside the vocabulary and there is no unknown token or byte fallback for it.
+ *
+ * @param model The stage.
+ * @param word One pre-token.
+ * @param options For BPE: `upTo`, and `stream` with an optional `dropout` (the stage's own when left out). Dropout
+ *   applies only when `stream` is given. Other stages ignore them.
+ * @returns The tokens, in order.
+ *
+ * @example BPE, deterministic and with dropout
+ * const model = bpeStage(
+ *   { merges: [['l', 'o'], ['lo', 'w'], ['e', 'r']], vocabulary: ['l', 'o', 'w', 'e', 'r', 'lo', 'low', 'er'] },
+ *   { dropout: 0.5 },
+ * )
+ * print('lower =', modelSegment(model, 'lower'))
+ * print('first merge only:', modelSegment(model, 'lower', { upTo: 1 }).map((t) => t.token))
+ * const s = stream(3)
+ * print('with a stream:', modelSegment(model, 'lower', { stream: s }).map((t) => t.token))
+ * print('with a stream:', modelSegment(model, 'lower', { stream: s }).map((t) => t.token))
+ */
 export function modelSegment(model: TokeniserModel, word: string, options: SegmentOptions = {}): ModelToken[] {
   switch (model.type) {
     case 'bpe': {

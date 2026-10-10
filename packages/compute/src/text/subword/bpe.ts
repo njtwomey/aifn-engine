@@ -15,9 +15,13 @@ import { byCodePoint, characterPieces, encodeByWords, wordTable, type Piece, typ
 
 /** One merge: the left and right symbols, the merged symbol, and the pair's count when it was chosen. */
 export interface BpeMerge {
+  /** The left symbol of the pair. */
   readonly left: string
+  /** The right symbol of the pair. */
   readonly right: string
+  /** The new symbol, `left + right`. */
   readonly merged: string
+  /** The pair's count over the corpus (weighted by word counts) when the merge was made. */
   readonly count: number
 }
 
@@ -56,7 +60,10 @@ export interface BpeState extends Status {
   readonly vocabulary: readonly string[]
   /** The merge made by the last step (null at step 0 and when training has stopped). */
   readonly merge: BpeMerge | null
-  /** The corpus length in symbols, Σ count × segmentation length (falls by the pair count at each merge). */
+  /**
+   * The corpus length in symbols, $\sum_w c_w \ell_w$ for word counts $c_w$ and segmentation lengths $\ell_w$ (falls
+   * by the pair count at each merge).
+   */
   readonly symbols: number
   /** True when no further merge is allowed (budget, vocabulary size or minimum count reached). */
   readonly done: boolean
@@ -64,17 +71,31 @@ export interface BpeState extends Status {
 
 /** A trained BPE tokeniser. */
 export interface BpeModel {
+  /** Marks the value as a BPE tokeniser. */
   readonly kind: 'bpe'
+  /** The merges in the order they were learned; a merge's index is its rank. */
   readonly merges: readonly BpeMerge[]
+  /** The base symbols, then one symbol per merge. */
   readonly vocabulary: readonly string[]
+  /** Whether base symbols are code points (`character`) or GPT-2 byte symbols (`byte`). */
   readonly unit: 'character' | 'byte'
+  /** The end-of-word symbol appended to each word before merging (empty for none). */
   readonly endOfWord: string
+  /** The pre-tokeniser pattern that splits new text into words before segmenting. */
   readonly pattern: TokenPattern
 }
 
 const SEP = '\u0000'
 
-/** The symbols of a word before any merge, with their ranges in the word (the end-of-word symbol has zero width). */
+/**
+ * The symbols of a word before any merge, with their ranges in the word (the end-of-word symbol has zero width).
+ *
+ * @param word The word to split.
+ * @param unit `character` splits into code points, `byte` into the byte symbols of its UTF-8 encoding.
+ * @param endOfWord The symbol appended at the end of the word, at range [`word.length`, `word.length`); none when
+ *   empty.
+ * @returns The base symbols with their ranges, in order.
+ */
 function baseSymbols(word: string, unit: 'character' | 'byte', endOfWord: string): Piece[] {
   const pieces = unit === 'byte' ? byteSymbols(word) : characterPieces(word)
   if (endOfWord) pieces.push({ token: endOfWord, start: word.length, end: word.length })
@@ -84,6 +105,16 @@ function baseSymbols(word: string, unit: 'character' | 'byte', endOfWord: string
 /**
  * The count of every adjacent symbol pair, weighted by word counts, in order of first occurrence (reading the words in
  * order, each left to right): the `pairs` as [left, right] and their `counts` (float64 [P]).
+ *
+ * @param segmentations Each word's current segmentation into symbols.
+ * @param wordCounts The count of each word, in the order of `segmentations`: a float64 tensor [W] or an array.
+ * @returns `pairs`, the distinct adjacent pairs, and `counts`, the summed count of each: a pair occurring $k$ times
+ *   in a word of count $c$ adds $k c$.
+ *
+ * @example Pairs of "low" (5 times) and "lower" (twice)
+ * const { pairs, counts } = bpePairCounts([['l', 'o', 'w'], ['l', 'o', 'w', 'e', 'r']], [5, 2])
+ * print('pairs =', pairs.map(([a, b]) => a + ' ' + b))
+ * print('counts =', counts)
  */
 export function bpePairCounts(
   segmentations: readonly (readonly string[])[],
@@ -103,7 +134,15 @@ export function bpePairCounts(
   }
 }
 
-/** Replace every non-overlapping occurrence of `left right`, scanning left to right, by `merged`. */
+/**
+ * Replace every non-overlapping occurrence of `left right`, scanning left to right, by `merged`.
+ *
+ * @param seg The segmentation of one word; not modified.
+ * @param left The left symbol of the pair.
+ * @param right The right symbol of the pair.
+ * @param merged The symbol that replaces each occurrence.
+ * @returns The new segmentation.
+ */
 function mergeIn(seg: readonly string[], left: string, right: string, merged: string): string[] {
   const out: string[] = []
   for (let i = 0; i < seg.length; i++) {
@@ -115,6 +154,12 @@ function mergeIn(seg: readonly string[], left: string, right: string, merged: st
   return out
 }
 
+/**
+ * The options of BPE with their defaults filled in.
+ *
+ * @param options The options as given.
+ * @returns Every option resolved: the default end-of-word symbol and pattern depend on `unit`.
+ */
 function resolve(options: BpeOptions) {
   const unit = options.unit ?? 'character'
   return {
@@ -132,8 +177,29 @@ function resolve(options: BpeOptions) {
  * BPE training as a traceable algorithm: step 0 holds the words split into base symbols; each step makes one merge,
  * the most frequent adjacent pair (ties: the pair met first reading the words in order of first appearance, each left
  * to right), and records it with its count. Training stops (`done`) at the merge budget, the vocabulary size, or when
- * the best pair occurs fewer than `minCount` times. Each step recounts every pair, O(S) for S symbols in the word
+ * the best pair occurs fewer than `minCount` times. Each step recounts every pair, $O(S)$ for $S$ symbols in the word
  * table: clear rather than fast, for corpora of up to a few thousand distinct words.
+ *
+ * The base vocabulary is the 256 byte symbols at byte level; at character level it is the characters seen together
+ * with `alphabet`, in code-point order. The end-of-word symbol, if any, comes last. A step after `done` changes
+ * nothing but `t`. Throws `DomainError` when the words hold no non-empty word or a count is not a count.
+ *
+ * @param words The training words: a list (each occurrence counted) or words with their counts.
+ * @param options The merge budget and stopping rules, the base unit and end-of-word symbol.
+ * @returns The algorithm, to step with `run`; it takes no input.
+ *
+ * @example The first three merges of "low lower lowest"
+ * const s = run(bpeSteps(['low', 'lower', 'lowest']), undefined, 3)
+ * print('merges =', s.merges.map((m) => `${m.left} + ${m.right} (count ${m.count})`))
+ * print('segmentations =', s.segmentations)
+ * print('symbols =', s.symbols)
+ *
+ * @example Sennrich et al.'s example: watch the corpus shrink
+ * const alg = bpeSteps({ low: 5, lower: 2, newest: 6, widest: 3 })
+ * for (let t = 1; t <= 4; t++) {
+ *   const s = run(alg, undefined, t)
+ *   print(`step ${t}: merge`, s.merge.merged, 'count', s.merge.count, ' symbols', s.symbols)
+ * }
  */
 export function bpeSteps(words: WordCountsLike, options: BpeOptions = {}): Algorithm<void, BpeState> {
   const table = wordTable(words, 'bpeSteps')
@@ -191,7 +257,19 @@ export function bpeSteps(words: WordCountsLike, options: BpeOptions = {}): Algor
   }
 }
 
-/** The tokeniser of a BPE training state (the merges learned so far). */
+/**
+ * The tokeniser of a BPE training state (the merges learned so far).
+ *
+ * @param state A state of `bpeSteps`, at any step.
+ * @param options The options the state was trained with: `unit`, `endOfWord` and `pattern` are read from them, so
+ *   options that differ give a tokeniser that does not match its merges.
+ * @returns The tokeniser, with the state's merges and vocabulary.
+ *
+ * @example A tokeniser from part-way through training
+ * const alg = bpeSteps(['low', 'lower', 'lowest'])
+ * print('after 1 merge: ', bpeSegment(bpeModel(run(alg, undefined, 1)), 'lowest').map((p) => p.token))
+ * print('after 3 merges:', bpeSegment(bpeModel(run(alg, undefined, 3)), 'lowest').map((p) => p.token))
+ */
 export function bpeModel(state: BpeState, options: BpeOptions = {}): BpeModel {
   const o = resolve(options)
   return {
@@ -204,7 +282,23 @@ export function bpeModel(state: BpeState, options: BpeOptions = {}): BpeModel {
   }
 }
 
-/** Train BPE to the end (see {@link bpeSteps}) and return the tokeniser. */
+/**
+ * Train BPE to the end (see {@link bpeSteps}) and return the tokeniser.
+ *
+ * @param words The training words: a list (each occurrence counted) or words with their counts.
+ * @param options The merge budget and stopping rules, the base unit, end-of-word symbol and encoding pattern.
+ * @returns The trained tokeniser.
+ *
+ * @example Merges learned from "low lower lowest"
+ * const model = bpe(['low', 'lower', 'lowest'])
+ * print('merges =', model.merges.map((m) => m.merged))
+ * print('vocabulary =', model.vocabulary)
+ *
+ * @example Byte level: "é" is two byte symbols, merged like any others
+ * const model = bpe(['café', 'cafés'], { unit: 'byte', merges: 4 })
+ * print('merges =', model.merges.map((m) => m.merged))
+ * print('vocabulary size =', model.vocabulary.length)
+ */
 export function bpe(words: WordCountsLike, options: BpeOptions = {}): BpeModel {
   const o = resolve(options)
   const final = run(bpeSteps(words, options), undefined, Math.min(o.maxMerges, 1e6) + 1)
@@ -213,6 +307,13 @@ export function bpe(words: WordCountsLike, options: BpeOptions = {}): BpeModel {
 
 const ranks = new WeakMap<BpeModel, Map<string, number>>()
 
+/**
+ * The rank of each merge pair (its index in the merge list; the first if a pair repeats), keyed by the pair, built
+ * once per model and cached.
+ *
+ * @param model The tokeniser whose merges are ranked.
+ * @returns A map from `left` and `right` joined by a NUL character to the rank.
+ */
 function rankTable(model: BpeModel): Map<string, number> {
   let r = ranks.get(model)
   if (!r) {
@@ -243,9 +344,29 @@ export interface BpeSegmentOptions {
  * Segment one word with a BPE tokeniser, as pieces with their ranges in the word: start from base symbols and apply
  * merges in the order they were learned, by repeatedly merging the adjacent pair of lowest merge rank (leftmost among
  * equals), as GPT-2 and Hugging Face encode. The candidate pairs sit in a priority queue keyed by (rank, position) and
- * the symbols in a linked list, so a word of n symbols costs O(n log n) rather than the O(n²) of rescanning after
- * every merge; the result equals replaying the merge list in order. With `dropout`, a popped merge is skipped with
- * that probability and retried after the next merge that succeeds (Hugging Face's BPE-dropout).
+ * the symbols in a linked list, so a word of $n$ symbols costs $O(n \log n)$ rather than the $O(n^2)$ of rescanning
+ * after every merge; the result equals replaying the merge list in order. With `dropout`, a popped merge is skipped
+ * with that probability and retried after the next merge that succeeds (Hugging Face's BPE-dropout).
+ *
+ * @param model The tokeniser.
+ * @param word One word, already pre-tokenised.
+ * @param options `upTo`, `dropout` and `stream`; a number is taken as `upTo`. With `dropout` above 0, `stream` must
+ *   be given.
+ * @returns The pieces, in order, with their ranges in `word`.
+ *
+ * @example Segment a seen word and an unseen one
+ * const model = bpe(['low', 'lower', 'lowest'])
+ * const pieces = bpeSegment(model, 'lowest')
+ * print('lowest =', pieces.map((p) => p.token), 'ranges', pieces.map((p) => [p.start, p.end]))
+ * print('slower =', bpeSegment(model, 'slower').map((p) => p.token))
+ *
+ * @example Fewer merges, and BPE-dropout
+ * const model = bpe(['low', 'lower', 'lowest'])
+ * print('first merge only:', bpeSegment(model, 'lower', 1).map((p) => p.token))
+ * const s = stream(1)
+ * print('dropout 0.5:', bpeSegment(model, 'lower', { dropout: 0.5, stream: s }).map((p) => p.token))
+ * print('dropout 0.5:', bpeSegment(model, 'lower', { dropout: 0.5, stream: s }).map((p) => p.token))
+ * print('dropout 0.5:', bpeSegment(model, 'lower', { dropout: 0.5, stream: s }).map((p) => p.token))
  */
 export function bpeSegment(model: BpeModel, word: string, options: BpeSegmentOptions | number = {}): Piece[] {
   const { upTo = Infinity, dropout = 0, stream } = typeof options === 'number' ? { upTo: options } : options
@@ -293,7 +414,20 @@ export function bpeSegment(model: BpeModel, word: string, options: BpeSegmentOpt
   return out
 }
 
-/** Encode text with a BPE tokeniser: pre-tokenise by the model's pattern, then segment each word. */
+/**
+ * Encode text with a BPE tokeniser: pre-tokenise by the model's pattern, then segment each word.
+ *
+ * @param model The tokeniser.
+ * @param text The text to encode.
+ * @param options `upTo`, `dropout` and `stream`, as in {@link bpeSegment}, applied to every word.
+ * @returns The tokens with their offsets into `text`; an end-of-word symbol has a zero-width range at the word's end.
+ *
+ * @example Two words to tokens and offsets
+ * const model = bpe(['low', 'lower', 'lowest'])
+ * const enc = bpeEncode(model, 'lower lowest')
+ * print('tokens =', enc.tokens)
+ * print('offsets =', enc.offsets)
+ */
 export function bpeEncode(model: BpeModel, text: string, options: BpeSegmentOptions = {}): Tokenisation {
   return encodeByWords(text, model.pattern, (w) => bpeSegment(model, w, options))
 }
@@ -301,6 +435,23 @@ export function bpeEncode(model: BpeModel, text: string, options: BpeSegmentOpti
 /**
  * Text from BPE tokens: the end-of-word symbol becomes a space (character level), byte symbols are decoded as UTF-8
  * (byte level). The inverse of encoding up to white space between words.
+ *
+ * @param model The tokeniser that produced the tokens.
+ * @param tokens The tokens, in order.
+ * @returns The text. At character level, trailing white space is trimmed; with no end-of-word symbol the tokens are
+ *   joined as they are.
+ *
+ * @example Encode and decode
+ * const model = bpe(['low', 'lower', 'lowest'])
+ * const { tokens } = bpeEncode(model, 'lower lowest')
+ * print('tokens =', tokens)
+ * print('text =', bpeDecode(model, tokens))
+ *
+ * @example Byte level: byte symbols back to UTF-8
+ * const model = bpe(['naïve', 'naïvely'], { unit: 'byte', merges: 5 })
+ * const { tokens } = bpeEncode(model, 'naïve')
+ * print('tokens =', tokens)
+ * print('text =', bpeDecode(model, tokens))
  */
 export function bpeDecode(model: BpeModel, tokens: readonly string[]): string {
   const joined = tokens.join('')

@@ -6,6 +6,12 @@
  * - `scikitLearn`: scikit-learn's `ENGLISH_STOP_WORDS` (318 words), from the Glasgow Information Retrieval Group.
  */
 
+/**
+ * A space-separated list as a frozen array of words.
+ *
+ * @param s The words, separated by single spaces.
+ * @returns The words in order, frozen.
+ */
 const split = (s: string): readonly string[] => Object.freeze(s.split(' '))
 
 /** The stop-word lists by name. */
@@ -50,8 +56,18 @@ export const STOP_WORDS = Object.freeze({
 export type StopList = keyof typeof STOP_WORDS
 
 /**
- * The tokens not in the stop list, compared after lower-casing. `list` is a named list (default `nltk`) or any list of
- * words.
+ * The tokens not in the stop list, compared after lower-casing. The tokens that remain keep their case and order.
+ *
+ * @param tokens The tokens to filter.
+ * @param list A named list from `STOP_WORDS`, or any list of words. A list of your own is matched as given, so its
+ *   words should be lower case.
+ * @returns The tokens whose lower case is not in the list.
+ *
+ * @example NLTK's list and scikit-learn's differ
+ * const tokens = ['The', 'cat', 'sat', 'on', 'the', 'mat', 'by', 'itself', 'again', 'first']
+ * print('nltk       ', removeStopWords(tokens))
+ * print('scikitLearn', removeStopWords(tokens, 'scikitLearn'))
+ * print('own list   ', removeStopWords(tokens, ['the', 'on']))
  */
 export function removeStopWords(tokens: readonly string[], list: StopList | readonly string[] = 'nltk'): string[] {
   const stop = new Set(typeof list === 'string' ? STOP_WORDS[list] : list)

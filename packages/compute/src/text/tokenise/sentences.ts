@@ -1,7 +1,8 @@
 /**
  * Sentence splitting by the decision rules of Punkt (Kiss & Strunk 2006) with fixed English parameters: a "?" or "!"
- * ends a sentence; a word ending in a period ends one unless it is a known abbreviation, an initial or a number, and
- * those end one only when the next word is capitalised and usually starts sentences. The abbreviations and sentence
+ * ends a sentence; a word ending in a period ends one unless it is a known abbreviation, an initial, a number or an
+ * ellipsis. An abbreviation, an initial or an ellipsis ends one only when the next word is capitalised and usually
+ * starts sentences; a number ends one unless the next word starts in lower case. The abbreviations and sentence
  * starters are those of NLTK's pre-trained English Punkt model; the orthographic evidence Punkt learns from a corpus
  * (which words appear in lower case) is replaced by a list of common function words.
  */
@@ -40,7 +41,9 @@ export interface SentenceOptions {
   starters?: readonly string[]
 }
 
+/** Closing quotes and brackets at the end of a word, ignored when looking for its final punctuation. */
 const CLOSING = /["'”’)\]}»]+$/u
+/** Opening quotes and brackets at the start of a word, ignored when reading it. */
 const OPENING = /^["'“‘([{«]+/u
 const NUMBER = /^-?[.,]?\p{Nd}[\p{Nd},.-]*$/u
 const INITIAL = /^\p{L}$/u
@@ -49,7 +52,21 @@ const ELLIPSIS = /\.\.+$/u
 /**
  * Split text into sentences, each a token with its offsets (leading and trailing white space excluded). Candidates are
  * words (runs of non-space) ending in ".", "?" or "!", possibly followed by closing quotes or brackets, and followed by
- * white space.
+ * white space; the decision rules are those of the file comment.
+ *
+ * @param text The text to split.
+ * @param options The abbreviations and sentence starters to use, in place of the English ones; see
+ *   {@link SentenceOptions}.
+ * @returns One token per sentence, the text from its first word's start to its last word's end, with offsets.
+ *
+ * @example Abbreviations, initials and numbers
+ * const text = 'Dr. Smith paid $3.50 at 5 p.m. on Main St. today. J. R. R. Tolkien wrote it! However, nobody read it.'
+ * for (const s of sentenceSplit(text).tokens) print(JSON.stringify(s))
+ *
+ * @example Without the abbreviation list, "approx." ends a sentence
+ * const text = 'It took approx. Ten minutes. Then we left.'
+ * print('English list', sentenceSplit(text).tokens)
+ * print('no list     ', sentenceSplit(text, { abbreviations: [] }).tokens)
  */
 export function sentenceSplit(text: string, options: SentenceOptions = {}): Tokenisation {
   const abbreviations = new Set(options.abbreviations ?? ENGLISH_ABBREVIATIONS)

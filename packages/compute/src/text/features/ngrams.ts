@@ -6,9 +6,16 @@
 
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** An n, or an inclusive range [min, max] of n. */
+/** An $n$, or an inclusive range [min, max] of $n$. */
 export type NgramRange = number | readonly [number, number]
 
+/**
+ * An n-gram range as [min, max], checked: throws `DomainError` unless both are integers with $1 \le \min \le \max$.
+ *
+ * @param n One $n$, or an inclusive range [min, max].
+ * @param op The caller's name, for the error message.
+ * @returns The range [min, max].
+ */
 function range(n: NgramRange, op: string): [number, number] {
   const [lo, hi] = typeof n === 'number' ? [n, n] : n
   if (!(Number.isInteger(lo) && Number.isInteger(hi) && lo >= 1 && hi >= lo))
@@ -16,7 +23,20 @@ function range(n: NgramRange, op: string): [number, number] {
   return [lo, hi]
 }
 
-/** The word n-grams of a token list, each joined by `joiner` (default a space). */
+/**
+ * The word n-grams of a token list, each joined by `joiner`, as scikit-learn's `CountVectorizer(ngram_range=...)` forms
+ * them: every n-gram of the smallest $n$ first, each in order of position. Repeats are kept. Throws `DomainError` for
+ * an invalid range.
+ *
+ * @param tokens The tokens, in order.
+ * @param n One $n$, or an inclusive range [min, max] of $n$.
+ * @param joiner The string placed between the tokens of an n-gram.
+ * @returns The n-grams; none for an $n$ longer than the list.
+ *
+ * @example Unigrams and bigrams
+ * print(wordNgrams(['the', 'cat', 'sat', 'on', 'the', 'mat'], [1, 2]))
+ * print(wordNgrams(['new', 'york', 'city'], 3, '_'))
+ */
 export function wordNgrams(tokens: readonly string[], n: NgramRange, joiner = ' '): string[] {
   const [lo, hi] = range(n, 'wordNgrams')
   const out: string[] = []
@@ -36,7 +56,17 @@ export interface CharacterNgramOptions {
 
 /**
  * The character n-grams of a text. Runs of two or more white-space characters are first collapsed to one space, as
- * scikit-learn does.
+ * scikit-learn does. Throws `DomainError` for an invalid range.
+ *
+ * @param text The text; n-grams are formed over its code points.
+ * @param n One $n$, or an inclusive range [min, max] of $n$.
+ * @param options Whether n-grams stay inside words; see {@link CharacterNgramOptions}.
+ * @returns The n-grams, smallest $n$ first, each in order of position (word by word with `wordBoundaries`).
+ *
+ * @example Across the text, and inside padded words (scikit-learn's `char_wb`)
+ * print(characterNgrams('to be', 3))
+ * print(characterNgrams('to be', 3, { wordBoundaries: true }))
+ * print(characterNgrams('where', [3, 4], { wordBoundaries: true }))
  */
 export function characterNgrams(text: string, n: NgramRange, options: CharacterNgramOptions = {}): string[] {
   const [lo, hi] = range(n, 'characterNgrams')

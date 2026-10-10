@@ -1,9 +1,10 @@
 /**
  * Random indexing (Kanerva, Kristoferson & Holst 2000; Sahlgren 2005): every context word gets a fixed sparse ternary
- * index vector of d dimensions, a few entries +1 or −1 and the rest 0, and a word's vector is the sum of the index
- * vectors of the words around it. Index vectors in high dimension are nearly orthogonal, so the sum approximates a
- * random projection of the word's co-occurrence row (Achlioptas 2003) without ever building the V × V matrix, and a
- * new word or document only adds to the sums. It is the incremental alternative to the SVD of a co-occurrence matrix.
+ * index vector of $d$ dimensions, a few entries $+1$ or $-1$ and the rest 0, and a word's vector is the sum of the
+ * index vectors of the words around it. Index vectors in high dimension are nearly orthogonal, so the sum approximates
+ * a random projection of the word's co-occurrence row (Achlioptas 2003) without ever building the $V \times V$ matrix,
+ * and a new word or document only adds to the sums. It is the incremental alternative to the SVD of a co-occurrence
+ * matrix.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -14,14 +15,22 @@ import { buildVocabulary, type Vocabulary } from 'aifn-compute/text/vocabulary'
 
 /** Options of {@link indexVector}. */
 export interface IndexVectorOptions {
-  /** The dimension d (default 64). */
+  /** The dimension $d$ (default 64). */
   dimensions?: number
-  /** The number of non-zero entries, half +1 and half −1 (default 4; an odd count gives the extra one +1). */
+  /** The number of non-zero entries, half $+1$ and half $-1$ (default 4; an odd count gives the extra one $+1$). */
   nonZeros?: number
   /** The seed (default 0): the same token and seed always give the same vector. */
   seed?: number | string
 }
 
+/**
+ * Check the shape of index vectors: throws `DomainError` unless both are integers with
+ * $1 \le \text{nonZeros} \le \text{dimensions}$.
+ *
+ * @param d The dimension.
+ * @param nz The number of non-zero entries.
+ * @param op The caller's name, for the error message.
+ */
 function checkIndex(d: number, nz: number, op: string): void {
   if (!(Number.isInteger(d) && d >= 1 && Number.isInteger(nz) && nz >= 1 && nz <= d))
     throw new DomainError(op, `${op}: need integers 1 ≤ nonZeros ≤ dimensions`)
@@ -29,7 +38,18 @@ function checkIndex(d: number, nz: number, op: string): void {
 
 /**
  * The sparse ternary index vector of a token (float64 [d]): `nonZeros` distinct positions drawn uniformly, the first
- * half set to +1 and the rest to −1. It depends only on the token and the seed, not on the vocabulary.
+ * half set to $+1$ and the rest to $-1$. It depends only on the token and the seed, not on the vocabulary. Throws
+ * `DomainError` for a bad dimension or count.
+ *
+ * @param token The token whose vector is drawn.
+ * @param options The dimension, the number of non-zeros and the seed; see {@link IndexVectorOptions}.
+ * @returns The index vector.
+ *
+ * @example Fixed by the token and seed
+ * print('cat ', indexVector('cat', { dimensions: 12 }))
+ * print('cat ', indexVector('cat', { dimensions: 12 }))
+ * print('dog ', indexVector('dog', { dimensions: 12 }))
+ * print('seed', indexVector('cat', { dimensions: 12, seed: 1 }))
  */
 export function indexVector(token: string, options: IndexVectorOptions = {}): Tensor {
   const { dimensions = 64, nonZeros = 4, seed = 0 } = options
@@ -55,18 +75,35 @@ export interface RandomIndexingOptions extends IndexVectorOptions, Omit<Cooccurr
 
 /** Word vectors by random indexing, with the index vectors of the contexts they sum. */
 export interface RandomIndexing {
+  /** The tag `'random-indexing'`. */
   readonly kind: 'random-indexing'
-  /** Context vectors (float64 [V, d]): row w is Σ_c #(w, c) · index(c). */
+  /** Context vectors (float64 [V, d]): row $w$ is $\sum_c \#(w, c) \, \mathrm{index}(c)$. */
   readonly vectors: Tensor
   /** The index vectors of the vocabulary's words (float64 [V, d]). */
   readonly index: Tensor
+  /** The words of the rows. */
   readonly words: Vocabulary
 }
 
 /**
  * Random indexing of tokenised documents: each word's context vector is the (distance-weighted) sum of the index vectors
  * of the words in its window. Equal to the co-occurrence matrix times the matrix of index vectors, computed here
- * through it for clarity; a streaming implementation adds one index vector per context token instead.
+ * through it for clarity; a streaming implementation adds one index vector per context token instead. Throws
+ * `DomainError` for a bad dimension or count, and passes on the errors of `cooccurrence`.
+ *
+ * @param documents The tokenised documents; windows do not cross from one to the next.
+ * @param options The index vectors, the window and the rows; see {@link RandomIndexingOptions}. Words outside `words`
+ *   are not counted, as contexts or as rows.
+ * @returns The context vectors, the index vectors and the vocabulary.
+ *
+ * @example Words that share contexts get similar vectors
+ * const docs = [['cat', 'chases', 'mouse'], ['dog', 'chases', 'cat'], ['dog', 'eats', 'bone'], ['cat', 'eats', 'mouse']]
+ * const r = randomIndexing(docs, { dimensions: 32, window: 1 })
+ * const sim = cosineSimilarities(r.vectors)
+ * const [cat, dog, bone] = ['cat', 'dog', 'bone'].map((w) => r.words.tokens.indexOf(w))
+ * const V = r.words.tokens.length
+ * print('cos(cat, dog) ', sim.data[cat * V + dog])
+ * print('cos(cat, bone)', sim.data[cat * V + bone])
  */
 export function randomIndexing(
   documents: readonly (readonly string[])[],
