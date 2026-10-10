@@ -7,6 +7,7 @@
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as tree from './tree'
 
+/** A table of registry entries, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'learning/trees-and-ensembles')
 const fn = definer<FunctionInfo>('function', 'learning/trees-and-ensembles')

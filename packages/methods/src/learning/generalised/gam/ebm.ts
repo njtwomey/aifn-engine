@@ -2,7 +2,9 @@
  * A small explainable boosting machine (Lou, Caruana and Gehrke, 2012, "Intelligible models for classification and
  * regression"; Nori et al., 2019, InterpretML): a GAM whose shape functions are step functions on binned features,
  * learned by cyclic gradient boosting of one-split trees with a small learning rate, one feature at a time. Regression
- * uses squared error; classification uses the logistic loss with Newton leaf values (Friedman, 2001).
+ * uses squared error; classification uses the logistic loss with Newton leaf values (Friedman, 2001). Unlike
+ * interpret's `ExplainableBoostingRegressor`, the bins are of equal width over each feature's training range, there
+ * are no pairwise interaction terms and no bagging.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -31,14 +33,18 @@ type F64 = Float64Array
 
 /** Hyperparameters of `explainableBoostingMachine`. */
 export type EbmParams = {
+  /** `'regression'` (default; squared error) or `'classification'` (logistic loss on 0/1 responses). */
   task?: 'regression' | 'classification'
   /** Equal-width bins per feature over the training range (default 32). */
   bins?: number
   /** Boosting rounds; each visits every feature once (default 1000). */
   rounds?: number
-  /** Shrinkage ν of each tree (default 0.01). */
+  /** Shrinkage $\nu$ of each tree (default 0.01). */
   learningRate?: number
-  /** Least total Hessian (squared error: points) in a leaf (default 2). */
+  /**
+   * Least total Hessian in a leaf, in points for squared error (default 2); for classification the least total
+   * $p(1 - p)$ is 0.01 times this.
+   */
   minLeaf?: number
 }
 
@@ -54,15 +60,42 @@ export type EbmState = Status & {
   t: number
 }
 
-/** Binning of each feature: bin(v) = ⌊(v − lo)/(hi − lo)·B⌋ clamped to [0, B − 1]. */
+/**
+ * Binning of each feature: $\text{bin}(v) = \lfloor B (v - \text{lo}) / (\text{hi} - \text{lo}) \rfloor$ clamped
+ * to $[0, B - 1]$, with `lo` and `hi` per feature ($d$ values each) and $B$ = `bins`.
+ */
 type Binning = { lo: F64; hi: F64; bins: number }
 
+/**
+ * The bin of a value of one feature; values outside the training range fall in the end bins.
+ *
+ * @param b The binning.
+ * @param j The feature's index.
+ * @param v The value.
+ * @returns The bin, in $[0, B - 1]$.
+ */
 function binOf(b: Binning, j: number, v: number): number {
   const u = Math.floor(((v - b.lo[j]) / (b.hi[j] - b.lo[j])) * b.bins)
   return Math.min(b.bins - 1, Math.max(0, u))
 }
 
-/** The EBM boosting loop as a traceable algorithm (see the module comment). */
+/**
+ * The EBM boosting loop as a traceable algorithm (see the module comment). Each round visits the features in turn: it
+ * sums the loss's gradient $G$ and Hessian $H$ per bin of the feature, takes the split of the bins that maximises
+ * $G_L^2/H_L + G_R^2/H_R$, and adds $-\nu G/H$ of each side to that side's bins. The intercept stays at the mean of
+ * $\yvec$ (or its log-odds) and the shapes are not centred here; the estimator centres them.
+ *
+ * @param data The training features `x` ($n \times d$) and responses `y` ($n$; 0 or 1 for classification).
+ * @param params The task, bins, learning rate and least leaf size (see `EbmParams`); `rounds` is not read here.
+ * @returns The algorithm, with the `binning` it made from the training range.
+ *
+ * @example The training loss falls round by round
+ * const r = stream(0)
+ * const x = uniform(r, -1, 1, { shape: [100, 2] })
+ * const y = tensor(toArray(x).map(([a, b]) => Math.sin(3 * a) + b * b))
+ * const alg = ebmBoosting({ x, y }, { bins: 8, learningRate: 0.1 })
+ * for (const k of [0, 10, 100]) print('round', k, 'loss =', run(alg, undefined, k).loss)
+ */
 export function ebmBoosting(
   data: Supervised<Tensor, Tensor>,
   params: EbmParams = {},
@@ -165,24 +198,45 @@ export interface EbmModel
     Expects<Tensor>,
     Samples<Tensor, Tensor>,
     Trained<EbmState> {
+  /** Tags a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'explainable-boosting-machine'
+  /** The task it was fitted for. */
   readonly task: 'regression' | 'classification'
   /** The intercept after centring the shapes. */
   readonly intercept: number
-  /** Shape functions [d, bins], each centred to mean zero over the training points (the intercept absorbs it). */
+  /**
+   * Shape functions ($d \times$ `bins`), each centred to mean zero over the training points (the intercept absorbs
+   * it).
+   */
   readonly shapes: Tensor
-  /** Bin edges per feature [d, bins + 1]. */
+  /** Bin edges per feature ($d \times (\text{bins} + 1)$). */
   readonly edges: Tensor
-  /** Residual standard deviation on the training data (regression). */
+  /** Root-mean-square training residual (regression; computed on the 0/1 scale for classification). */
   readonly noiseSd: number
 }
 
 /**
  * An explainable boosting machine: `forward` gives the additive score (the prediction for regression, the logit for
  * classification), `decide` the prediction or class, `predictive` a normal with the training residual spread or a
- * Bernoulli, and the boosting run is kept in `training`.
+ * Bernoulli, and the boosting run is kept in `training` (every $\max(1, \lfloor \text{rounds}/200 \rfloor)$-th
+ * round unless the fit's `trace.every` says otherwise). After boosting, each shape is centred over the training points
+ * and the intercept takes the means, as in interpret.
+ *
+ * @param params The task, bins, rounds, learning rate and least leaf size (see `EbmParams`).
+ * @returns The estimator; its `fit` takes features `x` ($n \times d$) and responses `y` ($n$).
+ *
+ * @example Each feature's shape: a sine of the first, a parabola of the second
+ * const r = stream(0)
+ * const x = uniform(r, -1, 1, { shape: [100, 2] })
+ * const y = tensor(toArray(x).map(([a, b]) => Math.sin(3 * a) + b * b))
+ * const model = explainableBoostingMachine({ bins: 8, rounds: 200, learningRate: 0.1 }).fit({ x, y })
+ * const edges = toArray(model.edges)[0]
+ * print('bin centres =', edges.slice(0, 8).map((e, b) => (e + edges[b + 1]) / 2))
+ * print('shape of x0 =', toArray(model.shapes)[0])
+ * print('shape of x1 =', toArray(model.shapes)[1])
+ * print('intercept =', model.intercept, 'residual sd =', model.noiseSd)
  */
 export function explainableBoostingMachine(params: EbmParams = {}): Estimator<Supervised<Tensor, Tensor>, EbmModel> {
   const { rounds = 1000, bins = 32, task = 'regression' } = params

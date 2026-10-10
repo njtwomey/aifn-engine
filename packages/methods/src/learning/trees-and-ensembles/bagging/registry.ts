@@ -1,4 +1,4 @@
-/** The registry of `aifn-methods/learning/trees-and-ensembles/bagging`. */
+/** The registry of `aifn-methods/learning/trees-and-ensembles/bagging`: forest growth as a traceable algorithm. */
 
 import { definer, entries, type AlgorithmInfo, type Entry } from 'aifn-compute/foundation/registry'
 import * as forest from './forest'

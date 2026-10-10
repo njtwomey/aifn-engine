@@ -2,6 +2,11 @@
  * Logistic regression (binary and multinomial) fitted by Newton's method: the binary model is the binomial GLM with
  * the logit link, fitted by the generalised models' penalised IRLS (`irls`, one definition); the softmax model by
  * Newton's method on the multinomial log-likelihood (`softmaxNewton`), whose Hessian couples the classes.
+ *
+ * Both minimise the penalised negative log-likelihood
+ * $\sum_i -\log p(y_i \mid \xvec_i) + \tfrac12\lambda\lVert\Wmat\rVert^2$ with the intercepts unpenalised,
+ * scikit-learn's `LogisticRegression` objective with $C = 1/\lambda$. The softmax weights are a $p \times K$ matrix,
+ * row $j$ for design column $j$ (the intercept row last).
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -25,8 +30,8 @@ const values = dense.data
 /** Hyperparameters of `logisticRegression`. */
 export interface LogisticRegressionParams {
   /**
-   * L2 penalty λ in Σᵢ −log p(yᵢ | xᵢ) + ½λ‖W‖² (intercepts are not penalised). scikit-learn's `C` is 1/λ. Default 1,
-   * scikit-learn's default.
+   * L2 penalty $\lambda$ in $\sum_i -\log p(y_i \mid \xvec_i) + \tfrac12\lambda\lVert\Wmat\rVert^2$ (intercepts are not
+   * penalised). scikit-learn's `C` is $1/\lambda$. Default 1, scikit-learn's default. A negative value throws.
    */
   l2?: number
   /** Fit intercepts (default true). */
@@ -34,8 +39,8 @@ export interface LogisticRegressionParams {
   /** Use the softmax model even for two classes (default: only for three or more). */
   multinomial?: boolean
   /**
-   * Convergence tolerance: for the softmax model, half the squared Newton decrement (an estimate of f − f*); for the
-   * binary model, the relative change of the penalised deviance (default 1e-12).
+   * Convergence tolerance: for the softmax model, on half the squared Newton decrement (an estimate of $f - f^*$);
+   * for the binary model, on the relative change of the penalised deviance (default 1e-12).
    */
   tolerance?: number
   /** Most Newton steps (default 100). */
@@ -44,16 +49,17 @@ export interface LogisticRegressionParams {
 
 /** The problem the softmax Newton method solves: the design with a trailing column of ones when fitting intercepts. */
 export interface SoftmaxProblem {
-  /** Design matrix [n, p] (p = d + 1 with an intercept column last). */
+  /** Design matrix $\Xmat$, $n \times p$ ($p = d + 1$ with an intercept column last). */
   design: Tensor
-  /** Class labels 0 … K−1, length n. */
+  /** Class labels $0, \dots, K - 1$, length $n$. */
   labels: Tensor
-  /** Number of classes K (one weight column each). */
+  /** Number of classes $K$ (one weight column each). */
   columns: number
-  /** Penalty λ. */
+  /** Penalty $\lambda$ on every weight but the intercept row's. */
   l2: number
   /** True when the last design column is the (unpenalised) intercept. */
   intercept: boolean
+  /** Converged when half the squared Newton decrement, $\lambda(\Wmat)^2/2$, is at most this. */
   tolerance: number
 }
 
@@ -61,19 +67,22 @@ export interface SoftmaxProblem {
 export interface SoftmaxNewtonState extends Status {
   /** Newton steps taken. */
   t: number
-  /** Weights [p, K]: row j for design column j (the intercept last), column k for class k. */
+  /** Weights, $p \times K$: row $j$ for design column $j$ (the intercept last), column $k$ for class $k$. */
   weights: Tensor
   /** Penalised negative log-likelihood at `weights`. */
   loss: number
-  /** Gradient of the loss, [p, K]. */
+  /** Gradient $\gvec$ of the loss, $p \times K$. */
   grad: Tensor
-  /** Newton direction H⁻¹g (minimum norm when H is singular, as the model's intercepts make it), [p, K]. */
+  /**
+   * Newton direction $\Hmat^{-1}\gvec$, $p \times K$ (minimum norm when the Hessian $\Hmat$ is singular, as the
+   * model's intercepts make it).
+   */
   direction: Tensor
-  /** Newton decrement λ(W) = √(gᵀH⁻¹g) (Boyd and Vandenberghe, 2004, §9.5.1). */
+  /** Newton decrement $\lambda(\Wmat) = \sqrt{\gvec^\top\Hmat^{-1}\gvec}$ (Boyd and Vandenberghe, 2004, §9.5.1). */
   decrement: number
   /** Step length taken to reach this state by backtracking (1 is the full Newton step; 0 at the start). */
   stepSize: number
-  /** λ²/2 ≤ tolerance. */
+  /** $\lambda(\Wmat)^2/2 \le$ `tolerance`. */
   converged: boolean
   /** The loss is not finite. */
   diverged: boolean
@@ -81,9 +90,22 @@ export interface SoftmaxNewtonState extends Status {
   stalled: boolean
 }
 
+/**
+ * The penalised negative log-likelihood at a point (`loss`), its gradient (`gradient`, $p K$ values, row-major
+ * $p \times K$) and its Hessian (`hessian`, $pK \times pK$ row-major, or null when not asked for).
+ */
 type Evaluated = { loss: number; gradient: Float64Array; hessian: Float64Array | null }
 
-/** Loss, gradient and (optionally) Hessian of the penalised negative log-likelihood at W (flattened [p, K]). */
+/**
+ * Loss, gradient and (optionally) Hessian of the penalised negative log-likelihood at $\Wmat$. The Hessian entry for
+ * weights $(a, k)$ and $(b, l)$ is $\sum_i x_{ia} x_{ib} \pi_{ik}(\delta_{kl} - \pi_{il})$, plus $\lambda$ on the
+ * diagonal of the penalised rows.
+ *
+ * @param problem The design, labels, class count and penalty.
+ * @param W The weights, row-major $p \times K$ ($pK$ values); read only.
+ * @param withHessian Whether to form the Hessian (the line search needs only the loss).
+ * @returns The loss, gradient and Hessian.
+ */
 function evaluate(problem: SoftmaxProblem, W: Float64Array, withHessian: boolean): Evaluated {
   const X = values(problem.design)
   const y = values(problem.labels)
@@ -137,7 +159,17 @@ function evaluate(problem: SoftmaxProblem, W: Float64Array, withHessian: boolean
   return { loss, gradient, hessian }
 }
 
-/** The state at W: loss, gradient, Newton direction and decrement. */
+/**
+ * The state at $\Wmat$: loss, gradient, the Newton direction (the minimum-norm least-squares solution of
+ * $\Hmat\dvec = \gvec$) and the decrement. With a non-finite loss the direction is zero and the decrement NaN.
+ *
+ * @param problem The design, labels, class count, penalty and tolerance.
+ * @param W The weights, row-major $p \times K$ ($pK$ values).
+ * @param t The step count to record.
+ * @param stepSize The step length that reached $\Wmat$, to record (0 at the start).
+ * @param stalled Whether the line search failed to reach a lower loss.
+ * @returns The state.
+ */
 function stateAt(
   problem: SoftmaxProblem,
   W: Float64Array,
@@ -174,9 +206,25 @@ function stateAt(
 
 /**
  * Newton's method for (penalised) softmax regression as a traceable algorithm (Hastie, Tibshirani and Friedman, 2009,
- * §4.4.1). Each step backtracks from the full Newton step until the Armijo condition f(W − tΔ) ≤ f(W) − 10⁻⁴·t·λ²
- * holds (Boyd and Vandenberghe, 2004, Algorithm 9.5), which makes the method globally convergent. `init` takes
- * starting weights [p, K] (default zeros).
+ * §4.4.1). Each step backtracks from the full Newton step along the direction $\Deltamat$, halving $t$, until the
+ * Armijo condition $f(\Wmat - t\Deltamat) \le f(\Wmat) - 10^{-4} t \lambda^2$ holds (Boyd and Vandenberghe, 2004,
+ * Algorithm 9.5), which makes the method globally convergent; when no $t$ above $10^{-12}$ does, the state is marked
+ * `stalled` and the run stops. `init` takes starting weights $p \times K$ (default zeros).
+ *
+ * @param problem The design (with its intercept column, if any), labels, number of classes, penalty and tolerance.
+ * @returns The algorithm, for `run` or `trace`.
+ *
+ * @example Three classes: the loss and Newton decrement fall quadratically
+ * const s = stream(1)
+ * const x = normals(s, [200, 1])
+ * const labels = categorical(s, exp(matmul(x, tensor([[0, 1.5, -1.5]]))))
+ * const design = concat([x, ones([200, 1])], 1)
+ * const problem = { design, labels, columns: 3, l2: 0, intercept: true, tolerance: 1e-12 }
+ * const record = { loss: (state) => state.loss, decrement: (state) => state.decrement }
+ * const t = trace(softmaxNewton(problem), {}, 20, { record })
+ * print('loss by step =', t.series.loss)
+ * print('decrement by step =', t.series.decrement)
+ * print('weights (rows x, intercept) =', t.final.weights)
  */
 export function softmaxNewton(problem: SoftmaxProblem): Algorithm<{ weights?: Tensor }, SoftmaxNewtonState> {
   return {
@@ -213,34 +261,61 @@ export interface LogisticRegressionModel
     Samples<Tensor, Tensor>,
     Scores<Tensor>,
     Trained<IrlsState | SoftmaxNewtonState> {
+  /** The brand of a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'logistic-regression'
-  /** Number of classes K (labels 0 … K−1). */
+  /** Number of classes $K$ (labels $0, \dots, K - 1$; at least 2). */
   readonly classes: number
   /** True for the softmax model with one weight column per class. */
   readonly multinomial: boolean
-  /** Coefficients: [d] for the binary model, [d, K] for the multinomial one. */
+  /** Coefficients: $d$ for the binary model, $d \times K$ for the multinomial one. */
   readonly weights: Tensor
-  /** Intercepts: a scalar tensor [] for the binary model, [K] for the multinomial one (all 0 without intercepts). */
+  /**
+   * Intercepts: a scalar tensor for the binary model, $K$ for the multinomial one (all 0 without intercepts).
+   */
   readonly intercept: Tensor
   /** The final penalised negative log-likelihood. */
   readonly loss: number
+  /** Whether the Newton (IRLS) run met its tolerance within `maxSteps`. */
   readonly converged: boolean
   /** Newton (IRLS) steps taken. */
   readonly steps: number
+  /** The penalty $\lambda$ the model was fitted with. */
   readonly l2: number
 }
 
 /**
- * Logistic regression for labels 0 … K−1: Bernoulli with P(y = 1 | x) = σ(x·w + b) for two classes, softmax over K
- * weight columns otherwise, with an L2 penalty on the weights. The binary model is fitted by `irls` (binomial family,
- * logit link, penalty λ on the weights), the softmax model by `softmaxNewton`; the run is kept in `training` (series
- * `loss`, the penalised negative log-likelihood). The multinomial Hessian is singular along "add a constant to every intercept"; the minimum-norm
- * Newton step keeps Σₖ bₖ = 0, as scikit-learn's solution has.
+ * Logistic regression for labels $0, \dots, K - 1$: Bernoulli with
+ * $P(y = 1 \mid \xvec) = \sigma(\xvec^\top\wvec + b)$ for two classes, softmax over $K$ weight columns otherwise,
+ * with an L2 penalty on the weights. The binary model is fitted by `irls` (binomial family, logit link, penalty
+ * $\lambda$ on the weights), the softmax model by `softmaxNewton`; the run is kept in `training` (series `loss`, the
+ * penalised negative log-likelihood, and for the softmax model `decrement` and `stepSize`). The multinomial Hessian is
+ * singular along "add a constant to every intercept"; the minimum-norm Newton step keeps $\sum_k b_k = 0$, as
+ * scikit-learn's solution has.
  *
- * Capabilities: `forward` and `score` (logits: [N] binary, [N, K] multinomial), `decide` (the most probable class;
- * logit > 0 when binary), `predictive` (Bernoulli or categorical), `expect` (P(y = 1), or E[k]), `sample`.
+ * Capabilities: `forward` and `score` (logits: $m$ binary, $m \times K$ multinomial), `decide` (the most probable
+ * class; logit $> 0$ when binary), `predictive` (Bernoulli or categorical), `expect` ($P(y = 1)$, or $\expect[k]$),
+ * `sample`. `fit` throws `DomainError` for labels that are not non-negative integers and `ShapeError` when the rows of
+ * `x` and the labels differ in number.
+ *
+ * @param params The penalty, intercept, model choice and Newton controls; a negative `l2` throws `DomainError` here.
+ * @returns An estimator whose `fit` takes `{ x, y }` ($n \times d$ inputs, $n$ integer labels) and returns the model.
+ *
+ * @example Recovering known coefficients from simulated labels
+ * const s = stream(1)
+ * const x = normals(s, [500, 2])
+ * const y = bernoulli(s, div(1, add(1, exp(neg(add(matmul(x, tensor([2, -1])), 0.5))))))
+ * const model = logisticRegression({ l2: 0 }).fit({ x, y })
+ * print('weights (true 2, -1) =', model.weights)
+ * print('intercept (true 0.5) =', model.intercept)
+ * print('Newton steps =', model.steps, ' converged =', model.converged)
+ *
+ * @example The penalty shrinks the weights towards zero
+ * const s = stream(1)
+ * const x = normals(s, [40, 2])
+ * const y = bernoulli(s, div(1, add(1, exp(neg(matmul(x, tensor([2, -1])))))))
+ * for (const l2 of [0, 1, 10]) print('l2 =', l2, ' weights =', logisticRegression({ l2 }).fit({ x, y }).weights)
  */
 export function logisticRegression(
   params: LogisticRegressionParams = {},

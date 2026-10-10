@@ -1,8 +1,9 @@
 /**
  * Backfitting (Buja, Hastie and Tibshirani, 1989, Annals of Statistics 17; Hastie and Tibshirani, 1990, "Generalized
  * Additive Models", §4.4) with local scoring for non-Gaussian families (§6.5), as a traceable algorithm over any
- * additive model η = α + Σⱼ Bⱼβⱼ with a quadratic penalty per term: each step updates the working response and weights
- * from the current linear predictor, then refits each term's penalised smoother to its partial residual in turn,
+ * additive model $\eta = \alpha + \sum_j \Bmat_j\betavec_j$ with a quadratic penalty per term: each step updates the
+ * working response and weights from the current linear predictor, sets the intercept $\alpha$ to the weighted mean of
+ * the partial residual, then refits each term's penalised smoother to its partial residual in turn (Gauss–Seidel),
  * holding the others fixed. Shared by the generalised models; `gam` builds the term designs and penalties.
  */
 
@@ -21,17 +22,25 @@ import {
 
 /** The problem a backfitting run solves: one design block and one penalty per term. */
 export type BackfitProblem = {
-  /** Each term's design Bⱼ [n, pⱼ] (centred, so the intercept is identifiable). */
+  /** Each term's design $\Bmat_j$, $n \times p_j$ (centred, so the intercept is identifiable). */
   designs: readonly Tensor[]
-  /** Each term's penalty Sⱼ [pⱼ, pⱼ], smoothing parameters already applied. */
+  /**
+   * Each term's penalty $\Smat_j$, $p_j \times p_j$, smoothing parameters already applied. A zero penalty needs a
+   * design of full column rank.
+   */
   penalties: readonly Tensor[]
+  /** Responses $y_i$, $n$. */
   y: Tensor
+  /** Prior weights $w_i$, $n$ (default 1). */
   weights?: Tensor
-  /** Default the Gaussian family. */
+  /** The response family (default Gaussian). */
   family?: Family
-  /** Default the family's default link. */
+  /** The link (default the family's default link); one the family does not take throws. */
   link?: LinkName | Link
-  /** Converged when the largest change of any fⱼ(xᵢ) is below tolerance × (1 + max |f|) (default 1e-8). */
+  /**
+   * Converged when the largest change of any $f_j(\xvec_i)$ in a sweep is below this times
+   * $1 + \max \lvert f_j(\xvec_i)\rvert$ (default 1e-8).
+   */
   tolerance?: number
 }
 
@@ -39,23 +48,58 @@ export type BackfitProblem = {
 export type BackfitState = Status & {
   /** Sweeps done. */
   t: number
+  /** The intercept $\alpha$. */
   intercept: number
-  /** Each term's fitted values at the data, [terms, n]. */
+  /** Each term's fitted values $f_j(\xvec_i)$ at the data, terms $\times n$. */
   contributions: Tensor
-  /** Each term's coefficients βⱼ [pⱼ] (zeros at the start). */
+  /** Each term's coefficients $\betavec_j$, $p_j$ (zeros at the start). */
   coefficients: Tensor[]
-  /** Linear predictor η = α + Σ fⱼ, [n]. */
+  /** Linear predictor $\etavec = \alpha + \sum_j \fvec_j$, $n$. */
   eta: Tensor
-  /** Deviance at η. */
+  /** Deviance at $\etavec$. */
   deviance: number
-  /** Largest change of a term's fitted value in this sweep. */
+  /** Largest change of a term's fitted value in this sweep, halved with the sweep (Infinity at the start). */
   change: number
   /** Halvings of this sweep towards the previous state, to keep the mean inside the family's mean space. */
   halvings: number
+  /** The sweep's `change` met the tolerance. */
   converged: boolean
 }
 
-/** Backfitting as an `Algorithm` (no start: α begins at the weighted mean of g(μ₀), every fⱼ at 0). */
+/**
+ * Backfitting as an `Algorithm` (no start: $\alpha$ begins at the weighted mean of $g(\muvec_0)$, the family's
+ * initial mean, and every $f_j$ at 0). A step is one sweep: new working response and weights, the intercept, then each
+ * term by a penalised weighted least-squares solve (Cholesky, with jitter if needed). A sweep whose linear predictor
+ * leaves the mean space is halved towards the previous state up to 30 times. For the Gaussian family with the identity
+ * link it is plain backfitting, and with zero penalties it converges to the least-squares fit; correlated terms slow
+ * it.
+ *
+ * @param problem The term designs and penalties, responses, and optional weights, family, link and tolerance.
+ * @returns The algorithm, for `run` or `trace` with an `undefined` start.
+ *
+ * @example Two linear terms: backfitting converges to least squares
+ * const s = stream(1)
+ * const x1 = normals(s, 200)
+ * const x2 = normals(s, 200)
+ * const y = add(add(add(1, mul(2, x1)), mul(-1, x2)), normals(s, 200, 0, 0.5))
+ * const centred = (v) => reshape(sub(v, mean(v)), [200, 1])
+ * const problem = { designs: [centred(x1), centred(x2)], penalties: [tensor([[0]]), tensor([[0]])], y }
+ * const t = trace(backfitting(problem), undefined, 50, { record: { deviance: (state) => state.deviance } })
+ * print('deviance by sweep =', t.series.deviance)
+ * print('intercept (true 1) =', t.final.intercept)
+ * print('coefficients (true 2, -1) =', t.final.coefficients)
+ * print('sweeps =', t.final.t, ' converged =', t.final.converged)
+ *
+ * @example Correlated terms take many more sweeps
+ * const s = stream(1)
+ * const x1 = normals(s, 200)
+ * const x2 = add(mul(0.9, x1), mul(0.3, normals(s, 200)))
+ * const y = add(add(add(1, mul(2, x1)), mul(-1, x2)), normals(s, 200, 0, 0.5))
+ * const centred = (v) => reshape(sub(v, mean(v)), [200, 1])
+ * const problem = { designs: [centred(x1), centred(x2)], penalties: [tensor([[0]]), tensor([[0]])], y }
+ * const final = run(backfitting(problem), undefined, 500)
+ * print('sweeps =', final.t, ' converged =', final.converged, ' coefficients =', final.coefficients)
+ */
 export function backfitting(problem: BackfitProblem): Algorithm<void, BackfitState> {
   const family = problem.family ?? gaussianFamily()
   const lk = checkLink(family, problem.link, 'backfitting')

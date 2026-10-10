@@ -1,4 +1,4 @@
-/** The registry of `aifn-methods/learning/linear`. */
+/** Registry entries of `aifn-methods/learning/linear`: the perceptron as a step-through algorithm. */
 
 import { definer, entries, type AlgorithmInfo, type Entry } from 'aifn-compute/foundation/registry'
 import * as perceptron from './perceptron'

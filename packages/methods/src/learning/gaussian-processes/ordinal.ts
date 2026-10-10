@@ -1,16 +1,21 @@
 /**
  * Gaussian-process ordinal regression (Chu & Ghahramani, 2005, "Gaussian processes for ordinal regression", JMLR 6):
- * a latent function f ~ GP(0, k) and the cumulative probit likelihood with noise σ,
- * P(y = k | f) = Φ((θ_k − f)/σ) − Φ((θ_{k−1} − f)/σ), which is `aifn-compute/probability/likelihoods`' cumulative-probit
- * `ordinalLikelihood` at η = f/σ and thresholds θ/σ. The posterior is approximated by Laplace's method: the Newton
- * mode search of `./classification` (`laplaceMode`) with the likelihood's gradient and negative Hessian diagonal W
- * taken by automatic differentiation of the compute likelihood (a reverse pass and one Hessian–vector product with the
- * ones vector, exact because the likelihood factorises). The evidence is log p(y | f̂) − ½ f̂ᵀK⁻¹f̂ − ½ log|B|,
- * B = I + W^½KW^½ (their eq. 14). With `optimise`, the thresholds, σ and the kernel's hyperparameters maximise it,
- * by Nelder–Mead over (ordered-bijector coordinates of θ, log σ, log kernel hyperparameters).
+ * a latent function $f \sim \GP(0, k)$ and the cumulative probit likelihood with noise $\sigma$,
+ * $P(y = k \mid f) = \Phi((\theta_k - f)/\sigma) - \Phi((\theta_{k-1} - f)/\sigma)$, which is
+ * `aifn-compute/probability/likelihoods`' cumulative-probit `ordinalLikelihood` at $\eta = f/\sigma$ and thresholds
+ * $\thetavec/\sigma$. The posterior is approximated by Laplace's method: the Newton mode search of `./classification`
+ * (`laplaceMode`) with the likelihood's gradient and negative Hessian diagonal $\Wmat$ taken by automatic
+ * differentiation of the compute likelihood (a reverse pass and one Hessian–vector product with $\ones$, exact
+ * because the likelihood factorises). The evidence is
+ * $\log p(\yvec \mid \hat\fvec) - \frac{1}{2} \hat\fvec^\top\Kmat^{-1}\hat\fvec - \frac{1}{2} \log\lvert \Bmat \rvert$,
+ * $\Bmat = \Imat + \Wmat^{1/2}\Kmat\Wmat^{1/2}$ (their eq. 14). With `optimise`, the thresholds, $\sigma$ and the
+ * kernel's hyperparameters maximise it, by Nelder–Mead over (ordered-bijector coordinates of $\thetavec$,
+ * $\log \sigma$, log kernel hyperparameters).
  *
- * Predictions (their eq. 16–17): f* given the data is approximately N(μ*, s*²) with μ* = k*ᵀ∇log p(y | f̂) and
- * s*² = k** − k*ᵀ(K + W⁻¹)⁻¹k*, so P(y* = k) = Φ((θ_k − μ*)/√(σ² + s*²)) − Φ((θ_{k−1} − μ*)/√(σ² + s*²)).
+ * Predictions (their eq. 16–17): $f_*$ given the data is approximately $\Gauss(\mu_*, s_*^2)$ with
+ * $\mu_* = \kvec_*^\top \nabla \log p(\yvec \mid \hat\fvec)$ and
+ * $s_*^2 = k_{**} - \kvec_*^\top(\Kmat + \Wmat^{-1})^{-1}\kvec_*$, so $P(y_* = k)$ is
+ * $\Phi((\theta_k - \mu_*)/\sqrt{\sigma^2 + s_*^2}) - \Phi((\theta_{k-1} - \mu_*)/\sqrt{\sigma^2 + s_*^2})$.
  */
 
 import { hvp, valueAndGrad } from 'aifn-compute/foundation/autodiff'
@@ -53,8 +58,23 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 const LIKELIHOOD = ordinalLikelihood('cumulative', 'probit')
 
 /**
- * The cumulative-probit ordinal likelihood of classes `labels` with thresholds θ and noise σ as a Laplace likelihood:
- * log p(y | f), its gradient and W = −diag ∇² log p(y | f), by reverse mode and one forward-over-reverse pass.
+ * The cumulative-probit ordinal likelihood of classes `labels` with thresholds $\thetavec$ and noise $\sigma$ as a
+ * Laplace likelihood: $\log p(\yvec \mid \fvec)$, its gradient and
+ * $\Wmat = -\diag \nabla^2 \log p(\yvec \mid \fvec)$ (negative entries clipped to 0), by reverse mode and one
+ * forward-over-reverse pass.
+ *
+ * @param labels The class of each training point, $0, \dots, K - 1$.
+ * @param thresholds The increasing thresholds $\thetavec$, $K - 1$ values.
+ * @param noise The noise $\sigma > 0$ of the latent cdf.
+ * @returns The `LaplaceTerms` function, from latent values $\fvec$ (`[n]`) to the log likelihood, its gradient and
+ *   the diagonal of $\Wmat$.
+ *
+ * @example Three classes at $f = 0$: the outer classes pull $f$ outwards, the middle one not at all
+ * const terms = ordinalLaplaceTerms(Int32Array.from([0, 1, 2]), [-1, 1], 1)
+ * const { logLik, grad, W } = terms(new Float64Array(3))
+ * print('log p(y | f = 0)', logLik, ' gradient', grad, ' W', W)
+ * // P(y = 0) = P(y = 2) = 1 - Phi(1) and P(y = 1) = 2 Phi(1) - 1, with Phi(1) = 0.841345
+ * print('by hand', 2 * Math.log(1 - 0.841345) + Math.log(2 * 0.841345 - 1))
  */
 export function ordinalLaplaceTerms(labels: Int32Array, thresholds: ArrayLike<number>, noise: number): LaplaceTerms {
   const n = labels.length
@@ -79,20 +99,24 @@ export function ordinalLaplaceTerms(labels: Int32Array, thresholds: ArrayLike<nu
 
 /** Hyperparameters of `gpOrdinalRegression`. */
 export type GpOrdinalRegressionParams<P extends KernelParams = KernelParams> = {
+  /** The kernel $k$ (required); with `optimise`, the start of the fit. */
   kernel: Kernel<P>
-  /** Number of classes K (default: the largest label + 1). */
+  /** Number of classes $K$ (default: the largest label + 1). */
   classes?: number
-  /** Starting (or, without `optimise`, fixed) increasing thresholds θ [K − 1]; default from the class frequencies. */
+  /**
+   * Starting (or, without `optimise`, fixed) increasing thresholds $\thetavec$, $K - 1$ values; default from the
+   * class frequencies.
+   */
   thresholds?: ArrayLike<number>
-  /** Starting (or fixed) noise σ > 0 of the latent cdf. Default 1. */
+  /** Starting (or fixed) noise $\sigma > 0$ of the latent cdf. Default 1. */
   noise?: number
-  /** Maximise the Laplace evidence over θ, σ and the kernel's hyperparameters. Default true. */
+  /** Maximise the Laplace evidence over $\thetavec$, $\sigma$ and the kernel's hyperparameters. Default true. */
   optimise?: boolean
   /** Most Nelder–Mead steps of the evidence maximisation (default 300). */
   hyperSteps?: number
   /** Most Newton steps of each mode search (default 100). */
   maxSteps?: number
-  /** Newton tolerance on Ψ (default 1e-10). */
+  /** Newton tolerance on $\Psi$ (default 1e-10). */
   tolerance?: number
 }
 
@@ -108,26 +132,37 @@ export interface GpOrdinalRegressionModel<P extends KernelParams = KernelParams>
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'gp-ordinal-regression'
+  /** The kernel $k$ (the fitted one with `optimise`). */
   readonly kernel: Kernel<P>
+  /** The number of classes $K$. */
   readonly classes: number
-  /** The thresholds θ [K − 1], increasing. */
+  /** The thresholds $\thetavec$, `[K - 1]`, increasing. */
   readonly thresholds: Tensor
-  /** The noise σ of the latent cdf. */
+  /** The noise $\sigma$ of the latent cdf. */
   readonly noise: number
-  /** The posterior mode f̂ at the training inputs, [n]. */
+  /** The posterior mode $\hat\fvec$ at the training inputs, `[n]`. */
   readonly mode: Tensor
-  /** The Laplace approximation to log p(y | X, θ, σ). */
+  /** The Laplace approximation to $\log p(\yvec \mid \Xmat, \thetavec, \sigma)$. */
   readonly logMarginal: number
+  /** Whether the final Newton run converged within `maxSteps`. */
   readonly converged: boolean
   /** The Newton run at the final hyperparameters. */
   readonly training: Trace<LaplaceState>
-  /** Mean and variance of the approximate latent posterior q(f* | y) at xs. */
+  /** Mean and variance of the approximate latent posterior $q(f_* \mid \yvec)$ at `xs`. */
   latent(xs: Tensor): { mean: Tensor; variance: Tensor }
-  /** Class probabilities P(y* = k | x*) [m, K]. */
+  /** Class probabilities $P(y_* = k \mid \xvec_*)$, `[m, K]`. */
   probabilities(xs: Tensor): Tensor
 }
 
-/** Starting thresholds: the probit of the cumulative class frequencies, scaled by √(σ² + 1). */
+/**
+ * Starting thresholds: the probit of the cumulative class frequencies (clipped to $[\frac{1}{2n}, 1 - \frac{1}{2n}]$),
+ * scaled by $\sqrt{\sigma^2 + 1}$, and kept at least $10^{-3}$ apart.
+ *
+ * @param labels The class of each training point, $0, \dots, K - 1$.
+ * @param K The number of classes.
+ * @param noise The noise $\sigma$ of the latent cdf.
+ * @returns The $K - 1$ increasing thresholds.
+ */
 function startingThresholds(labels: Int32Array, K: number, noise: number): Float64Array {
   const counts = new Float64Array(K)
   for (const c of labels) counts[c]++
@@ -142,16 +177,42 @@ function startingThresholds(labels: Int32Array, K: number, noise: number): Float
   return theta
 }
 
-/** The Laplace mode and evidence for a Gram matrix and likelihood (Newton from `warm` when given). */
+/**
+ * The Laplace mode and evidence for a Gram matrix and likelihood (Newton from `warm` when given).
+ *
+ * @param problem The Gram matrix, labels and likelihood.
+ * @param maxSteps The most Newton steps.
+ * @param warm The starting latent values, `[n]` (default $\zeros$).
+ * @returns The final state of `laplaceMode`.
+ */
 function laplaceFit(problem: LaplaceProblem, maxSteps: number, warm?: Tensor): LaplaceState {
   return run(laplaceMode(problem), warm ? { f: warm } : {}, maxSteps)
 }
 
 /**
- * Gaussian-process ordinal regression (see the module comment): labels are the class indices 0 … K − 1.
+ * Gaussian-process ordinal regression (see the file comment): labels are the class indices $0, \dots, K - 1$.
  * Capabilities: `forward` and `score` (the latent posterior mean, larger for higher classes), `predictive`
- * (categorical over the K classes), `decide` (the most probable class), `expect` (E[y]), `sample`. The kernel is a
- * required argument.
+ * (categorical over the $K$ classes), `decide` (the most probable class), `expect` ($\expect[y]$), `sample`. The
+ * kernel is a required argument. `fit` throws `ShapeError` when the numbers of inputs and labels differ or the
+ * thresholds are not $K - 1$, and `DomainError` for a label that is not a class index, fewer than two classes, or
+ * thresholds that do not increase.
+ *
+ * @param params The kernel, the number of classes, the starting thresholds and noise, and the iteration limits.
+ * @returns The estimator: `fit({ x, y })` on inputs `[n, d]` (or `[n]`) and class labels `[n]` returns a
+ *   `GpOrdinalRegressionModel`.
+ *
+ * @example Three ordered classes along a line, at fixed hyperparameters
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7], [8]])
+ * const y = tensor([0, 0, 0, 1, 1, 1, 2, 2, 2])
+ * const model = gpOrdinalRegression({ kernel: rbf({ lengthscale: 2, variance: 4 }), optimise: false }).fit({ x, y })
+ * const xs = tensor([[0], [4], [8]])
+ * print('thresholds', model.thresholds)
+ * print('P(class) at 0, 4 and 8', model.probabilities(xs))
+ * print('decision', model.decide(xs), ' E[y]', model.expect(xs))
  */
 export function gpOrdinalRegression<P extends KernelParams>(
   params: GpOrdinalRegressionParams<P>,

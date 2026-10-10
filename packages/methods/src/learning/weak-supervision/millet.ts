@@ -1,16 +1,17 @@
 /**
  * MILLET: multiple instance learning for locally explainable time series classification (Early, Cheung, Cutajar, Xie,
- * Kandola and Twomey 2024, ICLR). A time series X_i = {x_i¹ … x_iᵗ} is a MIL bag whose instances are its time points.
- * A convolutional feature extractor ψ_FE maps it to time-point embeddings Z_i [t, d] (Eq. 1); fixed sinusoidal
- * positional encodings are added and dropout (0.1) applied (App. B.1, Eq. A.1); one of the five MIL poolings of
- * `aifn-compute/nn/layers` (`milPool`: embedding/GAP, attention, instance, additive, conjunctive) gives the series' logits and,
- * inherently, a time-point interpretation (§3.3). Convolutions pad by replicating the boundary value, not zeros (§3.4).
+ * Kandola and Twomey 2024, ICLR). A time series $\Xmat_i = \{x_i^1, \dots, x_i^t\}$ is a MIL bag whose instances are
+ * its time points. A convolutional feature extractor $\psi_{\text{FE}}$ maps it to time-point embeddings $\Zmat_i$
+ * ($t \times d$, Eq. 1); fixed sinusoidal positional encodings are added and dropout (0.1) applied (App. B.1, Eq. A.1);
+ * one of the five MIL poolings of `aifn-compute/nn/layers` (`milPool`: embedding/GAP, attention, instance, additive,
+ * conjunctive) gives the series' logits and, inherently, a time-point interpretation (§3.3). Convolutions pad by
+ * replicating the boundary value, not zeros (§3.4).
  *
  * The backbone here is a browser-sized FCN (Wang et al. 2017: convolution, ReLU, length kept), a few thousand
  * parameters instead of the paper's 128-wide FCN/ResNet/InceptionTime. The interpretability metrics are the paper's
- * (App. D.1): AOPCR from `aifn-compute/learning/explain` (MoRF in blocks of 5% up to 50%, removed time points dropped from the
- * bag with their positional encodings kept, against three random orders, on the logit of the predicted class) and
- * NDCG@n against the planted discriminatory points (n of them), from `aifn-compute/learning/metrics`.
+ * (App. D.1): AOPCR from `aifn-compute/learning/explain` (MoRF in blocks of 5% up to 50%, removed time points dropped
+ * from the bag with their positional encodings kept, against three random orders, on the logit of the predicted class)
+ * and NDCG@$n$ against the planted discriminatory points ($n$ of them), from `aifn-compute/learning/metrics`.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -51,33 +52,57 @@ import { softmax } from 'aifn-compute/numerics/special'
 
 /** The shape of a MILLET model. */
 export interface MilletSpec {
-  /** Series length t and number of classes c. */
+  /** The series length $t$. */
   readonly length: Size
+  /** The number of classes $c$. */
   readonly classes: Size
-  /** Channel widths of the convolutions (the last is the embedding width d, which must be even) and their kernel sizes. */
+  /**
+   * Channel widths of the convolutions, one per layer; the last is the embedding width $d$, which must be even when
+   * `positional` is set.
+   */
   readonly widths: readonly Size[]
+  /** The kernel size of each convolution, one per entry of `widths`. */
   readonly kernels: readonly Size[]
+  /** The MIL pooling. */
   readonly pooling: MilPoolingKind
-  /** Add positional encodings (default true) and the dropout rate after them (default 0.1, as the paper). */
+  /** Add sinusoidal positional encodings to the embeddings (`milletRun` sets it for every pooling but `embedding`). */
   readonly positional: boolean
+  /** The dropout rate after them in training (`milletRun`: 0.1, as the paper, or 0 for `embedding`). */
   readonly dropout: number
-  /** Inputs are standardised by this mean and scale (from the training set). */
+  /** Inputs are standardised by subtracting this mean (from the training set). */
   readonly mean: number
+  /** ... and dividing by this scale. */
   readonly scale: number
 }
 
-/** A MILLET model's parameters: the convolutions and the pooling. */
+/** A MILLET model's parameters: `convs`, one entry per convolution, and `pool`, the pooling's. */
 export type MilletParams = { convs: ConvParams[]; pool: MilPoolingParams }
 
 /** A MILLET model: its spec, initialiser and forward pass. */
 export interface MilletModel {
+  /** The shape it was built from. */
   readonly spec: MilletSpec
+  /** Fresh parameters, the convolutions drawn from `child(s, 'conv', l)` and the pooling from `child(s, 'pool')`. */
   init(s: Stream): MilletParams
-  /** Series [N, t] → the pooling's outputs (logits [N, c] and the interpretation); `mask` [N, t] drops time points. */
+  /**
+   * Series $N \times t$ to the pooling's outputs (logits $N \times c$ and the interpretation). `mask`, $N \times t$ of
+   * 1 (kept) and 0, drops time points from their bag; dropout is applied only with a training `ctx` that has a stream.
+   */
   forward(params: MilletParams, x: Value, options?: { ctx?: Context; mask?: Tensor }): MilPooled
 }
 
-/** Pad the last axis of x [N, C, L] by repeating its first and last values (`left`, `right` copies). */
+/**
+ * Pad the last axis of a batch of signals by repeating its first and last values, as MILLET's convolutions pad
+ * (differentiable: a gather).
+ *
+ * @param x The signals, $N \times C \times L$.
+ * @param left The number of copies of the first value put before it.
+ * @param right The number of copies of the last value put after it.
+ * @returns The padded signals, $N \times C \times (L + \text{left} + \text{right})$.
+ *
+ * @example Two copies of the first value, one of the last
+ * print('padded:', replicatePad(tensor([[[1, 2, 3, 4]]]), 2, 1))
+ */
 export function replicatePad(x: Value, left: Size, right: Size): Value {
   const [N, C, L] = shapeOfValue(x)
   const W = L + left + right
@@ -87,7 +112,25 @@ export function replicatePad(x: Value, left: Size, right: Size): Value {
   return gather(x, idx, [N, C, W])
 }
 
-/** Build a MILLET model (module notes). */
+/**
+ * Build a MILLET model (see the file's notes): standardisation, the convolutions (each padded by replication to keep
+ * the length, then ReLU), positional encodings and dropout, and the MIL pooling. Throws when there is not one kernel
+ * size per convolution, or none.
+ *
+ * @param spec The model's shape: length, classes, widths and kernels, pooling, positional encodings, dropout and
+ *   standardisation.
+ * @returns The model, with its initialiser and forward pass.
+ *
+ * @example An untrained model's logits and interpretation for two series
+ * const model = milletModel({
+ *   length: 8, classes: 2, widths: [4], kernels: [3], pooling: 'conjunctive',
+ *   positional: true, dropout: 0, mean: 0, scale: 1,
+ * })
+ * const params = model.init(stream(0))
+ * const out = model.forward(params, normals(stream(1), [2, 8]))
+ * print('logits:', out.logits)
+ * print('interpretation shape:', out.interpretation.shape)
+ */
 export function milletModel(spec: MilletSpec): MilletModel {
   const { length: t, classes, widths, kernels, pooling, positional, dropout: rate, mean, scale } = spec
   if (widths.length !== kernels.length || widths.length === 0)
@@ -127,59 +170,87 @@ export function milletModel(spec: MilletSpec): MilletModel {
 
 // ── Training ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** A labelled set of series: x [N, t], labels 0 … c − 1. */
+/** A labelled set of series: `x`, $N \times t$, and `y`, $N$ labels in $0, \dots, c - 1$. */
 export type SeriesSet = { x: Tensor; y: Tensor }
 
 /** Options of {@link milletRun}. */
 export interface MilletRunOptions {
+  /** The training series. */
   readonly train: SeriesSet
+  /** The test series, scored at every checkpoint and for interpretability at the end. */
   readonly test: SeriesSet & {
-    /** The planted discriminatory points [N, t] (1 = discriminatory), for NDCG@n; optional. */
+    /** The planted discriminatory points, $N \times t$ (1 = discriminatory), for NDCG@$n$; optional. */
     discriminatory?: Tensor
   }
+  /** The MIL pooling. */
   readonly pooling: MilPoolingKind
+  /** Channel widths of the convolutions (default $[8, 16]$). */
   readonly widths?: readonly Size[]
+  /** Their kernel sizes (default $[7, 5]$). */
   readonly kernels?: readonly Size[]
-  /** Positional encodings and dropout (default: on, rate 0.1, for the MIL poolings; off for `embedding`, the GAP baseline). */
+  /** Positional encodings (default: on for the MIL poolings; off for `embedding`, the GAP baseline). */
   readonly positional?: boolean
+  /** The dropout rate (default 0.1 for the MIL poolings; 0 for `embedding`). */
   readonly dropout?: number
-  /** Optimiser steps (default 300), Adam's step size (default 0.01) and the minibatch size (default 32). */
+  /** Optimiser steps (default 300). */
   readonly steps?: Size
+  /** Adam's step size (default 0.01). */
   readonly stepSize?: number
+  /** The minibatch size (default 32, or the training set's size when smaller). */
   readonly batchSize?: Size
-  /** Checkpoints (default about 30). */
+  /** Steps between checkpoints (default `steps / 30` rounded, so about 30 checkpoints; at least 1). */
   readonly every?: Size
-  /** Test series scored for AOPCR at the end (default 30; NDCG@n uses every test series with planted points). */
+  /** Test series scored for AOPCR at the end (default 30; NDCG@$n$ uses every test series with planted points). */
   readonly evaluate?: Size
+  /** Seed of the initial weights, the minibatches, dropout and AOPCR's random orders (default `'millet'`). */
   readonly seed?: number | string
 }
 
-/** One checkpoint: the step and the parameters. */
+/** One checkpoint: the `step` and the `params` after it. */
 export type MilletCheckpoint = { step: Size; params: MilletParams }
 
 /** The interpretability scores of a model on the test set (App. D.1). */
 export interface MilletScores {
+  /** The accuracy of the argmax of the logits on the test set. */
   readonly accuracy: number
-  /** Mean AOPCR over the scored test series, and mean NDCG@n over the series with planted points. */
+  /** Mean AOPCR over the scored test series. */
   readonly aopcr: number
+  /** Mean NDCG@$n$ over the series with planted points (NaN when none has any). */
   readonly ndcg: number
-  /** Per-series values (NaN where undefined), in test order (AOPCR for the first `evaluate` only). */
+  /** AOPCR per series, in test order (NaN after the first `evaluate`). */
   readonly aopcrPerSeries: number[]
+  /** NDCG@$n$ per series, in test order (NaN for a series with no planted points). */
   readonly ndcgPerSeries: number[]
 }
 
 /** What {@link milletRun} yields: the run so far. */
 export interface MilletSnapshot {
+  /** The step reached. */
   readonly step: Size
+  /** The steps of the whole run. */
   readonly steps: Size
+  /** Whether training is over (the final snapshot, with `scores`). */
   readonly done: boolean
+  /** The model's shape, with the training set's standardisation. */
   readonly spec: MilletSpec
+  /**
+   * At each checkpoint so far: the step, the training loss on the whole training set (without dropout), and the
+   * training and test accuracies.
+   */
   readonly history: { step: number[]; loss: number[]; trainAccuracy: number[]; testAccuracy: number[] }
+  /** The parameters at each checkpoint so far. */
   readonly checkpoints: MilletCheckpoint[]
   /** Set on the final snapshot. */
   readonly scores?: MilletScores
 }
 
+/**
+ * The accuracy of the argmax of the logits (the first class on a tie).
+ *
+ * @param logits The logits, $N \times c$.
+ * @param y The true class of each series.
+ * @returns The share of series whose argmax is their class.
+ */
 function accuracyOf(logits: Tensor, y: ArrayLike<number>): number {
   const [N, c] = logits.shape
   const z = dense.data(logits)
@@ -192,7 +263,26 @@ function accuracyOf(logits: Tensor, y: ArrayLike<number>): number {
   return hit / N
 }
 
-/** The interpretation of one series for one class: [t] scores (class-agnostic attention for `attention` pooling). */
+/**
+ * The interpretation of one series for one class: $t$ scores, one per time point (the class-agnostic attention for
+ * `attention` pooling, whatever the class).
+ *
+ * @param model The model.
+ * @param params Its parameters.
+ * @param series The series, $t$ values.
+ * @param label The class the interpretation is for.
+ * @returns The score of each time point.
+ *
+ * @example Where an untrained model looks, for each class
+ * const model = milletModel({
+ *   length: 6, classes: 2, widths: [4], kernels: [3], pooling: 'instance',
+ *   positional: false, dropout: 0, mean: 0, scale: 1,
+ * })
+ * const params = model.init(stream(0))
+ * const series = [0, 0, 3, 3, 0, 0]
+ * print('class 0:', milletInterpretation(model, params, series, 0))
+ * print('class 1:', milletInterpretation(model, params, series, 1))
+ */
 export function milletInterpretation(
   model: MilletModel,
   params: MilletParams,
@@ -207,7 +297,25 @@ export function milletInterpretation(
   return Float64Array.from({ length: t }, (_, j) => v[j * c + label])
 }
 
-/** Logits [c] of one series with some time points dropped from the bag (`kept[j] = 1` keeps j). */
+/**
+ * Logits ($c$ values) of one series, with some time points dropped from the bag.
+ *
+ * @param model The model.
+ * @param params Its parameters.
+ * @param series The series, $t$ values.
+ * @param kept Which time points stay in the bag: `kept[j] = 1` keeps $j$, 0 drops it; left out, all stay.
+ * @returns The logits, one per class.
+ *
+ * @example Dropping time points from the bag changes the logits
+ * const model = milletModel({
+ *   length: 6, classes: 2, widths: [4], kernels: [3], pooling: 'additive',
+ *   positional: false, dropout: 0, mean: 0, scale: 1,
+ * })
+ * const params = model.init(stream(0))
+ * const series = [0, 0, 3, 3, 0, 0]
+ * print('every point:', milletLogits(model, params, series))
+ * print('the bump only:', milletLogits(model, params, series, Uint8Array.from([0, 0, 1, 1, 0, 0])))
+ */
 export function milletLogits(
   model: MilletModel,
   params: MilletParams,
@@ -223,7 +331,29 @@ export function milletLogits(
 
 /**
  * The interpretability scores of a trained model on a test set (App. D.1): AOPCR on the logit of the predicted class
- * (blocks of 5% up to 50%, three random orders) for the first `evaluate` series, and NDCG@n against the planted points.
+ * (blocks of 5% up to 50%, three random orders) for the first `evaluate` series, and NDCG@$n$ of the interpretation for
+ * the true class against the planted points.
+ *
+ * @param s The stream AOPCR's random orders come from (series $i$ uses `child(s, 'aopcr', i)`).
+ * @param model The model.
+ * @param params Its parameters.
+ * @param test The test series, with their planted points when known.
+ * @param evaluate The number of test series, from the first, scored for AOPCR.
+ * @returns The accuracy and the mean and per-series AOPCR and NDCG@$n$.
+ *
+ * @example The scores' shape, from an untrained model on four series
+ * const model = milletModel({
+ *   length: 8, classes: 2, widths: [4], kernels: [3], pooling: 'conjunctive',
+ *   positional: false, dropout: 0, mean: 0, scale: 1,
+ * })
+ * const params = model.init(stream(0))
+ * const marks = [[], [2, 3], [], [5, 6]]
+ * const discriminatory = tensor(marks.map((m) => Array.from({ length: 8 }, (_, j) => (m.includes(j) ? 1 : 0))))
+ * const x = mul(discriminatory, 3)
+ * const scores = milletScores(stream(1), model, params, { x, y: tensor([0, 1, 0, 1]), discriminatory }, 4)
+ * print('AOPCR per series:', scores.aopcrPerSeries)
+ * print('NDCG@n per series (none without planted points):', scores.ndcgPerSeries)
+ * print('means:', scores.aopcr, scores.ndcg)
  */
 export function milletScores(
   s: Stream,
@@ -269,7 +399,35 @@ export function milletScores(
 /**
  * Train a MILLET model end to end by Adam on the softmax cross-entropy of minibatches, as a generator yielding the run
  * at each checkpoint (the first at step 0, before training) and, at the end, the interpretability scores. Series are
- * standardised by the training set's mean and standard deviation.
+ * standardised by the training set's mean and standard deviation (over every value). The number of classes is one
+ * more than the largest label of the training and test sets.
+ *
+ * @param options The data, the model, the training and the evaluation.
+ * @returns A generator of snapshots: one at step 0, one every `every` steps before the last, and a final one, with
+ *   `done` and `scores`, which it also returns.
+ *
+ * @example Learn where a bump sits in a short series
+ * // Class 1 series have a bump of height 3 at a random place; class 0 series are noise alone.
+ * const s = stream(3)
+ * const make = (count) => {
+ *   const [x, y, d] = [[], [], []]
+ *   for (let i = 0; i < count; i++) {
+ *     const label = i % 2
+ *     const at = 2 + Math.floor(uniform(s) * 10)
+ *     const row = Array.from({ length: 16 }, () => normal(s, 0, 0.3))
+ *     const mark = row.map((_, j) => (label === 1 && j >= at && j < at + 3 ? 1 : 0))
+ *     x.push(row.map((v, j) => v + 3 * mark[j]))
+ *     y.push(label)
+ *     d.push(mark)
+ *   }
+ *   return { x: tensor(x), y: tensor(y), discriminatory: tensor(d) }
+ * }
+ * const options = { train: make(16), test: make(6), pooling: 'conjunctive', widths: [4, 8], kernels: [3, 3] }
+ * let last
+ * for (const snapshot of milletRun({ ...options, steps: 30, batchSize: 8, every: 10, evaluate: 2 })) last = snapshot
+ * print('loss by checkpoint:', last.history.loss)
+ * print('test accuracy by checkpoint:', last.history.testAccuracy)
+ * print('AOPCR:', last.scores.aopcr, ' NDCG@n:', last.scores.ndcg)
  */
 export function* milletRun(options: MilletRunOptions): Generator<MilletSnapshot, MilletSnapshot> {
   const {
@@ -351,7 +509,21 @@ export function* milletRun(options: MilletRunOptions): Generator<MilletSnapshot,
   return final
 }
 
-/** The softmax probabilities [c] of one series, for readouts. */
+/**
+ * The softmax probabilities ($c$ values) of one series, for readouts.
+ *
+ * @param model The model.
+ * @param params Its parameters.
+ * @param series The series, $t$ values.
+ * @returns The class probabilities.
+ *
+ * @example An untrained model's class probabilities
+ * const model = milletModel({
+ *   length: 6, classes: 3, widths: [4], kernels: [3], pooling: 'attention',
+ *   positional: false, dropout: 0, mean: 0, scale: 1,
+ * })
+ * print('p =', milletProbabilities(model, model.init(stream(0)), [0, 1, 2, 3, 2, 1]))
+ */
 export const milletProbabilities = (
   model: MilletModel,
   params: MilletParams,

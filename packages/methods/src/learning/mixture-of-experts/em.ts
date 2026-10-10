@@ -3,13 +3,19 @@
  * of experts and the EM algorithm", Neural Computation 6(2), §4), as a step-through algorithm: one step is one E-step
  * and one M-step.
  *
- * - E-step: the responsibility of expert i for row t is its posterior given y, hₜᵢ ∝ gᵢ(xₜ) pᵢ(yₜ | xₜ).
- * - M-step, experts: each expert is refitted to every row weighted by hₜᵢ: weighted least squares and
- *   σᵢ² = Σₜ hₜᵢ rₜᵢ² / Σₜ hₜᵢ for regression; a few Newton (IRLS) steps of weighted logistic regression for
- *   classification. A tiny ridge keeps an expert with almost no responsibility solvable.
- * - M-step, gate: the gate is refitted as a multinomial logistic regression on the soft targets h, maximising
- *   Σₜ Σᵢ hₜᵢ log gᵢ(xₜ) by L-BFGS from the current gate (a generalised EM step: the likelihood never decreases). For
- *   the hierarchy this one objective holds the top gate (targets Σⱼ hₜ,gⱼ) and every lower gate together.
+ * - E-step: the responsibility of expert $i$ for row $t$ is its posterior given $y$,
+ *   $h_{ti} \propto g_i(\xvec_t) p_i(y_t \mid \xvec_t)$.
+ * - M-step, experts: each expert is refitted to every row weighted by $h_{ti}$: weighted least squares and
+ *   $\sigma_i^2 = \sum_t h_{ti} r_{ti}^2 / \sum_t h_{ti}$ (with $r_{ti}$ the residual) for regression; a few Newton
+ *   (IRLS) steps of weighted logistic regression for classification. A tiny ridge keeps an expert with almost no
+ *   responsibility solvable.
+ * - M-step, gate: the gate is refitted as a multinomial logistic regression on the soft targets $\Hmat$, maximising
+ *   $\sum_t \sum_i h_{ti} \log g_i(\xvec_t)$ by L-BFGS from the current gate (a generalised EM step: the likelihood
+ *   should not decrease). For the hierarchy this one objective holds the top gate (targets $\sum_j h_{t,gj}$) and
+ *   every lower gate together.
+ *
+ * Both M-steps use the responsibilities of the E-step before them, so the experts and the gate are refitted to the
+ * same targets.
  */
 
 import type { Algorithm, Size, Status, StepContext } from 'aifn-compute/foundation/contracts'
@@ -34,7 +40,7 @@ import type { LinearParams } from 'aifn-compute/nn/layers'
 import { expertLogLikelihood, moeForward, moeLoss, type MoeModel, type MoeParams } from './model'
 import { DomainError, NumericalError } from 'aifn-compute/foundation/errors'
 
-/** Training data: inputs [T, d] and targets [T] (floats, or 0/1 labels). */
+/** Training data: inputs `x` ($T \times d$) and targets `y` ($T$ floats, or 0/1 labels). */
 export type MoeData = { x: Tensor; y: Tensor }
 
 /** Options of `moeEm`. */
@@ -45,21 +51,34 @@ export type MoeEmOptions = {
   newtonSteps?: Size
   /** Ridge added to each expert's normal equations (default 1e-6). */
   ridge?: number
-  /** The smallest σᵢ² of a regression expert (default 1e-6), so an expert on a few exact points stays finite. */
+  /**
+   * The smallest $\sigma_i^2$ of a regression expert (default 1e-6), so an expert on a few exact points stays finite.
+   */
   minVariance?: number
 }
 
-/** The state of `moeEm` after t EM steps. */
+/** The state of `moeEm` after $t$ EM steps. */
 export interface MoeEmState extends Status {
+  /** EM steps done. */
   readonly t: Size
+  /** The parameters after $t$ steps. */
   readonly params: MoeParams
   /** The mean negative log-likelihood at `params`. */
   readonly loss: number
-  /** The responsibilities hₜᵢ at `params` (the next E-step's), [T][N]. */
+  /** The responsibilities $h_{ti}$ at `params` (the next E-step's), $T$ rows of $N$. */
   readonly responsibilities: number[][]
 }
 
-/** Check that EM applies: linear experts, a dense gate, the mixture objective. */
+/**
+ * Check that EM applies: linear experts, a dense gate (softmax or hierarchical), the mixture objective.
+ *
+ * @param model The model; its spec is read.
+ * @returns Null when EM applies, else the reason it does not.
+ *
+ * @example A mixture of linear experts, and one of MLP experts
+ * print('linear:', emApplies(moeModel({ inputs: 1, task: 'regression' })))
+ * print('MLP:', emApplies(moeModel({ inputs: 1, task: 'regression', expert: 'mlp' })))
+ */
 export function emApplies(model: MoeModel): string | null {
   const { expert, gate, objective } = model.spec
   if (expert !== 'linear') return 'EM needs linear experts (an MLP expert has no closed-form M-step)'
@@ -68,17 +87,40 @@ export function emApplies(model: MoeModel): string | null {
   return null
 }
 
-/** log gᵢ(x) [T, N] of a dense routing: logSoftmax of the scores (flat gate) or the log-probabilities (hierarchy). */
+/**
+ * The log gate weights $\log g_i(\xvec)$ of a dense routing: the log-softmax of the scores (flat gate), or the
+ * log-probabilities the hierarchy keeps in `logits`.
+ *
+ * @param model The model; its gate is read.
+ * @param scores The routing's `scores`, $T \times N$ (read for a flat gate).
+ * @param logits The routing's `logits`, $T \times N$ (read for a hierarchy, where they are log-probabilities).
+ * @returns The $T \times N$ log weights, differentiable.
+ */
 function logGate(model: MoeModel, scores: Value, logits: Value): Value {
   return model.spec.gate === 'hierarchical' ? logits : logSoftmax(scores)
 }
 
+/**
+ * The rows of a matrix as plain arrays.
+ *
+ * @param t The matrix, $n \times k$.
+ * @param n The number of rows.
+ * @param k The number of columns.
+ * @returns $n$ arrays of $k$ values.
+ */
 const rowsOf = (t: Tensor, n: number, k: number) => {
   const f = toFlat(t)
   return Array.from({ length: n }, (_, i) => f.slice(i * k, (i + 1) * k))
 }
 
-/** Mean negative log-likelihood and responsibilities [T][N] at params. */
+/**
+ * The E-step: the mean negative log-likelihood and the responsibilities at the parameters, in log space.
+ *
+ * @param model The model.
+ * @param params The parameters.
+ * @param data The training data.
+ * @returns `loss`, the mean negative log-likelihood, and `h`, the responsibilities, $T$ rows of $N$ summing to 1.
+ */
 function responsibilities(model: MoeModel, params: MoeParams, data: MoeData) {
   const { routing, outputs } = moeForward(model, params, data.x)
   const T = data.x.shape[0]
@@ -99,7 +141,19 @@ function responsibilities(model: MoeModel, params: MoeParams, data: MoeData) {
   return { loss: nll, h }
 }
 
-/** Refit expert i by weighted least squares (regression) or weighted IRLS (classification). */
+/**
+ * Refit one expert by weighted least squares (regression) or weighted IRLS (classification), with the bias as the
+ * weight of a constant feature and `ridge` added to the diagonal of the normal equations (bias included). Throws
+ * `NumericalError` when the equations are singular.
+ *
+ * @param model The model; its task and input width are read.
+ * @param current The expert's current parameters: IRLS starts from them; least squares does not read them.
+ * @param data The training data.
+ * @param h The expert's responsibility for each row, $T$ values: the weights of the fit.
+ * @param options The EM options, every default filled in (`ridge`, `newtonSteps`, `minVariance`).
+ * @returns The refitted parameters, and for regression the weighted residual variance $\sigma_i^2$ (at least
+ *   `minVariance`).
+ */
 function refitExpert(
   model: MoeModel,
   current: LinearParams,
@@ -159,7 +213,14 @@ function refitExpert(
   }
 }
 
-/** The gate's parameters as one flat vector, and back. */
+/**
+ * The gate's parameters as one flat vector, and back: the router's weight ($d \times N$) and bias, then for a
+ * hierarchy the top gate's weight ($d \times G$) and bias.
+ *
+ * @param model The model.
+ * @param params The parameters whose gate is flattened.
+ * @returns `v`, the flat gate, and `read`, which turns a flat vector (traced or not) into `params` with that gate.
+ */
 function gateVector(model: MoeModel, params: MoeParams): { v: Float64Array; read: (v: Value) => MoeParams } {
   const { inputs: d, experts: N, groups: G } = model.spec
   const parts: Tensor[] = [params.moe.router.weight, params.moe.router.bias!]
@@ -181,7 +242,17 @@ function gateVector(model: MoeModel, params: MoeParams): { v: Float64Array; read
   return { v, read }
 }
 
-/** Refit the gate to the soft targets h by L-BFGS on −mean Σᵢ hₜᵢ log gᵢ(xₜ). */
+/**
+ * Refit the gate to the soft targets by L-BFGS on $-\frac{1}{T} \sum_t \sum_i h_{ti} \log g_i(\xvec_t)$, from the
+ * current gate.
+ *
+ * @param model The model.
+ * @param params The parameters; only the gate is refitted, the rest is kept.
+ * @param data The training data; only `x` is read.
+ * @param h The soft targets: the responsibilities, $T$ rows of $N$.
+ * @param steps The most L-BFGS steps.
+ * @returns The parameters with the refitted gate, as plain tensors.
+ */
 function refitGate(model: MoeModel, params: MoeParams, data: MoeData, h: number[][], steps: Size): MoeParams {
   const T = data.x.shape[0]
   const N = model.spec.experts
@@ -209,8 +280,26 @@ function refitGate(model: MoeModel, params: MoeParams, data: MoeData, h: number[
 }
 
 /**
- * EM for a mixture (or hierarchical mixture) of linear experts on `data`: `init` takes `{ params }` (e.g.
- * `model.init(stream)`); each step is an E-step and an M-step (experts, then gate). Throws when `emApplies` says no.
+ * EM for a mixture (or hierarchical mixture) of linear experts on `data`: `init` takes `{ params }` (such as
+ * `model.init(stream)`); each step is an M-step on the responsibilities the state holds (experts, then gate), then
+ * the E-step at the new parameters. Neither uses the stream. Throws `DomainError` when `emApplies` says no, and the
+ * steps throw `NumericalError` when an expert's normal equations are singular; a non-finite loss marks the state
+ * `diverged`.
+ *
+ * @param model The model: linear experts, a softmax or hierarchical gate, the mixture objective.
+ * @param data The training data.
+ * @param options The M-step's settings.
+ * @returns The algorithm, one EM iteration per step.
+ *
+ * @example The loss falls as two experts take a V of two regimes apart
+ * const xs = Array.from({ length: 16 }, (_, t) => -1 + (2 * t) / 15)
+ * const x = tensor(xs.map((v) => [v]))
+ * const y = add(tensor(xs.map((v) => Math.abs(2 * v))), normals(stream(1), 16, 0, 0.1))
+ * const model = moeModel({ inputs: 1, task: 'regression', experts: 2 })
+ * const alg = moeEm(model, { x, y })
+ * const tr = trace(alg, { params: model.init(stream(2)) }, 10, { record: { loss: (s) => s.loss } })
+ * print('loss by step:', tr.series.loss)
+ * print('expert sigmas:', exp(tr.final.params.logSigma))
  */
 export function moeEm(
   model: MoeModel,
@@ -258,7 +347,22 @@ export function moeEm(
   }
 }
 
-/** The mean negative log-likelihood of params on data (the EM objective), for checks. */
+/**
+ * The mean negative log-likelihood of the parameters on the data (the EM objective, the data term of `moeLoss`), for
+ * checks. Evaluation mode: no gate noise.
+ *
+ * @param model The model (with the mixture objective, for the value to be a likelihood).
+ * @param params The parameters.
+ * @param data The data.
+ * @returns $-\frac{1}{T} \sum_t \log p(y_t \mid \xvec_t)$.
+ *
+ * @example The same value as an EM state's loss
+ * const x = tensor([[-1], [0], [1]])
+ * const y = tensor([2, 0, 2])
+ * const model = moeModel({ inputs: 1, task: 'regression', experts: 2 })
+ * const s = run(moeEm(model, { x, y }), { params: model.init(stream(1)) }, 2)
+ * print('state loss:', s.loss, 'recomputed:', moeNegativeLogLikelihood(model, s.params, { x, y }))
+ */
 export function moeNegativeLogLikelihood(model: MoeModel, params: MoeParams, data: MoeData): number {
   const raw = unwrap(moeLoss(model, params, data.x, data.y).data)
   return typeof raw === 'number' ? raw : toFlat(raw)[0]

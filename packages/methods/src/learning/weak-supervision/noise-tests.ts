@@ -1,24 +1,32 @@
 /**
  * Hypothesis tests for class-conditional label noise from anchor points (Poyiadzi, Yang, Twomey and Santos-Rodriguez
- * 2022, ECML-PKDD, arXiv 2103.02630; Yang, Poyiadzi, Twomey and Santos-Rodriguez 2024, AAAI). Labels y ∈ {0, 1} (the
- * papers' ±1) are flipped with α = P(ỹ = 0 | y = 1) and β = P(ỹ = 1 | y = 0); the noisy posterior is
- * η̃(x) = (1 − α − β) η(x) + β. An anchor point is an x whose clean posterior is η(x) = ½, so η̃(x) = (1 − α + β)/2,
- * which is ½ exactly when α = β. The tests are two-sided z-tests of
+ * 2022, ECML-PKDD, arXiv 2103.02630; Yang, Poyiadzi, Twomey and Santos-Rodriguez 2024, AAAI). Labels $y \in \{0, 1\}$
+ * (the papers' $\pm 1$) are flipped with $\alpha = p(\tilde{y} = 0 \mid y = 1)$ and
+ * $\beta = p(\tilde{y} = 1 \mid y = 0)$; the noisy posterior is
+ * $\tilde{\eta}(\xvec) = (1 - \alpha - \beta) \eta(\xvec) + \beta$. An anchor point is an $\xvec$ whose clean posterior
+ * is $\eta(\xvec) = \tfrac{1}{2}$, so $\tilde{\eta}(\xvec) = (1 - \alpha + \beta)/2$, which is $\tfrac{1}{2}$ exactly
+ * when $\alpha = \beta$. The tests are two-sided $z$-tests of
  *
- *   H₀: α = β (uniform noise, or none)   against   H₁: α ≠ β (class-conditional noise)
+ * $H_0: \alpha = \beta$ (uniform noise, or none) against $H_1: \alpha \ne \beta$ (class-conditional noise)
  *
- * on η̄ = (1/k) Σ η̂(x_i) over k anchors, with η̂ a model fitted to the noisy labels:
+ * on $\bar{\eta} = \frac{1}{k} \sum_i \hat{\eta}(\xvec_i)$ over $k$ anchors, with $\hat{\eta}$ a model fitted to the
+ * noisy labels:
  *
- * - **parametric** (2022): logistic regression by maximum likelihood on (1, x); by the asymptotic normality of the MLE
- *   and the delta method, η̄ ~ N(½, v) under H₀ with v = (1/16) x̄ᵀĤx̄, Ĥ = (XᵀDX)⁻¹, D = diag(η̂ᵢ(1 − η̂ᵢ)), x̄ the mean
- *   of the augmented anchors (Eqs. 4, 6 and §3.2);
+ * - **parametric** (2022): logistic regression by maximum likelihood on $(1, \xvec)$; by the asymptotic normality of
+ *   the MLE and the delta method, $\bar{\eta} \sim \Gauss(\tfrac{1}{2}, v)$ under $H_0$ with
+ *   $v = \tfrac{1}{16} \bar{\xvec}^\top \hat{\Hmat} \bar{\xvec}$, $\hat{\Hmat} = (\Xmat^\top \Dmat \Xmat)^{-1}$,
+ *   $\Dmat = \diag(\hat{\eta}_i(1 - \hat{\eta}_i))$, $\bar{\xvec}$ the mean of the augmented anchors (Eqs. 4, 6 and
+ *   §3.2);
  * - **local** (2024): local likelihood logistic regression at each anchor (`localLogistic`), whose log-odds have the
- *   sandwich variance; v = (1/(16k²)) Σ_{k,j} cov(β̂₀(x_k), β̂₀(x_j)) (Eqs. 7–9 and the multiple-anchor variance).
+ *   sandwich variance; $v = \frac{1}{16k^2} \sum_{a,b} \cov(\hat{\beta}_0(\xvec_a), \hat{\beta}_0(\xvec_b))$ (Eqs. 7–9
+ *   and the multiple-anchor variance).
  *
- * z = (η̄ − ½)/√v, and the p-value is 2(1 − Φ(|z|)). The power at level a is 1 − b with
- * b = Φ((z_{1−a/2}√v + h)/√ṽ) − Φ((−z_{1−a/2}√v + h)/√ṽ), h = (β − α)/2 (Prop. 3.1, Eq. 11); under H₁ the delta-method
- * factor is [η̃(1 − η̃)]² with η̃ = (1 − α + β)/2, so ṽ = 16[η̃(1 − η̃)]² v. (The paper prints the factor as
- * [(1 − α + β)(β − α)]²/16; the reading here, logged in the progress file, is the delta method's.)
+ * $z = (\bar{\eta} - \tfrac{1}{2})/\sqrt{v}$, and the p-value is $2(1 - \Phi(\lvert z \rvert))$. The power at level $a$
+ * is $1 - b$ with $b = \Phi(u_+) - \Phi(u_-)$, $u_\pm = (\pm z_{1-a/2}\sqrt{v} + h)/\sqrt{\tilde{v}}$,
+ * $h = (\beta - \alpha)/2$ (Prop. 3.1, Eq. 11); under $H_1$ the delta-method factor is
+ * $[\tilde{\eta}(1 - \tilde{\eta})]^2$ with $\tilde{\eta} = (1 - \alpha + \beta)/2$, so
+ * $\tilde{v} = 16[\tilde{\eta}(1 - \tilde{\eta})]^2 v$. (The paper prints the factor as
+ * $[(1 - \alpha + \beta)(\beta - \alpha)]^2/16$; the reading here, logged in the progress file, is the delta method's.)
  */
 
 import type { MatrixLike, Size } from 'aifn-compute/foundation/contracts'
@@ -31,28 +39,40 @@ import { Normal } from 'aifn-compute/probability/distributions'
 import type { TestResult } from 'aifn-compute/probability/tests'
 import { localLogistic, localLogisticBandwidth, localLogisticCovariance, weightedLogistic } from './local-likelihood'
 
-/** Which model estimates the posterior at the anchors. */
+/**
+ * Which model estimates the posterior at the anchors: logistic regression by maximum likelihood, or local likelihood.
+ */
 export type NoiseTestModel = 'parametric' | 'local'
 
 /** Options of {@link classConditionalNoiseTest}. */
 export interface NoiseTestOptions {
   /** `parametric` (logistic regression MLE, default) or `local` (local likelihood). */
   model?: NoiseTestModel
-  /** The local model's bandwidth (default 1) and polynomial order (default 1). */
+  /** The local model's kernel bandwidth (default 1); unused by the parametric model. */
   bandwidth?: number
+  /** The local model's polynomial order (default 1); unused by the parametric model. */
   degree?: 0 | 1 | 2
 }
 
 /** A noise test's result: the z-test, with the posterior estimates at the anchors. */
 export type NoiseTestResult = TestResult & {
-  /** η̂ at each anchor and their mean η̄. */
+  /** $\hat{\eta}$ at each anchor. */
   readonly anchorEstimates: readonly number[]
+  /** Their mean $\bar{\eta}$ (also the result's `estimate`). */
   readonly meanEstimate: number
-  /** v, the variance of η̄ under H₀. */
+  /** $v$, the variance of $\bar{\eta}$ under $H_0$. */
   readonly variance: number
 }
 
-/** The logistic-regression MLE on (1, x) and Ĥ = (XᵀDX)⁻¹ at it. */
+/**
+ * The logistic-regression MLE on $(1, \xvec)$ and $\hat{\Hmat} = (\Xmat^\top \Dmat \Xmat)^{-1}$ at it, with $\Xmat$
+ * the design of an intercept and the features.
+ *
+ * @param x The points, $n \times d$.
+ * @param y The noisy labels, $\tilde{y}_i \in \{0, 1\}$, one per point.
+ * @returns `theta`, the $q = d + 1$ coefficients (intercept first), `H`, $\hat{\Hmat}$ ($q \times q$, row-major),
+ *   `q` and `d`.
+ */
 function logisticMle(x: MatrixLike, y: ArrayLike<number>) {
   const m = dense.toMatrixF64(x, 'classConditionalNoiseTest')
   const { m: n, n: d } = m
@@ -72,8 +92,35 @@ function logisticMle(x: MatrixLike, y: ArrayLike<number>) {
 }
 
 /**
- * The anchor-point test for class-conditional label noise (module notes): `x` [n, d] and the noisy labels `y` ∈ {0, 1}
- * of the data, and `anchors` [k, d], points whose clean posterior is (about) ½.
+ * The anchor-point test for class-conditional label noise (see the file's notes): a two-sided $z$-test of
+ * $H_0: \alpha = \beta$ on the mean noisy posterior at the anchors. Throws `DomainError` for no anchors and
+ * `ShapeError` when the anchors and the data differ in dimension.
+ *
+ * @param x The points, $n \times d$.
+ * @param y The noisy labels, $\tilde{y}_i \in \{0, 1\}$, one per point.
+ * @param anchors The anchor points, $k \times d$: points whose clean posterior is (about) $\tfrac{1}{2}$.
+ * @param options The model (default `parametric`), and the local model's bandwidth and order.
+ * @returns The test result ($z$, p-value, null law $\Gauss(0, 1)$, estimate $\bar{\eta}$ against $\tfrac{1}{2}$), with
+ *   the estimate at each anchor and the variance $v$.
+ *
+ * @example Uniform noise passes, class-conditional noise is caught
+ * // The clean posterior is sigmoid(2x), so x = 0 is an anchor.
+ * const noisy = (seed, alpha, beta) => {
+ *   const s = stream(seed)
+ *   const x = Array.from({ length: 400 }, () => [uniform(s, -3, 3)])
+ *   const y = x.map(([v]) => {
+ *     const clean = uniform(s) < 1 / (1 + Math.exp(-2 * v)) ? 1 : 0
+ *     return uniform(s) < (clean === 1 ? alpha : beta) ? 1 - clean : clean
+ *   })
+ *   return { x, y }
+ * }
+ * const uniformNoise = noisy(1, 0.2, 0.2)
+ * const classNoise = noisy(1, 0.3, 0.05)
+ * print('alpha = beta = 0.2, p =', classConditionalNoiseTest(uniformNoise.x, uniformNoise.y, [[0]]).pValue)
+ * const t = classConditionalNoiseTest(classNoise.x, classNoise.y, [[0]])
+ * print('alpha = 0.3, beta = 0.05, p =', t.pValue, ' mean noisy posterior:', t.meanEstimate)
+ * const local = classConditionalNoiseTest(classNoise.x, classNoise.y, [[-0.2], [0], [0.2]], { model: 'local' })
+ * print('the same with the local model at three anchors, p =', local.pValue)
  */
 export function classConditionalNoiseTest(
   x: MatrixLike,
@@ -141,9 +188,19 @@ export function classConditionalNoiseTest(
 }
 
 /**
- * The power 1 − b of the two-sided test at level `level` (Prop. 3.1, Eq. 11; Eq. 12 for k anchors chosen at random):
- * v is the variance of η̄ under H₀ (already divided by k for several anchors), and ṽ = 16[η̃(1 − η̃)]² v with
- * η̃ = (1 − α + β)/2 its variance under H₁ (module notes).
+ * The power $1 - b$ of the two-sided test at level `level` (Prop. 3.1, Eq. 11; Eq. 12 for $k$ anchors chosen at
+ * random): $v$ is the variance of $\bar{\eta}$ under $H_0$ (already divided by $k$ for several anchors), and
+ * $\tilde{v} = 16[\tilde{\eta}(1 - \tilde{\eta})]^2 v$ with $\tilde{\eta} = (1 - \alpha + \beta)/2$ its variance under
+ * $H_1$ (see the file's notes). Throws `DomainError` unless the variance is positive.
+ *
+ * @param options `variance`, $v$; `alpha` and `beta`, the noise rates $\alpha = p(\tilde{y} = 0 \mid y = 1)$ and
+ *   $\beta = p(\tilde{y} = 1 \mid y = 0)$; and `level`, the test's level $a$ (default 0.05).
+ * @returns The power, the probability that the test rejects $H_0$ at these noise rates.
+ *
+ * @example Power grows with the gap between the noise rates
+ * for (const alpha of [0.1, 0.15, 0.2, 0.3]) {
+ *   print('alpha =', alpha, ' beta = 0.1, power:', noiseTestPower({ variance: 0.001, alpha, beta: 0.1 }))
+ * }
  */
 export function noiseTestPower(options: { variance: number; alpha: number; beta: number; level?: number }): number {
   const { variance: v, alpha, beta, level = 0.05 } = options
@@ -162,27 +219,63 @@ export function noiseTestPower(options: { variance: number; alpha: number; beta:
 
 /** One cell of a simulation: noisy datasets with their anchor sets, tested the same way. */
 export interface NoiseTestCell {
+  /** The cell's name, as a figure shows it. */
   readonly label: string
-  /** The datasets' features and noisy labels, and one anchor set [k, d] per dataset. */
+  /** The datasets: features `x` ($n \times d$) and noisy labels `y` ($n$ values in $\{0, 1\}$). */
   readonly datasets: readonly { x: Tensor; y: Tensor }[]
+  /** One anchor set ($k \times d$) per dataset, in the same order. */
   readonly anchors: readonly MatrixLike[]
 }
 
 /** The p-values of every cell so far, and the share rejected at each level. */
 export interface NoiseTestSimulation {
+  /** The cells' labels. */
   readonly labels: readonly string[]
+  /** The p-values so far, one list per cell. */
   readonly pValues: number[][]
-  /** Rejection rates at 0.05 and 0.10 per cell (the size under H₀, the power under H₁). */
+  /**
+   * The share of each cell's p-values below 0.05 (the size under $H_0$, the power under $H_1$; NaN for a cell not yet
+   * started).
+   */
   readonly rejected05: number[]
+  /** The same at level 0.10. */
   readonly rejected10: number[]
+  /** The datasets tested so far. */
   readonly done: number
+  /** The datasets in all. */
   readonly total: number
 }
 
 /**
  * Run the test on every dataset of every cell, as a generator that yields after each dataset, so a figure can fill its
- * box plots while the worker computes. With `bandwidths`, the local model's bandwidth is chosen per dataset by
- * leave-one-out (`localLogisticBandwidth`).
+ * box plots while the worker computes. With the local model and `bandwidths`, the bandwidth is chosen per dataset by
+ * leave-one-out over a subsample of 40 points (`localLogisticBandwidth`). The yielded snapshots share their `pValues`
+ * lists, which grow as the run goes on.
+ *
+ * @param cells The cells, each a set of datasets with their anchors.
+ * @param options The test's options, with `bandwidths`, the grid the local model's bandwidth is chosen from, and
+ *   `seed`, the seed of the streams that draw the leave-one-out subsamples (default 0).
+ * @returns A generator of snapshots, one after each dataset; it returns the final one.
+ *
+ * @example The rejection rate under uniform and under class-conditional noise
+ * const noisy = (s, alpha, beta) => {
+ *   const x = Array.from({ length: 150 }, () => [uniform(s, -3, 3)])
+ *   const y = x.map(([v]) => {
+ *     const clean = uniform(s) < 1 / (1 + Math.exp(-2 * v)) ? 1 : 0
+ *     return uniform(s) < (clean === 1 ? alpha : beta) ? 1 - clean : clean
+ *   })
+ *   return { x: tensor(x), y: tensor(y) }
+ * }
+ * const s = stream(2)
+ * const cell = (label, alpha, beta) => ({
+ *   label,
+ *   datasets: Array.from({ length: 5 }, () => noisy(s, alpha, beta)),
+ *   anchors: Array.from({ length: 5 }, () => [[0]]),
+ * })
+ * const cells = [cell('uniform', 0.2, 0.2), cell('class-conditional', 0.35, 0.05)]
+ * let last
+ * for (const snapshot of noiseTestSimulation(cells)) last = snapshot
+ * print(last.labels, ' rejected at 0.05:', last.rejected05, ' datasets:', last.done, 'of', last.total)
  */
 export function* noiseTestSimulation(
   cells: readonly NoiseTestCell[],
@@ -219,7 +312,20 @@ export function* noiseTestSimulation(
   return snapshot()
 }
 
-/** The number of anchors k that reaches power `target` at level `level` for given noise rates and single-anchor v. */
+/**
+ * The number of anchors $k$ that reaches power `target` at level `level` for given noise rates and single-anchor
+ * variance $v$, taking the variance with $k$ anchors as $v/k$. Only powers of two are tried, so the result is the
+ * smallest power of two that is enough, or `Infinity` when none up to `max` is.
+ *
+ * @param options `variance`, $v$ for one anchor; `alpha` and `beta`, the noise rates; `target`, the power wanted
+ *   (default 0.8); `level`, the test's level (default 0.05); and `max`, the most anchors tried (default 4096).
+ * @returns The number of anchors, a power of two, or `Infinity`.
+ *
+ * @example Smaller gaps between the noise rates need more anchors
+ * for (const alpha of [0.3, 0.2, 0.15]) {
+ *   print('alpha =', alpha, ' beta = 0.1, anchors:', anchorsForPower({ variance: 0.01, alpha, beta: 0.1 }))
+ * }
+ */
 export function anchorsForPower(options: {
   variance: number
   alpha: number

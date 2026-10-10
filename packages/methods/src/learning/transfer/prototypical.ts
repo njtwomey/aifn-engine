@@ -1,13 +1,14 @@
 /**
  * Prototypical networks (Snell, Swersky and Zemel, 2017): few-shot classification by distance to class prototypes in a
- * learned embedding. In an N-way K-shot episode, each class's prototype is the mean embedding of its K support points,
- * c_k = (1/K) Σ f_φ(xᵢ), and a query x is classified by a softmax over negative squared distances,
- * p(y = k | x) ∝ exp(−‖f_φ(x) − c_k‖²). The embedding f_φ is trained episodically: every update draws a new episode
- * of new classes and minimises the cross-entropy of its queries, so the network learns a metric that transfers to
- * classes it has never seen rather than the classes themselves. With squared Euclidean distance the classifier is
- * linear in the embedding, with weights 2c_k and bias −‖c_k‖² (Snell et al., §2.4).
+ * learned embedding. In an $N$-way $K$-shot episode, each class's prototype is the mean embedding of its $K$ support
+ * points, $\cvec_k = \frac{1}{K} \sum_i f_{\phivec}(\xvec_i)$, and a query $\xvec$ is classified by a softmax over
+ * negative squared distances, $p(y = k \mid \xvec) \propto \exp(-\lVert f_{\phivec}(\xvec) - \cvec_k \rVert^2)$. The
+ * embedding $f_{\phivec}$ is trained episodically: every update draws a new episode of new classes and minimises the
+ * cross-entropy of its queries, so the network learns a metric that transfers to classes it has never seen rather
+ * than the classes themselves. With squared Euclidean distance the classifier is linear in the embedding, with
+ * weights $2\cvec_k$ and bias $-\lVert \cvec_k \rVert^2$ (Snell et al., §2.4).
  *
- * The baseline is the same nearest-prototype rule on the raw inputs (f = identity).
+ * The baseline is the same nearest-prototype rule on the raw inputs ($f$ the identity).
  */
 
 import type { Params } from 'aifn-compute/foundation/pytree'
@@ -21,28 +22,48 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 /** Options of `fewShotEpisode`. */
 export interface FewShotEpisodeOptions {
-  /** Classes per episode N (default 5), labelled support points per class K (default 1), query points per class (default 5). */
+  /** Classes per episode $N$ (default 5, at most 24). */
   ways?: number
+  /** Labelled support points per class $K$ (default 1). */
   shots?: number
+  /** Query points per class (default 5). */
   queries?: number
-  /** The radius range [rMin, rMax] (default [0.3, 3]) and the angular noise sd in radians (default 0.06). */
+  /** The radius range $[r_{\min}, r_{\max}]$ (default $[0.3, 3]$). */
   radius?: readonly number[]
+  /** The angular noise's standard deviation $\sigma$, radians (default 0.06). */
   angularNoise?: number
 }
 
-/** One N-way K-shot episode: support and query points with labels 0 … N − 1, and each class's direction. */
+/**
+ * One $N$-way $K$-shot episode: support and query points (inputs $NK \times 2$ and $NQ \times 2$, grouped by class)
+ * with labels $0, \dots, N - 1$, and each class's direction.
+ */
 export interface FewShotEpisode {
+  /** The labelled support points, $K$ per class. */
   readonly support: { x: Tensor; y: Tensor }
+  /** The query points to classify, `queries` per class. */
   readonly query: { x: Tensor; y: Tensor }
+  /** Each class's direction $\theta_c$, radians. */
   readonly angles: Float64Array
 }
 
 /**
- * A few-shot episode on 2-d inputs: each of N classes is a direction θ_c from the origin (24 evenly spaced slots with
- * jitter, so classes differ by at least 7.5°), and a point of class c sits at angle θ_c + ε, ε ~ N(0, σ²), and a radius
- * uniform on [rMin, rMax]. The class is the angle and the radius is a nuisance, so prototypes compared by raw Euclidean
- * distance confuse a far point with a near point of a neighbouring class; an embedding that discards the radius does not.
- * Every episode draws new classes.
+ * A few-shot episode on 2-d inputs: each of $N$ classes is a direction $\theta_c$ from the origin (24 evenly spaced
+ * slots with jitter, so classes differ by at least 7.5 degrees), and a point of class $c$ sits at angle
+ * $\theta_c + \varepsilon$, $\varepsilon \sim \Gauss(0, \sigma^2)$, and a radius uniform on $[r_{\min}, r_{\max}]$.
+ * The class is the angle and the radius is a nuisance, so prototypes compared by raw Euclidean distance confuse a far
+ * point with a near point of a neighbouring class; an embedding that discards the radius does not. Every episode
+ * draws new classes. Throws `DomainError` for more than 24 ways.
+ *
+ * @param s The stream the episode is drawn from.
+ * @param options The episode's size and geometry.
+ * @returns The episode.
+ *
+ * @example A 3-way 1-shot episode with two queries per class
+ * const episode = fewShotEpisode(stream(1), { ways: 3, shots: 1, queries: 2 })
+ * print('class directions, degrees:', Array.from(episode.angles, (a) => (a * 180) / Math.PI))
+ * print('support points:', episode.support.x)
+ * print('query labels:', episode.query.y)
  */
 export function fewShotEpisode(s: Stream, options: FewShotEpisodeOptions = {}): FewShotEpisode {
   const { ways = 5, shots = 1, queries = 5, radius = [0.3, 3], angularNoise = 0.06 } = options
@@ -73,7 +94,14 @@ export function fewShotEpisode(s: Stream, options: FewShotEpisodeOptions = {}): 
   return { support: draw('support', shots), query: draw('query', queries), angles }
 }
 
-/** The averaging matrix A [N, N·K] with A[k, i] = 1/K when support point i (grouped by class) belongs to class k. */
+/**
+ * The averaging matrix $\Amat$, with $A_{ki} = 1/n_k$ when support point $i$ belongs to class $k$ ($n_k$ the
+ * points of class $k$) and 0 otherwise, so that $\Amat$ times the embedded support rows gives the prototypes.
+ *
+ * @param labels The support labels, $0, \dots, N - 1$, in any order.
+ * @param ways The number of classes $N$.
+ * @returns $\Amat$, $N \times$ the number of support points; a class with no support point has a row of zeros.
+ */
 function averaging(labels: Int32Array, ways: number): Tensor {
   const A = new Float64Array(ways * labels.length)
   const counts = new Float64Array(ways)
@@ -83,8 +111,18 @@ function averaging(labels: Int32Array, ways: number): Tensor {
 }
 
 /**
- * The logits −‖f(x) − c_k‖² [n, N] of queries x [n, d] against prototypes from support (x, y) under an embedding
- * (any differentiable map of rows; the identity gives the raw-input rule).
+ * The logits $-\lVert f(\xvec) - \cvec_k \rVert^2$ of queries against the prototypes of a support set under an
+ * embedding $f$, differentiable in whatever the embedding is.
+ *
+ * @param embed The embedding $f$: any differentiable map of rows (the identity gives the raw-input rule).
+ * @param support The support points `x` (rows) and their labels `y`, $0, \dots, N - 1$.
+ * @param query The queries, $n \times d$.
+ * @param ways The number of classes $N$.
+ * @returns The $n \times N$ logits; their softmax is $p(y = k \mid \xvec)$.
+ *
+ * @example Raw-input prototypes at 0 and 2: each query is nearer its own
+ * const support = { x: tensor([[0, 0], [2, 0]]), y: [0, 1] }
+ * print(prototypeLogits((x) => x, support, tensor([[0.5, 0], [1.8, 0]]), 2))
  */
 export function prototypeLogits(
   embed: (x: Value) => Value,
@@ -96,6 +134,14 @@ export function prototypeLogits(
   return neg(scaledSquaredDistances(embed(query), prototypes, 1))
 }
 
+/**
+ * The index of the largest entry of each row (the first on a tie).
+ *
+ * @param z The values, row-major $n \times k$.
+ * @param n The number of rows.
+ * @param k The number of columns.
+ * @returns $n$ column indices.
+ */
 const argmaxRows = (z: ArrayLike<number>, n: number, k: number) =>
   Int32Array.from({ length: n }, (_, i) => {
     let best = 0
@@ -105,56 +151,91 @@ const argmaxRows = (z: ArrayLike<number>, n: number, k: number) =>
 
 /** Options of `prototypicalRun`. */
 export interface PrototypicalOptions extends Pick<FewShotEpisodeOptions, 'radius' | 'angularNoise'> {
-  /** Test episodes: N ways (default 5), K shots (default 1), queries per class (default 5). */
+  /** Ways $N$ of the test and demo episodes (default 5). */
   ways?: number
+  /** Shots $K$ of every episode (default 1). */
   shots?: number
+  /** Queries per class of every episode (default 5). */
   queries?: number
   /** Ways of the training episodes (default: `ways`; Snell et al. train with more ways than they test). */
   trainWays?: number
-  /** Episodes trained on (default 1000), Adam step size (default 3e-3), hidden widths (default [32, 32]). */
+  /** Episodes trained on, one Adam update each (default 1000). */
   episodes?: number
+  /** Adam's step size (default 3e-3). */
   stepSize?: number
+  /** Hidden widths of the embedding MLP (default $[32, 32]$, tanh; the embedding is 2-d). */
   hidden?: readonly number[]
   /** Held-out test episodes scoring accuracy (default 100). */
   testEpisodes?: number
-  /** Grid cells per side of the prototype map (default 48) over [−box, box]² (default 3.2). */
+  /** Grid cells per side of the prototype map (default 48). */
   grid?: number
+  /** The grid's half-width: it spans $[-\mathit{box}, \mathit{box}]^2$ (default 3.2). */
   box?: number
+  /** About how many checkpoints to keep after the start (default 20): one every `episodes / checkpoints` episodes. */
   checkpoints?: number
+  /** The root stream's seed (default 0): the run is deterministic in it. */
   seed?: number | string
 }
 
 /** One checkpoint: the demo episode in the embedding and the nearest-prototype map of the input plane. */
 export interface PrototypicalCheckpoint {
+  /** Episodes trained on. */
   episode: number
-  /** Embedded support [N·K × 2], query [N·Q × 2] and prototypes [N × 2] (the first two embedding coordinates). */
+  /** The embedded support points, row-major $NK \times 2$ (the embedding is 2-d). */
   support: Float64Array
+  /** The embedded query points, row-major $NQ \times 2$. */
   query: Float64Array
+  /** The prototypes, row-major $N \times 2$. */
   prototypes: Float64Array
-  /** The predicted class of each grid cell, row-major in (y, x). */
+  /** The predicted class of each grid cell, row-major in $(y, x)$. */
   map: Int32Array
-  /** Accuracy on the test episodes. */
+  /** Mean query accuracy over the test episodes. */
   accuracy: number
 }
 
 /** A prototypical-network run so far. */
 export interface PrototypicalRun {
+  /** The episodes the run will train on. */
   episodes: number
+  /** The episodes trained on. */
   done: number
+  /** True for the last snapshot. */
   finished: boolean
+  /** Ways of the test and demo episodes. */
   ways: number
+  /** The grid's coordinates along each axis, `grid` values. */
   gridX: Float64Array
-  /** The demo episode in the input plane. */
+  /** The demo episode in the input plane: points row-major, 2 per row. */
   demo: { support: Float64Array; supportY: Int32Array; query: Float64Array; queryY: Int32Array; angles: Float64Array }
-  /** The nearest-prototype map and test accuracy of the raw inputs (the baseline). */
+  /** The nearest-prototype map of the raw inputs (the baseline), row-major in $(y, x)$. */
   rawMap: Int32Array
+  /** The baseline's mean query accuracy over the test episodes. */
   rawAccuracy: number
-  /** Episode loss (query cross-entropy) and episode query accuracy per recorded episode. */
+  /**
+   * Per recorded episode (about 200 of them): the query cross-entropy before the update, and the query accuracy on
+   * that episode after it.
+   */
   history: { episode: number[]; loss: number[]; accuracy: number[] }
+  /** The checkpoints so far, the first at episode 0. */
   checkpoints: PrototypicalCheckpoint[]
 }
 
-/** Train a prototypical network episodically on direction classes and yield snapshots (module docs). */
+/**
+ * Train a prototypical network episodically on direction classes and yield snapshots: at the start and at each
+ * checkpoint (the last also returned). Each training episode is a fresh `fewShotEpisode` with `trainWays` ways; the
+ * test episodes and a demo episode are drawn once. Everything comes from the root stream of `seed`, so the run is
+ * deterministic in it.
+ *
+ * @param options The episodes, the training, the embedding and the grid.
+ * @returns A generator of snapshots of the run.
+ *
+ * @example Test accuracy of raw-input prototypes, and of the embedding before and after forty training episodes
+ * const options = { episodes: 40, ways: 3, testEpisodes: 10, hidden: [8], grid: 2, checkpoints: 1 }
+ * let run
+ * for (const snapshot of prototypicalRun(options)) run = snapshot
+ * print('raw-input prototypes:', run.rawAccuracy)
+ * print('learned embedding, before and after training:', run.checkpoints.map((c) => c.accuracy))
+ */
 export function* prototypicalRun(options: PrototypicalOptions = {}): Generator<PrototypicalRun, PrototypicalRun> {
   const { ways = 5, shots = 1, queries = 5, episodes = 1000, stepSize = 3e-3, hidden = [32, 32] } = options
   const { testEpisodes = 100, grid = 48, box = 3.2, checkpoints = 20, seed = 0, radius, angularNoise } = options

@@ -1,7 +1,12 @@
 /**
- * Generalised linear models as estimators: IRLS fits with the classical inference of McCullagh and Nelder (1989)
- * (standard errors from the inverse Fisher information, Wald tests, deviance, Pearson dispersion, AIC, residuals), and
- * the negative binomial with its shape estimated by maximum likelihood (Venables and Ripley, 2002, §7.4, `glm.nb`).
+ * Generalised linear models $g(\expect[y \mid \xvec]) = \xvec^\top\betavec + o$ as estimators: IRLS fits with the
+ * classical inference of McCullagh and Nelder (1989) (standard errors from the inverse Fisher information, Wald tests,
+ * deviance, Pearson dispersion, AIC, residuals), and the negative binomial with its shape $\theta$ estimated by maximum
+ * likelihood (Venables and Ripley, 2002, §7.4, `glm.nb`).
+ *
+ * The design is `x` with a trailing column of ones when an intercept is fitted, so the intercept is the last
+ * coefficient. The output is that of R's `glm` and statsmodels' `GLM`: coefficients with standard errors, Wald
+ * statistics and p-values, deviance and null deviance, dispersion and AIC.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -36,24 +41,30 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { bool, int, real, space } from 'aifn-compute/foundation/space'
 import { NumericalError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** Data for a GLM fit: inputs x [n, d], responses y [n], optional prior weights and offset [n]. */
+/** Data for a GLM fit: inputs, responses, and optional prior weights and offset, one of each per row. */
 export type GlmData = {
+  /** Inputs, $n \times d$: one row per observation. */
   x: Tensor
+  /** Responses, $n$ (binomial: proportions of successes). */
   y: Tensor
-  /** Prior weights (binomial: the number of trials, with y the proportion of successes). */
+  /** Prior weights, $n$ (binomial: the number of trials, with `y` the proportion of successes); default 1. */
   weights?: Tensor
-  /** Offset added to the linear predictor, e.g. log exposure in a Poisson rate model. */
+  /** Offset $o$, $n$, added to the linear predictor, e.g. log exposure in a Poisson rate model; default 0. */
   offset?: Tensor
 }
 
 /** Hyperparameters of `glm`. */
 export type GlmParams = {
+  /** The response family (Poisson, binomial, gamma, ...): its variance function, deviance and predictive law. */
   family: Family
-  /** The link (default: the family's default link). */
+  /** The link $g$, by name or as a `Link` (default: the family's default link); one the family does not take throws. */
   link?: LinkName | Link
   /** Fit an intercept (default true); it is the last coefficient. */
   intercept?: boolean
-  /** Ridge penalty λ on ½‖β‖²… added as λI to XᵀWX, intercept unpenalised (default 0). */
+  /**
+   * Ridge penalty $\lambda$: $\lambda\lVert\betavec\rVert^2$ is added to the deviance and $\lambda\Imat$ to
+   * $\Xmat^\top\Wmat\Xmat$, the intercept unpenalised (default 0).
+   */
   l2?: number
   /** IRLS convergence tolerance on the relative change of the penalised deviance (default 1e-8). */
   tolerance?: number
@@ -70,51 +81,93 @@ export interface GlmModel
     Expects<Tensor>,
     Samples<Tensor, Tensor>,
     Trained<IrlsState> {
+  /** The brand of a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'glm'
+  /** The family it was fitted with. */
   readonly family: Family
+  /** The link it was fitted with. */
   readonly link: Link
-  /** Coefficients β [p]: one per column of x, then the intercept (when fitted). */
+  /** Coefficients $\hat\betavec$ ($p$): one per column of `x`, then the intercept (when fitted). */
   readonly coefficients: Tensor
   /** Names "x0", "x1", …, "intercept". */
   readonly names: string[]
-  /** Covariance φ(XᵀWX + λI)⁻¹ of β̂ [p, p] (Bayesian for a penalised fit). */
+  /**
+   * Covariance $\phi(\Xmat^\top\Wmat\Xmat + \lambda\Imat)^{-1}$ of $\hat\betavec$ ($p \times p$), with the
+   * working weights $\Wmat$ at the fit (Bayesian for a penalised fit; the pseudo-inverse when the matrix is singular).
+   */
   readonly covariance: Tensor
-  /** √diag(covariance) [p]. */
+  /** $\sqrt{\diag(\text{covariance})}$ ($p$). */
   readonly standardErrors: Tensor
-  /** Wald statistics β̂ⱼ/SEⱼ [p]: z when φ is known, t (n − p degrees of freedom) when it is estimated. */
+  /**
+   * Wald statistics $\hat\beta_j / \text{SE}_j$ ($p$): $z$ when $\phi$ is known, $t$ (on `dfResidual` degrees of
+   * freedom) when it is estimated.
+   */
   readonly statistics: Tensor
-  /** Two-sided p-values of the Wald tests [p]. */
+  /** Two-sided p-values of the Wald tests ($p$): normal when $\phi$ is known, Student's $t$ when it is estimated. */
   readonly pValues: Tensor
-  /** φ: fixed by the family, or the Pearson estimate Σ wᵢ(yᵢ − μᵢ)²/V(μᵢ) / (n − p). */
+  /**
+   * The dispersion $\phi$: fixed by the family, or the Pearson estimate
+   * $\sum_i w_i (y_i - \mu_i)^2 / V(\mu_i)$ divided by `dfResidual`.
+   */
   readonly dispersion: number
+  /** The deviance $\sum_i w_i d(y_i, \hat\mu_i)$ at the fit (without the penalty). */
   readonly deviance: number
   /** Deviance of the intercept-only model (with the same offset and weights). */
   readonly nullDeviance: number
-  /** Residual degrees of freedom n − p (n − edf when penalised). */
+  /** Residual degrees of freedom $n - p$ ($n - \text{edf}$ when penalised). */
   readonly dfResidual: number
-  /** Effective degrees of freedom tr((XᵀWX + λI)⁻¹XᵀWX) (p when unpenalised). */
+  /**
+   * Effective degrees of freedom $\trace((\Xmat^\top\Wmat\Xmat + \lambda\Imat)^{-1}\Xmat^\top\Wmat\Xmat)$ ($p$
+   * when unpenalised).
+   */
   readonly edf: number
-  /** Log-likelihood at β̂, with φ = deviance/n for families that estimate it (R's convention for AIC). */
+  /**
+   * Log-likelihood at $\hat\betavec$, with $\phi = \text{deviance}/n$ for families that estimate it (R's convention
+   * for AIC).
+   */
   readonly logLikelihood: number
-  /** −2 log L + 2k, with k = p (+1 when φ is estimated). */
+  /** $-2\log L + 2k$, with $k = p$ ($p + 1$ when $\phi$ is estimated; $p$ even when penalised). */
   readonly aic: number
-  /** Fitted means μ̂ [n] and linear predictor η̂ [n] on the training data. */
+  /** Fitted means $\hat\muvec$ ($n$) on the training data. */
   readonly fitted: Tensor
+  /** Linear predictor $\hat\etavec$ ($n$) on the training data, offset included. */
   readonly linearPredictor: Tensor
+  /** Whether IRLS met its tolerance within `maxSteps`. */
   readonly converged: boolean
   /** IRLS steps taken. */
   readonly steps: number
-  /** Training residuals of a kind. */
+  /** Training residuals of a kind (default `'deviance'`), as `residuals` computes them. */
   residuals(kind?: ResidualKind): Tensor
-  /** The linear predictor at new inputs, with an optional offset. */
+  /** The linear predictor $\Xmat\hat\betavec + o$ at new inputs ($m \times d$), with an optional offset ($m$). */
   forward(x: Tensor, offset?: Tensor): Tensor
 }
 
+/**
+ * A vector tensor over an array, without copying.
+ *
+ * @param a The values.
+ * @returns A tensor of shape $[\text{length}]$.
+ */
 const vec = (a: Float64Array) => fromData(a, [a.length])
+/**
+ * A tensor's values as a fresh `Float64Array`, row-major.
+ *
+ * @param t The tensor.
+ * @returns A copy of its values.
+ */
 const flat = (t: Tensor) => Float64Array.from(toFlat(t))
 
+/**
+ * The design matrix $\Xmat$: the inputs with a trailing column of ones when an intercept is fitted. Throws
+ * `ShapeError` when `x` is not a matrix.
+ *
+ * @param x The inputs, $n \times d$.
+ * @param intercept Whether to append the column of ones.
+ * @returns `X`, the design as a row-major array of $n p$ values; `n`, `d`, and `p`, its columns ($d + 1$ with an
+ *   intercept, else $d$).
+ */
 function designOf(x: Tensor, intercept: boolean): { X: Float64Array; n: number; d: number; p: number } {
   if (x.shape.length !== 2) throw new ShapeError('glm', `glm: x must be [n, d], got [${x.shape.join(', ')}]`)
   const [n, d] = x.shape
@@ -129,11 +182,29 @@ function designOf(x: Tensor, intercept: boolean): { X: Float64Array; n: number; 
 }
 
 /**
- * A generalised linear model g(E[y | x]) = xᵀβ + o, fitted by IRLS (`irls`), with the classical Wald inference.
- * Capabilities: `forward` (η), `decide` and `expect` (μ = g⁻¹(η)), `predictive` (the family's distribution at μ with
- * the fitted dispersion), `sample`. The IRLS run is kept in `training`.
+ * A generalised linear model $g(\expect[y \mid \xvec]) = \xvec^\top\betavec + o$, fitted by IRLS (`irls`), with the
+ * classical Wald inference (McCullagh and Nelder, 1989; as R's `glm` and statsmodels' `GLM`). Capabilities: `forward`
+ * ($\eta$), `decide` and `expect` ($\mu = g^{-1}(\eta)$, without the offset), `predictive` (the family's distribution
+ * at $\mu$ with the fitted dispersion), `sample`. The IRLS run is kept in `training` (series `deviance` and
+ * `penalisedDeviance`). `fit` throws `NumericalError` when IRLS takes no step, and `ShapeError` when `x` is not a
+ * matrix; a run that does not converge is reported in `converged`.
  *
- * @example glm({ family: poissonFamily() }).fit({ x, y, offset: logExposure })
+ * @param params The family, and optionally the link, intercept, ridge penalty and IRLS controls.
+ * @returns An estimator whose `fit` takes `GlmData` (and `FitOptions`, whose `trace.every` thins the IRLS trace) and
+ *   returns a `GlmModel`.
+ *
+ * @example Counts in two groups: the coefficients are the logs of the ratio of the means and of the baseline mean
+ * const x = tensor([[0], [0], [0], [0], [1], [1], [1], [1]])
+ * const y = tensor([1, 3, 0, 4, 6, 9, 2, 11])
+ * // `glm` takes any family; this one is the negative binomial at the θ that `negativeBinomialRegression` estimates.
+ * const { family } = negativeBinomialRegression().fit({ x, y })
+ * const model = glm({ family }).fit({ x, y })
+ * print('names =', model.names)
+ * print('exp(coefficients) =', exp(model.coefficients))
+ * print('standard errors =', model.standardErrors)
+ * print('p-values =', model.pValues)
+ * print('deviance, null deviance =', model.deviance, model.nullDeviance)
+ * print('IRLS steps =', model.steps, ' converged =', model.converged)
  */
 export function glm(params: GlmParams): Estimator<GlmData, GlmModel> {
   const { family, intercept = true, l2 = 0, tolerance = 1e-8, maxSteps = 50 } = params
@@ -172,20 +243,41 @@ export function glm(params: GlmParams): Estimator<GlmData, GlmModel> {
   }
 }
 
+/** What `summarise` needs of a finished `glm` fit. */
 type SummaryInput = {
+  /** The family fitted. */
   family: Family
+  /** The link fitted. */
   link: Link
+  /** Whether the design's last column is the intercept. */
   intercept: boolean
+  /** Number of input columns $d$. */
   d: number
+  /** Number of observations $n$. */
   n: number
+  /** Number of coefficients $p$. */
   p: number
+  /** The design $\Xmat$, row-major, $n p$ values. */
   X: Float64Array
+  /** The data the model was fitted to. */
   data: GlmData
+  /** The last IRLS state. */
   final: IrlsState
+  /** The IRLS trace, kept on the model. */
   training: Trace<IrlsState>
+  /** The ridge penalty matrix $\lambda\Imat$ (intercept entry 0), when penalised. */
   penalty?: Tensor
 }
 
+/**
+ * The fitted model from a finished IRLS run: the Fisher information $\Xmat^\top\Wmat\Xmat$ at the final working
+ * weights, its (penalised) inverse for the covariance and effective degrees of freedom, the Pearson dispersion, Wald
+ * tests, the null deviance (by a second IRLS fit of the intercept-only model, or the offset alone without an
+ * intercept), the log-likelihood and AIC, and the prediction methods.
+ *
+ * @param s The fit to summarise.
+ * @returns The `GlmModel`.
+ */
 function summarise(s: SummaryInput): GlmModel {
   const { family, link, intercept, d, n, p, X, data, final, training, penalty } = s
   const beta = flat(final.coefficients!)
@@ -292,30 +384,48 @@ function summarise(s: SummaryInput): GlmModel {
 
 /** Hyperparameters of `negativeBinomialRegression`. */
 export type NegativeBinomialParams = Omit<GlmParams, 'family'> & {
-  /** Starting θ (default 1). */
+  /** Starting $\theta$ (default 1). */
   theta?: number
-  /** Most alternations between β and θ (default 25). */
+  /** Most alternations between $\betavec$ and $\theta$ (default 25). */
   maxAlternations?: number
 }
 
-/** A state of the negative binomial's alternation: the GLM fitted at θ, and the next θ by maximum likelihood. */
+/** A state of the negative binomial's alternation: the GLM fitted at the current $\theta$, as plain data. */
 export type NegativeBinomialState = Status & {
   /** Alternations done. */
   t: number
-  /** The θ the current GLM was fitted with. */
+  /** The $\theta$ the current GLM was fitted with. */
   theta: number
-  /** The GLM's coefficients at θ. */
+  /** The GLM's coefficients at $\theta$. */
   coefficients: Tensor
-  /** Its fitted means μ. */
+  /** Its fitted means $\muvec$. */
   fitted: Tensor
   /** Its deviance. */
   deviance: number
-  /** |log(θ_new / θ)| of the last alternation (Infinity at the start). */
+  /** $\lvert\log(\theta_{\text{new}} / \theta)\rvert$ of the last alternation (Infinity at the start). */
   change: number
+  /** True once `change` is below $10^{-8}$. */
   converged: boolean
 }
 
-/** The ML estimate of θ given fitted means (the score equation, solved by Brent's method in log θ). */
+/**
+ * The maximum-likelihood estimate of the negative binomial's shape $\theta$ given fitted means $\mu_i$: the root of
+ * the score $\sum_i w_i s_i(\theta)$, with
+ * $s_i = \psi(y_i + \theta) - \psi(\theta) + \log\theta + 1 - \log(\theta + \mu_i) - (y_i + \theta)/(\mu_i + \theta)$
+ * ($\psi$ the digamma function), found by `findRoot` in $\log\theta$ on $[10^{-4}, 10^6]$ (Venables and Ripley, 2002,
+ * §7.4, R's `theta.ml`). When the counts are no more dispersed than Poisson the score has no root there: $\theta$ is
+ * then an end of the bracket and `converged` is false.
+ *
+ * @param y The counts, $n$.
+ * @param mu The fitted means $\mu_i$, $n$, held fixed.
+ * @param weights Prior weights $w_i$, $n$ (default 1).
+ * @returns `theta`, the estimate, and `converged`, whether the root search converged.
+ *
+ * @example Overdispersed counts give a small shape; counts no more variable than Poisson run to the bound
+ * const mu = tensor([4, 4, 4, 4, 4, 4, 4, 4])
+ * print('variance 17 about mean 4:', thetaMaximumLikelihood(tensor([0, 2, 5, 1, 9, 3, 0, 12]), mu))
+ * print('variance 1.25 about mean 4:', thetaMaximumLikelihood(tensor([3, 5, 4, 4, 2, 6, 4, 4]), mu))
+ */
 export function thetaMaximumLikelihood(y: Tensor, mu: Tensor, weights?: Tensor): { theta: number; converged: boolean } {
   const ys = flat(y)
   const ms = flat(mu)
@@ -340,8 +450,21 @@ export function thetaMaximumLikelihood(y: Tensor, mu: Tensor, weights?: Tensor):
 
 /**
  * The negative binomial's alternation as a traceable algorithm (Venables and Ripley, 2002, §7.4, `glm.nb`): each step
- * takes the ML estimate of θ at the current fitted means, then refits β by IRLS at that θ; converged when log θ moves
- * by less than 1e-8. No start: θ begins at `params.theta` (default 1).
+ * takes the maximum-likelihood $\theta$ at the current fitted means (`thetaMaximumLikelihood`), then refits
+ * $\betavec$ by IRLS (`glm`) at that $\theta$; converged when $\log\theta$ moves by less than $10^{-8}$, diverged when
+ * $\theta$ is not finite. No start: $\theta$ begins at `params.theta` (default 1), with a first fit there.
+ *
+ * @param data The data, as `glm` takes it.
+ * @param params The GLM's hyperparameters other than the family, and the starting `theta`.
+ * @param options Fit options passed to every IRLS fit.
+ * @returns The algorithm; its states hold the coefficients, fitted means and deviance of each fit, not the model.
+ *
+ * @example The alternation run to convergence
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const y = tensor([1, 0, 3, 1, 6, 2, 12, 5])
+ * const final = run(negativeBinomialAlternation({ x, y }), undefined, 25)
+ * print('theta =', final.theta, ' alternations =', final.t, ' converged =', final.converged)
+ * print('coefficients =', final.coefficients)
  */
 export function negativeBinomialAlternation(
   data: GlmData,
@@ -373,9 +496,22 @@ export function negativeBinomialAlternation(
 }
 
 /**
- * Negative binomial (NB2) regression with θ estimated: alternate an IRLS fit of β at fixed θ with the ML estimate of
- * θ at fixed μ until θ settles (`negativeBinomialAlternation`). Returns the final GLM (with `family.params.theta`) and
- * the alternation's trace in `alternation` (record `theta` to plot its path).
+ * Negative binomial (NB2, $\var(y) = \mu + \mu^2/\theta$) regression with $\theta$ estimated: alternate an IRLS fit
+ * of $\betavec$ at fixed $\theta$ with the maximum-likelihood $\theta$ at fixed $\mu$ until $\theta$ settles
+ * (`negativeBinomialAlternation`), as R's `MASS::glm.nb`. The model is a final `glm` fit at the last $\theta$ (in
+ * `family.params.theta`), with the alternation's trace in `alternation` (series `theta` and `deviance`).
+ *
+ * @param params The GLM's hyperparameters other than the family, the starting `theta` and `maxAlternations`.
+ * @returns An estimator whose `fit` takes `GlmData` and returns the `GlmModel` with its `alternation`.
+ *
+ * @example Overdispersed counts: the shape, its path, and the log-linear coefficients
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const y = tensor([1, 0, 3, 1, 6, 2, 12, 5])
+ * const model = negativeBinomialRegression().fit({ x, y })
+ * print('theta =', model.family.params.theta)
+ * print('theta by alternation =', model.alternation.series.theta)
+ * print('coefficients =', model.coefficients, ' standard errors =', model.standardErrors)
+ * print('AIC =', model.aic)
  */
 export function negativeBinomialRegression(
   params: NegativeBinomialParams = {},

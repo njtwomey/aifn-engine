@@ -1,19 +1,23 @@
 /**
  * Generalised additive models for location, scale and shape (GAMLSS; Rigby and Stasinopoulos, 2005, JRSS C 54(3)):
- * y ~ D(θ₁, …, θ_K) with g_k(θ_k) = η_k = X_k β_k for every parameter, each predictor an intercept plus GAM terms
- * (`s`, `linearTerm`, … on the GAM bases and penalties of `gamDesign`), fitted by maximising the penalised
- * log-likelihood ℓ − ½ Σ_k λ_k β_kᵀ S_k β_k.
+ * $y \sim \mathcal{D}(\theta_1, \dots, \theta_K)$ with $g_k(\thetavec_k) = \etavec_k = \Xmat_k\betavec_k$ for
+ * every parameter, each predictor an intercept plus GAM terms (`s`, `linearTerm`, ... on the GAM bases and penalties
+ * of `gamDesign`), fitted by maximising the penalised log-likelihood
+ * $\ell - \tfrac12 \sum_k \lambda_k \betavec_k^\top\Smat_k\betavec_k$.
  *
  * The RS algorithm (`gamlssRs`, one step = one cycle) updates the parameters in turn, each by penalised IRLS with the
- * others held fixed: with u = ∂ℓ/∂η_k = (∂ℓ/∂θ_k)(dθ_k/dη_k) and w = −E[∂²ℓ/∂θ_k²](dθ_k/dη_k)², it solves
- * (X_kᵀWX_k + S_λ)β = X_kᵀWz for the working response z = η_k + u/w, halving a step that raises the penalised global
- * deviance, until that deviance settles; then it moves to the next parameter. The cycle ends with the global deviance
- * GD = −2ℓ. Smoothing parameters are fixed or chosen by local maximum likelihood: after each parameter's inner fit,
- * λ ← (r − λ tr(H⁻¹S))/(βᵀSβ) (r = rank S), the Fellner–Schall fixed point of the working model's marginal likelihood
- * (Wood and Fasiolo, 2017), which Rigby and Stasinopoulos's local ML estimates.
+ * others held fixed: with $u = \partial\ell/\partial\eta_k = (\partial\ell/\partial\theta_k)(d\theta_k/d\eta_k)$
+ * and $w = -\expect[\partial^2\ell/\partial\theta_k^2](d\theta_k/d\eta_k)^2$, it solves
+ * $(\Xmat_k^\top\Wmat\Xmat_k + \Smat_\lambda)\betavec = \Xmat_k^\top\Wmat\zvec$ for the working response
+ * $z = \eta_k + u/w$, halving a step that raises the penalised global deviance, until that deviance settles; then it
+ * moves to the next parameter. The cycle ends with the global deviance $\text{GD} = -2\ell$. Smoothing parameters are
+ * fixed or chosen by local maximum likelihood: after each parameter's inner fit,
+ * $\lambda \leftarrow (r - \lambda \trace(\Hmat^{-1}\Smat))/(\betavec^\top\Smat\betavec)$ ($r = \rank\Smat$),
+ * the Fellner–Schall fixed point of the working model's marginal likelihood (Wood and Fasiolo, 2017), which Rigby and
+ * Stasinopoulos's local ML estimates. The new $\lambda$ is used from the next cycle on.
  *
  * Outputs: parameter curves, centile curves, normalised quantile residuals and a worm plot (`gamlssModel`), and the
- * generalised AIC GAIC(k) = GD + k·df with df the summed effective degrees of freedom.
+ * generalised AIC $\text{GAIC}(k) = \text{GD} + k \cdot \text{df}$ with df the summed effective degrees of freedom.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -39,7 +43,7 @@ import type { TermSpec } from './terms'
 
 type F64 = Float64Array
 
-/** One parameter's predictor: GAM terms (default none: a constant) and its link (default the family's). */
+/** One parameter's predictor: GAM `terms` (default none: a constant) and its `link` (default the family's). */
 export type GamlssParameterSpec = { terms?: readonly TermSpec[]; link?: LinkName }
 
 /** How the smoothing parameters are chosen. */
@@ -47,6 +51,7 @@ export type GamlssSmoothing = 'fixed' | 'local-ml'
 
 /** What defines a GAMLSS problem. */
 export type GamlssSpec = {
+  /** The distribution: a distributional family or its name (`'normal'`, `'student-t'`, `'gamma'`, ...). */
   family: DistributionalFamily | DistributionalFamilyName
   /** One predictor per parameter name; a parameter left out is a constant. */
   parameters?: Partial<Record<DistributionalParameter, GamlssParameterSpec>>
@@ -58,49 +63,96 @@ export type GamlssSpec = {
   tolerance?: number
 }
 
-/** The data: x [n, d] and responses y [n]. */
+/** The data: features `x` ($n \times d$) and responses `y` ($n$). */
 export type GamlssData = { x: Tensor; y: Tensor }
 
 /** A GAMLSS problem: the family, one link and design per parameter, and the data. */
 export type GamlssProblem = {
+  /** Tags a GAMLSS problem. */
   readonly kind: 'gamlss-problem'
+  /** The specification it was built from. */
   readonly spec: GamlssSpec
+  /** The distributional family. */
   readonly family: DistributionalFamily
+  /** One link per parameter, in the family's parameter order. */
   readonly links: readonly Link[]
+  /** One design per parameter, in the family's parameter order. */
   readonly designs: readonly GamDesign[]
+  /** The responses ($n$). */
   readonly y: F64
+  /** The number of observations. */
   readonly n: number
   /** The rank of each penalty of each parameter's design. */
   readonly ranks: readonly (readonly number[])[]
-  /** Starting λ per parameter and penalty. */
+  /** Starting $\lambda$ per parameter and penalty: the term's own `lambda`, or 1. */
   readonly lambdas: readonly (readonly number[])[]
 }
 
 /** One RS state: after `t` cycles. */
 export type GamlssState = Status & {
+  /** Cycles done. */
   t: number
-  /** β_k per parameter. */
+  /** $\betavec_k$ per parameter. */
   coefficients: F64[]
-  /** η_k and θ_k = g_k⁻¹(η_k) per parameter, [n] each. */
+  /** $\etavec_k$ per parameter ($n$ each). */
   eta: F64[]
+  /** $\thetavec_k = g_k^{-1}(\etavec_k)$ per parameter ($n$ each). */
   theta: F64[]
-  /** λ per parameter and penalty, as used in this cycle's fits. */
+  /**
+   * $\lambda$ per parameter and penalty: with `fixed` smoothing, those of this cycle's fits; with `local-ml`, the
+   * updated values the next cycle will use (`penalisedDeviance` is at the $\lambda$ this cycle used).
+   */
   lambdas: number[][]
-  /** Global deviance −2ℓ, and with the penalties Σ λ βᵀSβ. */
+  /** Global deviance $-2\ell$. */
   deviance: number
+  /** The global deviance plus the penalties $\sum \lambda \betavec^\top\Smat\betavec$. */
   penalisedDeviance: number
-  /** Effective degrees of freedom per parameter, tr(H_k⁻¹X_kᵀWX_k). */
+  /**
+   * Effective degrees of freedom per parameter, $\trace(\Hmat_k^{-1}\Xmat_k^\top\Wmat\Xmat_k)$ (at cycle 0, the
+   * number of columns of each design).
+   */
   edf: number[]
   /** Inner IRLS iterations per parameter in this cycle. */
   inner: number[]
+  /** Whether the global deviance changed by less than the tolerance in this cycle. */
   converged: boolean
+  /** Whether the global deviance is no longer finite. */
   diverged: boolean
 }
 
+/**
+ * The distributional family by name, or as given.
+ *
+ * @param f A family or its name.
+ * @returns The family.
+ */
 const asFamily = (f: GamlssSpec['family']) => (typeof f === 'string' ? distributionalFamily(f) : f)
+/**
+ * Treat a value as a number: a link applied to a number returns one, though it is typed for tensors too.
+ *
+ * @param v The value.
+ * @returns The same value, typed as a number.
+ */
 const num = (v: unknown) => v as number
 
-/** Build the designs, links and penalties of a GAMLSS. */
+/**
+ * Build the designs, links and penalties of a GAMLSS: one GAM design per parameter of the family (an intercept alone
+ * for a parameter left out). Throws `ShapeError` when `x` and `y` differ in length, and `DomainError` for a parameter
+ * the family does not have.
+ *
+ * @param spec The family, each parameter's terms and link, and the smoothing and convergence settings.
+ * @param data The features and responses.
+ * @returns The problem.
+ *
+ * @example A normal with a linear mean and a linear log standard deviation
+ * const r = stream(0)
+ * const x = uniform(r, 0, 1, { shape: [60, 1] })
+ * const y = add(reshape(x, [60]), mul(add(0.2, mul(0.8, reshape(x, [60]))), normals(r, 60)))
+ * const spec = { family: 'normal', parameters: { mu: { terms: [linearTerm(0)] }, sigma: { terms: [linearTerm(0)] } } }
+ * const problem = gamlssProblem(spec, { x, y })
+ * print('parameters =', problem.family.parameters.map((p) => p.name))
+ * print('links =', problem.links.map((l) => l.name), 'columns =', problem.designs.map((A) => A.P))
+ */
 export function gamlssProblem(spec: GamlssSpec, data: GamlssData): GamlssProblem {
   const family = asFamily(spec.family)
   const y = Float64Array.from(toFlat(data.y))
@@ -120,6 +172,13 @@ export function gamlssProblem(spec: GamlssSpec, data: GamlssData): GamlssProblem
   return { kind: 'gamlss-problem', spec, family, links, designs, y, n, ranks, lambdas }
 }
 
+/**
+ * The linear predictor $\Xmat\betavec$ of a design.
+ *
+ * @param A The design, whose model matrix $\Xmat$ ($n \times P$) is read.
+ * @param beta $\betavec$, $P$ values.
+ * @returns $\Xmat\betavec$, $n$ values.
+ */
 function matVec(A: GamDesign, beta: F64): F64 {
   const out = new Float64Array(A.n)
   for (let i = 0; i < A.n; i++) {
@@ -130,7 +189,15 @@ function matVec(A: GamDesign, beta: F64): F64 {
   return out
 }
 
-/** Solve (XᵀWX + S)β = XᵀWz. */
+/**
+ * Solve $(\Xmat^\top\Wmat\Xmat + \Smat)\betavec = \Xmat^\top\Wmat\zvec$ by Cholesky (with jitter if needed).
+ *
+ * @param A The design, whose model matrix $\Xmat$ ($n \times P$) is read.
+ * @param W The working weights, the diagonal of $\Wmat$ ($n$ values; zeros drop their rows).
+ * @param z The working response $\zvec$ ($n$ values).
+ * @param S The penalty $\Smat$, $P \times P$ row-major, already weighted by $\lambda$; not modified.
+ * @returns $\betavec$, $P$ values.
+ */
 function penalisedSolve(A: GamDesign, W: ArrayLike<number>, z: ArrayLike<number>, S: F64): F64 {
   const { P, n, X } = A
   const M = Float64Array.from(S)
@@ -149,16 +216,37 @@ function penalisedSolve(A: GamDesign, W: ArrayLike<number>, z: ArrayLike<number>
   return Float64Array.from(toFlat(choleskySolve(L, fromData(b, [P])) as Tensor))
 }
 
+/**
+ * The quadratic form $\betavec^\top\Smat\betavec$.
+ *
+ * @param beta $\betavec$, $P$ values.
+ * @param S $\Smat$, $P \times P$ row-major.
+ * @param P The number of coefficients.
+ * @returns $\betavec^\top\Smat\betavec$.
+ */
 const quad = (beta: F64, S: F64, P: number) => {
   let s = 0
   for (let a = 0; a < P; a++) for (let b = 0; b < P; b++) s += beta[a] * S[a * P + b] * beta[b]
   return s
 }
 
-/** θ_k = g_k⁻¹(η_k) elementwise. */
+/**
+ * $\thetavec_k = g_k^{-1}(\etavec_k)$ elementwise.
+ *
+ * @param lk The parameter's link $g_k$.
+ * @param eta $\etavec_k$, $n$ values.
+ * @returns $\thetavec_k$, $n$ values.
+ */
 const inverse = (lk: Link, eta: F64) => Float64Array.from(eta, (e) => num(lk.inverse(e)))
 
-/** −2ℓ at per-parameter θ arrays, or NaN when some θ leaves the parameter space. */
+/**
+ * The global deviance $-2\ell$ at per-parameter $\thetavec$ arrays, or NaN when some $\thetavec$ leaves the
+ * parameter space or the log-likelihood is not finite.
+ *
+ * @param problem The problem, whose family and responses are read.
+ * @param theta One array of $n$ values per parameter, in the family's order.
+ * @returns $-2\ell$, or NaN.
+ */
 function globalDeviance(problem: GamlssProblem, theta: readonly F64[]): number {
   const { family, y, n } = problem
   const th = new Array<number>(theta.length)
@@ -171,7 +259,16 @@ function globalDeviance(problem: GamlssProblem, theta: readonly F64[]): number {
   return Number.isFinite(s) ? -2 * s : NaN
 }
 
-/** The working response and weights of parameter k (see the module comment). */
+/**
+ * The working response and weights of parameter $k$ (see the module comment). An observation whose weight is not
+ * finite and positive gets weight 0 and $z = \eta$.
+ *
+ * @param problem The problem, whose family, responses and links are read.
+ * @param k The parameter's index, in the family's order.
+ * @param eta $\etavec_k$, $n$ values.
+ * @param theta Every parameter's $\thetavec$, $n$ values each.
+ * @returns `z` and `W`, $n$ values each.
+ */
 function working(problem: GamlssProblem, k: number, eta: F64, theta: readonly F64[]) {
   const { family, y, n } = problem
   const lk = problem.links[k]
@@ -190,7 +287,20 @@ function working(problem: GamlssProblem, k: number, eta: F64, theta: readonly F6
 
 /**
  * The RS algorithm as a traceable algorithm: `init` projects each parameter's starting values (the family's
- * `initial`) onto its predictor; each `step` is one cycle over the parameters (see the module comment).
+ * `initial`, on the link scale) onto its predictor by a penalised least-squares fit; each `step` is one cycle over the
+ * parameters (see the module comment). It is converged when the global deviance changes by less than the
+ * specification's `tolerance` over a cycle.
+ *
+ * @param problem The problem.
+ * @returns The algorithm.
+ *
+ * @example The global deviance falls over a few cycles
+ * const r = stream(0)
+ * const x = uniform(r, 0, 1, { shape: [60, 1] })
+ * const y = add(reshape(x, [60]), mul(add(0.2, mul(0.8, reshape(x, [60]))), normals(r, 60)))
+ * const spec = { family: 'normal', parameters: { mu: { terms: [linearTerm(0)] }, sigma: { terms: [linearTerm(0)] } } }
+ * const problem = gamlssProblem(spec, { x, y })
+ * for (const st of trace(gamlssRs(problem), undefined, 20).steps) print('cycle', st.t, 'GD =', st.deviance)
  */
 export function gamlssRs(problem: GamlssProblem): Algorithm<undefined, GamlssState> {
   const { designs, links, family } = problem
@@ -302,7 +412,23 @@ export function gamlssRs(problem: GamlssProblem): Algorithm<undefined, GamlssSta
   }
 }
 
-/** Trace the RS algorithm for at most `maxCycles` cycles (default 50), keeping every state. */
+/**
+ * Trace the RS algorithm for at most `maxCycles` cycles, keeping every state and recording the deviance, the
+ * penalised deviance and the total EDF (`df`).
+ *
+ * @param problem The problem.
+ * @param maxCycles The most cycles; the run stops earlier when it converges.
+ * @returns The trace.
+ *
+ * @example A smooth for the standard deviation: local ML shrinks it to its linear null space
+ * const r = stream(0)
+ * const x = uniform(r, 0, 1, { shape: [60, 1] })
+ * const y = add(reshape(x, [60]), mul(add(0.2, mul(0.8, reshape(x, [60]))), normals(r, 60)))
+ * const problem = gamlssProblem({ family: 'normal', parameters: { sigma: { terms: [s(0, { k: 6 })] } } }, { x, y })
+ * const { final } = gamlssTrace(problem)
+ * print('cycles =', final.t, 'GD =', final.deviance, 'converged =', final.converged)
+ * print('edf per parameter =', final.edf)
+ */
 export function gamlssTrace(problem: GamlssProblem, maxCycles = 50): Trace<GamlssState> {
   return trace(gamlssRs(problem), undefined, maxCycles, {
     record: {
@@ -315,28 +441,52 @@ export function gamlssTrace(problem: GamlssProblem, maxCycles = 50): Trace<Gamls
 
 /** A fitted GAMLSS at one RS state. */
 export type GamlssModel = {
+  /** Tags a fitted GAMLSS. */
   readonly kind: 'gamlss-model'
+  /** The distributional family. */
   readonly family: DistributionalFamily
+  /** The problem it solves. */
   readonly problem: GamlssProblem
+  /** The RS state it is the model of. */
   readonly state: GamlssState
-  /** Global deviance −2ℓ. */
+  /** Global deviance $-2\ell$. */
   readonly deviance: number
-  /** EDF per parameter and in total. */
+  /** EDF per parameter. */
   readonly edf: readonly number[]
+  /** The total EDF. */
   readonly df: number
-  /** GD + k·df (k = 2: AIC; k = log n: SBC). */
+  /** $\text{GD} + k \cdot \text{df}$ ($k = 2$, the default: AIC; $k = \log n$: SBC). */
   gaic(k?: number): number
-  /** θ_k at new inputs x [m, d], one [m] array per parameter. */
+  /** $\thetavec_k$ at new inputs ($m \times d$), one array of $m$ values per parameter. */
   parameters(x: Tensor): F64[]
-  /** The p-centile curve at x for each level p in (0, 1): one [m] array per level. */
+  /** The $p$-centile curve at the inputs for each level $p \in (0, 1)$: one array of $m$ values per level. */
   centiles(x: Tensor, levels: readonly number[]): F64[]
-  /** Normalised quantile residuals Φ⁻¹(F(yᵢ | θ̂ᵢ)), [n]. */
+  /** Normalised quantile residuals $\Phi^{-1}(F(y_i \mid \hat{\thetavec}_i))$ ($n$). */
   residuals(): F64
   /** The worm plot of the residuals. */
   worm(): WormPlot
 }
 
-/** The model at an RS state (by default a run to convergence). */
+/**
+ * The model at an RS state: parameter and centile curves, quantile residuals, the worm plot and GAIC.
+ *
+ * @param problem The problem.
+ * @param state The RS state (default the final state of `gamlssTrace(problem)`, at most 50 cycles).
+ * @returns The model.
+ *
+ * @example The spread grows with x, and modelling it lowers the AIC
+ * const r = stream(0)
+ * const x = uniform(r, 0, 1, { shape: [60, 1] })
+ * const y = add(reshape(x, [60]), mul(add(0.2, mul(0.8, reshape(x, [60]))), normals(r, 60)))
+ * const spec = { family: 'normal', parameters: { mu: { terms: [linearTerm(0)] }, sigma: { terms: [linearTerm(0)] } } }
+ * const model = gamlssModel(gamlssProblem(spec, { x, y }))
+ * const grid = tensor([[0], [0.5], [1]])
+ * const [mu, sigma] = model.parameters(grid)
+ * print('mu =', mu, 'sigma =', sigma)
+ * print('10% and 90% centiles =', model.centiles(grid, [0.1, 0.9]))
+ * const constant = gamlssModel(gamlssProblem({ ...spec, parameters: { mu: spec.parameters.mu } }, { x, y }))
+ * print('AIC =', model.gaic(), 'with a constant sigma:', constant.gaic())
+ */
 export function gamlssModel(problem: GamlssProblem, state?: GamlssState): GamlssModel {
   const s = state ?? gamlssTrace(problem).final
   const { family, links, designs } = problem

@@ -1,7 +1,8 @@
 /**
- * Multinomial logistic regression with standard errors: `logisticRegression` (softmax, fitted by
- * Newton's method; one definition of the fit) plus the inverse Fisher information and baseline-category contrasts, the
- * parameterisation of R's `nnet::multinom` (Agresti, 2013, "Categorical Data Analysis", §8.1).
+ * Multinomial logistic regression with standard errors: `logisticRegression` (softmax, fitted by Newton's method; one
+ * definition of the fit) plus the inverse Fisher information and baseline-category contrasts
+ * $\betavec_k - \betavec_r$, the parameterisation of R's `nnet::multinom` and statsmodels' `MNLogit` (Agresti, 2013,
+ * "Categorical Data Analysis", §8.1).
  */
 
 import { logisticRegression, type LogisticRegressionModel } from './logistic'
@@ -16,8 +17,9 @@ import { bool, int, real, space } from 'aifn-compute/foundation/space'
 export type MultinomialParams = {
   /** L2 penalty on the weights, as `logisticRegression` (default 0: maximum likelihood). */
   l2?: number
+  /** Fit intercepts (default true). */
   intercept?: boolean
-  /** The baseline class of the contrasts (default 0). */
+  /** The baseline class $r$ of the contrasts (default 0). */
   reference?: number
   /** Newton convergence tolerance (see `logisticRegression`). */
   tolerance?: number
@@ -25,12 +27,18 @@ export type MultinomialParams = {
   maxSteps?: number
 }
 
-/** Coefficients of class k against the reference class r: βₖ − βᵣ, with Wald inference. */
+/** Coefficients of each class $k$ against the reference class $r$, $\betavec_k - \betavec_r$, with Wald inference. */
 export type Contrasts = {
-  /** [(p), K − 1]: row j is design column j (the intercept last), column c the c-th non-reference class. */
+  /**
+   * The contrasts, $p \times (K - 1)$: row $j$ is design column $j$ (the intercept last), column $c$ the $c$-th
+   * non-reference class.
+   */
   coefficients: Tensor
+  /** Their standard errors, $p \times (K - 1)$, from the covariance of the weights. */
   standardErrors: Tensor
+  /** Wald statistics, coefficient over standard error, $p \times (K - 1)$. */
   statistics: Tensor
+  /** Two-sided normal p-values of the Wald statistics, $p \times (K - 1)$. */
   pValues: Tensor
   /** The non-reference classes, in column order. */
   classes: number[]
@@ -39,17 +47,34 @@ export type Contrasts = {
 /** A fitted multinomial logistic regression with inference. */
 export type MultinomialModel = LogisticRegressionModel & {
   /**
-   * The covariance of the softmax weights W [p·K, p·K] (row-major over [p, K], the intercept row last): the
-   * Moore–Penrose inverse of the Fisher information, whose null space is the direction that adds a constant to every
-   * class. Estimable contrasts βₖ − βᵣ get their exact variances from it.
+   * The covariance of the softmax weights $\Wmat$, $pK \times pK$ (row-major over $p \times K$, the intercept row
+   * last): the Moore–Penrose inverse of the Fisher information (plus the penalty), whose null space is the direction
+   * that adds a constant to every class. Estimable contrasts $\betavec_k - \betavec_r$ get their exact variances from
+   * it.
    */
   covariance: Tensor
+  /** Each class against the reference class, with Wald inference. */
   contrasts: Contrasts
 }
 
 /**
- * Softmax regression for labels 0 … K − 1 by `logisticRegression({ multinomial: true })`, with the covariance of the
- * weights and Wald tests for each class against a reference class.
+ * Softmax regression for labels $0, \dots, K - 1$ by `logisticRegression({ multinomial: true })`, with the covariance
+ * of the weights and Wald ($z$) tests for each class against a reference class. The Fisher information is
+ * $\sum_i (\diag(\boldsymbol{\pi}_i) - \boldsymbol{\pi}_i\boldsymbol{\pi}_i^\top) \otimes \xvec_i\xvec_i^\top$
+ * at the fitted class probabilities $\boldsymbol{\pi}_i$.
+ *
+ * @param params The penalty (default 0), intercept, reference class and Newton controls.
+ * @returns An estimator whose `fit` takes `{ x, y }` ($n \times d$ inputs, $n$ integer labels) and returns the model.
+ *
+ * @example Three classes against the first: the contrasts recover known slopes and intercepts
+ * const s = stream(3)
+ * const x = normals(s, [500, 1])
+ * const y = categorical(s, exp(add(matmul(x, tensor([[0, 1.5, -1.5]])), tensor([0, 0.5, 0]))))
+ * const { contrasts } = multinomialLogisticRegression().fit({ x, y })
+ * print('classes =', contrasts.classes)
+ * print('contrasts (rows x, intercept; true [[1.5, -1.5], [0.5, 0]]) =', contrasts.coefficients)
+ * print('standard errors =', contrasts.standardErrors)
+ * print('p-values =', contrasts.pValues)
  */
 export function multinomialLogisticRegression(
   params: MultinomialParams = {},

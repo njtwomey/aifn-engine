@@ -1,19 +1,21 @@
 /**
- * Sparse Gaussian-process regression through m inducing inputs Z: the Nyström approximation Q = K_nm K_mm⁻¹ K_mn of
- * the training covariance, used three ways (Quiñonero-Candela and Rasmussen, 2005, "A unifying view of sparse
- * approximate Gaussian process regression"):
+ * Sparse Gaussian-process regression through $m$ inducing inputs $\Zmat$: the Nyström approximation
+ * $\Qmat = \Kmat_{nm} \Kmat_{mm}^{-1} \Kmat_{mn}$ of the training covariance, used three ways (Quiñonero-Candela and
+ * Rasmussen, 2005, "A unifying view of sparse approximate Gaussian process regression"):
  *
  * - `sor` (subset of regressors) and `dtc` (deterministic training conditional) share the marginal likelihood
- *   N(y | m, Q + σ²I); they differ only in the predictive variance (SoR's collapses away from Z, DTC's does not).
+ *   $\Gauss(\yvec \mid m\ones, \Qmat + \sigma^2\Imat)$; they differ only in the predictive variance (SoR's collapses
+ *   away from $\Zmat$, DTC's does not).
  * - `fitc` (fully independent training conditional; Snelson and Ghahramani, 2006) corrects the diagonal:
- *   N(y | m, Q + diag(K − Q) + σ²I).
+ *   $\Gauss(\yvec \mid m\ones, \Qmat + \diag(\Kmat - \Qmat) + \sigma^2\Imat)$.
  * - `vfe` (Titsias, 2009, "Variational learning of inducing variables in sparse Gaussian processes") keeps the DTC
- *   likelihood term and subtracts tr(K − Q)/(2σ²), so the bound never exceeds the exact log marginal likelihood and
- *   inducing inputs can be optimised without overfitting.
+ *   likelihood term and subtracts $\trace(\Kmat - \Qmat)/(2\sigma^2)$, so the bound never exceeds the exact log
+ *   marginal likelihood and inducing inputs can be optimised without overfitting.
  *
- * The algebra is the numerically stable form of GPflow's `SGPR` and `GPRFITC` (Matthews et al., 2017): with
- * L = chol(K_mm), A = L⁻¹K_mn Λ^{−½} and L_B = chol(I + AAᵀ), everything costs O(nm²). Every quantity is built from
- * tensor primitives, so the bound is differentiable in Z, the kernel's hyperparameters and σ².
+ * The algebra is the numerically stable form of GPflow's `SGPR` and `GPRFITC` (Matthews et al., 2017): with $\Lmat$
+ * the Cholesky factor of $\Kmat_{mm}$, $\Amat = \Lmat^{-1}\Kmat_{mn} \Lambdamat^{-1/2}$ and $\Lmat_B$ that of
+ * $\Imat + \Amat\Amat^\top$, everything costs $O(nm^2)$. Every quantity is built from tensor primitives, so the bound
+ * is differentiable in $\Zmat$, the kernel's hyperparameters and $\sigma^2$.
  */
 
 import { valueAndGrad } from 'aifn-compute/foundation/autodiff'
@@ -78,31 +80,58 @@ export type SparseMethod = 'vfe' | 'fitc' | 'dtc' | 'sor'
 
 /** Options of `sparseGp`. */
 export type SparseGpOptions = {
+  /** The approximation (default `vfe`). */
   method?: SparseMethod
-  /** Observation-noise variance σ² > 0. */
+  /** Observation-noise variance $\sigma^2 > 0$. */
   noiseVariance: Value
+  /** The constant prior mean $m$ (default 0). */
   mean?: number
-  /** Diagonal jitter on K_mm relative to its mean diagonal (default 1e-8), always added and reported. */
+  /**
+   * Diagonal jitter on $\Kmat_{mm}$ relative to its mean diagonal (default 1e-8), always added and reported (with
+   * any further jitter its factorisation needed).
+   */
   relativeJitter?: number
 }
 
 /** The pieces of a sparse GP, possibly traced. */
 type Pieces = {
+  /** The Cholesky factor $\Lmat$ of $\Kmat_{mm}$ plus jitter, $m \times m$. */
   L: Value
+  /** The Cholesky factor $\Lmat_B$ of $\Imat + \Amat\Amat^\top$, $m \times m$. */
   LB: Value
+  /** $\cvec = \Lmat_B^{-1}\Amat\Lambdamat^{-1/2}(\yvec - m\ones)$, `[m]`: the predictive mean's weights. */
   c: Value
+  /** The approximate log marginal likelihood (the ELBO for `vfe`), the sum of `terms`. */
   bound: Value
   /** The bound's terms. */
   terms: { fit: Value; complexity: Value; trace: Value; constant: number }
+  /** The total jitter added to $\Kmat_{mm}$. */
   jitter: number
 }
 
+/**
+ * The $n \times n$ identity.
+ *
+ * @param n The number of rows and columns.
+ * @returns $\Imat$.
+ */
 function eye(n: number): Tensor {
   const out = new Float64Array(n * n)
   for (let i = 0; i < n; i++) out[i * n + i] = 1
   return fromData(out, [n, n])
 }
 
+/**
+ * The factors and the bound of a sparse GP, as tensor primitives (traced when the arguments are). The factor of
+ * $\Imat + \Amat\Amat^\top$ takes no jitter, so its failure is not reported.
+ *
+ * @param kernel The kernel $k$.
+ * @param x The training inputs, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]`.
+ * @param z The inducing inputs $\Zmat$, `[m, d]` or `[m]`.
+ * @param o The method, noise variance, prior mean and relative jitter.
+ * @returns The factors, the bound and its terms, and the jitter added.
+ */
 function pieces(kernel: Kernel, x: Value, y: Tensor, z: Value, o: SparseGpOptions): Pieces {
   const { method = 'vfe', noiseVariance, mean = 0, relativeJitter = 1e-8 } = o
   const X = asRows(x)
@@ -142,27 +171,54 @@ function pieces(kernel: Kernel, x: Value, y: Tensor, z: Value, o: SparseGpOption
 
 /** A fitted sparse GP. */
 export interface SparseGp<P extends KernelParams = KernelParams> {
+  /** The approximation. */
   readonly method: SparseMethod
+  /** The kernel $k$. */
   readonly kernel: Kernel<P>
-  /** Inducing inputs Z [m, d]. */
+  /** Inducing inputs $\Zmat$, `[m, d]`. */
   readonly inducing: Tensor
+  /** The observation-noise variance $\sigma^2$. */
   readonly noiseVariance: number
+  /** The constant prior mean $m$. */
   readonly mean: number
-  /**
-   * The approximate log marginal likelihood (for `vfe`, the evidence lower bound), and its terms: data fit, complexity
-   * (−log|L_B| − ½ Σ log Λ), the VFE trace penalty −tr(K − Q)/(2σ²) (0 for the others) and the constant.
-   */
+  /** The approximate log marginal likelihood (for `vfe`, the evidence lower bound): the sum of `terms`. */
   readonly logMarginal: number
+  /**
+   * The terms of `logMarginal`: data fit, complexity ($-\log\lvert \Lmat_B \rvert - \frac{1}{2} \sum \log \Lambda$),
+   * the VFE trace penalty $-\trace(\Kmat - \Qmat)/(2\sigma^2)$ (0 for the others) and the constant.
+   */
   readonly terms: { fit: number; complexity: number; trace: number; constant: number }
-  /** Jitter added to K_mm. */
+  /** Jitter added to $\Kmat_{mm}$. */
   readonly jitter: number
-  /** Predictive mean and variance of f at xs [s, d] (or [s]); `noise` adds σ². */
+  /** Predictive mean and variance of $f$ at `xs` (`[s, d]` or `[s]`); `noise` adds $\sigma^2$. */
   predict(xs: Tensor, options?: { noise?: boolean }): { mean: Tensor; variance: Tensor }
 }
 
 /**
- * A sparse GP regression with inducing inputs z [m, d] (or [m]) for inputs x [n, d] and targets y [n]. See the module
- * comment for the methods. With z = x, `fitc` and `vfe` reproduce the exact GP.
+ * A sparse GP regression through inducing inputs; see the file comment for the methods. With $\Zmat = \Xmat$, `fitc`
+ * and `vfe` reproduce the exact GP. Throws `DomainError` unless the noise variance is positive.
+ *
+ * @param kernel The kernel $k$.
+ * @param x The training inputs $\Xmat$, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]` or `[n, 1]`.
+ * @param z The inducing inputs $\Zmat$, `[m, d]` or `[m]`.
+ * @param options The method (default `vfe`), the noise variance (required), the prior mean and the jitter on
+ *   $\Kmat_{mm}$.
+ * @returns The sparse GP: its bound and terms, and `predict` at new inputs.
+ *
+ * @example With every training input as an inducing input VFE is exact; two cost a lot
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const k = rbf({ lengthscale: 1, variance: 1 })
+ * print('exact', logMarginalLikelihood(k, x, y, { noiseVariance: 0.01 }).value)
+ * print('VFE with Z = X', sparseGp(k, x, y, x, { noiseVariance: 0.01 }).logMarginal)
+ * const two = sparseGp(k, x, y, tensor([[0.5], [3]]), { noiseVariance: 0.01 })
+ * print('VFE with two inducing inputs', two.logMarginal, two.terms)
+ * print('prediction at pi/2', two.predict(tensor([[Math.PI / 2]])))
  */
 export function sparseGp<P extends KernelParams>(
   kernel: Kernel<P>,
@@ -210,47 +266,90 @@ export function sparseGp<P extends KernelParams>(
   }
 }
 
-/** The approximate log marginal likelihood (a traced value when its arguments are traced). */
+/**
+ * The approximate log marginal likelihood (the ELBO for `vfe`), a traced value when its arguments are traced: the
+ * objective that `sparseGpFitSteps` differentiates. Unlike `sparseGp` it neither checks the noise variance nor
+ * reshapes the targets.
+ *
+ * @param kernel The kernel $k$, possibly with traced hyperparameters.
+ * @param x The training inputs $\Xmat$, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]`.
+ * @param z The inducing inputs $\Zmat$, `[m, d]` or `[m]`, possibly traced.
+ * @param options The method (default `vfe`), the noise variance $\sigma^2 > 0$ (possibly traced), the prior mean and
+ *   the jitter on $\Kmat_{mm}$.
+ * @returns The bound.
+ *
+ * @example The four approximations at the same inducing inputs: VFE lowest, SoR and DTC equal, all below exact
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const k = rbf({ lengthscale: 1, variance: 1 })
+ * const z = tensor([[0.5], [2], [3.5]])
+ * for (const method of ['vfe', 'dtc', 'sor', 'fitc'])
+ *   print(method, sparseLogMarginal(k, x, y, z, { method, noiseVariance: 0.01 }))
+ * print('exact', logMarginalLikelihood(k, x, y, { noiseVariance: 0.01 }).value)
+ */
 export function sparseLogMarginal(kernel: Kernel, x: Value, y: Tensor, z: Value, options: SparseGpOptions): Value {
   return pieces(kernel, x, y, z, options).bound
 }
 
 /** Options of `fitSparseGp` and `sparseGpFitSteps`. */
 export type FitSparseGpOptions = {
+  /** The approximation whose bound is maximised (default `vfe`). */
   method?: SparseMethod
   /** Starting noise variance (default 0.1). */
   noiseVariance?: number
+  /** Fit the noise variance too (default true); otherwise it stays at `noiseVariance`. */
   fitNoise?: boolean
   /** Move the inducing inputs too (default true). */
   fitInducing?: boolean
   /** Fit the kernel's hyperparameters (default true); otherwise they stay as given. */
   fitKernel?: boolean
+  /** The constant prior mean $m$, held fixed (default 0). */
   mean?: number
+  /** Most L-BFGS steps, for `fitSparseGp` (default 200). */
   maxSteps?: number
+  /** Converged when the gradient norm in the fitted parameters is at most this (default 1e-6). */
   tolerance?: number
-  /** Also record the exact GP's log marginal likelihood at every state's hyperparameters (O(n³) a state). */
+  /** Also record the exact GP's log marginal likelihood at every state's hyperparameters ($O(n^3)$ a state). */
   exact?: boolean
 }
 
 /** What every state of a sparse-GP fit reports: the inducing inputs, hyperparameters and objective it has reached. */
 export type SparseGpFitFields = {
-  /** Inducing inputs Z [m, d]. */
+  /** Inducing inputs $\Zmat$, `[m, d]`. */
   inducing: Tensor
   /** The kernel's log hyperparameters, in `kernelLogVector` order (rebuild the kernel with `sparseGpAt`). */
   logKernel: Float64Array
   /** The kernel's hyperparameters by name (pytree path). */
   hyper: Record<string, number>
+  /** The noise variance $\sigma^2$. */
   noiseVariance: number
   /** The approximate log marginal likelihood (for `vfe`, the ELBO). */
   logMarginal: number
-  /** With `exact`: the exact GP's log marginal likelihood at the same hyperparameters (≥ the VFE bound). */
+  /** With `exact`: the exact GP's log marginal likelihood at the same hyperparameters ($\ge$ the VFE bound). */
   exact?: number
 }
 
 /** The state of `sparseGpFitSteps`: an L-BFGS state with the fit's fields. */
 export type SparseGpFitState = LbfgsState & SparseGpFitFields
 
-/** The fitting problem: the objective over θ = [log θ_k, log σ², Z] (each part present when fitted) and its layout. */
+/**
+ * The fitting problem: the objective over $\thetavec = [\log \thetavec_k, \log \sigma^2, \Zmat]$ (each part present
+ * when fitted, $\Zmat$ flattened row-major) and its layout. A point where the bound cannot be computed counts as
+ * $+\infty$.
+ *
+ * @param kernel The kernel at the starting hyperparameters.
+ * @param x The training inputs, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]` or `[n, 1]`.
+ * @param z The starting inducing inputs, `[m, d]` or `[m]`.
+ * @param o What is fitted, the starting noise, the method and the prior mean.
+ * @returns The inputs as rows and the targets as a vector, the objective (minus the bound, with its gradient), the
+ *   starting $\thetavec$, `fields` (a state's reported fields at $\thetavec$), the method and the mean.
+ */
 function fitProblem<P extends KernelParams>(kernel: Kernel<P>, x: Tensor, y: Tensor, z: Tensor, o: FitSparseGpOptions) {
   const { method = 'vfe', noiseVariance = 0.1, fitNoise = true, fitInducing = true, fitKernel = true, mean = 0 } = o
   const X = asRows(x) as Tensor
@@ -314,15 +413,45 @@ function fitProblem<P extends KernelParams>(kernel: Kernel<P>, x: Tensor, y: Ten
   return { X, Y, objective, start, fields, method, mean }
 }
 
+/**
+ * The exact GP's log marginal likelihood, as a number.
+ *
+ * @param kernel The kernel $k$.
+ * @param x The training inputs, `[n, d]`.
+ * @param y The targets, `[n]`.
+ * @param noiseVariance The noise variance $\sigma^2$.
+ * @param mean The constant prior mean $m$.
+ * @returns $\log p(\yvec \mid \Xmat, \thetavec)$.
+ */
 function exactLogMarginal(kernel: Kernel, x: Tensor, y: Tensor, noiseVariance: number, mean: number): number {
   return logMarginalLikelihood(kernel, x, y, { noiseVariance, mean }).value as number
 }
 
 /**
  * The sparse GP's fit as a traceable algorithm: L-BFGS on minus the approximate log marginal likelihood (the ELBO for
- * `vfe`) over the kernel's log hyperparameters, log σ² and the inducing inputs Z, with gradients from
- * `aifn-compute/foundation/autodiff`. Every state carries Z, the hyperparameters and the objective, so a figure can play the
- * optimisation; `init` takes nothing. The objective never decreases from one state to the next (a Wolfe line search).
+ * `vfe`) over the kernel's log hyperparameters, $\log \sigma^2$ and the inducing inputs $\Zmat$, with gradients from
+ * `aifn-compute/foundation/autodiff`. Every state carries $\Zmat$, the hyperparameters and the objective, so a figure
+ * can play the optimisation; `init` takes nothing. The objective never decreases from one state to the next (a Wolfe
+ * line search).
+ *
+ * @param kernel The kernel at the starting hyperparameters.
+ * @param x The training inputs, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]` or `[n, 1]`.
+ * @param z The starting inducing inputs, `[m, d]` or `[m]`.
+ * @param options What is fitted, the starting noise, the method and the tolerance (`maxSteps` is not read here).
+ * @returns The algorithm; run it with `run` or `trace`.
+ *
+ * @example The ELBO rises step by step from three inducing inputs
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const steps = sparseGpFitSteps(rbf({ lengthscale: 1, variance: 1 }), x, y, tensor([[0], [0.5], [1]]))
+ * const tr = trace(steps, undefined, 30, { record: { logMarginal: (s) => s.logMarginal } })
+ * print('ELBO', tr.series.logMarginal)
+ * print('inducing', tr.final.inducing, ' hyperparameters', tr.final.hyper, ' noise', tr.final.noiseVariance)
  */
 export function sparseGpFitSteps<P extends KernelParams>(
   kernel: Kernel<P>,
@@ -341,7 +470,30 @@ export function sparseGpFitSteps<P extends KernelParams>(
   }
 }
 
-/** The sparse GP at a fit state's inducing inputs and hyperparameters (`kernel` is the template the fit started from). */
+/**
+ * The sparse GP at a fit state's inducing inputs and hyperparameters (`kernel` is the template the fit started from).
+ *
+ * @param kernel The kernel the fit started from; only its shape and names are used.
+ * @param x The training inputs, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]` or `[n, 1]`.
+ * @param state A state of `sparseGpFitSteps` or `sparseGpGrowSteps` (its inducing inputs, log hyperparameters and
+ *   noise variance).
+ * @param options `method` (default `vfe`) and `mean` (default 0), as the fit used them.
+ * @returns The sparse GP at the state.
+ *
+ * @example The model at the end of a run
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const k = rbf({ lengthscale: 1, variance: 1 })
+ * const state = run(sparseGpFitSteps(k, x, y, tensor([[0], [0.5], [1]])), undefined, 30)
+ * const model = sparseGpAt(k, x, y, state)
+ * print('ELBO', model.logMarginal, ' as the state reports it', state.logMarginal)
+ * print('mean at pi/2', model.predict(tensor([[Math.PI / 2]])).mean, ' sin(pi/2) = 1')
+ */
 export function sparseGpAt<P extends KernelParams>(
   kernel: Kernel<P>,
   x: Tensor,
@@ -355,15 +507,38 @@ export function sparseGpAt<P extends KernelParams>(
 
 /** The result of `fitSparseGp`. */
 export type SparseGpFit<P extends KernelParams = KernelParams> = {
+  /** The sparse GP at the final state. */
   model: SparseGp<P>
   /** The trace of `sparseGpFitSteps`, with the objective recorded as `logMarginal`. */
   training: Trace<SparseGpFitState>
+  /** Whether the final gradient norm reached `tolerance`. */
   converged: boolean
 }
 
 /**
  * Maximise the sparse approximation's log marginal likelihood (the ELBO for `vfe`) over the kernel's log
- * hyperparameters, log σ² and the inducing inputs, by L-BFGS (`sparseGpFitSteps` run to `maxSteps`, default 200).
+ * hyperparameters, $\log \sigma^2$ and the inducing inputs, by L-BFGS (`sparseGpFitSteps` run to `maxSteps`, default
+ * 200).
+ *
+ * @param kernel The kernel at the starting hyperparameters.
+ * @param x The training inputs, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]` or `[n, 1]`.
+ * @param z The starting inducing inputs, `[m, d]` or `[m]`.
+ * @param options What is fitted, the starting noise, the method, the step limit and the tolerance.
+ * @returns The fitted sparse GP, the trace and whether it converged.
+ *
+ * @example Three inducing inputs on a noisy sine, with the exact evidence above the bound
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const z = tensor([[0], [0.5], [1]])
+ * const fit = fitSparseGp(rbf({ lengthscale: 1, variance: 1 }), x, y, z, { exact: true })
+ * print('ELBO', fit.model.logMarginal, ' exact', fit.training.final.exact, ' converged', fit.converged)
+ * print('inducing', fit.model.inducing, ' noise variance', fit.model.noiseVariance)
+ * print('mean at pi/2', fit.model.predict(tensor([[Math.PI / 2]])).mean, ' sin(pi/2) = 1')
  */
 export function fitSparseGp<P extends KernelParams>(
   kernel: Kernel<P>,
@@ -388,9 +563,12 @@ export type SparseGpGrowOptions = FitSparseGpOptions & {
   initial?: number
   /** Stop at this many inducing inputs (default 20). */
   maxInducing?: number
-  /** Candidates: this many training rows drawn without replacement from the stream (default min(n, 50)). */
+  /** Candidates: this many training rows drawn without replacement from the stream (default $\min(n, 50)$). */
   candidates?: number
-  /** L-BFGS steps on the hyperparameters and Z after each addition (default 0: hyperparameters held, Z only grows). */
+  /**
+   * L-BFGS steps on the hyperparameters and $\Zmat$ after each addition (default 0: hyperparameters held, $\Zmat$ only
+   * grows).
+   */
   reoptimise?: number
 }
 
@@ -406,11 +584,32 @@ export type SparseGpGrowState = Status &
   }
 
 /**
- * Greedy selection of inducing inputs (in the spirit of Seeger et al., 2003, and Titsias, 2009, §3): each step adds the
- * candidate training input whose addition most increases the objective (the ELBO for `vfe`, the approximate log
- * marginal likelihood otherwise), then optionally re-optimises everything by `reoptimise` L-BFGS steps. Each candidate is
- * scored exactly, at O(nm²) for m inducing inputs, so a step costs O(cnm²) for c candidates. With the hyperparameters
- * held, the VFE bound never decreases as Z grows. `init` draws the candidates from its stream.
+ * Greedy selection of inducing inputs (in the spirit of Seeger et al., 2003, and Titsias, 2009, §3): each step adds
+ * the candidate training input whose addition most increases the objective (the ELBO for `vfe`, the approximate log
+ * marginal likelihood otherwise), then optionally re-optimises everything by `reoptimise` L-BFGS steps. Each candidate
+ * is scored exactly, at $O(nm^2)$ for $m$ inducing inputs, so a step costs $O(cnm^2)$ for $c$ candidates. With the
+ * hyperparameters held, the VFE bound never decreases as $\Zmat$ grows. `init` draws the candidates from its stream
+ * and adds the first `initial` inducing inputs; the run terminates when the candidates run out or `maxInducing` is
+ * reached.
+ *
+ * @param kernel The kernel, held at its hyperparameters unless `reoptimise` is positive.
+ * @param x The training inputs, `[n, d]` or `[n]`.
+ * @param y The targets, `[n]` or `[n, 1]`.
+ * @param options The method, the noise variance (default 0.1), the candidates, the sizes and the re-optimisation.
+ * @returns The algorithm; run it with `run` or `trace`.
+ *
+ * @example Four inducing inputs, one added per step
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const grow = sparseGpGrowSteps(rbf({ lengthscale: 1, variance: 1 }), x, y, { noiseVariance: 0.01, maxInducing: 4 })
+ * const tr = trace(grow, undefined, 10, { record: { logMarginal: (s) => s.logMarginal, added: (s) => s.added ?? -1 } })
+ * print('row added (-1 at step 0)', tr.series.added)
+ * print('ELBO', tr.series.logMarginal)
+ * print('inducing', tr.final.inducing)
  */
 export function sparseGpGrowSteps<P extends KernelParams>(
   kernel: Kernel<P>,
@@ -510,8 +709,9 @@ export function sparseGpGrowSteps<P extends KernelParams>(
 
 /** Hyperparameters of `sparseGaussianProcessRegressor`. */
 export type SparseGaussianProcessRegressorParams<P extends KernelParams = KernelParams> = FitSparseGpOptions & {
+  /** The kernel $k$ (required); with `optimise`, the start of the fit. */
   kernel: Kernel<P>
-  /** Number of inducing inputs m, chosen from the training inputs without replacement (default min(n, 20)). */
+  /** Number of inducing inputs $m$, chosen from the training inputs without replacement (default $\min(n, 20)$). */
   inducing?: number
   /** Fit the kernel, noise and inducing inputs by maximising the bound (default true). */
   optimise?: boolean
@@ -528,14 +728,33 @@ export interface SparseGaussianProcessRegressionModel<P extends KernelParams = K
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'sparse-gaussian-process-regression'
+  /** The fitted sparse GP. */
   readonly sparse: SparseGp<P>
 }
 
 /**
  * Sparse GP regression as an estimator (the C1 conformance of `sparseGp`/`fitSparseGp`): the inducing inputs start
- * at `inducing` training inputs drawn from `options.stream` (the first ones without a stream), and with `optimise` the
- * kernel, noise and inducing inputs are fitted by `fitSparseGp`, whose L-BFGS run is kept in `training`.
- * Capabilities: `forward` and `decide` (the predictive mean), `predictive` (normals N(mean, var + σ²)), `expect`.
+ * at `inducing` training inputs drawn from the `stream` given to `fit` (the first ones without a stream), and with
+ * `optimise` the kernel, noise and inducing inputs are fitted by `fitSparseGp`, whose L-BFGS run is kept in
+ * `training`. Capabilities: `forward` and `decide` (the predictive mean), `predictive` (normals
+ * $\Gauss(\mu, v + \sigma^2)$), `expect`.
+ *
+ * @param params The kernel, the number of inducing inputs, whether to optimise, and the options of `fitSparseGp`.
+ * @returns The estimator: `fit({ x, y })` on inputs `[n, d]` (or `[n]`) and targets `[n]` returns a
+ *   `SparseGaussianProcessRegressionModel`.
+ *
+ * @example Three inducing inputs, fitted with the kernel and the noise
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const x = tensor([[0], [0.5], [1], [1.5], [2], [2.5], [3], [3.5]])
+ * const y = add(sin(reshape(x, [8])), mul(0.1, normals(stream(0), [8])))
+ * const gp = sparseGaussianProcessRegressor({ kernel: rbf({ lengthscale: 1, variance: 1 }), inducing: 3 })
+ * const model = gp.fit({ x, y })
+ * print('inducing', model.sparse.inducing, ' ELBO', model.sparse.logMarginal)
+ * const xs = tensor([[Math.PI / 2]])
+ * print('mean at pi/2', model.forward(xs), ' predictive variance', model.predictive(xs).variance())
  */
 export function sparseGaussianProcessRegressor<P extends KernelParams>(
   params: SparseGaussianProcessRegressorParams<P>,

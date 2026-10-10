@@ -4,6 +4,7 @@ import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } f
 import * as crammerSinger from './crammerSinger'
 import * as svm from './svm'
 
+/** A table of registry entries of one kind, keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'learning/kernel-methods')
 const fn = definer<FunctionInfo>('function', 'learning/kernel-methods')

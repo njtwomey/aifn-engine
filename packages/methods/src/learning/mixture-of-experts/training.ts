@@ -1,8 +1,9 @@
 /**
  * Training a mixture of experts by gradient descent (Adam through aifn's autodiff, with the auxiliary losses of
- * `aifn-compute/nn/experts`), and `mixtureOfExpertsRun`, a generator that trains by EM or by Adam and yields snapshots with the
- * curves a figure needs: the data loss, the auxiliary losses, each expert's load, the router's entropy and how well the
- * gate's assignments recover the true regimes (adjusted Rand index), plus the parameters at checkpoints for a player.
+ * `aifn-compute/nn/experts`), and `mixtureOfExpertsRun`, a generator that trains by EM, Adam or L-BFGS and yields
+ * snapshots with the curves a figure needs: the data loss, the auxiliary losses, each expert's load, the router's
+ * entropy and how well the gate's assignments recover the true regimes (adjusted Rand index), plus the parameters at
+ * checkpoints for a player.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -37,7 +38,26 @@ export type MoeTrainingOptions = {
   clipNorm?: number
 }
 
-/** Adam on the data loss plus the weighted auxiliary losses, as a traceable `trainingLoop`. */
+/**
+ * Adam on the data loss plus the weighted auxiliary losses (`moeLoss`'s total), as a traceable `trainingLoop`: the
+ * minibatches' shuffles and any gate noise come from the steps' streams, as `trainingLoop` describes.
+ *
+ * @param model The model: any experts, gate and objective.
+ * @param data The training data.
+ * @param options Adam's step size, the minibatch size, the auxiliary losses' weights and the gradient clipping.
+ * @returns The algorithm; `init` takes `{ params }` (such as `model.init(stream)`), and the state's `loss` is the
+ *   objective on the next minibatch (the whole set when full-batch).
+ *
+ * @example Adam fits two experts to a V of two regimes
+ * const xs = Array.from({ length: 16 }, (_, t) => -1 + (2 * t) / 15)
+ * const x = tensor(xs.map((v) => [v]))
+ * const y = add(tensor(xs.map((v) => Math.abs(2 * v))), normals(stream(1), 16, 0, 0.1))
+ * const model = moeModel({ inputs: 1, task: 'regression', experts: 2 })
+ * const alg = moeTraining(model, { x, y }, { stepSize: 0.05 })
+ * const s = run(alg, { params: model.init(stream(2)) }, 120, { stream: stream(3) })
+ * print('loss after 120 steps:', s.loss)
+ * print('gate at x = -0.5 and 0.5:', moePredict(model, s.params, tensor([[-0.5], [0.5]])).gate)
+ */
 export function moeTraining(
   model: MoeModel,
   data: MoeData,
@@ -55,8 +75,12 @@ export function moeTraining(
 
 /** Options of `mixtureOfExpertsRun`. */
 export type MoeRunOptions = Omit<MoeConfig, 'inputs' | 'task'> & {
-  /** Inputs [T, d], targets [T], and optionally the true regime of each row (int [T]), for the agreement curve. */
+  /**
+   * Inputs `x` ($T \times d$), targets `y` ($T$), and optionally the true regime of each row (`regime`, $T$ integers),
+   * for the agreement curve.
+   */
   data: MoeData & { regime?: Tensor }
+  /** Real targets or 0/1 labels. The input width is read from the data. */
   task: 'regression' | 'classification'
   /**
    * `em` (linear experts, dense gate, mixture objective), `adam` (default) or `lbfgs` (full batch, the gate without
@@ -67,9 +91,11 @@ export type MoeRunOptions = Omit<MoeConfig, 'inputs' | 'task'> & {
   memory?: Size
   /** Steps: EM iterations, Adam updates or L-BFGS iterations (default 40 for EM, 600 otherwise). */
   steps?: Size
-  /** Keep the parameters every this many steps for the player (default steps/60, at least 1). */
+  /** Keep the parameters, and yield a snapshot, every this many steps (default `steps` / 60 rounded, at least 1). */
   every?: Size
+  /** Adam's step size (default 0.03). */
   stepSize?: number
+  /** Adam's rows per step (default all). */
   batchSize?: Size
   /** Weight of the load-balancing loss (default 0). */
   balance?: number
@@ -81,13 +107,20 @@ export type MoeRunOptions = Omit<MoeConfig, 'inputs' | 'task'> & {
   seed?: string | number
 }
 
-/** Curves of a run, one entry per recorded step. */
+/**
+ * Curves of a run, one entry per recorded step: every step of a run of fewer than 600 steps, every
+ * $\lfloor \mathit{steps}/300 \rfloor$-th of a longer one, and the last step.
+ */
 export type MoeHistory = {
+  /** The recorded steps (0 for the start). */
   step: number[]
   /** The data term on the whole training set. */
   loss: number[]
+  /** The load-balancing loss on the whole training set. */
   balance: number[]
+  /** The importance loss on the whole training set. */
   importance: number[]
+  /** The router z-loss on the whole training set. */
   z: number[]
   /**
    * Each expert's load [step][N]: its share of the processed assignments for a sparse gate; for a dense gate, where
@@ -106,24 +139,55 @@ export type MoeHistory = {
 
 /** A snapshot of `mixtureOfExpertsRun`. */
 export type MoeSnapshot = {
+  /** Steps taken. */
   readonly step: Size
+  /**
+   * Steps the run will take: `steps`, or, once an Adam or L-BFGS run has stopped early (converged or diverged), the
+   * step it stopped at.
+   */
   readonly steps: Size
+  /** True for the last snapshot. */
   readonly done: boolean
+  /** The training method. */
   readonly method: 'em' | 'adam' | 'lbfgs'
+  /** The model's structure. */
   readonly spec: MoeSpec
+  /** The curves so far (a copy). */
   readonly history: MoeHistory
   /** Parameters at step 0, every `every` steps and at the last step. */
   readonly checkpoints: readonly { step: Size; params: MoeParams }[]
 }
 
+/**
+ * A scalar value as a number.
+ *
+ * @param v The value (traced or not; its primal is read).
+ * @returns The number.
+ */
 const scalar = (v: Value) => {
   const r = unwrap(v)
   return typeof r === 'number' ? r : toFlat(r)[0]
 }
 
 /**
- * Train a mixture of experts on `data` by EM or Adam, yielding a snapshot every `every` steps and at the end: a
- * generator, so a worker can stream the run to a page that plots the curves and plays the checkpoints.
+ * Train a mixture of experts on `data` by EM, Adam or L-BFGS, yielding a snapshot every `every` steps and at the end:
+ * a generator, so a worker can stream the run to a page that plots the curves and plays the checkpoints. Every draw
+ * (the initial parameters, minibatches, gate noise) comes from the root stream of `seed`. A run that diverges, or an
+ * L-BFGS run that converges, stops early. Throws as `moeModel` does, and as `moeEm` does for EM on a model it does
+ * not apply to.
+ *
+ * @param options The data, the model's structure (as `MoeConfig`, less `inputs`) and the training settings.
+ * @returns A generator of snapshots, the last with `done` set.
+ *
+ * @example Ten EM steps on a V of two regimes: the gate's assignments recover the regimes
+ * const xs = Array.from({ length: 16 }, (_, t) => -1 + (2 * t) / 15)
+ * const x = tensor(xs.map((v) => [v]))
+ * const y = add(tensor(xs.map((v) => Math.abs(2 * v))), normals(stream(1), 16, 0, 0.1))
+ * const regime = tensor(xs.map((v) => (v < 0 ? 0 : 1)))
+ * const options = { data: { x, y, regime }, task: 'regression', experts: 2, method: 'em', steps: 10, every: 5 }
+ * for (const snap of mixtureOfExpertsRun(options)) {
+ *   print(`step ${snap.step}: loss`, snap.history.loss.at(-1), 'agreement', snap.history.agreement.at(-1))
+ * }
  */
 export function* mixtureOfExpertsRun(options: MoeRunOptions): Generator<MoeSnapshot> {
   const {

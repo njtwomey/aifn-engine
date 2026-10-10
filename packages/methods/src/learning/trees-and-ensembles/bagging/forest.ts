@@ -1,4 +1,12 @@
-/** Bagging and random forests of CART trees, part of `aifn-methods/learning/trees-and-ensembles/bagging`. */
+/**
+ * Bagging and random forests of CART classification trees (Breiman, 1996, "Bagging predictors"; Breiman, 2001,
+ * "Random forests", Machine Learning 45), as scikit-learn's `RandomForestClassifier`.
+ *
+ * Each tree is grown on a bootstrap sample of the rows, drawn as integer sample weights (a row drawn twice weighs 2),
+ * and searches a random subset of the features at every node; the forest averages the trees' leaf class shares. With
+ * every feature searched it is bagging. The rows a tree's bootstrap missed give the out-of-bag estimate of accuracy.
+ * The growth is a traceable algorithm, one tree per step, and each tree depends only on the root stream and its index.
+ */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
 import type {
@@ -20,11 +28,17 @@ import { classLabels, classPredictive, inputs, matrix, probabilityModel, values 
 import { defineModel } from 'aifn-compute/learning/estimators'
 import { bool, int, space } from 'aifn-compute/foundation/space'
 
-/** The problem a forest grows on: inputs [n, d], labels 0 … K−1, and the tree and bagging settings. */
+/**
+ * The problem a forest grows on: inputs ($n \times d$), labels $0, \dots, K - 1$, and the tree and bagging settings.
+ */
 export interface ForestProblem {
+  /** The inputs, $n \times d$. */
   x: Tensor
+  /** The class labels, $n$ integers from 0. */
   y: Tensor
+  /** The number of classes $K$. */
   classes: number
+  /** The growth hyperparameters of every tree (`maxFeatures` sets the features searched at each node). */
   params: TreeParams
   /** Grow each tree on a bootstrap sample (default true); otherwise on every row. */
   bootstrap?: boolean
@@ -32,18 +46,31 @@ export interface ForestProblem {
 
 /** A state of forest growth: the trees so far and their bootstrap counts. */
 export interface ForestState extends Status {
-  /** Trees grown. */
+  /** The number of trees grown. */
   t: number
+  /** The trees grown, in order. */
   trees: readonly DecisionTree[]
-  /** The bootstrap count of each training row in each tree's sample [t, n] (all ones without bootstrap). */
+  /** The bootstrap count of each training row in each tree's sample, $t \times n$ (all ones without bootstrap). */
   inBag: Tensor
 }
 
 /**
  * Random-forest growth as a traceable algorithm (Breiman, 2001, Machine Learning 45): each step grows one CART tree
- * on a bootstrap sample (as integer sample weights) drawn from `child(ctx.stream, 'bootstrap')`, its feature subsets
- * from the rest of the step's stream, so tree t depends only on the root key and t and adding trees keeps the
- * existing ones. No start.
+ * on a bootstrap sample ($n$ rows drawn uniformly with replacement, as integer sample weights) drawn from
+ * `child(ctx.stream, 'bootstrap')`, its feature subsets from the step's child stream `'features'`, so tree $t$ depends
+ * only on the root key and $t$, and adding trees keeps the existing ones. No start.
+ *
+ * @param problem The data, the number of classes, the tree parameters and whether to bootstrap.
+ * @returns The algorithm, whose state holds the trees grown so far and their bootstrap counts.
+ *
+ * @example Three trees, each on its own bootstrap sample
+ * const x = tensor([[0, 0], [1, 1], [2, 0], [5, 5], [6, 4], [7, 5]])
+ * const y = tensor([0, 0, 0, 1, 1, 1])
+ * const alg = forestGrowth({ x, y, classes: 2, params: { maxFeatures: 1 } })
+ * const state = run(alg, undefined, 3, { stream: stream(1) })
+ * print('trees:', state.t)
+ * print('bootstrap counts:', state.inBag)
+ * print('root splits:', state.trees.map((tree) => tree.nodes[0].label))
  */
 export function forestGrowth(problem: ForestProblem): Algorithm<void, ForestState> {
   const { x, y, classes: K, params, bootstrap = true } = problem
@@ -86,24 +113,53 @@ export interface RandomForestModel
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'random-forest'
+  /** The $T$ trees, in the order grown. */
   readonly trees: DecisionTree[]
-  /** The bootstrap count of each training row in each tree's sample [T, n] (all ones without bootstrap). */
+  /** The bootstrap count of each training row in each tree's sample, $T \times n$ (all ones without bootstrap). */
   readonly inBag: Tensor
+  /** The number of classes $K$. */
   readonly classes: number
-  /** Mean of the trees' impurity importances [d]. */
+  /** The mean of the trees' impurity importances, $d$ values summing to 1. */
   readonly featureImportances: Tensor
-  /** Out-of-bag class shares [n, K] (NaN rows for rows in every bag) and the out-of-bag accuracy. */
+  /**
+   * The out-of-bag class shares, $n \times K$ (each row averaged over the trees whose bag missed it; NaN for a row in
+   * every bag), and the out-of-bag accuracy over the rows that have them (NaN when none has; always so without
+   * bootstrap).
+   */
   readonly outOfBag: { probabilities: Tensor; accuracy: number }
-  /** The predictive law of the first `t` trees only, e.g. to show the forest growing. */
+  /** The predictive law of the first `t` trees only (clamped to 1 to $T$), e.g. to show the forest growing. */
   predictiveUpTo(x: Tensor, t: number): AnyUnivariate
 }
 
 /**
- * A random forest (Breiman, 2001): `trees` CART trees (default 100), each grown on a bootstrap sample (as integer
- * sample weights) searching a random subset of `maxFeatures` features (default `sqrt`) at every node. The predictive
- * averages the trees' leaf class shares. The growth (`forestGrowth`, one tree per step) is kept in `training`. If a
- * node's feature subset has no valid split, further features are drawn until one has (as scikit-learn), so a node is a
- * leaf for want of a split only when no feature splits it.
+ * A random forest (Breiman, 2001), as scikit-learn's `RandomForestClassifier`: `trees` CART trees, each grown on a
+ * bootstrap sample (as integer sample weights) searching a random subset of `maxFeatures` features (default `'sqrt'`)
+ * at every node. `forward`, `score` and the predictive average the trees' leaf class shares; `decide` takes the
+ * largest. The growth (`forestGrowth`, one tree per step) is kept in `training`. If a node's feature subset has no
+ * valid split, further features are drawn until one has (as scikit-learn), so a node is a leaf for want of a split
+ * only when no feature splits it.
+ *
+ * @param params The tree hyperparameters (`TreeParams`, with `maxFeatures` defaulting to `'sqrt'`), `trees`, the number
+ *   $T$ of trees (default 100), and `bootstrap`, whether each tree is grown on a bootstrap sample (default true) or on
+ *   every row.
+ * @returns An estimator whose `fit({ x, y }, { stream? })` grows the forest (from `stream(0)` when no stream is given)
+ *   and returns the fitted `RandomForestModel`.
+ *
+ * @example Accuracy on two separable clusters
+ * const s = stream(1)
+ * const x = concat([normal(s, -2, 1, { shape: [30, 2] }), normal(stream(2), 2, 1, { shape: [30, 2] })], 0)
+ * const y = tensor([...Array(30).fill(0), ...Array(30).fill(1)])
+ * const model = randomForest({ trees: 20 }).fit({ x, y }, { stream: stream(3) })
+ * const right = Array.from(toFlat(model.decide(x)), (c, i) => (c === toFlat(y)[i] ? 1 : 0))
+ * print('training accuracy:', right.reduce((a, b) => a + b) / 60)
+ * print('out-of-bag accuracy:', model.outOfBag.accuracy)
+ * print('importances:', model.featureImportances)
+ *
+ * @example The predicted probability as trees are added
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const y = tensor([0, 0, 0, 1, 0, 1, 1, 1])
+ * const model = randomForest({ trees: 30 }).fit({ x, y }, { stream: stream(1) })
+ * for (const t of [1, 5, 30]) print(`P(class 1 at 3.5), ${t} trees:`, model.predictiveUpTo(tensor([[3.5]]), t).mean())
  */
 export function randomForest(
   params: TreeParams & { trees?: number; bootstrap?: boolean } = {},

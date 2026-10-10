@@ -1,9 +1,34 @@
 /**
- * `aifn-methods/learning/gaussian-processes`: Gaussian processes on the kernels of `aifn-compute/learning/kernels`: regression
- * with the marginal likelihood and fitting, sparse approximations (fitted by L-BFGS or grown greedily, step by step), the relevance vector machine (Tipping and
- * Faul's fast algorithm and re-estimation), classification (Laplace and EP, with evidence
- * gradients and L-BFGS fitting), ordinal regression (Laplace; Chu & Ghahramani, 2005), and the GP latent variable
- * model (MAP GPLVM by L-BFGS from PCA, with the latent-to-data map `project`).
+ * `aifn-methods/learning/gaussian-processes`: Gaussian processes on the kernels of `aifn-compute/learning/kernels`, for
+ * regression, sparse regression, the relevance vector machine, classification, ordinal regression and the latent
+ * variable model.
+ *
+ * - Exact regression: `gpPrior` and `samplePrior` for the prior, `gpPosterior` for the posterior by a Cholesky factor
+ *   of $\Kmat + \sigma^2\Imat$, `logMarginalLikelihood` and `logMarginalLikelihoodGradient` for the evidence,
+ *   `fitGp` for type-II maximum likelihood by L-BFGS (`kernelLogVector` gives its log-space layout), and the
+ *   estimator `gaussianProcessRegressor`.
+ * - Sparse regression through $m$ inducing inputs, at $O(nm^2)$: `sparseGp` and `sparseLogMarginal` for the VFE,
+ *   FITC, DTC and SoR approximations; `fitSparseGp` (or step by step, `sparseGpFitSteps` with `sparseGpAt`) to fit
+ *   the inducing inputs and hyperparameters by L-BFGS; `sparseGpGrowSteps` to choose inducing inputs greedily; and
+ *   the estimator `sparseGaussianProcessRegressor`.
+ * - The relevance vector machine: `rvmProblem`, `rvmPosterior` and `rvmModel`, fitted by Tipping and Faul's fast
+ *   algorithm (`rvmFastSteps`, one basis function per step) or by re-estimation (`rvmReestimationSteps`); the
+ *   estimator `relevanceVectorMachine`.
+ * - Binary classification (labels 0 and 1): the Laplace approximation (`laplaceMode`, `laplaceLogMarginal`, and
+ *   `laplaceEvidence` differentiable in $\Kmat$) or EP with the probit link (`gpEp`, `gpEpLogMarginal`,
+ *   `gpEpEvidence`); `gpClassifierEvidenceGradient` and `fitGpClassifier` for the hyperparameters; the estimator
+ *   `gpClassifier`.
+ * - Ordinal regression (Chu and Ghahramani, 2005): the estimator `gpOrdinalRegression`, by Laplace with the
+ *   cumulative probit likelihood of `ordinalLaplaceTerms`.
+ * - The GP latent variable model: `gplvmProblem` and `gplvmFitSteps` (MAP by L-BFGS from PCA), `fitGplvm`, and
+ *   `gplvmModel`, whose `project` maps latent points to data space.
+ * - The registry tables `gaussianProcessAlgorithms` and `gaussianProcessFunctions`.
+ *
+ * Every function takes the kernel as an argument; hyperparameters are fitted in log space, and the fits and
+ * iterations are traceable algorithms (`run`, `trace`) whose states carry what a figure plays. Inputs are $n \times d$
+ * matrices of rows (or vectors of $n$ one-dimensional inputs). Jitter added to make a matrix factor is reported, not
+ * hidden. The methods follow Rasmussen and Williams (2006), "Gaussian Processes for Machine Learning", and the tests
+ * compare them with scikit-learn's `sklearn.gaussian_process`.
  */
 
 export {

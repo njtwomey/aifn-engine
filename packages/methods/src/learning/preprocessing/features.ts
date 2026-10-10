@@ -1,5 +1,10 @@
 /**
- * Feature expansions: polynomial features, B-spline features and random Fourier features.
+ * Feature expansions: polynomial features, B-spline features and random Fourier features, as scikit-learn's
+ * `PolynomialFeatures`, `SplineTransformer` and `RBFSampler`.
+ *
+ * Each maps an $n \times d$ matrix to a wider one of fixed basis functions of its columns, so that a linear model on
+ * the output is non-linear in the input (Hastie, Tibshirani and Friedman, 2009, "The Elements of Statistical Learning",
+ * ch. 5). `fit` learns only what the basis needs (the number of columns, the knots, or the random draws).
  */
 
 import type { FitOptions } from 'aifn-compute/learning/estimators'
@@ -19,13 +24,23 @@ export interface PolynomialFeatures extends FittedTransform {
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'polynomial-features'
-  /** Exponents of each output column, [outputs, d]: output k is Πⱼ xⱼ^powers[k, j]. */
+  /**
+   * The exponents of each output column, $m \times d$ for $m$ outputs: output $k$ is $\prod_j x_j^{p_{kj}}$ with
+   * $p_{kj}$ = `powers[k, j]`.
+   */
   readonly powers: Tensor
-  /** Names such as "1", "x0", "x0^2", "x0 x1". */
+  /** The output columns' names, such as "1", "x0", "x0^2", "x0 x1". */
   readonly featureNames: readonly string[]
 }
 
-/** Multisets of size `size` from 0 … d−1 in lexicographic order (with repetition unless `distinct`). */
+/**
+ * Multisets of size `size` from $0, \dots, d - 1$ in lexicographic order (with repetition unless `distinct`).
+ *
+ * @param d The number of indices to choose from.
+ * @param size The number of indices in each multiset.
+ * @param distinct Whether each index may appear at most once (sets rather than multisets).
+ * @returns The multisets, each a non-decreasing (increasing when `distinct`) list of indices.
+ */
 function combinations(d: number, size: number, distinct: boolean): number[][] {
   const out: number[][] = []
   const walk = (start: number, prefix: number[]) => {
@@ -37,9 +52,22 @@ function combinations(d: number, size: number, distinct: boolean): number[][] {
 }
 
 /**
- * All monomials of the d input columns of degree at most `degree`, in scikit-learn's `PolynomialFeatures` order: by
+ * All monomials of the $d$ input columns of degree at most `degree`, in scikit-learn's `PolynomialFeatures` order: by
  * degree, then lexicographically in the column indices. `interactionOnly` keeps products of distinct columns;
- * `includeBias` (default true) leads with the constant column.
+ * `includeBias` leads with the constant column. Throws `DomainError` unless `degree` is a whole number $\ge 0$.
+ *
+ * @param options The degree and which monomials to keep.
+ * @param options.degree The largest total degree of a monomial.
+ * @param options.interactionOnly Keep only products of distinct columns (no $x_j^2$ and higher powers).
+ * @param options.includeBias Lead with the constant column 1 (the degree-0 monomial).
+ * @returns An estimator whose `fit({ x })` on an $n \times d$ matrix returns the fitted `PolynomialFeatures`.
+ *
+ * @example Degree-2 monomials of two columns
+ * const x = tensor([[2, 3], [1, -1]])
+ * const model = polynomialFeatures().fit({ x })
+ * print('features:', model.featureNames)
+ * print(model.transform(x))
+ * print('interactions only:', polynomialFeatures({ interactionOnly: true }).fit({ x }).featureNames)
  */
 export function polynomialFeatures({
   degree = 2,
@@ -99,20 +127,43 @@ export interface SplineFeatures extends FittedTransform {
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'spline-features'
-  /** The full knot vector of each column (the base knots extended by `degree` knots at each end), [d, knots + 2·degree]. */
+  /**
+   * The full knot vector of each column (the base knots extended by `degree` knots at each end), $d \times (K + 2p)$
+   * for $K$ base knots of degree $p$.
+   */
   readonly knots: Tensor
+  /** The degree $p$ of the B-splines. */
   readonly degree: number
-  /** Output columns per input column: knots + degree − 1 (one fewer without the bias). */
+  /** The number of output columns per input column: $K + p - 1$ (one fewer without the bias). */
   readonly perColumn: number
 }
 
 /**
- * B-spline basis expansion of each column, as scikit-learn's `SplineTransformer`: `knots` base knots spread uniformly
- * over the training range (or at its quantiles), extended beyond it by `degree` knots with the end spacing, give
- * knots + degree − 1 B-splines of degree `degree` per column (de Boor, 1978, "A Practical Guide to Splines"). Outside
- * the training range, `extrapolation` holds the boundary values (`'constant'`, the default), continues the end
- * polynomials (`'continue'`) or throws (`'error'`). Without `includeBias` the last spline of each column is dropped, so
- * the basis no longer sums to one (for use with an intercept).
+ * B-spline basis expansion of each column, as scikit-learn's `SplineTransformer`: $K$ = `knots` base knots spread
+ * uniformly over the training range (or at its quantiles), extended beyond it by $p$ = `degree` knots with the end
+ * spacing, give $K + p - 1$ B-splines of degree $p$ per column (de Boor, 1978, "A Practical Guide to Splines"). The
+ * output is $n \times d(K + p - 1)$, column by column. Outside the training range, `extrapolation` holds the boundary
+ * values (`'constant'`, the default), continues the end polynomials (`'continue'`) or throws `DomainError`
+ * (`'error'`). Without `includeBias` the last spline of each column is dropped, so the basis no longer sums to one (for
+ * use with an intercept). Throws `DomainError` for fewer than 2 knots.
+ *
+ * @param options The knots, the degree, and the behaviour outside the training range.
+ * @param options.knots The number $K \ge 2$ of base knots, including the two ends of the training range.
+ * @param options.degree The degree $p$ of the B-splines (3 for cubic).
+ * @param options.knotPlacement `'uniform'` (evenly spaced from the column's minimum to its maximum) or `'quantile'`
+ *   (at equally spaced quantiles of the training column).
+ * @param options.extrapolation `'constant'` (clamp to the training range), `'continue'` (extend the end polynomials) or
+ *   `'error'` (throw).
+ * @param options.includeBias Keep every spline; when false the last of each column is dropped.
+ * @returns An estimator whose `fit({ x })` on an $n \times d$ matrix returns the fitted `SplineFeatures`.
+ *
+ * @example Quadratic B-splines on three knots sum to one
+ * const x = tensor([[0], [0.25], [0.5], [1]])
+ * const model = splineFeatures({ knots: 3, degree: 2 }).fit({ x })
+ * print('splines per column:', model.perColumn)
+ * const B = model.transform(x)
+ * print('B =', B)
+ * print('row sums =', sum(B, 1))
  */
 export function splineFeatures({
   knots = 5,
@@ -203,18 +254,37 @@ export interface RandomFourierFeatures extends FittedTransform {
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'random-fourier-features'
-  /** Frequencies ω, [d, D], drawn from N(0, ℓ⁻² I). */
+  /**
+   * The frequencies $\omegavec_k$ as columns, $d \times D$, drawn from $\Gauss(\zeros, \ell^{-2} \Imat)$.
+   */
   readonly frequencies: Tensor
-  /** Phases b, [D], drawn from U(0, 2π). */
+  /** The phases $b_k$, $D$ values, drawn from $\Unif(0, 2\pi)$. */
   readonly phases: Tensor
+  /** The kernel's lengthscale $\ell$. */
   readonly lengthscale: number
 }
 
 /**
- * Random Fourier features for the squared-exponential kernel k(x, x′) = exp(−‖x − x′‖² / 2ℓ²) (Rahimi and Recht,
- * 2007, "Random features for large-scale kernel machines", NeurIPS): z(x) = √(2/D) cos(ωᵀx + b) with ω ~ N(0, ℓ⁻² I)
- * and b ~ U(0, 2π), so that z(x)·z(x′) is an unbiased estimate of k(x, x′) with variance O(1/D). The draws come from
- * the fit's stream (required); scikit-learn's `RBFSampler(gamma)` is ℓ = 1/√(2γ).
+ * Random Fourier features for the squared-exponential kernel
+ * $k(\xvec, \xvec') = \exp(-\lVert \xvec - \xvec' \rVert^2 / 2\ell^2)$ (Rahimi and Recht, 2007, "Random features for
+ * large-scale kernel machines", NeurIPS): $z_k(\xvec) = \sqrt{2/D} \cos(\omegavec_k^\top \xvec + b_k)$ for
+ * $k = 1, \dots, D$, with $\omegavec_k \sim \Gauss(\zeros, \ell^{-2} \Imat)$ and $b_k \sim \Unif(0, 2\pi)$, so that
+ * $\zvec(\xvec)^\top \zvec(\xvec')$ is an unbiased estimate of $k(\xvec, \xvec')$ with variance $O(1/D)$. The draws
+ * come from the fit's stream (required: `fit` throws `DomainError` without one); scikit-learn's `RBFSampler(gamma)` is
+ * $\ell = 1/\sqrt{2\gamma}$.
+ *
+ * @param options The number of features and the kernel's lengthscale.
+ * @param options.components The number $D$ of random features (output columns).
+ * @param options.lengthscale The lengthscale $\ell > 0$ of the approximated kernel.
+ * @returns An estimator whose `fit({ x }, { stream })` draws the frequencies and phases and returns the fitted
+ *   `RandomFourierFeatures`; `transform` gives an $n \times D$ matrix.
+ *
+ * @example Inner products of the features approximate the kernel
+ * const x = tensor([[0, 0], [1, 0], [0, 2]])
+ * const model = randomFourierFeatures({ components: 2000 }).fit({ x }, { stream: stream(1) })
+ * const z = model.transform(x)
+ * print('z zᵀ =', matmul(z, transpose(z)))
+ * print('k(x0, x1) = exp(-1/2) =', Math.exp(-0.5), ' k(x0, x2) = exp(-2) =', Math.exp(-2))
  */
 export function randomFourierFeatures({
   components = 100,

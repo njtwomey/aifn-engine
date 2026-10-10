@@ -1,7 +1,10 @@
 /**
  * Generative classifiers: naive Bayes (Gaussian, multinomial, Bernoulli) and linear and quadratic discriminant
- * analysis. Each fits p(x | y = k) and p(y = k) and classifies by Bayes' rule; `forward` returns the joint
- * log-likelihoods log p(x, y = k) (up to a constant shared by the classes), and `predictive` their softmax.
+ * analysis. Each fits $p(\xvec \mid y = k)$ and $p(y = k)$ and classifies by Bayes' rule; `forward` and `score`
+ * return the joint log-likelihoods $\log p(\xvec, y = k)$ (up to a constant shared by the classes) as an
+ * $m \times K$ matrix, `predictive` their softmax as a Bernoulli law of class 1 ($K = 2$) or a Categorical law, and
+ * `decide` the most probable class. Labels are the integers $0, \dots, K - 1$, and the class priors are the training
+ * frequencies unless `priors` are given.
  *
  * References: Hastie, Tibshirani and Friedman (2009), "The Elements of Statistical Learning", §4.3 (LDA, QDA) and
  * §6.6.3 (naive Bayes); McCallum and Nigam (1998), "A comparison of event models for naive Bayes text
@@ -25,15 +28,26 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { real, space } from 'aifn-compute/foundation/space'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A fitted generative classifier: joint log-likelihoods as its head, a categorical predictive. */
+/** A fitted generative classifier: joint log-likelihoods as its head, a class law as its predictive. */
 export interface GenerativeClassifier
   extends Fitted<Tensor, Tensor>, Scores<Tensor>, Decides<Tensor, Tensor>, Predicts<Tensor, AnyUnivariate> {
+  /** The number of classes $K$. */
   readonly classes: number
-  /** log p(y = k), [K]. */
+  /** The log-priors $\log p(y = k)$, $K$ values. */
   readonly logPrior: Tensor
 }
 
-/** Class counts and log-priors (empirical frequencies unless `priors` are given). */
+/**
+ * Class counts and log-priors (empirical frequencies unless `priors` are given). Throws `ShapeError` when `priors`
+ * does not have $K$ entries.
+ *
+ * @param y The integer label of each training row.
+ * @param K The number of classes.
+ * @param priors Prior class weights, one per class, normalised to sum to 1 here; undefined for the training
+ *   frequencies.
+ * @param where The caller's name, for error messages.
+ * @returns `counts`, the number of rows of each class, and `logPrior`, the $K$ log-priors.
+ */
 function priorsOf(y: Int32Array, K: number, priors: readonly number[] | undefined, where: string) {
   const counts = new Float64Array(K)
   for (const c of y) counts[c]++
@@ -48,7 +62,17 @@ function priorsOf(y: Int32Array, K: number, priors: readonly number[] | undefine
   return { counts, logPrior }
 }
 
-/** Per-class means [K, d]. */
+/**
+ * Per-class means, $K \times d$ row-major (zero for a class with no rows).
+ *
+ * @param v The training matrix, $n \times d$ row-major.
+ * @param y The integer label of each row.
+ * @param n The number of rows.
+ * @param d The number of features.
+ * @param K The number of classes.
+ * @param counts The number of rows of each class, as `priorsOf` returns them.
+ * @returns The class means, row $k$ the mean of class $k$.
+ */
 function classMeans(v: Float64Array, y: Int32Array, n: number, d: number, K: number, counts: Float64Array) {
   const means = new Float64Array(K * d)
   for (let i = 0; i < n; i++) for (let j = 0; j < d; j++) means[y[i] * d + j] += v[i * d + j]
@@ -60,21 +84,36 @@ function classMeans(v: Float64Array, y: Int32Array, n: number, d: number, K: num
 
 /** A fitted Gaussian naive Bayes model. */
 export interface GaussianNaiveBayesModel extends GenerativeClassifier {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'gaussian-naive-bayes'
-  /** Per-class feature means [K, d]. */
+  /** Per-class feature means, $K \times d$. */
   readonly means: Tensor
-  /** Per-class feature variances [K, d] (maximum likelihood, plus the smoothing `epsilon`). */
+  /** Per-class feature variances, $K \times d$ (maximum likelihood, plus the smoothing `epsilon`). */
   readonly variances: Tensor
-  /** The variance added to every entry: `varianceSmoothing` × the largest feature variance. */
+  /** The variance added to every entry: `varianceSmoothing` times the largest feature variance over all the data. */
   readonly epsilon: number
 }
 
 /**
- * Gaussian naive Bayes: features independent given the class, each Gaussian with a per-class mean and variance.
- * `varianceSmoothing` (default 1e-9) adds that fraction of the largest feature variance to every variance, for
- * stability, as scikit-learn's `var_smoothing`.
+ * Gaussian naive Bayes, as scikit-learn's `GaussianNB`: features independent given the class, each Gaussian with a
+ * per-class mean and maximum-likelihood variance, so
+ * $\log p(\xvec, y = k) = \log \pi_k + \sum_j \log \Gauss(x_j; \mu_{kj}, \sigma_{kj}^2)$.
+ *
+ * @param params `varianceSmoothing` (default 1e-9): the fraction of the largest feature variance added to every
+ *   variance, for stability, as scikit-learn's `var_smoothing`. `priors`: the class priors, one weight per class
+ *   (normalised; default the training frequencies).
+ * @returns The estimator: `fit({ x, y })` returns a `GaussianNaiveBayesModel`.
+ *
+ * @example Two Gaussian classes
+ * // Two Gaussian classes of twenty points, centred at (0, 0) and (3, 3).
+ * const x = concat([normals(stream(0), [20, 2]), add(normals(stream(1), [20, 2]), tensor([3, 3]))])
+ * const y = tensor(Array.from({ length: 40 }, (_, i) => (i < 20 ? 0 : 1)))
+ * const model = gaussianNaiveBayes().fit({ x, y })
+ * print('means =', model.means)
+ * print('variances =', model.variances)
+ * print('P(class 1) =', model.predictive(tensor([[0, 0], [1.5, 1.5], [3, 3]])).mean())
  */
 export function gaussianNaiveBayes(
   params: { varianceSmoothing?: number; priors?: readonly number[] } = {},
@@ -136,18 +175,35 @@ export function gaussianNaiveBayes(
 
 /** A fitted multinomial or Bernoulli naive Bayes model. */
 export interface DiscreteNaiveBayesModel extends GenerativeClassifier {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'multinomial-naive-bayes' | 'bernoulli-naive-bayes'
-  /** log P(feature j | class k) [K, d]: the probability of a count unit (multinomial) or of a one (Bernoulli). */
+  /**
+   * $\log \theta_{kj}$, $K \times d$: the log-probability of feature $j$ in class $k$, of one count unit
+   * (multinomial) or of a one (Bernoulli).
+   */
   readonly featureLogProb: Tensor
-  /** The smoothed per-class feature totals [K, d] (counts plus α). */
+  /** The smoothed per-class feature totals $N_{kj} + \alpha$, $K \times d$. */
   readonly featureCounts: Tensor
 }
 
 /**
- * Multinomial naive Bayes for count features (e.g. word counts): log p(x | k) = Σⱼ xⱼ log θ_kj + const, with
- * θ_kj = (N_kj + α) / Σⱼ (N_kj + α) (additive, Laplace, smoothing α, default 1).
+ * Multinomial naive Bayes for count features (such as word counts), as scikit-learn's `MultinomialNB`:
+ * $\log p(\xvec \mid k) = \sum_j x_j \log \theta_{kj} + \text{const}$, with
+ * $\theta_{kj} = (N_{kj} + \alpha) / \sum_j (N_{kj} + \alpha)$, $N_{kj}$ the total count of feature $j$ in class $k$.
+ * `fit` throws `DomainError` for a negative or NaN training feature; query features are not checked.
+ *
+ * @param params `alpha`: the additive (Laplace) smoothing $\alpha$ (default 1). `priors`: the class priors, one
+ *   weight per class (normalised; default the training frequencies).
+ * @returns The estimator: `fit({ x, y })` returns a `DiscreteNaiveBayesModel`.
+ *
+ * @example Word counts of sport and politics
+ * // Counts of the words (ball, goal, vote, poll) in four short texts: sport (0) or politics (1).
+ * const x = tensor([[3, 2, 0, 0], [2, 3, 1, 0], [0, 0, 3, 2], [1, 0, 2, 3]])
+ * const model = multinomialNaiveBayes().fit({ x, y: tensor([0, 0, 1, 1]) })
+ * print('word probabilities =', exp(model.featureLogProb))
+ * print('classes =', model.decide(tensor([[2, 1, 0, 0], [0, 1, 2, 2]])))
  */
 export function multinomialNaiveBayes(
   params: { alpha?: number; priors?: readonly number[] } = {},
@@ -197,9 +253,22 @@ export function multinomialNaiveBayes(
 }
 
 /**
- * Bernoulli naive Bayes for binary features: each feature is 1 with probability θ_kj = (N_kj + α) / (N_k + 2α) in
- * class k, and absent features count too (unlike the multinomial model). Features are binarised as x > `binarize`
- * (default 0; `null` when they are already 0/1).
+ * Bernoulli naive Bayes for binary features, as scikit-learn's `BernoulliNB`: feature $j$ is 1 with probability
+ * $\theta_{kj} = (N_{kj} + \alpha) / (N_k + 2\alpha)$ in class $k$ ($N_{kj}$ the rows of class $k$ with a one,
+ * $N_k$ the rows of class $k$), and absent features count too (unlike the multinomial model).
+ *
+ * @param params `alpha`: the additive (Laplace) smoothing $\alpha$ (default 1). `binarize`: features, in training and
+ *   at prediction, become 1 when greater than it and 0 otherwise (default 0); `null` uses them as given, for features
+ *   that already are 0 or 1. `priors`: the class priors, one weight per class (normalised; default the training
+ *   frequencies).
+ * @returns The estimator: `fit({ x, y })` returns a `DiscreteNaiveBayesModel`.
+ *
+ * @example Which words appear, in sport and politics
+ * // Whether the words (ball, goal, vote, poll) appear in four short texts: sport (0) or politics (1).
+ * const x = tensor([[1, 1, 0, 0], [1, 1, 1, 0], [0, 0, 1, 1], [1, 0, 1, 1]])
+ * const model = bernoulliNaiveBayes().fit({ x, y: tensor([0, 0, 1, 1]) })
+ * print('P(word | class) =', exp(model.featureLogProb))
+ * print('P(politics) =', model.predictive(tensor([[1, 0, 0, 0], [0, 0, 1, 0]])).mean())
  */
 export function bernoulliNaiveBayes(
   params: { alpha?: number; binarize?: number | null; priors?: readonly number[] } = {},
@@ -254,7 +323,15 @@ export function bernoulliNaiveBayes(
 
 // ── Discriminant analysis ────────────────────────────────────────────────────────────────────────────────────────
 
-/** A Cholesky factor as raw values, with log |Σ| and the jitter that was needed. */
+/**
+ * The Cholesky factor of a covariance, with $\log\det\Sigmamat$ and the jitter that was needed. A failed
+ * factorisation (`failed`) is returned, not thrown; its partial factor gives infinite or NaN log-likelihoods.
+ *
+ * @param cov The covariance $\Sigmamat$, $d \times d$ row-major (only its lower triangle is read).
+ * @param d The number of features.
+ * @returns The factor `L` (a tensor), `logDet` $= \log\det(\Sigmamat + j\Imat)$, the `jitter` $j$ added to the
+ *   diagonal, and whether the factorisation `failed`.
+ */
 function factorCovariance(cov: Float64Array, d: number) {
   const { L, jitter, failed } = cholesky(fromData(cov, [d, d]))
   const l = Float64Array.from(L.data as Float64Array)
@@ -264,8 +341,15 @@ function factorCovariance(cov: Float64Array, d: number) {
 }
 
 /**
- * ‖L⁻¹(xᵢ − μ)‖² for every row xᵢ of q (m × d, flat), by `solveTriangular`: the squared Mahalanobis distances to μ
- * when LLᵀ = Σ. Returns [m].
+ * $\lVert \Lmat^{-1}(\xvec_i - \muvec) \rVert^2$ for every row $\xvec_i$ of a query, by `solveTriangular`: the squared
+ * Mahalanobis distances to $\muvec$ when $\Lmat\Lmat^\top = \Sigmamat$.
+ *
+ * @param L The lower-triangular Cholesky factor of $\Sigmamat$, $d \times d$.
+ * @param q The query rows, $m \times d$ row-major.
+ * @param m The number of query rows.
+ * @param d The number of features.
+ * @param mean The centre $\muvec$, $d$ values.
+ * @returns The $m$ squared distances.
  */
 function mahalanobisRows(L: Tensor, q: Float64Array, m: number, d: number, mean: Float64Array): Float64Array {
   const res = new Float64Array(d * m) // column i is xᵢ − μ
@@ -275,38 +359,75 @@ function mahalanobisRows(L: Tensor, q: Float64Array, m: number, d: number, mean:
 
 /** A fitted linear or quadratic discriminant analysis. */
 export interface DiscriminantModel extends GenerativeClassifier {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'linear-discriminant' | 'quadratic-discriminant'
-  /** Class means [K, d]. */
+  /** Class means, $K \times d$. */
   readonly means: Tensor
-  /** LDA: the pooled within-class covariance [d, d]. QDA: one covariance per class [K, d, d]. */
+  /**
+   * LDA: the pooled within-class covariance, $d \times d$ (after shrinkage). QDA: one covariance per class,
+   * $K \times d \times d$ (after regularisation).
+   */
   readonly covariance: Tensor
-  /** Jitter added to each covariance's diagonal to factor it (0 when it was positive definite). */
+  /**
+   * The jitter added to each covariance's diagonal to factor it (0 when it was positive definite): one value for LDA,
+   * $K$ for QDA.
+   */
   readonly jitter: Tensor
 }
 
 /** A fitted LDA, which also projects onto its discriminant directions. */
 export interface LinearDiscriminantModel extends DiscriminantModel {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'linear-discriminant'
   /**
-   * Discriminant directions [d, r] (r = min(K − 1, d)) as columns, solving S_b w = λ S_w w with wᵀ S_w w = 1, so the
-   * projected classes have unit within-class variance. Ordered by λ, descending.
+   * Discriminant directions as the columns of a $d \times r$ matrix, $r = \min(K - 1, d)$, solving
+   * $\Smat_b \wvec = \lambda \Smat_w \wvec$ with $\wvec^\top \Smat_w \wvec = 1$ ($\Smat_w$ the shared covariance,
+   * $\Smat_b$ the prior-weighted scatter of the class means), so the projected classes have unit within-class
+   * variance. Ordered by $\lambda$, descending.
    */
   readonly scalings: Tensor
-  /** The share of the between-class variance along each direction [r]. */
+  /** The share of the between-class variance along each direction, $r$ values. */
   readonly explainedVarianceRatio: Tensor
-  /** Projections of x − (the prior-weighted mean of the class means) onto `scalings`, [m, r]. */
+  /**
+   * Projections of the rows of $\xvec$ minus the prior-weighted mean of the class means onto `scalings`,
+   * $m \times r$.
+   */
   transform(x: Tensor): Tensor
 }
 
 /**
- * Linear discriminant analysis: Gaussian classes sharing one covariance Σ, estimated as the within-class scatter
- * divided by n (the maximum-likelihood estimate, which scikit-learn's predictions use). The discriminant is
- * δ_k(x) = xᵀΣ⁻¹μ_k − ½ μ_kᵀΣ⁻¹μ_k + log π_k, linear in x. `shrinkage` s ∈ [0, 1] replaces Σ by
- * (1 − s)Σ + s (tr Σ / d) I.
+ * Linear discriminant analysis: Gaussian classes sharing one covariance $\Sigmamat$, estimated as the within-class
+ * scatter divided by $n$ (the maximum-likelihood estimate, which scikit-learn's predictions use). The discriminant is
+ * $\delta_k(\xvec) = \xvec^\top\Sigmamat^{-1}\muvec_k - \tfrac12 \muvec_k^\top\Sigmamat^{-1}\muvec_k + \log \pi_k$,
+ * linear in $\xvec$; `forward` gives $\log \pi_k - \tfrac12 (\xvec - \muvec_k)^\top\Sigmamat^{-1}(\xvec - \muvec_k)$,
+ * which differs from it by a term shared by the classes. The model also projects onto its discriminant directions
+ * (Fisher, 1936; Rao, 1948), as scikit-learn's `LinearDiscriminantAnalysis.transform`. Throws `DomainError` at once
+ * when `shrinkage` is outside $[0, 1]$.
+ *
+ * @param params `priors`: the class priors, one weight per class (normalised; default the training frequencies).
+ *   `shrinkage` $s \in [0, 1]$ (default 0) replaces $\Sigmamat$ by $(1 - s)\Sigmamat + s (\trace \Sigmamat / d) \Imat$.
+ * @returns The estimator: `fit({ x, y })` returns a `LinearDiscriminantModel`.
+ *
+ * @example Two Gaussian classes sharing a covariance
+ * // Two Gaussian classes of twenty points, centred at (0, 0) and (3, 3).
+ * const x = concat([normals(stream(0), [20, 2]), add(normals(stream(1), [20, 2]), tensor([3, 3]))])
+ * const y = tensor(Array.from({ length: 40 }, (_, i) => (i < 20 ? 0 : 1)))
+ * const model = linearDiscriminant().fit({ x, y })
+ * print('class means =', model.means)
+ * print('shared covariance =', model.covariance)
+ * print('P(class 1) =', model.predictive(tensor([[0, 0], [1.5, 1.5], [3, 3]])).mean())
+ *
+ * @example Projected onto the discriminant direction, the class means are about four apart
+ * // Two Gaussian classes of twenty points, centred at (0, 0) and (3, 3).
+ * const x = concat([normals(stream(0), [20, 2]), add(normals(stream(1), [20, 2]), tensor([3, 3]))])
+ * const y = tensor(Array.from({ length: 40 }, (_, i) => (i < 20 ? 0 : 1)))
+ * const model = linearDiscriminant().fit({ x, y })
+ * print('direction =', model.scalings)
+ * print('projected class centres =', model.transform(tensor([[0, 0], [3, 3]])))
  */
 export function linearDiscriminant(
   params: { priors?: readonly number[]; shrinkage?: number } = {},
@@ -403,10 +524,24 @@ export function linearDiscriminant(
 }
 
 /**
- * Quadratic discriminant analysis: Gaussian classes each with its own covariance Σ_k (the maximum-likelihood
- * estimate, divided by n_k, as scikit-learn ≥ 1.6), so the
- * boundaries are quadrics: δ_k(x) = −½ log |Σ_k| − ½ (x − μ_k)ᵀΣ_k⁻¹(x − μ_k) + log π_k. `regularisation` r ∈ [0, 1]
- * replaces each Σ_k by (1 − r)Σ_k + rI, as scikit-learn's `reg_param`.
+ * Quadratic discriminant analysis: Gaussian classes each with its own covariance $\Sigmamat_k$ (the
+ * maximum-likelihood estimate, divided by $n_k$, as scikit-learn $\ge 1.6$), so the boundaries are quadrics:
+ * $\delta_k(\xvec) = \log \pi_k - \tfrac12 \log\det\Sigmamat_k - \tfrac12 r_k^2$, with the squared Mahalanobis
+ * distance $r_k^2 = (\xvec - \muvec_k)^\top\Sigmamat_k^{-1}(\xvec - \muvec_k)$, which `forward` returns. `fit` throws
+ * `DomainError` when a class has fewer than two rows.
+ *
+ * @param params `priors`: the class priors, one weight per class (normalised; default the training frequencies).
+ *   `regularisation` $\rho$, in $[0, 1]$ (default 0; not checked), replaces each $\Sigmamat_k$ by
+ *   $(1 - \rho)\Sigmamat_k + \rho\Imat$, as scikit-learn's `reg_param`.
+ * @returns The estimator: `fit({ x, y })` returns a `DiscriminantModel`.
+ *
+ * @example A tight class inside a spread one: the boundary curves around the tight class
+ * // Class 0 is tight around the origin, class 1 three times as spread.
+ * const x = concat([mul(normals(stream(0), [30, 2]), 0.5), mul(normals(stream(1), [30, 2]), 1.5)])
+ * const y = tensor(Array.from({ length: 60 }, (_, i) => (i < 30 ? 0 : 1)))
+ * const model = quadraticDiscriminant().fit({ x, y })
+ * print('covariances =', model.covariance)
+ * print('P(class 1) at 0, 1 and 2 from the origin =', model.predictive(tensor([[0, 0], [1, 0], [2, 0]])).mean())
  */
 export function quadraticDiscriminant(
   params: { priors?: readonly number[]; regularisation?: number } = {},

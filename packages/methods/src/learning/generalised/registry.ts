@@ -1,6 +1,6 @@
 /**
  * The registry of the `aifn-methods/learning/generalised` group's shared layer: IRLS and backfitting as traceable
- * algorithms, and the penalised-fit and residual functions.
+ * algorithms, and the deviance, residual, penalty and smoothing-criterion functions.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

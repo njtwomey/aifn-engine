@@ -1,15 +1,20 @@
 /**
- * The Cox proportional-hazards model (Cox, 1972): the hazard of subject i is h(t | xᵢ) = h₀(t) exp(xᵢᵀβ), with the
- * baseline hazard h₀ left unspecified. β maximises the partial likelihood (Cox, 1975), the product over event times of
- * the chance that the subject who failed was the one to fail among those still at risk:
+ * The Cox proportional-hazards model (Cox, 1972): the hazard of subject $i$ is
+ * $h(t \mid \xvec_i) = h_0(t) \exp(\xvec_i^\top\betavec)$, with the baseline hazard $h_0$ left unspecified.
+ * $\betavec$ maximises the partial likelihood (Cox, 1975), the product over event times of the chance that the subject
+ * who failed was the one to fail among those still at risk:
  *
- *   ℓ(β) = Σ_events [xᵢᵀβ − log Σ_{j ∈ R(tᵢ)} exp(xⱼᵀβ)].
+ * $\ell(\betavec) = \sum_{i \in E} [\xvec_i^\top\betavec - \log \sum_{j \in R(t_i)} e^{\xvec_j^\top\betavec}]$,
  *
- * With d tied events at one time, Breslow (1974) uses the full risk-set sum for each of the d, and Efron (1977) removes
- * the tied subjects' share in steps: the l-th of them (l = 0, …, d − 1) sees Σ_R − (l/d) Σ_D. The fit is Newton's method
- * on ℓ, with the exact gradient and Hessian (score and observed information), halving a step that lowers ℓ. Standard
- * errors are the square roots of the diagonal of the inverse information. The baseline cumulative hazard is Breslow's
- * estimator Ĥ₀(t) = Σ_{tⱼ ≤ t} dⱼ / Σ_{R(tⱼ)} exp(xᵀβ̂).
+ * with $E$ the subjects with an event and $R(t)$ those whose time is at least $t$. With $d$ tied events at one time,
+ * Breslow (1974) uses the full risk-set sum for each of the $d$, and Efron (1977) removes the tied subjects' share in
+ * steps: the $l$-th of them ($l = 0, \dots, d - 1$) sees $\Sigma_R - (l/d) \Sigma_D$, the risk-set sum less that
+ * fraction of the tied events' sum. The fit is Newton's method on $\ell$, with the exact gradient and Hessian (score
+ * and observed information), halving a step that lowers $\ell$. Standard errors are the square roots of the diagonal
+ * of the inverse information. The baseline cumulative hazard is Breslow's estimator
+ * $\hat{H}_0(t) = \sum_{t_j \le t} d_j / \sum_{i \in R(t_j)} \exp(\xvec_i^\top\hat{\betavec})$, the baseline of a
+ * subject with $\xvec = \zeros$ (lifelines and R report it at the mean covariates instead). Coefficients, standard
+ * errors and the partial likelihood match lifelines' `CoxPHFitter` (Efron ties).
  */
 
 import { dense, fromData, toFlat, type MatrixLike, type Tensor, type VectorLike } from 'aifn-compute/foundation/tensor'
@@ -18,39 +23,65 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 
 /** Options of `coxPh`. */
 export interface CoxOptions {
-  /** How tied event times are handled: `efron` (default, as lifelines) or `breslow` (as R's `coxph(ties = 'breslow')`). */
+  /**
+   * How tied event times are handled: `efron` (default, as lifelines) or `breslow` (as R's
+   * `coxph(ties = 'breslow')`).
+   */
   ties?: 'efron' | 'breslow'
   /** Most Newton steps (default 50). */
   maxIterations?: number
-  /** Stop when the largest change in β is below this (default 1e-9). */
+  /** Stop when the largest change in $\betavec$ is below this (default 1e-9). */
   tolerance?: number
-  /** A ridge penalty ½λ‖β‖² subtracted from ℓ (default 0). */
+  /** A ridge penalty $\tfrac12 \lambda \lVert \betavec \rVert^2$ subtracted from $\ell$ (default 0): its $\lambda$. */
   penalty?: number
 }
 
 /** A fitted Cox model. */
 export interface CoxFit {
+  /** Always `'cox-model'`. */
   readonly kind: 'cox-model'
+  /** $\hat{\betavec}$: the log hazard ratio per unit of each covariate, $p$ values. */
   readonly coefficients: Float64Array
-  /** exp(β): the multiplicative change in hazard per unit of each covariate. */
+  /** $\exp(\hat{\betavec})$: the multiplicative change in hazard per unit of each covariate. */
   readonly hazardRatios: Float64Array
+  /** The standard error of each coefficient, from the inverse observed information at $\hat{\betavec}$. */
   readonly standardErrors: Float64Array
-  /** The partial log-likelihood at β̂ and at β = 0. */
+  /** The partial log-likelihood at $\hat{\betavec}$ (penalised, when `penalty` is set). */
   readonly logPartialLikelihood: number
+  /** The partial log-likelihood at $\betavec = \zeros$. */
   readonly nullLogPartialLikelihood: number
-  /** The partial log-likelihood after each Newton step (entry 0 at β = 0). */
+  /** The partial log-likelihood after each Newton step (entry 0 at $\betavec = \zeros$). */
   readonly path: Float64Array
-  /** β after each Newton step, row-major [(iterations + 1) × p] (row 0 is β = 0). */
+  /** $\betavec$ after each Newton step, row-major $(\text{iterations} + 1) \times p$ (row 0 is $\betavec = \zeros$). */
   readonly coefficientPath: Float64Array
+  /** The Newton steps taken. */
   readonly iterations: number
+  /** Whether the last step changed every coefficient by less than `tolerance`. */
   readonly converged: boolean
+  /** How tied event times were handled. */
   readonly ties: 'efron' | 'breslow'
-  /** Breslow's baseline cumulative hazard at the distinct event times. */
+  /**
+   * Breslow's baseline cumulative hazard $\hat{H}_0$ (at $\xvec = \zeros$), at the distinct event times in increasing
+   * order.
+   */
   readonly baseline: { readonly time: Float64Array; readonly cumulativeHazard: Float64Array }
 }
 
+/**
+ * Survival data as flat arrays: $n$ subjects, $p$ covariates (`x` row-major), times `t`, event flags `e`, and `order`,
+ * the subjects by increasing time with events before censorings at a tie.
+ */
 type Data = { n: number; p: number; x: Float64Array; t: Float64Array; e: Float64Array; order: number[] }
 
+/**
+ * Read and check survival data, and sort the subjects by time. Throws `ShapeError` when `x`, `time` and `event` differ
+ * in rows.
+ *
+ * @param x The covariates, $n \times p$.
+ * @param time The observed times, $n$ values.
+ * @param event The event flags, $n$ values (1 an event; anything else right-censored).
+ * @returns The data as flat arrays with the time order.
+ */
 function prepare(x: MatrixLike, time: VectorLike, event: VectorLike): Data {
   const X = dense.toMatrixF64(x, 'coxPh')
   const t = dense.toF64(time, 'coxPh')
@@ -62,7 +93,17 @@ function prepare(x: MatrixLike, time: VectorLike, event: VectorLike): Data {
   return { n, p: X.n, x: X.data, t, e, order }
 }
 
-/** ℓ(β), its gradient and its Hessian, by one sweep from the latest time down (risk sets grow as time falls). */
+/**
+ * $\ell(\betavec)$, its gradient and its Hessian, by one sweep from the latest time down (risk sets grow as time
+ * falls), with Breslow's baseline hazard increments on the way.
+ *
+ * @param d The prepared data.
+ * @param beta The coefficients $\betavec$, $p$ values.
+ * @param ties How tied event times are handled.
+ * @returns `ll`, `grad` ($p$ values) and `hess` ($p \times p$ row-major) of the partial log-likelihood, and `times`,
+ *   the distinct event times in increasing order, with `hazard`, Breslow's increment
+ *   $d_j / \sum_{i \in R(t_j)} e^{\xvec_i^\top\betavec}$ at each.
+ */
 function partial(d: Data, beta: Float64Array, ties: 'efron' | 'breslow') {
   const { n, p, x, t, e, order } = d
   const eta = new Float64Array(n)
@@ -135,8 +176,35 @@ function partial(d: Data, beta: Float64Array, ties: 'efron' | 'breslow') {
 }
 
 /**
- * Fit a Cox model to covariates x [n, p], times [n] and event flags [n] (1 an event, 0 right-censored) by Newton's
- * method on the partial likelihood.
+ * Fit a Cox model by Newton's method on the partial likelihood, from $\betavec = \zeros$. Throws `ShapeError` when
+ * `x`, `time` and `event` differ in rows; not converging within `maxIterations` is reported in `converged`. A
+ * covariate that separates the events perfectly has no finite maximiser, and its coefficient grows until the steps
+ * become small.
+ *
+ * @param x The covariates, $n \times p$ (one row per subject).
+ * @param time The observed times, $n$ values: the event time, or the censoring time.
+ * @param event The event flags, $n$ values: 1 for an observed event, 0 for a right-censored time.
+ * @param options The tie handling, the iteration limit and tolerance, and a ridge penalty, as `CoxOptions`.
+ * @returns The fit: coefficients, hazard ratios and standard errors, the partial likelihood and its path, and the
+ *   baseline cumulative hazard.
+ *
+ * @example A treatment that lowers the hazard
+ * // Ten subjects, treated (1) or not (0); an event of 0 means censored at that time.
+ * const treated = [[0], [0], [0], [0], [0], [1], [1], [1], [1], [1]]
+ * const time = [2, 3, 4, 5, 8, 5, 7, 9, 12, 15]
+ * const event = [1, 1, 0, 1, 1, 1, 0, 1, 1, 0]
+ * const fit = coxPh(treated, time, event)
+ * print('coefficient =', fit.coefficients, ' hazard ratio =', fit.hazardRatios)
+ * print('standard error =', fit.standardErrors)
+ * print('Newton steps =', fit.iterations, ' converged =', fit.converged)
+ *
+ * @example Breslow's ties give a slightly different coefficient
+ * // Ten subjects, treated (1) or not (0); an event of 0 means censored at that time.
+ * const treated = [[0], [0], [0], [0], [0], [1], [1], [1], [1], [1]]
+ * const time = [2, 3, 4, 5, 8, 5, 7, 9, 12, 15]
+ * const event = [1, 1, 0, 1, 1, 1, 0, 1, 1, 0]
+ * print('Efron:', coxPh(treated, time, event).coefficients)
+ * print('Breslow:', coxPh(treated, time, event, { ties: 'breslow' }).coefficients)
  */
 export function coxPh(x: MatrixLike, time: VectorLike, event: VectorLike, options: CoxOptions = {}): CoxFit {
   const { ties = 'efron', maxIterations = 50, tolerance = 1e-9, penalty = 0 } = options
@@ -212,7 +280,25 @@ export function coxPh(x: MatrixLike, time: VectorLike, event: VectorLike, option
   }
 }
 
-/** The partial log-likelihood ℓ(β) at given coefficients (Efron or Breslow ties), e.g. to draw its profile. */
+/**
+ * The partial log-likelihood $\ell(\betavec)$ at given coefficients (Efron or Breslow ties, no penalty), for instance
+ * to draw its profile. Throws `ShapeError` when `x`, `time` and `event` differ in rows.
+ *
+ * @param x The covariates, $n \times p$.
+ * @param time The observed times, $n$ values.
+ * @param event The event flags, $n$ values: 1 for an observed event, 0 for a right-censored time.
+ * @param coefficients The coefficients $\betavec$, $p$ values.
+ * @param ties How tied event times are handled.
+ * @returns $\ell(\betavec)$.
+ *
+ * @example The profile peaks at the fitted coefficient
+ * // Ten subjects, treated (1) or not (0); an event of 0 means censored at that time.
+ * const treated = [[0], [0], [0], [0], [0], [1], [1], [1], [1], [1]]
+ * const time = [2, 3, 4, 5, 8, 5, 7, 9, 12, 15]
+ * const event = [1, 1, 0, 1, 1, 1, 0, 1, 1, 0]
+ * for (const b of [-3, -2, -1, 0]) print('l(' + b + ') =', coxPartialLikelihood(treated, time, event, [b]))
+ * print('fitted:', coxPh(treated, time, event).coefficients)
+ */
 export function coxPartialLikelihood(
   x: MatrixLike,
   time: VectorLike,
@@ -224,7 +310,22 @@ export function coxPartialLikelihood(
 }
 
 /**
- * The survival curve S(t | x) = exp(−Ĥ₀(t) exp(xᵀβ̂)) of a subject with covariates x, at the model's event times.
+ * The survival curve $S(t \mid \xvec) = \exp(-\hat{H}_0(t) \exp(\xvec^\top\hat{\betavec}))$ of a subject with
+ * covariates $\xvec$, at the model's event times (`fit.baseline.time`).
+ *
+ * @param fit The fitted model.
+ * @param x The subject's covariates, $p$ values.
+ * @returns $S(t \mid \xvec)$ at each distinct event time, a step function constant between them.
+ *
+ * @example Survival with and without the treatment
+ * // Ten subjects, treated (1) or not (0); an event of 0 means censored at that time.
+ * const treated = [[0], [0], [0], [0], [0], [1], [1], [1], [1], [1]]
+ * const time = [2, 3, 4, 5, 8, 5, 7, 9, 12, 15]
+ * const event = [1, 1, 0, 1, 1, 1, 0, 1, 1, 0]
+ * const fit = coxPh(treated, time, event)
+ * print('at times', fit.baseline.time)
+ * print('treated:', coxSurvival(fit, [1]))
+ * print('untreated:', coxSurvival(fit, [0]))
  */
 export function coxSurvival(fit: CoxFit, x: ArrayLike<number>): Float64Array {
   let eta = 0
@@ -234,8 +335,22 @@ export function coxSurvival(fit: CoxFit, x: ArrayLike<number>): Float64Array {
 }
 
 /**
- * Harrell's concordance index: among comparable pairs (the shorter time is an event), the share where the subject who
- * failed first has the higher risk score (ties in score count ½).
+ * Harrell's concordance index (Harrell, Califf, Pryor, Lee and Rosati, 1982): among comparable pairs (the shorter time
+ * is an event and the other time strictly longer), the share where the subject who failed first has the higher risk
+ * score (ties in score count $\tfrac12$). 1 is a perfect ranking and $\tfrac12$ a random one. The score is a risk,
+ * such as $\xvec^\top\hat{\betavec}$: lifelines' `concordance_index` takes predicted times, so its scores are this
+ * one's negated.
+ *
+ * @param time The observed times, $n$ values.
+ * @param event The event flags, $n$ values: 1 for an observed event, anything else right-censored.
+ * @param risk The risk score of each subject, higher for an earlier failure.
+ * @returns The concordance, or NaN when no pair is comparable.
+ *
+ * @example A perfect ranking and its reverse
+ * const time = [1, 2, 3, 4]
+ * const event = [1, 1, 0, 1]
+ * print('risk falling with time:', harrellConcordance(time, event, [4, 3, 2, 1]))
+ * print('risk rising with time:', harrellConcordance(time, event, [1, 2, 3, 4]))
  */
 export function harrellConcordance(time: VectorLike, event: VectorLike, risk: VectorLike): number {
   const t = dense.toF64(time, 'harrellConcordance')

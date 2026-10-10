@@ -1,6 +1,10 @@
 /**
  * Linear regression by least squares (ridge when `l2 > 0`) with a Gaussian predictive: a reference estimator that
  * exercises the capability design end to end.
+ *
+ * The data are centred before the solve, so the intercept is never penalised, as in scikit-learn's `LinearRegression`
+ * and `Ridge`; least squares goes through the SVD (`lstsq`), so a rank-deficient design gives the minimum-norm
+ * solution, and ridge through the Cholesky factor of the regularised normal equations.
  */
 
 import { cholesky, choleskySolve, lstsq } from 'aifn-compute/numerics/linalg'
@@ -18,13 +22,16 @@ const values = dense.data
 
 /** Hyperparameters of `linearRegression`. */
 export interface LinearRegressionParams {
-  /** Ridge penalty α on ‖w‖² (the intercept is not penalised), as scikit-learn's `Ridge(alpha)`. Default 0. */
+  /**
+   * Ridge penalty $\alpha$ on $\lVert \wvec \rVert^2$ (the intercept is not penalised), as scikit-learn's
+   * `Ridge(alpha)`. Default 0, plain least squares.
+   */
   l2?: number
   /** Fit an intercept (default true). */
   intercept?: boolean
 }
 
-/** A fitted linear regression y = x·w + b + ε, ε ~ N(0, σ²). */
+/** A fitted linear regression $y = \xvec^\top\wvec + b + \varepsilon$, $\varepsilon \sim \Gauss(0, \sigma^2)$. */
 export interface LinearRegressionModel
   extends
     Fitted<Tensor, Tensor>,
@@ -32,33 +39,61 @@ export interface LinearRegressionModel
     Predicts<Tensor, AnyUnivariate>,
     Expects<Tensor>,
     Samples<Tensor, Tensor> {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'linear-regression'
-  /** Coefficients w, shape [d]. */
+  /** Coefficients $\wvec$, $d$ values. */
   readonly weights: Tensor
-  /** Intercept b (0 without an intercept). */
+  /** Intercept $b$ (0 without an intercept). */
   readonly intercept: number
-  /** Plug-in noise standard deviation σ̂ = √(RSS / (n − p)), p the rank plus the intercept; NaN when n ≤ p. */
+  /**
+   * Plug-in noise standard deviation $\hat\sigma = \sqrt{\text{RSS} / (n - p)}$, $p$ the rank plus the intercept;
+   * NaN when $n \le p$.
+   */
   readonly noiseSd: number
   /** Residual sum of squares on the training data. */
   readonly rss: number
-  /** Residual degrees of freedom n − p. */
+  /** Residual degrees of freedom $n - p$. */
   readonly residualDof: number
-  /** Numerical rank of the centred design (d when `l2 > 0`). */
+  /** Numerical rank of the centred design ($d$ when `l2 > 0`). */
   readonly rank: number
   /** Singular values of the centred design (least squares only; null for ridge). */
   readonly singularValues: Tensor | null
+  /** The ridge penalty it was fitted with. */
   readonly l2: number
 }
 
 /**
  * Linear regression by least squares on the centred data, as scikit-learn's `LinearRegression` and `Ridge`: with
- * x̄ and ȳ the training means, w minimises ‖(X − x̄)w − (y − ȳ)‖² + α‖w‖² and b = ȳ − x̄·w. With α = 0 the
- * minimum-norm solution is found by SVD (rank deficiency is reported in `rank`); with α > 0 by Cholesky of
- * XcᵀXc + αI. The predictive is the plug-in Gaussian N(x·w + b, σ̂²), which ignores the uncertainty in w.
+ * $\bar{\xvec}$ and $\bar{y}$ the training means, $\wvec$ minimises
+ * $\lVert (\Xmat - \ones\bar{\xvec}^\top)\wvec - (\yvec - \bar{y}\ones) \rVert^2 + \alpha \lVert \wvec \rVert^2$ and
+ * $b = \bar{y} - \bar{\xvec}^\top\wvec$. With $\alpha = 0$ the minimum-norm solution is found by SVD (rank
+ * deficiency is reported in `rank`); with $\alpha > 0$ by Cholesky of $\Xmat_c^\top\Xmat_c + \alpha\Imat$, with
+ * $\Xmat_c$ the centred design. The predictive is the plug-in Gaussian $\Gauss(\xvec^\top\wvec + b, \hat\sigma^2)$,
+ * which ignores the uncertainty in $\wvec$. Throws `DomainError` at once for a negative or NaN `l2`, and `ShapeError`
+ * from `fit` when `x` and `y` differ in rows.
  *
- * Capabilities: `forward` and `decide` (the mean x·w + b), `predictive` (Gaussian), `expect`, `sample`.
+ * Capabilities: `forward` and `decide` (the mean $\xvec^\top\wvec + b$, $m$ values), `predictive` (Gaussian),
+ * `expect`, `sample`.
+ *
+ * @param params The ridge penalty `l2` and whether to fit an intercept, as `LinearRegressionParams`.
+ * @returns The estimator: `fit({ x, y })`, with `x` $n \times d$ and `y` $n$ values, returns a `LinearRegressionModel`.
+ *
+ * @example Ordinary least squares recovers a known slope and intercept
+ * // 50 points on the line y = 2x + 1, with noise of standard deviation 0.1.
+ * const x = normals(stream(0), [50, 1])
+ * const y = add(add(mul(reshape(x, [50]), 2), 1), mul(normals(stream(1), [50]), 0.1))
+ * const model = linearRegression().fit({ x, y })
+ * print('slope =', model.weights, ' intercept =', model.intercept)
+ * print('noise sd =', model.noiseSd)
+ * print('predictive sd at x = 0 and 1:', model.predictive(tensor([[0], [1]])).stddev())
+ *
+ * @example Ridge shrinks the slope towards zero as the penalty grows
+ * // 50 points on the line y = 2x + 1, with noise of standard deviation 0.1.
+ * const x = normals(stream(0), [50, 1])
+ * const y = add(add(mul(reshape(x, [50]), 2), 1), mul(normals(stream(1), [50]), 0.1))
+ * for (const l2 of [0, 10, 100]) print('l2 =', l2, ' slope =', linearRegression({ l2 }).fit({ x, y }).weights)
  */
 export function linearRegression(
   params: LinearRegressionParams = {},

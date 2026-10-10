@@ -1,12 +1,14 @@
 /**
- * Continual learning on a sequence of classification tasks with one network (an MLP), trained on each task in turn:
+ * Continual learning on a sequence of binary classification tasks on 2-d inputs with one network (an MLP), trained
+ * on each task in turn:
  *
  * - **naive** fine-tuning, which forgets earlier tasks (catastrophic forgetting);
- * - **elastic weight consolidation** (EWC; Kirkpatrick et al., 2017): after task t, the diagonal of the empirical
- *   Fisher information Fᵢ = mean over the task of (∂ log p(y | x)/∂θᵢ)² measures how much each weight mattered, and later
- *   tasks add (λ/2) Σᵢ Fᵢ (θᵢ − θ*ᵢ)², a quadratic anchor to the old solution θ* (the Fishers and anchors of all earlier
- *   tasks are summed);
- * - **experience replay**: a small memory of examples from earlier tasks is mixed into every minibatch.
+ * - **elastic weight consolidation** (EWC; Kirkpatrick et al., 2017): after task $k$, the diagonal of the empirical
+ *   Fisher information $F_i = \operatorname{mean}_{(\xvec, y)} (\partial \log p(y \mid \xvec) / \partial\theta_i)^2$
+ *   over the task measures how much each weight mattered, and later tasks add
+ *   $\frac{\lambda}{2} \sum_i F_i (\theta_i - \theta_i^*)^2$, a quadratic anchor to the old solution $\thetavec^*$ (one
+ *   such penalty per earlier task, each with its own Fisher and anchor, summed);
+ * - **experience replay**: a small memory of examples from each earlier task is appended to every minibatch.
  *
  * The run reports the accuracy on every task as training proceeds, so forgetting shows as falling curves.
  */
@@ -38,41 +40,78 @@ export type ContinualMethod = 'naive' | 'ewc' | 'replay'
 
 /** Options of `continualRun`. */
 export interface ContinualOptions {
+  /** The strategy (default `ewc`). */
   method?: ContinualMethod
-  /** EWC's λ (default 1000). */
+  /** EWC's $\lambda$ (default 1000). */
   lambda?: number
-  /** Replay memory per earlier task (default 20 examples). */
+  /** Replay memory per earlier task (default 20 examples), all of it appended to every minibatch. */
   memory?: number
-  /** Adam updates per task (default 400), step size (default 1e-2), rows per step (default 32). */
+  /** Adam updates per task (default 400). */
   stepsPerTask?: number
+  /** Adam's step size (default 1e-2). */
   stepSize?: number
+  /** Rows of the current task per step, drawn with replacement (default 32, at most the task's size). */
   batchSize?: number
+  /** Hidden widths of the MLP (default $[32, 32]$, tanh). */
   hidden?: readonly number[]
   /** Examples used to estimate each task's Fisher (default 100). */
   fisherSamples?: number
+  /** The root stream's seed (default 0): the run is deterministic in it. */
   seed?: number | string
-  /** Grid of the decision fields (default 30 cells on [−box, box]², box 4). */
+  /** Grid cells per side of the decision fields (default 30). */
   grid?: number
+  /** The grid's half-width: it spans $[-\mathit{box}, \mathit{box}]^2$ (default 4). */
   box?: number
 }
 
 /** A continual run so far. */
 export interface ContinualRun {
+  /** The strategy. */
   method: ContinualMethod
+  /** The number of tasks. */
   tasks: number
+  /** Adam updates per task. */
   stepsPerTask: number
-  /** Accuracy on each task (rows) after each recorded step (columns), [tasks][records]. */
+  /** Accuracy on each task (rows) after each recorded step (columns): `tasks` rows of `steps.length` values. */
   accuracy: number[][]
+  /** The recorded steps, counted over all tasks: 0, then about 20 per task. */
   steps: number[]
-  /** The probability field of class 1 on the grid after each task, [tasks][grid²]. */
+  /** The probability field of class 1 on the grid after each task so far, $\mathit{grid}^2$ values each. */
   fields: Float64Array[]
+  /** The grid's coordinates along each axis, `grid` values. */
   gridX: Float64Array
+  /** True once the last task is trained. */
   done: boolean
 }
 
+/** One task: inputs $n \times 2$ and 0/1 labels. */
 type Task = { x: Tensor; y: Tensor }
 
-/** Train on the tasks in order with the chosen strategy, yielding after each task (module docs). */
+/**
+ * Train one network on the tasks in order with the chosen strategy, yielding a snapshot after each task (the
+ * returned value is the final run). Each task's minibatches, Fisher sample and replay memory are drawn from the root
+ * stream of `seed`, so the run is deterministic in it.
+ *
+ * @param tasks The tasks, in training order: inputs $n \times 2$ and 0/1 labels each.
+ * @param options The strategy, its settings, the training and the grid.
+ * @returns A generator of snapshots, one per task.
+ *
+ * @example Two tasks in different regions: naive fine-tuning forgets the first, replay keeps it
+ * const z = normals(stream(1), [40, 2])
+ * const side = toArray(z).map(([, b]) => (b > 0 ? 1 : 0))
+ * const tasks = [
+ *   { x: add(z, tensor([-2, 0])), y: tensor(side) },
+ *   { x: add(z, tensor([2, 0])), y: tensor(side.map((c) => 1 - c)) },
+ * ]
+ * for (const method of ['naive', 'replay']) {
+ *   let run
+ *   for (const snapshot of continualRun(tasks, { method, stepsPerTask: 40, stepSize: 0.05, hidden: [8], grid: 2 })) {
+ *     run = snapshot
+ *   }
+ *   const afterFirst = run.accuracy[0][run.steps.indexOf(40)]
+ *   print(`${method}: accuracy on task 1 after task 1:`, afterFirst, 'after task 2:', run.accuracy[0].at(-1))
+ * }
+ */
 export function* continualRun(
   tasks: readonly Task[],
   options: ContinualOptions = {},

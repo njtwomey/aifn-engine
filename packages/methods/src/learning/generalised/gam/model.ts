@@ -1,12 +1,14 @@
 /**
- * Generalised additive models g(E[y]) = α + Σⱼ fⱼ(x) fitted by penalised IRLS (`aifn-methods/learning/glm`'s `irls`
- * with the penalty S_λ = Σ λₖ Sₖ), with smoothing parameters chosen by GCV/UBRE or REML (Laplace-approximate restricted
- * likelihood), effective degrees of freedom, Bayesian posterior bands and draws, and shape constraints.
+ * Generalised additive models $g(\expect[y]) = \alpha + \sum_j f_j(\xvec)$ fitted by penalised IRLS
+ * (`aifn-methods/learning/glm`'s `irls` with the penalty $\Smat_\lambda = \sum_k \lambda_k\Smat_k$), with
+ * smoothing parameters chosen by GCV/UBRE or REML (Laplace-approximate restricted likelihood), effective degrees of
+ * freedom, Bayesian posterior bands and draws, and shape constraints.
  *
  * References: Wood (2017), "Generalized Additive Models: An Introduction with R", 2nd ed.: penalised IRLS §6.1.1,
- * GCV and UBRE §6.2.3–6.2.4, REML and LAML §6.2.5–6.2.6, EDF §6.1.2, posterior covariance V_β = (XᵀWX + S_λ)⁻¹φ §6.10.
- * Shape constraints follow pyGAM (Servén and Brummitt, 2018): a large penalty on the coefficient differences that
- * violate the constraint, added until none do.
+ * GCV and UBRE §6.2.3–6.2.4, REML and LAML §6.2.5–6.2.6, EDF §6.1.2, posterior covariance
+ * $\Vmat_\beta = (\Xmat^\top\Wmat\Xmat + \Smat_\lambda)^{-1}\phi$ §6.10. Shape constraints follow pyGAM
+ * (Servén and Brummitt, 2018): a large penalty on the coefficient differences that violate the constraint, added until
+ * none do.
  */
 
 import {
@@ -38,13 +40,25 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 export type { GamData, SmoothingMethod } from './problem'
 
 type F64 = Float64Array
+/**
+ * A tensor's values, flattened in row-major order, as a fresh `Float64Array`.
+ *
+ * @param t The tensor to copy; it is not modified.
+ * @returns Its entries in row-major order.
+ */
 const f64 = (t: Tensor): F64 => Float64Array.from(toFlat(t))
+/**
+ * A vector tensor on an array's values.
+ *
+ * @param a The values, $n$ of them.
+ * @returns A tensor of shape $[n]$.
+ */
 const vec = (a: F64) => fromData(a, [a.length])
 
 /** Hyperparameters of `gam`: a problem specification (`GamSpec`) with a family object or name. */
 export type GamParams = GamSpec & { terms: readonly TermSpec[] }
 
-/** Partial effect of one term on a grid, with pointwise standard errors. */
+/** Partial effect of one term on a grid (`fit`, $m$ values), with pointwise standard errors (`se`, $m$ values). */
 export type PartialEffect = { fit: Tensor; se: Tensor }
 
 /**
@@ -52,13 +66,13 @@ export type PartialEffect = { fit: Tensor; se: Tensor }
  * coefficients on each, the raw columns weighted by their coefficients, and their sum, the partial effect.
  */
 export type GamTermBasis = ReturnType<typeof termBasis> & {
-  /** βⱼ [size], the coefficients of the constrained columns. */
+  /** $\betavec_j$ (`size` values), the coefficients of the constrained columns. */
   coefficients: Tensor
-  /** Zβⱼ [rawSize], the same function's coefficients on the raw basis. */
+  /** $\Zmat\betavec_j$ (`rawSize` values), the same function's coefficients on the raw basis. */
   rawCoefficients: Tensor
-  /** Each raw basis column times its coefficient, [m, rawSize]. */
+  /** Each raw basis column times its coefficient ($m \times$ `rawSize`). */
   weighted: Tensor
-  /** Σ of the weighted columns: the partial effect fⱼ on the grid, [m]. */
+  /** The sum of the weighted columns: the partial effect $f_j$ on the grid ($m$ values). */
   sum: Tensor
 }
 
@@ -71,65 +85,111 @@ export interface GamModel
     Expects<Tensor>,
     Samples<Tensor, Tensor>,
     Trained<IrlsState> {
+  /** Tags a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'gam'
+  /** The response family. */
   readonly family: Family
+  /** The link. */
   readonly link: Link
+  /** The built terms, in model order. */
   readonly terms: readonly BuiltTerm[]
   /** Term labels, e.g. "s(x0)", "te(x1, x2)". */
   readonly labels: string[]
-  /** All coefficients [P]: the intercept, then each term's block. */
+  /** All coefficients ($P$): the intercept, then each term's block. */
   readonly coefficients: Tensor
+  /** The intercept, the first coefficient. */
   readonly intercept: number
   /** One smoothing parameter per penalty, in term order. */
   readonly lambdas: number[]
-  /** Total effective degrees of freedom tr(H⁻¹XᵀWX), including the intercept. */
+  /** Total effective degrees of freedom $\trace(\Hmat^{-1}\Xmat^\top\Wmat\Xmat)$, including the intercept. */
   readonly edf: number
   /** EDF of each term. */
   readonly termEdf: number[]
-  /** φ: fixed by the family or estimated as Σwᵢ(yᵢ − μᵢ)²/V(μᵢ) / (n − edf). */
+  /**
+   * $\phi$: fixed by the family, or estimated by Pearson's statistic
+   * $\sum_i w_i (y_i - \mu_i)^2 / V(\mu_i) / (n - \text{edf})$.
+   */
   readonly dispersion: number
+  /** The deviance $D$ at the coefficients. */
   readonly deviance: number
-  /** 1 − D/D₀ against the intercept-only model's deviance D₀. */
+  /** $1 - D/D_0$ against the intercept-only model's deviance $D_0$. */
   readonly devianceExplained: number
-  /** λ-weighted penalty βⱼᵀS_λβⱼ of each term. */
+  /** $\lambda$-weighted penalty $\betavec_j^\top\Smat_\lambda\betavec_j$ of each term. */
   readonly termPenalties: number[]
-  /** D + βᵀS_λβ (with any shape-constraint penalty). */
+  /** $D + \betavec^\top\Smat_\lambda\betavec$ (with any shape-constraint penalty). */
   readonly penalisedDeviance: number
-  /** AIC = −2 log L(β̂, φ̂) + 2(edf + 1 when φ is estimated) (Wood, 2017, §6.11.2). */
+  /**
+   * $\AIC = -2 \log L(\hat{\betavec}, \hat{\phi}) + 2(\text{edf} + 1)$ when $\phi$ is estimated, and
+   * $+ 2\,\text{edf}$ when it is known (Wood, 2017, §6.11.2).
+   */
   readonly aic: number
-  /** The smoothing-parameter criterion at the chosen λ (REML: −2 × restricted log-likelihood up to a constant). */
+  /**
+   * The smoothing-parameter criterion at the chosen $\lambda$ (REML: $-2 \times$ restricted log-likelihood up to a
+   * constant).
+   */
   readonly smoothingScore: { method: SmoothingMethod; value: number; evaluations: number }
-  /** Bayesian covariance V_β = H⁻¹φ [P, P]. */
+  /** Bayesian covariance $\Vmat_\beta = \Hmat^{-1}\phi$ ($P \times P$). */
   readonly covariance: Tensor
+  /** The fitted means $\muvec$ at the training data ($n$). */
   readonly fitted: Tensor
+  /** The linear predictor $\etavec$ at the training data, offset included ($n$). */
   readonly linearPredictor: Tensor
+  /** Whether the training run converged (the given trace's, or the P-IRLS optimum's). */
   readonly converged: boolean
-  /** Jitter added to XᵀWX + S_λ to factor it (non-zero when unpenalised directions overlap). */
+  /**
+   * Jitter added to $\Xmat^\top\Wmat\Xmat + \Smat_\lambda$ to factor it (non-zero when unpenalised directions
+   * overlap).
+   */
   readonly jitter: number
-  /** Shape constraints: active difference rows and how many differences still violate (with tolerance 1e-6). */
+  /** Shape constraints: active difference rows, and how many differences still violate (by more than 1e-6). */
   readonly shape: { active: number; violations: number }
-  /** The problem the model solves (design, penalties, λ, the reference optimum). */
+  /** The problem the model solves (design, penalties, $\lambda$, the reference optimum). */
   readonly problem: GamProblem
   /**
-   * The partial effect fⱼ on a grid: [m] for a one-dimensional term (a `by` variable set to 1 or its level), [m, 2] for
-   * a tensor.
+   * The partial effect $f_j$ of term `term` on a grid (without the intercept), with standard errors from its block of
+   * $\Vmat_\beta$: the grid is $m$ values for a one-dimensional term (a `by` variable set to 1 or its level), or
+   * $m \times 2$ for a tensor. Throws `DomainError` for a term that does not exist.
    */
   partial(term: number, grid: Tensor): PartialEffect
-  /** Term j's basis on a grid with its coefficients (raw and constrained), the weighted columns and their sum. */
+  /** Term `term`'s basis on a grid with its coefficients (raw and constrained), the weighted columns and their sum. */
   basis(term: number, grid: Tensor): GamTermBasis
-  /** Partial residuals of term j at the training data: f̂ⱼ(xᵢ) + the working residual (yᵢ − μᵢ)/μ′(ηᵢ), [n]. */
+  /**
+   * Partial residuals of term `term` at the training data: $\hat{f}_j(\xvec_i)$ plus the working residual
+   * $(y_i - \mu_i)/\mu'(\eta_i)$ ($n$ values).
+   */
   partialResiduals(term: number): Tensor
   /** Training residuals of a kind (default deviance). */
   residuals(kind?: ResidualKind): Tensor
-  /** `count` posterior draws of fⱼ on a grid from β ~ N(β̂, V_β), [count, m]. */
+  /**
+   * `count` posterior draws of $f_j$ on a grid from $\betavec_j \sim \Gauss(\hat{\betavec}_j, \Vmat_{\beta,j})$,
+   * the term's block of the covariance ($\text{count} \times m$).
+   */
   partialDraws(s: Stream, term: number, grid: Tensor, count: number): Tensor
 }
 
 /**
- * The GAM of a problem at coefficients β: at the problem's optimum this is the fitted model; at any other β (a step of
- * a fitter) it is the model those coefficients define, with EDF, covariance and bands from H = XᵀWX + S_λ at that β.
+ * The GAM of a problem at coefficients $\betavec$: at the problem's optimum this is the fitted model; at any other
+ * $\betavec$ (a step of a fitter) it is the model those coefficients define, with EDF, covariance and bands from
+ * $\Hmat = \Xmat^\top\Wmat\Xmat + \Smat_\lambda$ at that $\betavec$. Predictions at new inputs (`forward`,
+ * `decide`, `predictive`) take no offset. Throws `ShapeError` when the number of coefficients is not the design's $P$.
+ *
+ * @param problem The problem the coefficients solve, or approximately solve.
+ * @param coefficients $\betavec$, $P$ values: the intercept, then each term's block.
+ * @param training The run that reached $\betavec$, reported as the model's `training` and `converged` (default the
+ *   problem's P-IRLS optimum's run).
+ * @returns The model at $\betavec$.
+ *
+ * @example The model after 5 gradient steps and at the optimum of a logistic GAM
+ * const r = stream(0)
+ * const x = uniform(r, 0, 6, { shape: [60, 1] })
+ * const y = bernoulli(r, div(1, add(1, exp(mul(-2, sin(reshape(x, [60])))))))
+ * const problem = gamProblem({ terms: [s(0)], family: 'binomial' }, { x, y })
+ * const early = gamModel(problem, toArray(run(gamGradientDescent(problem), undefined, 5).coefficients))
+ * const best = gamModel(problem, problem.optimum.beta)
+ * print('after 5 steps: edf =', early.edf, 'deviance =', early.deviance)
+ * print('at the optimum: edf =', best.edf, 'deviance =', best.deviance)
  */
 export function gamModel(problem: GamProblem, coefficients: ArrayLike<number>, training?: Trace<IrlsState>): GamModel {
   const A = problem.design
@@ -311,8 +371,23 @@ export function gamModel(problem: GamProblem, coefficients: ArrayLike<number>, t
 }
 
 /**
- * The linear predictor η(x) = x̃ᵀβ̂ at new inputs x [m, d] with its pointwise standard error √(x̃ᵀV_βx̃), the intercept's
- * uncertainty included (Wood, 2017, §6.10); g⁻¹ of η ± 2 se is the usual band on the response scale. [m] each.
+ * The linear predictor $\eta(\xvec) = \tilde{\xvec}^\top\hat{\betavec}$ at new inputs, for the model-matrix row
+ * $\tilde{\xvec}$ of $\xvec$, with its pointwise standard error
+ * $\sqrt{\tilde{\xvec}^\top\Vmat_\beta\tilde{\xvec}}$, the intercept's uncertainty included (Wood, 2017,
+ * §6.10); $g^{-1}$ of $\eta \pm 2\,\text{se}$ is the usual band on the response scale. No offset is added.
+ *
+ * @param model The fitted model.
+ * @param x The new inputs ($m \times d$).
+ * @returns `fit`, $\eta$ at each input, and `se`, its standard error ($m$ values each).
+ *
+ * @example The band widens where there are no data
+ * const r = stream(0)
+ * const x = uniform(r, 0, 6, { shape: [40, 1] })
+ * const y = add(sin(reshape(x, [40])), normals(r, 40, 0, 0.2))
+ * const model = gam({ terms: [s(0)] }).fit({ x, y })
+ * const band = gamLinkBand(model, tensor([[0.5], [3], [5.9], [8]]))
+ * print('fit =', band.fit)
+ * print('se =', band.se)
  */
 export function gamLinkBand(model: GamModel, x: Tensor): PartialEffect {
   const A = model.problem.design
@@ -339,10 +414,30 @@ export function gamLinkBand(model: GamModel, x: Tensor): PartialEffect {
 }
 
 /**
- * A generalised additive model: `gam({ terms: [s(0), s(1, { k: 20 }), linearTerm(2)], family: poissonFamily() })`.
- * Fitting builds the penalised problem (`gamProblem`: design, λ by REML/GCV or fixed, shape constraints) and returns
- * the model at its P-IRLS optimum, kept in `training`. Capabilities: `forward` (η), `decide` and `expect` (μ),
- * `predictive` (the family at μ with the fitted dispersion), `sample`.
+ * A generalised additive model, as mgcv's `gam` and pygam's `GAM`:
+ * `gam({ terms: [s(0), s(1, { k: 20 }), linearTerm(2)], family: 'poisson' })`. Fitting builds the penalised problem
+ * (`gamProblem`: design, $\lambda$ by REML/GCV or fixed, shape constraints) and returns the model at its P-IRLS
+ * optimum, kept in `training`. Capabilities: `forward` ($\eta$), `decide` and `expect` ($\mu$), `predictive` (the
+ * family at $\mu$ with the fitted dispersion), `sample`.
+ *
+ * @param params The terms, family, link and smoothing-parameter choice (see `GamSpec`).
+ * @returns The estimator; its `fit` takes `GamData`.
+ *
+ * @example A smooth term recovers a sine from 40 noisy points
+ * const r = stream(0)
+ * const x = uniform(r, 0, 6, { shape: [40, 1] })
+ * const y = add(sin(reshape(x, [40])), normals(r, 40, 0, 0.2))
+ * const model = gam({ terms: [s(0)] }).fit({ x, y })
+ * print('f(x) =', model.decide(tensor([[0.5], [1.5], [3], [4.5], [5.5]])))
+ * print('sin x =', sin(tensor([0.5, 1.5, 3, 4.5, 5.5])))
+ * print('edf =', model.edf, 'deviance explained =', model.devianceExplained, 'noise variance =', model.dispersion)
+ *
+ * @example A Poisson GAM of counts, on the log link
+ * const x = reshape(linspace(0, 1, 29), [29, 1])
+ * const y = tensor([1, 0, 2, 1, 1, 3, 2, 2, 4, 3, 5, 4, 6, 5, 7, 8, 7, 9, 11, 10, 12, 14, 13, 16, 18, 17, 21, 22, 25])
+ * const model = gam({ terms: [s(0, { k: 6 })], family: 'poisson' }).fit({ x, y })
+ * print('link =', model.link.name, 'edf =', model.edf)
+ * print('mean count at 0, 1/2, 1 =', model.decide(tensor([[0], [0.5], [1]])))
  */
 export function gam(params: GamParams): Estimator<GamData, GamModel> {
   const fam = typeof params.family === 'string' ? params.family : (params.family?.name ?? 'gaussian')

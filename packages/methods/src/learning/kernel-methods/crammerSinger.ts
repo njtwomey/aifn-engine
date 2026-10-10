@@ -1,6 +1,13 @@
 /**
  * The Crammer–Singer multiclass SVM (Crammer and Singer, 2001, JMLR 2), part of `aifn-methods/learning/kernel-methods`,
  * solved by LIBLINEAR's sequential dual method (Keerthi et al., 2008, KDD).
+ *
+ * One weight vector $\wvec_k$ per class, trained jointly: the primal is
+ * $\min \frac{1}{2} \sum_k \lVert \wvec_k \rVert^2 + C \sum_i \xi_i$ subject to
+ * $\wvec_{y_i}^\top\xvec_i - \wvec_k^\top\xvec_i \ge \indicator[k \ne y_i] - \xi_i$ for every $k$, and the dual has
+ * $K$ variables $\alpha_{ik}$ per example, with $\wvec_k = \sum_i \alpha_{ik} \xvec_i$. Labels are the integers
+ * $0, \dots, K - 1$. With an intercept, $\tilde\xvec_i$ is $\xvec_i$ with a constant 1 appended, whose weights
+ * $\tilde\wvec_k$ end in the biases, regularised with the rest.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -21,10 +28,13 @@ import { bool, int, real, space } from 'aifn-compute/foundation/space'
 
 // ── Crammer–Singer ───────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The Crammer–Singer problem: inputs [n, d], labels 0 … K−1, C, and whether to append a constant feature. */
+/** The Crammer–Singer problem: inputs, labels, $C$, and whether to append a constant feature. */
 export interface CrammerSingerProblem {
+  /** Inputs $n \times d$. */
   x: Tensor
+  /** Integer class labels $0, \dots, K - 1$, $n$ of them; $K$ is one more than the largest (at least 2). */
   y: Tensor
+  /** The penalty $C$ on the slacks (default 1). */
   C?: number
   /** Append a constant feature whose weights act as (regularised) biases (default true). */
   intercept?: boolean
@@ -36,21 +46,41 @@ export interface CrammerSingerProblem {
 export interface CrammerSingerState extends Status {
   /** Epochs done. */
   t: number
-  /** Weights [K, d] and biases [K]. */
+  /** Weights $K \times d$, a row per class. */
   weights: Tensor
+  /** Biases, $K$ values (zeros without an intercept). */
   bias: Tensor
-  /** Dual variables α [n, K]: Σₖ α_ik = 0, α_ik ≤ C·1[k = yᵢ]. */
+  /**
+   * Dual variables $\alpha_{ik}$, $n \times K$, with $\sum_k \alpha_{ik} = 0$ and
+   * $\alpha_{ik} \le C \indicator[k = y_i]$.
+   */
   alpha: Tensor
-  /** ½ Σₖ ‖w̃ₖ‖² + C Σᵢ max_k (1[k ≠ yᵢ] + w̃ₖ·x̃ᵢ − w̃_yᵢ·x̃ᵢ). */
+  /**
+   * The primal objective $\frac{1}{2} \sum_k \lVert \tilde\wvec_k \rVert^2 + C \sum_i \max_k \ell_{ik}$, with
+   * $\ell_{ik} = \indicator[k \ne y_i] + \tilde\wvec_k^\top\tilde\xvec_i - \tilde\wvec_{y_i}^\top\tilde\xvec_i$.
+   */
   primalObjective: number
-  /** The largest violation max_k G_ik − min_{k: α_ik < C·1[k = yᵢ]} G_ik in the epoch. */
+  /**
+   * The largest violation $\max_k G_{ik} - \min_{k : \alpha_{ik} < C \indicator[k = y_i]} G_{ik}$ over the epoch's
+   * examples, each measured before its update ($\infty$ at the start), with
+   * $G_{ik} = \tilde\wvec_k^\top\tilde\xvec_i + \indicator[k \ne y_i]$.
+   */
   violation: number
+  /** Whether `violation` is at most the tolerance. */
   converged: boolean
 }
 
 /**
- * LIBLINEAR's sub-problem: min over β of ½ A ‖β‖² + Bᵀβ s.t. Σβ = 0, β_k ≤ Ĉ_k, solved by sorting (Keerthi et al.,
- * 2008, §3; Crammer and Singer, 2001, Algorithm 2).
+ * LIBLINEAR's sub-problem for one example,
+ * $\min_{\betavec} \frac{1}{2} A \lVert \betavec \rVert^2 + \bvec^\top\betavec$ subject to $\sum_k \beta_k = 0$ and
+ * $\beta_k \le \hat C_k$, with $\hat C_k = C_y$ for the example's class and 0 for the others, solved by sorting
+ * (Keerthi et al., 2008, §3; Crammer and Singer, 2001, Algorithm 2).
+ *
+ * @param A The curvature $A = \lVert \tilde\xvec_i \rVert^2$, positive.
+ * @param B The linear term $\bvec$, $K$ values (read only).
+ * @param Cy The cap $C_y$ of the example's own class.
+ * @param y The example's class.
+ * @returns The minimiser $\betavec$, $K$ values: the example's new dual variables.
  */
 function solveSubproblem(A: number, B: Float64Array, Cy: number, y: number): Float64Array {
   const K = B.length
@@ -71,9 +101,23 @@ function solveSubproblem(A: number, B: Float64Array, Cy: number, y: number): Flo
 }
 
 /**
- * The Crammer–Singer multiclass SVM, min ½ Σₖ ‖wₖ‖² + C Σᵢ ξᵢ s.t. w_yᵢ·xᵢ − wₖ·xᵢ ≥ 1[k ≠ yᵢ] − ξᵢ, by sequential
- * dual coordinate ascent: each step is one epoch over the examples in row order, solving each example's K-variable
- * dual sub-problem exactly.
+ * The Crammer–Singer multiclass SVM, $\min \frac{1}{2} \sum_k \lVert \wvec_k \rVert^2 + C \sum_i \xi_i$ subject to
+ * $\wvec_{y_i}^\top\xvec_i - \wvec_k^\top\xvec_i \ge \indicator[k \ne y_i] - \xi_i$, by sequential dual coordinate
+ * ascent: each step is one epoch over the examples in row order, solving each example's $K$-variable dual
+ * sub-problem exactly (an example within $10^{-12}$ of optimal, or a row of zeros, is skipped). No start:
+ * $\alphavec = \zeros$. Throws `ShapeError` or `DomainError` for labels that do not match the rows or are not
+ * integers $0, \dots, K - 1$.
+ *
+ * @param problem The inputs, the labels, $C$, `intercept` and `tolerance`.
+ * @returns The algorithm, one epoch per step.
+ *
+ * @example Three classes, each a pair of points along an axis
+ * const x = tensor([[0, 0], [1, 0], [5, 0], [6, 0], [0, 5], [0, 6]])
+ * const y = tensor([0, 0, 1, 1, 2, 2])
+ * const s = run(crammerSingerSteps({ x, y }), undefined, 100)
+ * print('weights =', s.weights)
+ * print('biases =', s.bias)
+ * print('primal =', s.primalObjective, 'converged:', s.converged, 'after', s.t, 'epochs')
  */
 export function crammerSingerSteps(problem: CrammerSingerProblem): Algorithm<void, CrammerSingerState> {
   const { n, d, v } = matrix(problem.x, 'crammerSingerSteps')
@@ -170,16 +214,40 @@ export function crammerSingerSteps(problem: CrammerSingerProblem): Algorithm<voi
 /** A fitted Crammer–Singer SVM. */
 export interface CrammerSingerModel
   extends Fitted<Tensor, Tensor>, Scores<Tensor>, Decides<Tensor, Tensor>, Trained<CrammerSingerState> {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'crammer-singer'
+  /** Weights $K \times d$, a row per class. */
   readonly weights: Tensor
+  /** Biases, $K$ values (zeros without an intercept). */
   readonly bias: Tensor
+  /** The number of classes $K$. */
   readonly classes: number
+  /** Whether the dual method reached the tolerance within `maxSteps` epochs. */
   readonly converged: boolean
 }
 
-/** The Crammer–Singer multiclass linear SVM (see `crammerSingerSteps`): `score` gives wₖ·x + bₖ [m, K]. */
+/**
+ * The Crammer–Singer multiclass linear SVM (see `crammerSingerSteps`), as scikit-learn's
+ * `LinearSVC(multi_class='crammer_singer')`. `score` and `forward` give $\wvec_k^\top\xvec + b_k$, $m \times K$ for
+ * $m$ query rows, and `decide` the class of the largest score.
+ *
+ * @param params The hyperparameters.
+ * @param params.C The penalty $C$ on the slacks (default 1).
+ * @param params.intercept Learn a bias per class as the weight of a constant feature (default true).
+ * @param params.tolerance Stop when an epoch's largest KKT violation is at most this (default 1e-6).
+ * @param params.maxSteps The most epochs (default 1000).
+ * @returns The estimator; its `fit` takes inputs `x` ($n \times d$) and integer labels `y`.
+ *
+ * @example Three classes: the decisions at the data and the scores of a new point
+ * const x = tensor([[0, 0], [1, 0], [5, 0], [6, 0], [0, 5], [0, 6]])
+ * const y = tensor([0, 0, 1, 1, 2, 2])
+ * const model = crammerSinger().fit({ x, y })
+ * print('decisions at the data:', model.decide(x))
+ * print('scores at (0.5, 0):', model.score(tensor([[0.5, 0]])))
+ * print('converged:', model.converged, 'after', model.training.final.t, 'epochs')
+ */
 export function crammerSinger(
   params: { C?: number; intercept?: boolean; tolerance?: number; maxSteps?: number } = {},
 ): Estimator<Supervised<Tensor, Tensor>, CrammerSingerModel> {

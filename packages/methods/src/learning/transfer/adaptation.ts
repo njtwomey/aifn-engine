@@ -1,14 +1,15 @@
 /**
  * Unsupervised domain adaptation on small 2-d problems: labelled source data, unlabelled target data. A feature
- * extractor f (an MLP to a low-dimensional feature space), a linear classifier head g and, for DANN, a domain
- * discriminator d are trained together by Adam on
+ * extractor $f$ (an MLP to a low-dimensional feature space), a linear classifier head $g$ and, for DANN, a domain
+ * discriminator $d$ are trained together by Adam on
  *
- *   CE(g(f(xₛ)), yₛ) + λ · alignment(f(xₛ), f(xₜ)),
+ * $\mathrm{CE}(g(f(\xvec_s)), y_s) + \lambda \cdot \mathrm{alignment}(f(\xvec_s), f(\xvec_t))$,
  *
  * where the alignment is nothing (source only), the squared MMD, the CORAL loss, or DANN's adversarial term
- * BCE(d(R(f(x))), domain) through the gradient-reversal layer R, which trains d to tell the domains apart and f to make
- * that impossible (Ganin et al., 2016). The run reports source and target accuracy (the target labels are used only
- * to score), the classifier's probability field on a grid, and the features of both domains.
+ * $\mathrm{BCE}(d(R(f(\xvec))), \mathrm{domain})$ through the gradient-reversal layer $R$, which trains $d$ to tell
+ * the domains apart and $f$ to make that impossible (Ganin et al., 2016). The run reports source and target accuracy
+ * (the target labels are used only to score), the classifier's probability field on a grid, and the features of both
+ * domains.
  */
 
 import type { Params } from 'aifn-compute/foundation/pytree'
@@ -35,56 +36,112 @@ export type AdaptationMethod = 'source-only' | 'mmd' | 'coral' | 'dann'
 
 /** Options of `domainAdaptationRun`. */
 export interface AdaptationOptions {
+  /** The alignment (default `dann`). */
   method?: AdaptationMethod
-  /** The alignment weight λ (default 10 for MMD, 100 for CORAL, 1 for DANN). */
+  /** The alignment weight $\lambda$ (default 10 for MMD, 100 for CORAL, 1 for DANN; unused for source only). */
   lambda?: number
-  /** Feature dimension (default 2, so the features can be drawn) and hidden widths (default [32, 32]). */
+  /** Feature dimension (default 2, so the features can be drawn). */
   features?: number
+  /** Hidden widths of the feature extractor (default $[32, 32]$, tanh). */
   hidden?: readonly number[]
-  /** Adam updates (default 1500), step size (default 3e-3), rows per domain per step (default 64). */
+  /** Adam updates (default 1500). */
   steps?: number
+  /** Adam's step size (default 3e-3). */
   stepSize?: number
+  /** Rows per domain per step, drawn with replacement (default 64, at most the domain's size). */
   batchSize?: number
   /** The MMD kernel bandwidth (default 1). */
   bandwidth?: number
+  /** The root stream's seed (default 0): the run is deterministic in it. */
   seed?: number | string
+  /** About how many checkpoints to keep after the start (default 30): one every `steps / checkpoints` steps. */
   checkpoints?: number
-  /** Grid cells per side of the probability field (default 40) and its half-width (default 2.5). */
+  /** Grid cells per side of the probability field (default 40). */
   grid?: number
+  /** The grid's half-width: it spans $[-\mathit{box}, \mathit{box}]^2$ (default 2.5). */
   box?: number
 }
 
 /** One checkpoint. */
 export interface AdaptationCheckpoint {
+  /** Adam updates taken. */
   step: number
+  /** Accuracy on every source point. */
   sourceAccuracy: number
+  /** Accuracy on every target point (the target labels are used only here). */
   targetAccuracy: number
-  /** P(class 1 | x) on the grid, row-major in (y, x). */
+  /** $P(\text{class } 1 \mid \xvec)$ on the grid, row-major in $(y, x)$: $\mathit{grid}^2$ values. */
   field: Float64Array
-  /** Features of the source and target points, [n × features]. */
+  /** Features of the source points, row-major, $n_s$ rows of `features` values. */
   sourceFeatures: Float64Array
+  /** Features of the target points, row-major, $n_t$ rows of `features` values. */
   targetFeatures: Float64Array
 }
 
 /** A run so far. */
 export interface AdaptationRun {
+  /** The alignment. */
   method: AdaptationMethod
+  /** The updates the run will take. */
   steps: number
+  /** The updates taken. */
   done: number
+  /** True for the last snapshot. */
   finished: boolean
+  /** The grid's coordinates along each axis, `grid` values. */
   gridX: Float64Array
+  /**
+   * Per recorded step (about 150 of them): the minibatch classification and alignment losses before the update, and
+   * the target accuracy after it.
+   */
   history: { step: number[]; classification: number[]; alignment: number[]; targetAccuracy: number[] }
+  /** The checkpoints so far, the first at step 0. */
   checkpoints: AdaptationCheckpoint[]
+  /** The source points (row-major, 2 per row) and labels. */
   source: { x: Float64Array; y: Int32Array }
+  /** The target points (row-major, 2 per row) and labels. */
   target: { x: Float64Array; y: Int32Array }
 }
 
+/** The three networks: `feature` the extractor $f$, `head` the classifier $g$, `discriminator` the critic $d$. */
 type Nets = { feature: Layer<Params[]>; head: Layer<Params>; discriminator: Layer<Params[]> }
+/** The parameters of the three networks, trained together. */
 type AdaptationParams = { feature: Params[]; head: Params; discriminator: Params[] }
 
+/**
+ * The rows of a matrix at the given indices, as a plain tensor.
+ *
+ * @param t The matrix.
+ * @param ids The row indices, repeats allowed.
+ * @returns The selected rows, in the order of `ids`.
+ */
 const rowsOf = (t: Tensor, ids: ArrayLike<number>) => unwrap(take(t, Array.from(ids))) as Tensor
 
-/** Train with the chosen alignment and yield snapshots (module docs). Deterministic in `seed`. */
+/**
+ * Train with the chosen alignment and yield snapshots: at the start, every `steps / 20` updates and at the end (the
+ * last also returned). Each update draws a minibatch from each domain, with replacement, from the root stream of
+ * `seed`, so the run is deterministic in it. Inputs must have two columns; the classes are $0, \dots, K - 1$ with
+ * $K$ one more than the largest source label, and the probability field is that of class 1.
+ *
+ * @param data The labelled `source` and the `target` domain: inputs $n \times 2$ and integer labels (the target's
+ *   used only to score).
+ * @param options The alignment, the networks, the training and the grid.
+ * @returns A generator of snapshots of the run.
+ *
+ * @example MMD pulls the target's features onto the source's while the classifier trains
+ * const centres = tensor(Array.from({ length: 40 }, (_, i) => (i < 20 ? [-1, 0] : [1, 0])))
+ * const xs = add(normals(stream(1), [40, 2], 0, 0.4), centres)
+ * const y = tensor(Array.from({ length: 40 }, (_, i) => (i < 20 ? 0 : 1)))
+ * const data = { source: { x: xs, y }, target: { x: add(xs, tensor([0.8, 0.8])), y } }
+ * const options = { method: 'mmd', steps: 60, batchSize: 20, hidden: [8], grid: 2, checkpoints: 1, seed: 1 }
+ * let run
+ * for (const snapshot of domainAdaptationRun(data, options)) run = snapshot
+ * const meanOf = (f) => [0, 1].map((j) => f.filter((_, i) => i % 2 === j).reduce((a, b) => a + b, 0) / 40)
+ * const [start, end] = [run.checkpoints[0], run.checkpoints.at(-1)]
+ * print('feature means at the start, source:', meanOf(start.sourceFeatures), 'target:', meanOf(start.targetFeatures))
+ * print('feature means at the end, source:', meanOf(end.sourceFeatures), 'target:', meanOf(end.targetFeatures))
+ * print('target accuracy at the start and the end:', start.targetAccuracy, end.targetAccuracy)
+ */
 export function* domainAdaptationRun(
   data: { source: { x: Tensor; y: Tensor }; target: { x: Tensor; y: Tensor } },
   options: AdaptationOptions = {},

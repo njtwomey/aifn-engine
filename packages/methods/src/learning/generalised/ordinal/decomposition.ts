@@ -1,14 +1,15 @@
 /**
  * Binary decomposition of ordinal regression (Frank & Hall, 2001, "A simple approach to ordinal classification",
- * ECML): K − 1 independent probabilistic classifiers qₖ(x) ≈ P(y > k | x), k = 0 … K − 2, each trained on the binary
- * target 1[y > k], and class probabilities by differencing: P(y = 0) = 1 − q₀, P(y = k) = q_{k−1} − qₖ,
- * P(y = K − 1) = q_{K−2}. The classifiers are independent, so the qₖ need not decrease in k and a difference can be
- * negative; `coherence` repairs it by clipping negatives to zero and renormalising (`clip`, the default) or by sorting
- * the qₖ into decreasing order first (`sort`). Neither makes the model coherent; `exceedance` returns the raw qₖ.
+ * ECML): $K - 1$ independent probabilistic classifiers $q_k(\xvec) \approx \pr(y > k \mid \xvec)$,
+ * $k = 0, \dots, K - 2$, each trained on the binary target $\indicator[y > k]$, and class probabilities by
+ * differencing: $\pr(y = 0) = 1 - q_0$, $\pr(y = k) = q_{k-1} - q_k$, $\pr(y = K - 1) = q_{K-2}$. The classifiers
+ * are independent, so the $q_k$ need not decrease in $k$ and a difference can be negative; `coherence` repairs it by
+ * clipping negatives to zero and renormalising (`clip`, the default) or by sorting the $q_k$ into decreasing order
+ * first (`sort`). Neither makes the model coherent; `exceedance` returns the raw $q_k$.
  *
  * The default classifier is L2-penalised logistic regression fitted by the generalised models' IRLS (binomial family,
  * logit link; one definition with `logisticRegression`); any estimator whose model predicts a Bernoulli law (its mean
- * is qₖ) can be passed as `base`.
+ * is $q_k$) can be passed as `base`.
  */
 
 import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
@@ -38,21 +39,27 @@ import { binomialFamily, link } from 'aifn-compute/probability/likelihoods'
 import { irls } from '../irls'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A fitted binary classifier of the decomposition: P(y > k | x) for rows x [m, d]. */
+/** A fitted binary classifier of the decomposition: $\pr(y > k \mid \xvec)$ for each row of inputs $m \times d$. */
 type Exceedance = (x: Tensor) => Float64Array
 
-/** An estimator usable as the base classifier: its model predicts a Bernoulli law whose mean is P(target = 1). */
+/**
+ * An estimator usable as the base classifier: its model predicts a Bernoulli law whose mean is $\pr(t = 1)$ for the
+ * binary target $t$.
+ */
 export type BinaryBase = Estimator<Supervised<Tensor, Tensor>, Fitted<Tensor, Tensor> & Predicts<Tensor, AnyUnivariate>>
 
 /** Hyperparameters of `binaryDecomposition`. */
 export type BinaryDecompositionParams = {
   /** The base classifier (default: logistic regression with `l2`). */
   base?: BinaryBase
-  /** L2 penalty λ of the default logistic classifiers, on the weights only. Default 1. */
+  /**
+   * L2 penalty $\lambda$ of the default logistic classifiers, on the weights only, as `logisticRegression`'s. Default
+   * 1. Ignored with a `base`.
+   */
   l2?: number
   /** How negative differences are repaired: `clip` (default) or `sort`. */
   coherence?: 'clip' | 'sort'
-  /** Number of classes K (default: the largest label + 1). */
+  /** Number of classes $K$ (default: the largest label + 1). */
   classes?: number
   /** Most IRLS steps of each default classifier (default 100). */
   maxSteps?: number
@@ -67,18 +74,32 @@ export interface BinaryDecompositionModel
     Predicts<Tensor, AnyUnivariate>,
     Expects<Tensor>,
     Samples<Tensor, Tensor> {
+  /** The brand of a fitted model. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'binary-decomposition'
+  /** Number of classes $K$. */
   readonly classes: number
+  /** How negative differences are repaired. */
   readonly coherence: 'clip' | 'sort'
-  /** The raw classifier outputs qₖ(x) ≈ P(y > k | x) [m, K − 1], not repaired. */
+  /** The raw classifier outputs $q_k(\xvec) \approx \pr(y > k \mid \xvec)$, $m \times (K - 1)$, not repaired. */
   exceedance(x: Tensor): Tensor
-  /** Class probabilities P(y = k | x) [m, K], repaired by `coherence`. */
+  /** Class probabilities $\pr(y = k \mid \xvec)$, $m \times K$, repaired by `coherence`. */
   probabilities(x: Tensor): Tensor
 }
 
-/** Penalised logistic regression by IRLS on [x, 1]; returns P(t = 1 | x). */
+/**
+ * Penalised logistic regression by IRLS on the inputs with a column of ones appended (the intercept unpenalised).
+ *
+ * @param X The inputs, row-major, $n d$ values.
+ * @param n The number of rows.
+ * @param d The number of input columns.
+ * @param t The binary targets, $n$ values in $\{0, 1\}$.
+ * @param l2 The ridge penalty $\lambda$ on the weights (0 for none).
+ * @param maxSteps Most IRLS steps.
+ * @returns The fitted classifier: inputs $m \times d$ to $\pr(t = 1 \mid \xvec)$ per row (all $\tfrac12$ when IRLS
+ *   took no step).
+ */
 function logisticExceedance(X: Float64Array, n: number, d: number, t: Float64Array, l2: number, maxSteps: number) {
   const p = d + 1
   const design = new Float64Array(n * p)
@@ -111,7 +132,23 @@ function logisticExceedance(X: Float64Array, n: number, d: number, t: Float64Arr
   }
 }
 
-/** Class probabilities from exceedance probabilities q [m, K − 1] by differencing, repaired by `coherence`. */
+/**
+ * Class probabilities from exceedance probabilities by differencing, $q_{k-1} - q_k$ with $q_{-1} = 1$ and
+ * $q_{K-1} = 0$, repaired by `coherence`: `clip` sets negative differences to zero and renormalises each row; `sort`
+ * first sorts the row's $q_k$ into decreasing order, so no difference is negative. A row whose differences are all
+ * zero gets $1/K$ for every class.
+ *
+ * @param q The exceedance probabilities $q_k \approx \pr(y > k)$, row-major $m \times (K - 1)$; not modified.
+ * @param m The number of rows.
+ * @param K The number of classes.
+ * @param coherence `clip` or `sort`.
+ * @returns The class probabilities, row-major $m \times K$; each row sums to 1.
+ *
+ * @example A coherent row, and an incoherent one repaired both ways
+ * const q = [0.8, 0.4, 0.3, 0.5]
+ * print('clip:', differenceExceedance(q, 2, 3, 'clip'))
+ * print('sort:', differenceExceedance(q, 2, 3, 'sort'))
+ */
 export function differenceExceedance(
   q: ArrayLike<number>,
   m: number,
@@ -137,9 +174,27 @@ export function differenceExceedance(
 }
 
 /**
- * Frank and Hall's binary decomposition (see the module comment): labels are class indices 0 … K − 1. Capabilities:
- * `forward` and `score` (E[y], the expected class), `predictive` (categorical over the K classes), `decide` (the most
- * probable class), `expect`, `sample`.
+ * Frank and Hall's binary decomposition (see the file comment): labels are class indices $0, \dots, K - 1$.
+ * Capabilities: `forward` and `score` ($\expect[y]$, the expected class), `predictive` (categorical over the $K$
+ * classes), `decide` (the most probable class), `expect`, `sample`, with `exceedance` and `probabilities`. `fit`
+ * throws `DomainError` for labels that are not class indices or fewer than two classes, and `ShapeError` when the
+ * inputs and labels differ in number.
+ *
+ * @param params The base classifier (or the default's `l2` and `maxSteps`), the repair and the number of classes.
+ * @returns An estimator whose `fit` takes `{ x, y }` ($n \times d$ inputs, $n$ class labels) and returns the model;
+ *   `fit`'s options are passed to each `base` fit.
+ *
+ * @example Two logistic classifiers of the exceedances, differenced into three classes
+ * const s = stream(3)
+ * const x = normals(s, [400, 1])
+ * const u = uniform(s, 0, 1, { shape: [400] })
+ * const z = add(mul(reshape(x, [400]), 2), log(div(u, sub(1, u))))
+ * const y = tensor(Array.from(toFlat(z), (v) => (v > -1) + (v > 1)))
+ * const model = binaryDecomposition({ l2: 0 }).fit({ x, y })
+ * const grid = tensor([[-1], [0], [1]])
+ * print('P(y > 0), P(y > 1) =', model.exceedance(grid))
+ * print('P(y = k) =', model.probabilities(grid))
+ * print('expected class =', model.forward(grid))
  */
 export function binaryDecomposition(
   params: BinaryDecompositionParams = {},

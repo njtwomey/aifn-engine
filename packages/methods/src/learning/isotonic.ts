@@ -1,9 +1,11 @@
 /**
- * Isotonic regression by the pool-adjacent-violators algorithm (PAVA).
+ * Isotonic regression as an estimator: the pool-adjacent-violators algorithm (PAVA) of
+ * `aifn-compute/learning/calibration`, with out-of-sample prediction.
  *
- * Fits a non-decreasing (or non-increasing) univariate function that minimises the weighted
- * squared error sum w_i (y_i - f(x_i))^2 subject to monotonicity constraints.
- * Supports out-of-sample prediction via piecewise linear or step-function interpolation.
+ * The fit is the non-decreasing (or non-increasing) function $f$ of one feature that minimises the weighted squared
+ * error $\sum_i w_i (y_i - f(x_i))^2$ (Ayer et al., 1955; Best and Chakravarti, 1990). Points with equal $x$ are first
+ * pooled to their weighted mean, as scikit-learn's `IsotonicRegression`, and the fitted values at the distinct $x$ are
+ * joined by straight lines or held as steps between them.
  */
 
 import type { Estimator, FitOptions, Supervised } from 'aifn-compute/learning/estimators'
@@ -14,28 +16,56 @@ import { isotonicRegression as coreIsotonic } from 'aifn-compute/learning/calibr
 import { matrixShape } from 'aifn-compute/learning/estimators'
 import { targets } from './util'
 
+/** Hyperparameters of `isotonicRegressor`. */
 export type IsotonicParams = {
   /** If true (default), fits a non-decreasing function. If false, fits a non-increasing function. */
   increasing?: boolean
-  /** How to handle out-of-bounds queries: 'clip' to range extrema (default) or 'nan'. */
+  /**
+   * A query below the smallest or above the largest fitted $x$: `'clip'` (default) gives the fitted value at that end,
+   * `'nan'` gives NaN.
+   */
   outOfBounds?: 'clip' | 'nan'
-  /** Interpolation between points: 'linear' (default, connects steps) or 'step' (piecewise constant). */
+  /**
+   * Between two fitted $x$: `'linear'` (default) interpolates their fitted values, `'step'` holds the value of the
+   * left one (piecewise constant, continuous from the right).
+   */
   interpolation?: 'linear' | 'step'
 }
 
+/**
+ * Training data of `isotonicRegressor`: `x` an $n \times 1$ matrix, `y` the $n$ targets, and `weights` optional
+ * non-negative weights $w_i$, one per point (default all 1).
+ */
 export type WeightedData = Supervised<Tensor, Tensor> & { weights?: Tensor }
 
+/** A fitted isotonic regression. */
 export interface IsotonicRegressor {
+  /** The distinct training $x$, in increasing order. */
   thresholds: Tensor
+  /** The fitted value at each of `thresholds`, monotone in the fitted direction. */
   values: Tensor
+  /** Whether the fit is non-decreasing (true) or non-increasing. */
   increasing: boolean
+  /** What a query outside the range of `thresholds` gives, as in `IsotonicParams`. */
   outOfBounds: 'clip' | 'nan'
+  /** How a query between two thresholds is answered, as in `IsotonicParams`. */
   interpolation: 'linear' | 'step'
+  /** The fitted function at each element of `x`, with the shape of `x` (NaN for a NaN query). */
   forward(x: Tensor): Tensor
+  /** The same as `forward`. */
   predict(x: Tensor): Tensor
+  /** The same as `forward`. */
   decide(x: Tensor): Tensor
 }
 
+/**
+ * The number of entries of a sorted array that are at most `x`: the index at which `x` would be inserted to the right
+ * of any equal entries (Python's `bisect.bisect_right`).
+ *
+ * @param arr The entries, in non-decreasing order.
+ * @param x The value to place.
+ * @returns An index from 0 to `arr.length`.
+ */
 function bisectRight(arr: ArrayLike<number>, x: number): number {
   let lo = 0
   let hi = arr.length
@@ -48,7 +78,31 @@ function bisectRight(arr: ArrayLike<number>, x: number): number {
 }
 
 /**
- * Fit an isotonic regression model using the Pool Adjacent Violators Algorithm (PAVA).
+ * Isotonic regression of one feature (as scikit-learn's `IsotonicRegression`): `fit` sorts the points by $x$, pools
+ * points with equal $x$ to their weighted mean, and runs pool-adjacent-violators on the result; prediction
+ * interpolates the fitted values at the distinct $x$. `fit` throws `DomainError` unless `x` has exactly one column,
+ * `ShapeError` when `y` or `weights` does not have one entry per row, and `DomainError` (from the core PAVA) for a
+ * negative or NaN weight. With a single distinct $x$ every query, in range or not, gives its value.
+ *
+ * @param params The direction, the out-of-range rule and the interpolation, as `IsotonicParams`.
+ * @returns The estimator: `fit({ x, y, weights })` returns an `IsotonicRegressor`.
+ *
+ * @example A noisy increasing trend becomes a monotone staircase
+ * const x = tensor([[1], [2], [3], [4], [5], [6]])
+ * const model = isotonicRegressor().fit({ x, y: tensor([1, 3, 2, 4, 3, 5]) })
+ * print('thresholds =', model.thresholds)
+ * print('values =', model.values)
+ * print('at 2.5, 0 and 9 =', model.forward(tensor([[2.5], [0], [9]])))
+ *
+ * @example Step interpolation, and NaN outside the training range
+ * const x = tensor([[0], [1], [2]])
+ * const model = isotonicRegressor({ interpolation: 'step', outOfBounds: 'nan' }).fit({ x, y: tensor([0, 2, 4]) })
+ * print('at 0.5, 1.5 and 3 =', model.forward(tensor([[0.5], [1.5], [3]])))
+ *
+ * @example A decreasing fit
+ * const x = tensor([[1], [2], [3], [4]])
+ * const model = isotonicRegressor({ increasing: false }).fit({ x, y: tensor([5, 3, 4, 1]) })
+ * print('values =', model.values)
  */
 export function isotonicRegressor(params: IsotonicParams = {}): Estimator<WeightedData, IsotonicRegressor> {
   const { increasing = true, outOfBounds = 'clip', interpolation = 'linear' } = params

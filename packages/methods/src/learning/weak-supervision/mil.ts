@@ -1,8 +1,9 @@
 /**
  * Multiple-instance learning with attention pooling (Ilse, Tomczak and Welling, 2018): a bag of instances is labelled
- * positive when at least one instance is; the model embeds each instance, h = tanh(W x + b), weighs the instances of a
- * bag by attention a_i = softmax_bag(wᵀ tanh(V h_i)), pools z = Σ a_i h_i and classifies the bag by σ(cᵀz + c₀). The
- * attention weights point at the instances that made the bag positive.
+ * positive when at least one instance is; the model embeds each instance, $\hvec = \tanh(\Wmat^\top \xvec + \bvec)$,
+ * weighs the instances of a bag by attention $a_i = \operatorname{softmax}_{\text{bag}}(\wvec^\top
+ * \tanh(\Vmat^\top \hvec_i))$, pools $\zvec = \sum_i a_i \hvec_i$ and classifies the bag by
+ * $\sigma(\cvec^\top \zvec + c_0)$. The attention weights point at the instances that made the bag positive.
  */
 
 import type { MatrixLike, Size } from 'aifn-compute/foundation/contracts'
@@ -23,29 +24,49 @@ import { binaryCrossEntropyWithLogits } from 'aifn-compute/learning/losses'
 import { methodTraining, type TrainingMethod } from 'aifn-compute/nn/training'
 import { sigmoid, softmax } from 'aifn-compute/numerics/special'
 
-/** Parameters of the attention-MIL model. */
+/**
+ * Parameters of the attention-MIL model: the embedding $\Wmat$ ($d \times H$) and $\bvec$ ($H$), the attention
+ * $\Vmat$ ($H \times A$) and $\wvec$ ($A \times 1$), and the bag classifier $\cvec$ ($H \times 1$) and $c_0$ (one
+ * value).
+ */
 export type AttentionMilParams = { W: Tensor; b: Tensor; V: Tensor; w: Tensor; c: Tensor; c0: Tensor }
 
 /** Options of `attentionMil`. */
 export type AttentionMilOptions = {
-  /** Embedding width H (default 8) and attention width (default 8). */
+  /** Embedding width $H$ (default 8). */
   hidden?: Size
+  /** Attention width $A$ (default 8). */
   attention?: Size
-  /** Training steps (default 200) and method (default full-batch L-BFGS). */
+  /** The most training steps (default 200); training ends sooner when the method stops. */
   steps?: Size
+  /** The training method (default full-batch L-BFGS). */
   method?: TrainingMethod
+  /** Seed of the initial weights and of the training streams (default 0). */
   seed?: number | string
 }
 
 /** A trained attention-MIL model. */
 export type AttentionMil = {
+  /** The trained parameters. */
   params: AttentionMilParams
-  /** P(bag positive) for bags of new instances. */
+  /**
+   * $p(\text{bag positive})$ for bags of new instances: given the instances (the rows of `x`), each one's bag index and
+   * the number of bags, it returns `bags`, one probability per bag, and `attention`, each instance's weight within its
+   * own bag.
+   */
   predict: (x: MatrixLike, bags: ArrayLike<number>, count: Size) => { bags: Float64Array; attention: Float64Array }
+  /** The training loss at the start and after each step. */
   losses: number[]
 }
 
-/** The averaging pattern of bags as an additive mask [B, N]: 0 where instance i is in bag b, −10⁹ elsewhere. */
+/**
+ * The averaging pattern of bags as an additive mask $B \times N$: 0 where instance $i$ is in bag $b$, $-10^9$
+ * elsewhere, so that a softmax over a row after adding it spreads over that bag's instances only.
+ *
+ * @param bags Each instance's bag index in $0, \dots, B - 1$.
+ * @param count The number of bags $B$.
+ * @returns The mask, $B \times N$.
+ */
 function bagMask(bags: ArrayLike<number>, count: Size): Tensor {
   const N = bags.length
   const mask = new Float64Array(count * N).fill(-1e9)
@@ -53,6 +74,15 @@ function bagMask(bags: ArrayLike<number>, count: Size): Tensor {
   return fromData(mask, [count, N])
 }
 
+/**
+ * The model's forward pass on every bag at once.
+ *
+ * @param p The parameters.
+ * @param X The instances, $N \times d$.
+ * @param mask The bag mask of `bagMask`, $B \times N$.
+ * @returns `logits`, one per bag ($B$ values), and `attention`, $B \times N$, each row the weights of one bag's
+ *   instances (0 elsewhere).
+ */
 function forward(p: AttentionMilParams, X: Value, mask: Tensor) {
   const h = tanh(add(matmul(X, p.W), p.b)) // [N, H]
   const [B, N] = mask.shape
@@ -64,8 +94,32 @@ function forward(p: AttentionMilParams, X: Value, mask: Tensor) {
 }
 
 /**
- * Train attention-MIL on instances x [N, d] grouped into bags (`bags`: each instance's bag index in 0 … B − 1) with
- * bag labels in {0, 1}, by binary cross-entropy on the bag predictions.
+ * Train attention-MIL on instances grouped into bags with bag labels in $\{0, 1\}$, by binary cross-entropy on the bag
+ * predictions. The weights start from a seeded normal draw scaled by the inverse square root of each layer's input
+ * width. Deterministic for a given `seed`.
+ *
+ * @param x The instances, $N \times d$.
+ * @param bags Each instance's bag index in $0, \dots, B - 1$.
+ * @param bagLabels Each bag's label, 0 or 1; their number is the number of bags $B$.
+ * @param options The widths, the training and the seed.
+ * @returns The trained model with its losses and a `predict` for new bags.
+ *
+ * @example Positive bags hold one instance far from the rest; attention finds it
+ * const s = stream(11)
+ * const [x, bags, labels] = [[], [], []]
+ * for (let b = 0; b < 12; b++) {
+ *   labels.push(b % 2)
+ *   for (let i = 0; i < 4; i++) {
+ *     const key = b % 2 === 1 && i === b % 4
+ *     x.push([normal(s, key ? 3 : 0, 0.5), normal(s, key ? 3 : 0, 0.5)])
+ *     bags.push(b)
+ *   }
+ * }
+ * const mil = attentionMil(x, bags, labels, { steps: 100 })
+ * const r = mil.predict([[0, 0], [3, 3], [0.2, -0.1], [-0.3, 0.1], [0.1, 0.2], [-0.1, 0]], [0, 0, 0, 1, 1, 1], 2)
+ * print('loss at the start and the end:', mil.losses[0], mil.losses.at(-1))
+ * print('p(positive) of a bag with the key instance and one without:', r.bags)
+ * print('attention in the first bag:', r.attention.slice(0, 3))
  */
 export function attentionMil(
   x: MatrixLike,

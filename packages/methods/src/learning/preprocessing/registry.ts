@@ -1,4 +1,8 @@
-/** The functions of `aifn-methods/learning/preprocessing` besides its registered transformers. */
+/**
+ * The registry entries of the functions of `aifn-methods/learning/preprocessing` besides its transformers (which
+ * `defineModel` registers beside their definitions): the fitting helpers, cross-fitted target encoding and the
+ * resamplers for imbalanced classes, with their notes and citations.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as encoding from './encoding'

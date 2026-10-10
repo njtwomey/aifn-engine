@@ -1,16 +1,17 @@
 /**
- * Active learning with label proportions (Poyiadzis, Santos-Rodriguez and Twomey 2019, ICASSP): the learner holds a
- * few bags with known class proportions and a pool U of points in no bag; it builds a bag of k points from U and asks
- * an LLP-oracle, which answers with the bag's class proportion only (the true label when k = 1). The learner is LP-LLP
- * (`lpllpSteps`, Poyiadzi et al. 2018) in the papers' ±1 encoding: points in no bag start at the uninformative score
- * and are not constrained. Query strategies (§3.3 and §4):
+ * Active learning with label proportions (Poyiadzi, Santos-Rodriguez and Twomey 2019, ICASSP): the learner holds a
+ * few bags with known class proportions and a pool $\Ucal$ of points in no bag; it builds a bag of $k$ points from
+ * $\Ucal$ and asks an LLP-oracle, which answers with the bag's class proportion only (the true label when $k = 1$). The
+ * learner is LP-LLP (`lpllpSteps`, Poyiadzi et al. 2018) with two classes, labelled 0 and 1 here where the papers write
+ * $\pm 1$; its score $f_i \in [0, 1]$ is a point's class-1 column, and points in no bag start at the uninformative
+ * score $\tfrac{1}{2}$ and are not constrained. Query strategies (§3.3 and §4):
  *
- * - **US-Mass**: the pool point closest to the decision boundary (smallest |f_i − ½| in [0, 1] scores), and the k − 1
- *   pool points closest to it under L_U = (I − αS)⁻¹ restricted to U, the matrix LP-LLP already computed: aims at a pure
- *   bag around the most uncertain point;
- * - **US-LP**: the k most uncertain pool points, answered with their proportion;
- * - **Random**: k random pool points, answered with their proportion;
- * - **US-Exact**: the k most uncertain points, answered with their k true labels (k singleton bags).
+ * - **US-Mass**: the pool point closest to the decision boundary (smallest $\lvert f_i - \tfrac{1}{2} \rvert$), and
+ *   the $k - 1$ pool points closest to it under $\Lmat_{\Ucal} = (\Imat - \alpha\Smat)^{-1}$ restricted to $\Ucal$,
+ *   the matrix LP-LLP already computed: aims at a pure bag around the most uncertain point;
+ * - **US-LP**: the $k$ most uncertain pool points, answered with their proportion;
+ * - **Random**: $k$ random pool points, answered with their proportion;
+ * - **US-Exact**: the $k$ most uncertain points, answered with their $k$ true labels ($k$ singleton bags).
  *
  * Accuracy is measured on held-out test points, which sit in the graph (transductive) but are never queried.
  */
@@ -29,13 +30,18 @@ export type ActiveStrategy = 'us-mass' | 'us-lp' | 'random' | 'us-exact'
 /** All strategies, in the paper's order. */
 export const ACTIVE_STRATEGIES: readonly ActiveStrategy[] = ['us-lp', 'us-mass', 'us-exact', 'random']
 
-/** The setting of an active-learning run: the points, the oracle's labels, the starting bags, the pool and the test set. */
+/**
+ * The setting of an active-learning run: the points, the oracle's labels, the starting bags, the pool and the test
+ * set.
+ */
 export interface ActiveProportionsProblem {
+  /** The points, $n \times d$. */
   readonly x: MatrixLike
   /** True labels 0/1, read only by the oracle and the accuracy. */
   readonly labels: ArrayLike<number>
-  /** The starting bags (−1: in no bag) and their proportions [B, 2]. */
+  /** The starting bags: each point's bag, or $-1$ for none (the pool and the test points). */
   readonly bags: ArrayLike<number>
+  /** The starting bags' class proportions, $B \times 2$. */
   readonly proportions: MatrixLike
   /** Points that are never queried and on which accuracy is measured. */
   readonly test: ArrayLike<number>
@@ -43,32 +49,47 @@ export interface ActiveProportionsProblem {
 
 /** Options of an active-learning run. */
 export interface ActiveProportionsOptions extends LpLlpOptions {
+  /** The query strategy (default `us-lp`). */
   strategy?: ActiveStrategy
-  /** Points per query k (default 10). */
+  /** Points per query $k$ (default 10; fewer when the pool runs low). */
   bagSize?: Size
-  /** LP-LLP steps per refit (default 300). */
+  /** The most LP-LLP steps per refit (default 300). */
   maxSteps?: Size
+  /** Seed of the random strategy's draws (default 0). */
   seed?: number | string
 }
 
 /** One state: the bags after t queries, LP-LLP's fit to them, and the next query's ranking. */
 export interface ActiveProportionsState extends Status {
-  /** Each point's bag (−1 in none) and the bags' proportions [B, 2]. */
+  /** Each point's bag, or $-1$ for none. */
   readonly bags: Int32Array
+  /** The bags' proportions, $B \times 2$ row-major. */
   readonly proportions: Float64Array
-  /** LP-LLP's scores f_i = F_{i,1} ∈ [0, 1] and labels. */
+  /** LP-LLP's scores $f_i = F_{i,1} \in [0, 1]$. */
   readonly scores: Float64Array
+  /** LP-LLP's labels. */
   readonly labels: Int32Array
-  /** Accuracy on the test points. */
+  /** Accuracy on the test points (NaN with none). */
   readonly accuracy: number
-  /** The points of the last query (empty at t = 0), its seed point for US-Mass (−1 otherwise) and the oracle's answer. */
+  /** The points of the last query (empty at $t = 0$). */
   readonly query: readonly number[]
+  /** The last query's seed point for US-Mass ($-1$ otherwise). */
   readonly seed: number
+  /** The oracle's answer: the share of class 1 in the last query (NaN at $t = 0$). */
   readonly answer: number
-  /** Uncertainty |f_i − ½| of every point (Infinity outside the pool): what the next uncertainty query ranks. */
+  /**
+   * Uncertainty $\lvert f_i - \tfrac{1}{2} \rvert$ of every point (Infinity outside the pool): what the next
+   * uncertainty query ranks.
+   */
   readonly uncertainty: Float64Array
 }
 
+/**
+ * The starting proportions as a row-major copy, checking that there are two classes (`DomainError` otherwise).
+ *
+ * @param P The proportions, $B \times 2$.
+ * @returns The proportions, $2B$ values row-major.
+ */
 const binaryProportions = (P: MatrixLike) => {
   const m = dense.toMatrixF64(P, 'activeProportionsSteps')
   if (m.n !== 2)
@@ -77,9 +98,25 @@ const binaryProportions = (P: MatrixLike) => {
 }
 
 /**
- * Active learning with an LLP-oracle as steps: step 0 fits LP-LLP to the starting bags; each step queries a bag of k
- * pool points by the strategy (module notes), adds the oracle's answer as a new bag (k singleton bags for US-Exact) and
- * refits. Stops when the pool is empty.
+ * Active learning with an LLP-oracle as steps: step 0 fits LP-LLP to the starting bags; each step queries a bag of $k$
+ * pool points by the strategy (see the file's notes), adds the oracle's answer as a new bag ($k$ singleton bags for
+ * US-Exact) and refits LP-LLP from scratch. The state is `terminated` when the pool is empty. Ties in uncertainty go to
+ * the smaller index. Throws `DomainError` unless the proportions have two classes.
+ *
+ * @param problem The points, labels, starting bags and test set.
+ * @param options The strategy, the query size, LP-LLP's options and steps per refit, and the seed.
+ * @returns The algorithm, to run with `run` or `trace` (its input is unused).
+ *
+ * @example Two US-Mass queries of four points each
+ * const s = stream(30)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const data = { x: tensor(x), y: tensor(y) }
+ * const problem = activeProportionsProblem(stream(31), data, { startSize: 6 })
+ * const alg = activeProportionsSteps(problem, { strategy: 'us-mass', bagSize: 4, maxSteps: 20 })
+ * for (const st of trace(alg, undefined, 2, { keep: 'all' }).steps) {
+ *   print('query', st.t, ':', st.query, ' share of class 1:', st.answer, ' test accuracy:', st.accuracy)
+ * }
  */
 export function activeProportionsSteps(
   problem: ActiveProportionsProblem,
@@ -179,7 +216,24 @@ export function activeProportionsSteps(
 /**
  * The paper's starting point for one labelled dataset: a test split (`testShare`, default 0.3), and two bags of
  * `startSize` points (default 16) drawn from outside it with class-1 shares `startProportions` (default 0.75 and
- * 0.25); every other point is in the pool. The bags' proportions are their realised shares.
+ * 0.25); every other point is in the pool. Each bag takes `startSize` times its share of class-1 points, rounded, and
+ * fills up with class 0, each in a random order; a bag is smaller when a class runs out. The bags' proportions are
+ * their realised shares.
+ *
+ * @param s The stream of the random order that makes the split and fills the bags.
+ * @param data The points `x` ($n \times d$) and their labels `y` (0 or 1).
+ * @param options `startSize`, `startProportions` (one class-1 share per starting bag) and `testShare`.
+ * @returns The problem: points, labels, starting bags with their proportions, and test points.
+ *
+ * @example Two starting bags of six points, and a test split
+ * const s = stream(30)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const data = { x: tensor(x), y: tensor(y) }
+ * const problem = activeProportionsProblem(stream(31), data, { startSize: 6 })
+ * print('bags:', problem.bags)
+ * print('proportions:', problem.proportions)
+ * print('test points:', problem.test.length, ' pool:', problem.bags.filter((b) => b < 0).length - problem.test.length)
  */
 export function activeProportionsProblem(
   s: Stream,
@@ -214,33 +268,56 @@ export function activeProportionsProblem(
 
 /** Options of {@link activeProportionsCurves}. */
 export interface ActiveCurvesOptions extends LpLlpOptions {
-  /** One labelled dataset per repeat (features [n, d], labels 0/1). */
+  /** One labelled dataset per repeat (features $n \times d$, labels 0/1). */
   datasets: readonly { x: Tensor; y: Tensor }[]
+  /** The strategies to run (default all, in the paper's order). */
   strategies?: readonly ActiveStrategy[]
+  /** Points per query (default 10). */
   bagSize?: Size
   /** Queries per run (default 4, as the paper). */
   queries?: Size
-  /** The two starting bags' size (default 16) and their proportions of class 1 (default 0.75 and 0.25, as the paper). */
+  /** The starting bags' size (default 16). */
   startSize?: Size
+  /** The starting bags' proportions of class 1 (default 0.75 and 0.25, as the paper). */
   startProportions?: readonly number[]
   /** Share of each dataset held out for testing (default 0.3). */
   testShare?: number
+  /** Seed of the splits, the starting bags and the random strategy (default 0). */
   seed?: number | string
 }
 
-/** Mean and sd of the test accuracy after 0 … queries queries, per strategy, over the datasets done so far. */
+/** Mean and sd of the test accuracy after $0, \dots, q$ queries, per strategy, over the datasets done so far. */
 export interface ActiveCurves {
+  /** The strategies run. */
   readonly strategies: readonly ActiveStrategy[]
+  /** `mean[s][q]`: the mean test accuracy of strategy `s` after `q` queries (NaN before its first run). */
   readonly mean: number[][]
+  /** `sd[s][q]`: the sample standard deviation of the same (0 with fewer than two runs). */
   readonly sd: number[][]
+  /** Runs (dataset and strategy) done so far. */
   readonly done: number
+  /** Runs in all. */
   readonly total: number
 }
 
 /**
- * The paper's experiment as a generator: for each dataset, two starting bags of `startSize` points with proportions
- * (0.75, 0.25) and (0.25, 0.75) of class 1, a test split, and every strategy run for `queries` queries from the same
- * start; yields the accuracy curves after each run so a figure fills in while the worker computes.
+ * The paper's experiment as a generator: for each dataset, a test split and starting bags of `startSize` points
+ * (`activeProportionsProblem`), and every strategy run for `queries` queries from the same start; yields the accuracy
+ * curves after each run so a figure fills in while the worker computes. A run whose pool empties early carries its last
+ * accuracy forward.
+ *
+ * @param options The datasets, the strategies, the query size and count, the start, LP-LLP's options and the seed.
+ * @returns A generator of the curves so far, one after each run; it returns the final ones.
+ *
+ * @example US-LP against random queries on one small dataset
+ * const s = stream(30)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const data = { x: tensor(x), y: tensor(y) }
+ * const options = { strategies: ['us-lp', 'random'], queries: 2, bagSize: 4, startSize: 6, maxSteps: 20 }
+ * let last
+ * for (const curves of activeProportionsCurves({ datasets: [data], ...options })) last = curves
+ * print(last.strategies, ' test accuracy after 0, 1 and 2 queries:', last.mean)
  */
 export function* activeProportionsCurves(options: ActiveCurvesOptions): Generator<ActiveCurves, ActiveCurves> {
   const {
@@ -296,7 +373,23 @@ export function* activeProportionsCurves(options: ActiveCurvesOptions): Generato
 
 /**
  * One active-learning run as a generator for a worker: yields the states so far (step 0, then one more per query) so a
- * figure can show each query as it lands.
+ * figure can show each query as it lands. Stops after `queries` queries (default 6) or when the pool is empty.
+ *
+ * @param problem The points, labels, starting bags and test set.
+ * @param options The options of `activeProportionsSteps`, and `queries`.
+ * @returns A generator of the states so far; it returns them all.
+ *
+ * @example Three exact queries of three points
+ * const s = stream(30)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const data = { x: tensor(x), y: tensor(y) }
+ * const problem = activeProportionsProblem(stream(31), data, { startSize: 6 })
+ * const options = { strategy: 'us-exact', bagSize: 3, queries: 3, maxSteps: 20 }
+ * let states
+ * for (const st of activeProportionsRun(problem, options)) states = st
+ * print('queried:', states.map((st) => st.query))
+ * print('test accuracy:', states.map((st) => st.accuracy))
  */
 export function* activeProportionsRun(
   problem: ActiveProportionsProblem,

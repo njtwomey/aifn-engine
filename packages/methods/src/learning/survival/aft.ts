@@ -1,14 +1,18 @@
 /**
- * Parametric accelerated-failure-time (AFT) models: log T = μ + xᵀβ + σ ε, so a covariate multiplies the time scale by
- * exp(βₖ) per unit. The error ε is standard extreme-value (minimum Gumbel) for the Weibull model and standard normal for
- * the log-normal one. With z = (log t − μ − xᵀβ)/σ, an observed event contributes log f(t) = log f_ε(z) − log σ − log t
- * and a right-censored time contributes log S(t) = log S_ε(z), where
+ * Parametric accelerated-failure-time (AFT) models (Kalbfleisch and Prentice, 2002):
+ * $\log T = \mu + \xvec^\top\betavec + \sigma\varepsilon$, so a covariate multiplies the time scale by
+ * $e^{\beta_k}$ per unit. The error $\varepsilon$ is standard extreme-value (minimum Gumbel) for the Weibull model
+ * and standard normal for the log-normal one. With $z = (\log t - \mu - \xvec^\top\betavec)/\sigma$, an observed
+ * event contributes $\log f(t) = \log f_\varepsilon(z) - \log \sigma - \log t$ and a right-censored time
+ * contributes $\log S(t) = \log S_\varepsilon(z)$, where
  *
- * - Weibull: log f_ε(z) = z − eᶻ and log S_ε(z) = −eᶻ (shape k = 1/σ, scale λ = exp(μ + xᵀβ));
- * - log-normal: log f_ε(z) = log φ(z) and log S_ε(z) = log Φ(−z).
+ * - Weibull: $\log f_\varepsilon(z) = z - e^z$ and $\log S_\varepsilon(z) = -e^z$ (shape $k = 1/\sigma$, scale
+ *   $\lambda = e^{\mu + \xvec^\top\betavec}$), as lifelines' `WeibullAFTFitter`;
+ * - log-normal: $\log f_\varepsilon(z) = \log \phi(z)$ and $\log S_\varepsilon(z) = \log \Phi(-z)$.
  *
  * The log-likelihood is written with tensor primitives, differentiated by autodiff and maximised by L-BFGS over
- * (μ, β, log σ). Standard errors come from the inverse of the autodiff Hessian.
+ * $(\mu, \betavec, \log \sigma)$. Standard errors come from the inverse of the autodiff Hessian of the negative
+ * log-likelihood (the observed information).
  */
 
 import { hessian, valueAndGrad } from 'aifn-compute/foundation/autodiff'
@@ -41,26 +45,61 @@ export type AftFamily = 'weibull' | 'log-normal'
 
 /** A fitted AFT model. */
 export interface AftFit {
+  /** Always `'aft-model'`. */
   readonly kind: 'aft-model'
+  /** The error law that was fitted. */
   readonly family: AftFamily
-  /** The intercept μ. */
+  /** The intercept $\mu$. */
   readonly intercept: number
-  /** β: log time ratios per unit of each covariate. */
+  /** $\betavec$: the log time ratio per unit of each covariate, $p$ values. */
   readonly coefficients: Float64Array
-  /** σ (the Weibull shape is 1/σ). */
+  /** $\sigma$ (the Weibull shape is $1/\sigma$). */
   readonly scale: number
-  /** Standard errors of (μ, β, log σ), from the inverse Hessian of the log-likelihood. */
+  /**
+   * Standard errors of $(\mu, \betavec, \log \sigma)$, $p + 2$ values, from the inverse Hessian of the negative
+   * log-likelihood.
+   */
   readonly standardErrors: Float64Array
+  /** The maximised log-likelihood, including the $-\log t$ of each event. */
   readonly logLikelihood: number
+  /** Whether L-BFGS met its convergence test within `maxSteps`. */
   readonly converged: boolean
 }
 
+/**
+ * A scalar value as a number (the first entry of a tensor; a traced value is read as its current value).
+ *
+ * @param v The value.
+ * @returns Its number.
+ */
 const scalar = (v: Value): number => {
   const u = unwrap(v)
   return typeof u === 'number' ? u : toFlat(u as Tensor)[0]
 }
 
-/** Fit a Weibull or log-normal AFT model to covariates x [n, p], times [n] > 0 and event flags [n]. */
+/**
+ * Fit a Weibull or log-normal AFT model by maximum likelihood with right censoring, from $\beta = 0$ and the mean and
+ * spread of the log-times. Throws `ShapeError` when `x`, `time` and `event` differ in rows, and `DomainError` for a
+ * time that is not positive. Not converging is reported in `converged`, not thrown.
+ *
+ * @param x The covariates, $n \times p$ (one row per subject).
+ * @param time The observed times, $n$ positive values: the event time, or the censoring time.
+ * @param event The event flags, $n$ values: 1 for an observed event, 0 for a right-censored time.
+ * @param options `family`: `'weibull'` (default) or `'log-normal'`. `maxSteps`: the most L-BFGS steps (default 500).
+ * @returns The fit: $\mu$, $\betavec$, $\sigma$, their standard errors and the log-likelihood.
+ *
+ * @example A Weibull fit recovers the simulated parameters
+ * // 200 Weibull times with log T = 1 + 0.5 x + 0.5 e (e minimum-Gumbel), x alternating 0 and 1, censored at 6.
+ * const n = 200
+ * const x = Array.from({ length: n }, (_, i) => [i % 2])
+ * const e = toArray(log(neg(log(uniform(stream(0), 0, 1, { shape: [n] })))))
+ * const t = x.map(([xi], i) => Math.exp(1 + 0.5 * xi + 0.5 * e[i]))
+ * const time = t.map((ti) => Math.min(ti, 6))
+ * const event = t.map((ti) => (ti < 6 ? 1 : 0))
+ * const fit = aftModel(x, time, event)
+ * print('intercept =', fit.intercept, ' coefficient =', fit.coefficients, ' scale =', fit.scale)
+ * print('standard errors =', fit.standardErrors)
+ */
 export function aftModel(
   x: MatrixLike,
   time: VectorLike,
@@ -137,7 +176,27 @@ export function aftModel(
   }
 }
 
-/** S(t | x) of a fitted AFT model at the given times. */
+/**
+ * The survival function $S(t \mid \xvec)$ of a fitted AFT model at the given times: $\exp(-e^z)$ (Weibull) or
+ * $\Phi(-z)$ (log-normal), $z = (\log t - \mu - \xvec^\top\betavec)/\sigma$.
+ *
+ * @param fit The fitted model.
+ * @param x The subject's covariates, $p$ values.
+ * @param times The times $t > 0$ to evaluate at.
+ * @returns $S(t \mid \xvec)$ at each time.
+ *
+ * @example The second group survives longer
+ * // 200 Weibull times with log T = 1 + 0.5 x + 0.5 e (e minimum-Gumbel), x alternating 0 and 1, censored at 6.
+ * const n = 200
+ * const x = Array.from({ length: n }, (_, i) => [i % 2])
+ * const e = toArray(log(neg(log(uniform(stream(0), 0, 1, { shape: [n] })))))
+ * const t = x.map(([xi], i) => Math.exp(1 + 0.5 * xi + 0.5 * e[i]))
+ * const time = t.map((ti) => Math.min(ti, 6))
+ * const event = t.map((ti) => (ti < 6 ? 1 : 0))
+ * const fit = aftModel(x, time, event)
+ * print('S(1), S(2), S(4) at x = 0:', aftSurvival(fit, [0], [1, 2, 4]))
+ * print('S(1), S(2), S(4) at x = 1:', aftSurvival(fit, [1], [1, 2, 4]))
+ */
 export function aftSurvival(fit: AftFit, x: ArrayLike<number>, times: ArrayLike<number>): Float64Array {
   let eta = fit.intercept
   for (let k = 0; k < fit.coefficients.length; k++) eta += fit.coefficients[k] * x[k]
@@ -147,7 +206,23 @@ export function aftSurvival(fit: AftFit, x: ArrayLike<number>, times: ArrayLike<
   })
 }
 
-/** The time ratio exp(βₖ) per unit of each covariate: >1 lengthens survival. */
+/**
+ * The time ratio $e^{\beta_k}$ per unit of each covariate: above 1 it lengthens survival, below 1 it shortens it.
+ *
+ * @param fit The fitted model.
+ * @returns One ratio per covariate.
+ *
+ * @example A time ratio near the simulated one
+ * // 200 Weibull times with log T = 1 + 0.5 x + 0.5 e (e minimum-Gumbel), x alternating 0 and 1, censored at 6.
+ * const n = 200
+ * const x = Array.from({ length: n }, (_, i) => [i % 2])
+ * const e = toArray(log(neg(log(uniform(stream(0), 0, 1, { shape: [n] })))))
+ * const t = x.map(([xi], i) => Math.exp(1 + 0.5 * xi + 0.5 * e[i]))
+ * const time = t.map((ti) => Math.min(ti, 6))
+ * const event = t.map((ti) => (ti < 6 ? 1 : 0))
+ * const fit = aftModel(x, time, event)
+ * print('time ratio =', timeRatios(fit), ' simulated =', Math.exp(0.5))
+ */
 export function timeRatios(fit: AftFit): Float64Array {
   return Float64Array.from(fit.coefficients, Math.exp)
 }

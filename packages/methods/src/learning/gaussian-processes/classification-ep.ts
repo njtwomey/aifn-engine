@@ -1,7 +1,8 @@
 /**
- * Binary Gaussian-process classification by expectation propagation with the probit likelihood Φ(yf): compute's
- * multivariate EP (`aifn-compute/inference/expectation-propagation`) with the prior N(0, K) and one Gaussian site per training
- * point; the EP log marginal likelihood; and its gradient in K at the EP fixed point.
+ * Binary Gaussian-process classification by expectation propagation with the probit likelihood $\Phi(yf)$: compute's
+ * multivariate EP (`aifn-compute/inference/expectation-propagation`) with the prior $\Gauss(\zeros, \Kmat)$ and one
+ * Gaussian site per training point; the EP log marginal likelihood; and its gradient in $\Kmat$ at the EP fixed point.
+ * Labels are 0 and 1, with $y = \pm 1$ in the likelihood.
  *
  * Rasmussen and Williams (2006), "Gaussian Processes for Machine Learning", Algorithms 3.5 (EP), 3.6 (predictions),
  * eq. 3.65 (the evidence, in the stable form of the GPML toolbox's infEP) and eq. 5.27 (its gradient).
@@ -27,8 +28,15 @@ import { run, type Algorithm } from 'aifn-compute/foundation/trace'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
 /**
- * The factor of B = I + S K S with S = diag(s), and R = S B⁻¹ S. Laplace uses s = √W, EP s = √τ̃. Returns L (lower,
- * flat), ½ log|B| and a solver for B⁻¹.
+ * The factor of $\Bmat = \Imat + \Smat \Kmat \Smat$ with $\Smat = \diag(\svec)$, and $\Rmat = \Smat \Bmat^{-1} \Smat$.
+ * Laplace uses $\svec = \sqrt{\diag \Wmat}$, EP $\svec = \sqrt{\tilde\tauvec}$. Jitter is added if $\Bmat$ needs it
+ * and is not reported.
+ *
+ * @param K The Gram matrix $\Kmat$ as a row-major array of $n^2$ values; not modified.
+ * @param s The diagonal $\svec$ of $\Smat$, $n$ values.
+ * @returns `L`, the lower Cholesky factor of $\Bmat$ (row-major); `logDetHalf`, $\frac{1}{2} \log\lvert \Bmat \rvert$;
+ *   `forward(M, m)`, $\Lmat^{-1}\Mmat$, and `solve(M, m)`, $\Bmat^{-1}\Mmat$, for a row-major $n \times m$ array
+ *   $\Mmat$ (each a new array); and `R()`, $\Rmat$ as a row-major array.
  */
 export function stableFactor(K: Float64Array, s: Float64Array) {
   const n = s.length
@@ -58,7 +66,13 @@ export function stableFactor(K: Float64Array, s: Float64Array) {
   return { L: Lf, logDetHalf, solve, forward, R }
 }
 
-/** Matrix–vector product of a flat [n, n] matrix. */
+/**
+ * The matrix–vector product $\Amat\vvec$.
+ *
+ * @param A The matrix $\Amat$ as a row-major array of $n^2$ values.
+ * @param v The vector $\vvec$, $n$ values.
+ * @returns A new array of the $n$ values of $\Amat\vvec$.
+ */
 function mv(A: Float64Array, v: Float64Array): Float64Array {
   const n = v.length
   const out = new Float64Array(n)
@@ -72,10 +86,11 @@ function mv(A: Float64Array, v: Float64Array): Float64Array {
 
 /** The problem an EP run for GP classification solves. */
 export type GpEpProblem = {
+  /** The prior covariance $\Kmat$ of the latent values, $n \times n$. */
   K: Tensor
-  /** Labels 0 or 1, [n]. */
+  /** Labels 0 or 1, `[n]`. */
   labels: Tensor
-  /** Weight of the old site in each update, in [0, 1) (default 0). */
+  /** Weight of the old site in each update, in $[0, 1)$ (default 0). */
   damping?: number
   /** A sweep in which no site parameter moves by more than this has converged (default 1e-8). */
   tolerance?: number
@@ -83,10 +98,22 @@ export type GpEpProblem = {
 
 /**
  * Expectation propagation for GP classification with the probit likelihood (Rasmussen and Williams, 2006,
- * Algorithm 3.5), one site update per step: compute's `multivariateExpectationPropagation` with the prior N(0, K), one
- * site per latent value fᵢ (identity projections) and the tilted moments of q₋ᵢ(fᵢ) Φ(yᵢfᵢ) (`probitTilted`, yᵢ = ±1).
- * The state's `logEvidence` is EP's log marginal likelihood (eq. 3.65) as of the last sweep's end. `init` takes
- * optional starting sites (a warm start); by default every site is 1 (τ̃ = ν̃ = 0).
+ * Algorithm 3.5), one site update per step: compute's `multivariateExpectationPropagation` with the prior
+ * $\Gauss(\zeros, \Kmat)$, one site per latent value $f_i$ (identity projections) and the tilted moments of
+ * $q_{-i}(f_i) \Phi(y_i f_i)$ (`probitTilted`, $y_i = \pm 1$). The state's `logEvidence` is EP's log marginal
+ * likelihood (eq. 3.65) as of the last sweep's end. `init` takes optional starting sites (a warm start); by default
+ * every site is 1 ($\tilde\tau = \tilde\nu = 0$). Throws `DomainError` for a label other than 0 or 1.
+ *
+ * @param problem The Gram matrix, the labels, the damping and the tolerance.
+ * @returns The algorithm; a sweep is $n$ steps.
+ *
+ * @example Three points: EP converges in a few sweeps
+ * // The RBF Gram matrix at 0, 1 and 2 (lengthscale 1), and the labels 0, 0, 1
+ * const K = tensor([[1, 0.61, 0.14], [0.61, 1, 0.61], [0.14, 0.61, 1]])
+ * const s = run(gpEp({ K, labels: tensor([0, 0, 1]) }), {}, 100)
+ * print('sweeps', s.sweep, ' converged', s.converged)
+ * print('posterior mean', s.mean, ' log Z_EP', s.logEvidence)
+ * print('site precisions', s.sitePrecision)
  */
 export function gpEp(
   problem: GpEpProblem,
@@ -105,8 +132,14 @@ export function gpEp(
 }
 
 /**
- * The predictive weights of a converged EP run: the latent mean at x* is k*ᵀα with
- * α = ν̃ − S̃^½ B⁻¹ S̃^½ K ν̃ (R&W Algorithm 3.6), and s = √τ̃ for the variance.
+ * The predictive weights of a converged EP run: the latent mean at $\xvec_*$ is $\kvec_*^\top\alphavec$ with
+ * $\alphavec = \tilde\nuvec - \tilde\Smat^{1/2} \Bmat^{-1} \tilde\Smat^{1/2} \Kmat \tilde\nuvec$ (R&W
+ * Algorithm 3.6), and $\svec = \sqrt{\tilde\tauvec}$ for the variance (negative site precisions taken as 0).
+ *
+ * @param K The Gram matrix $\Kmat$ as a row-major array of $n^2$ values.
+ * @param tau The site precisions $\tilde\tauvec$, $n$ values.
+ * @param nu The site shifts $\tilde\nuvec$, $n$ values.
+ * @returns `alpha`, $\alphavec$; `s`, $\svec$; `factor`, the `stableFactor` of $\Bmat$; and `n`.
  */
 export function epWeights(K: Float64Array, tau: Float64Array, nu: Float64Array) {
   const n = tau.length
@@ -127,13 +160,28 @@ export type GpEpOptions = {
   maxSweeps?: number
   /** Site-change tolerance per sweep (default 1e-8). */
   tolerance?: number
+  /** Weight of the old site in each update, in $[0, 1)$ (default 0). */
   damping?: number
 }
 
 /**
- * The EP log marginal likelihood as a differentiable function of the Gram matrix K (labels 0 and 1, probit link).
- * Its reverse rule is ∂ log Z_EP/∂K = ½ ααᵀ − ½ S̃^½ B⁻¹ S̃^½ at the EP fixed point (R&W eq. 5.27; the sites are
- * stationary there, so no implicit term appears). Successive calls start EP from the previous call's sites.
+ * The EP log marginal likelihood as a differentiable function of the Gram matrix $\Kmat$ (labels 0 and 1, probit
+ * link). Its reverse rule is the gradient
+ * $\frac{1}{2} \alphavec\alphavec^\top - \frac{1}{2} \tilde\Smat^{1/2} \Bmat^{-1} \tilde\Smat^{1/2}$ of
+ * $\log Z_{\mathrm{EP}}$ in $\Kmat$ at the EP fixed point (R&W eq. 5.27; the sites are stationary there, so no
+ * implicit term appears). Successive calls start EP from the previous call's sites, and cold again when that gives a
+ * non-finite value.
+ *
+ * @param labels The labels, 0 or 1, `[n]`.
+ * @param options The most sweeps, the site-change tolerance and the damping.
+ * @returns The function from $\Kmat$ ($n \times n$, possibly traced) to $\log Z_{\mathrm{EP}}$.
+ *
+ * @example The evidence and its derivative along $c\Kmat$, against a central difference
+ * const K = tensor([[1, 0.61, 0.14], [0.61, 1, 0.61], [0.14, 0.61, 1]])
+ * const evidence = gpEpEvidence(tensor([0, 0, 1]))
+ * print('log Z_EP', evidence(K))
+ * print('d/dc at c = 1', grad((c) => evidence(mul(c, K)))(1))
+ * print('central difference', (evidence(mul(1.001, K)) - evidence(mul(0.999, K))) / 0.002)
  */
 export function gpEpEvidence(labels: Tensor, options: GpEpOptions = {}): (K: Value) => Value {
   const { maxSweeps = 100, tolerance = 1e-8, damping = 0 } = options

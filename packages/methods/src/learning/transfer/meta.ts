@@ -1,11 +1,12 @@
 /**
  * Model-agnostic meta-learning (MAML; Finn, Abbeel and Levine, 2017) on sinusoid regression: learn an initialisation
- * θ from which a few gradient steps on K points of a new task fit it. For each task in a meta-batch, the inner step
- * adapts θ′ = θ − α ∇_θ L_support(θ); the meta-objective is the query loss at θ′, averaged over tasks, minimised over θ
- * by Adam. Its gradient runs through the inner gradient step, so it holds second derivatives (taken here by nested
- * autodiff); first-order MAML drops them by treating ∇_θ L_support as a constant. The baseline pretrains one network
- * on all tasks together, whose best guess for an unseen task is the average function (near 0), and fine-tunes it
- * the same way.
+ * $\thetavec$ from which a few gradient steps on $K$ points of a new task fit it. For each task in a meta-batch, the
+ * inner step adapts $\thetavec' = \thetavec - \alpha \nabla_{\thetavec} L_{\mathrm{support}}(\thetavec)$; the
+ * meta-objective is the query loss at $\thetavec'$, averaged over tasks, minimised over $\thetavec$ by Adam. Its
+ * gradient runs through the inner gradient step, so it holds second derivatives (taken here by nested autodiff);
+ * first-order MAML drops them by treating $\nabla_{\thetavec} L_{\mathrm{support}}$ as a constant. The baseline
+ * pretrains one network on all tasks together (on the same meta-batches' query points), whose best guess for an
+ * unseen task is the average function (near 0), and fine-tunes it the same way.
  */
 
 import { stopGradient, valueAndGrad } from 'aifn-compute/foundation/autodiff'
@@ -25,19 +26,43 @@ import {
 import { Mlp, type Layer } from 'aifn-compute/nn/layers'
 import { adamTrainer } from './shared'
 
-/** A sinusoid regression task y = A sin(x − φ), A ∈ [0.1, 5], φ ∈ [0, π] (Finn, Abbeel and Levine, 2017). */
+/**
+ * A sinusoid regression task $y = A \sin(x - \varphi)$, $A \in [0.1, 5]$, $\varphi \in [0, \pi]$ (Finn, Abbeel and
+ * Levine, 2017).
+ */
 export interface SineTask {
+  /** The amplitude $A$. */
   readonly amplitude: number
+  /** The phase $\varphi$, radians. */
   readonly phase: number
 }
 
-/** `count` sinusoid tasks drawn uniformly. */
+/**
+ * Sinusoid tasks with amplitude uniform on $[0.1, 5]$ and phase uniform on $[0, \pi]$.
+ *
+ * @param s The stream the tasks are drawn from.
+ * @param count The number of tasks.
+ * @returns The tasks.
+ *
+ * @example Two tasks
+ * print(sineTasks(stream(1), 2))
+ */
 export function sineTasks(s: Stream, count: number): SineTask[] {
   const u = units(s, 2 * count)
   return Array.from({ length: count }, (_, i) => ({ amplitude: 0.1 + 4.9 * u[2 * i], phase: Math.PI * u[2 * i + 1] }))
 }
 
-/** k points of a sinusoid task with x uniform on [−5, 5]. */
+/**
+ * Points of a sinusoid task, noiseless, with $x$ uniform on $[-5, 5]$.
+ *
+ * @param task The task.
+ * @param s The stream the inputs are drawn from.
+ * @param k The number of points.
+ * @returns Inputs `x` and targets `y`, both $k \times 1$.
+ *
+ * @example Three points of a task with amplitude 2 and phase 0
+ * print(sineSamples({ amplitude: 2, phase: 0 }, stream(1), 3))
+ */
 export function sineSamples(task: SineTask, s: Stream, k: number): { x: Tensor; y: Tensor } {
   const u = units(s, k)
   const x = Float64Array.from(u, (v) => -5 + 10 * v)
@@ -50,12 +75,39 @@ export function sineSamples(task: SineTask, s: Stream, k: number): { x: Tensor; 
   }
 }
 
-/** Mean squared error of the network at parameters p on (x, y). */
-// Inputs on [−5, 5] are scaled to [−1, 1] before the network, which keeps the first gradients (and the inner step) tame.
+/**
+ * The network's output on inputs $x$. Inputs on $[-5, 5]$ are scaled to $[-1, 1]$ before the network, which keeps
+ * the first gradients (and the inner step) tame.
+ *
+ * @param net The network.
+ * @param p Its parameters.
+ * @param x The inputs, $n \times 1$.
+ * @returns The outputs, $n \times 1$ (differentiable in `p`).
+ */
 const forward = (net: Layer<Params[]>, p: Params[], x: Tensor): Value => net.apply(p, mul(0.2, x))
+/**
+ * Mean squared error of the network at parameters `p` on $(x, y)$ (differentiable in `p`).
+ *
+ * @param net The network.
+ * @param p Its parameters.
+ * @param x The inputs, $n \times 1$.
+ * @param y The targets, $n \times 1$.
+ * @returns The mean squared error, a scalar.
+ */
 const mse = (net: Layer<Params[]>, p: Params[], x: Tensor, y: Tensor): Value => mean(square(sub(forward(net, p, x), y)))
 
-/** θ − α ∇L(θ) on (x, y), keeping (second order) or cutting (first order) the gradient's dependence on θ. */
+/**
+ * One inner gradient step $\thetavec - \alpha \nabla L(\thetavec)$ of the mean squared error on $(x, y)$, keeping
+ * (second order) or cutting (first order) the gradient's dependence on $\thetavec$.
+ *
+ * @param net The network.
+ * @param p The parameters $\thetavec$ (traced when the meta-gradient is being taken).
+ * @param x The support inputs, $n \times 1$.
+ * @param y The support targets, $n \times 1$.
+ * @param alpha The inner step size $\alpha$.
+ * @param firstOrder Treat the gradient as a constant (first-order MAML).
+ * @returns The adapted parameters.
+ */
 function adapt(net: Layer<Params[]>, p: Params[], x: Tensor, y: Tensor, alpha: number, firstOrder: boolean): Params[] {
   const { grad } = valueAndGrad((q: Params[]): Value => mse(net, q, x, y), {})(p)
   return treeZip([p, grad as Params[]], ([w, g]) =>
@@ -67,46 +119,87 @@ function adapt(net: Layer<Params[]>, p: Params[], x: Tensor, y: Tensor, alpha: n
 export interface MamlOptions {
   /** `second` (default) or `first`-order MAML. */
   order?: 'first' | 'second'
-  /** Meta-updates (default 1000), tasks per meta-batch (default 8), support and query points per task (default 10). */
+  /** Meta-updates (default 1000). */
   steps?: number
+  /** Tasks per meta-batch (default 8). */
   tasksPerBatch?: number
+  /** Support points, and query points, per task (default 10 each); also the test task's support. */
   shots?: number
-  /** Inner step size α (default 0.01) and outer Adam step size (default 1e-3). */
+  /** Inner step size $\alpha$ (default 0.01), also of the fine-tuning at checkpoints. */
   innerRate?: number
+  /** Outer Adam step size (default 1e-3), for MAML and the baseline alike. */
   outerRate?: number
+  /** Hidden widths of the network (default $[40, 40]$, ReLU). */
   hidden?: readonly number[]
+  /** The root stream's seed (default 0): the run is deterministic in it. */
   seed?: number | string
   /** Adaptation steps shown at checkpoints (default 10). */
   adaptationSteps?: number
+  /** About how many checkpoints to keep after the start (default 20): one every `steps / checkpoints` steps. */
   checkpoints?: number
 }
 
-/** One checkpoint: the fixed test task's fits after 0, 1 and `adaptationSteps` steps, for MAML and the baseline. */
+/**
+ * One checkpoint: the fixed test task's fits on the grid after 0, 1 and `adaptationSteps` fine-tuning steps on its
+ * support points, for MAML and the baseline.
+ */
 export interface MamlCheckpoint {
+  /** Meta-updates taken. */
   step: number
+  /** MAML's fits, 101 values each. */
   maml: Float64Array[]
+  /** The baseline's fits, 101 values each. */
   pretrained: Float64Array[]
-  /** Query MSE on 20 held-out tasks after each adaptation step 0 … adaptationSteps. */
+  /** MAML's mean query MSE on 20 held-out tasks after each adaptation step $0, \dots,$ `adaptationSteps`. */
   mamlCurve: Float64Array
+  /** The baseline's curve, likewise. */
   pretrainedCurve: Float64Array
 }
 
 /** A MAML run so far. */
 export interface MamlRun {
+  /** First- or second-order MAML. */
   order: 'first' | 'second'
+  /** The meta-updates the run will take. */
   steps: number
+  /** The meta-updates taken. */
   done: number
+  /** True for the last snapshot. */
   finished: boolean
+  /** The 101 inputs on $[-5, 5]$ where the fits are drawn. */
   grid: Float64Array
+  /** The fixed test task. */
   testTask: SineTask
+  /** The test task's support points. */
   support: { x: Float64Array; y: Float64Array }
+  /** The test task's function on the grid. */
   truth: Float64Array
-  /** The meta-loss (query MSE after one inner step) and the baseline's training MSE, per recorded step. */
+  /**
+   * The meta-loss (query MSE after one inner step) and the baseline's training MSE, on the step's meta-batch before
+   * its update, per recorded step (about 100 of them).
+   */
   history: { step: number[]; meta: number[]; pretrained: number[] }
+  /** The checkpoints so far, the first at step 0. */
   checkpoints: MamlCheckpoint[]
 }
 
-/** Meta-train on sinusoids and yield snapshots (module docs). Deterministic in `seed`. */
+/**
+ * Meta-train on sinusoids, beside the pretrained baseline, and yield snapshots: at the start, every `steps / 20`
+ * meta-updates and at the end (the last also returned). Every task and point is drawn from the root stream of
+ * `seed`, so the run is deterministic in it. Checkpoints fine-tune by plain gradient steps of size `innerRate`.
+ *
+ * @param options The MAML variant, the meta-training, the network and the checkpoints.
+ * @returns A generator of snapshots of the run.
+ *
+ * @example Ten second-order meta-updates of a small network: the held-out error after 0, 1 and 2 adaptation steps
+ * const options = { steps: 10, tasksPerBatch: 2, shots: 5, hidden: [8, 8], adaptationSteps: 2, checkpoints: 1 }
+ * let run
+ * for (const snapshot of mamlRun(options)) run = snapshot
+ * const last = run.checkpoints.at(-1)
+ * print('MAML:', last.mamlCurve)
+ * print('pretrained baseline:', last.pretrainedCurve)
+ * print('meta-loss per step:', run.history.meta)
+ */
 export function* mamlRun(options: MamlOptions = {}): Generator<MamlRun, MamlRun> {
   const { order = 'second', steps = 1000, tasksPerBatch = 8, shots = 10, innerRate = 0.01, outerRate = 1e-3 } = options
   const { hidden = [40, 40], seed = 0, adaptationSteps = 10, checkpoints = 20 } = options

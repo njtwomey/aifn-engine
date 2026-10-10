@@ -1,4 +1,7 @@
-/** The registry of `aifn-methods/learning/trees-and-ensembles/boosting`. */
+/**
+ * The registry of `aifn-methods/learning/trees-and-ensembles/boosting`: AdaBoost and gradient boosting as traceable
+ * algorithms.
+ */
 
 import { definer, entries, type AlgorithmInfo, type Entry } from 'aifn-compute/foundation/registry'
 import * as ensembles from './ensembles'

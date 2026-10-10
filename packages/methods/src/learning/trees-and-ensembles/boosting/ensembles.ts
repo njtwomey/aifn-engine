@@ -1,13 +1,13 @@
 /**
- * Tree estimators and tree ensembles:
+ * Boosted tree ensembles: multiclass AdaBoost by SAMME (Zhu, Zou, Rosset and Hastie, 2009, "Multi-class AdaBoost"),
+ * which is Freund and Schapire's (1997) AdaBoost.M1 for two classes, and gradient tree boosting (Friedman, 2001,
+ * "Greedy function approximation: a gradient boosting machine") for squared error and the logistic (binomial and
+ * multinomial) deviance, with Newton leaf values as scikit-learn's `GradientBoostingClassifier`.
  *
- * - `decisionTree`, `regressionTree`: CART as estimators (growth traced, optional cost-complexity pruning).
- * - `randomForest`: bagged trees with random feature subsets per node (Breiman, 2001, "Random forests").
- * - `adaBoostSteps`, `adaBoost`: multiclass AdaBoost by SAMME (Zhu, Zou, Rosset and Hastie, 2009), which is
- *   Freund and Schapire's (1997) AdaBoost.M1 for two classes.
- * - `gradientBoostingSteps`, `gradientBoosting`: gradient tree boosting (Friedman, 2001, "Greedy function
- *   approximation: a gradient boosting machine") for squared error and the logistic (binomial and multinomial)
- *   deviance, with Newton leaf values as scikit-learn's `GradientBoostingClassifier`.
+ * Both add one stage of CART trees from `aifn-methods/learning/trees-and-ensembles` per step: AdaBoost a weighted
+ * classification tree on reweighted rows, gradient boosting a regression tree on the pseudo-residuals. Each is a
+ * traceable algorithm (`adaBoostSteps`, `gradientBoostingSteps`) behind its estimator, so the ensemble can be read
+ * stage by stage (`votesUpTo`, `rawUpTo`).
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -37,36 +37,54 @@ import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
 
 /** The problem an AdaBoost run solves. */
 export interface AdaBoostProblem {
+  /** The inputs, $n \times d$. */
   x: Tensor
-  /** Labels 0 … K−1. */
+  /** The labels $0, \dots, K - 1$, $n$ integers. */
   y: Tensor
   /** The weak learner's tree parameters (default stumps: `{ maxDepth: 1 }`). */
   base?: TreeParams
+  /** The learning rate $\eta > 0$ that scales each learner's weight (default 1). */
   learningRate?: number
 }
 
 /** One AdaBoost state: the learners so far, their weights and the current sample weights. */
 export interface AdaBoostState extends Status {
-  /** Rounds done. */
+  /** The number of rounds done (a round that stops for chance counts, though it adds no learner). */
   t: number
+  /** The learners $h_m$ kept, in order. */
   learners: DecisionTree[]
-  /** The weight α_m of each learner. */
+  /** The weight $\alpha_m$ of each learner. */
   alphas: number[]
   /** The weighted training error of each learner. */
   errors: number[]
-  /** Sample weights for the next round [n] (sum 1). */
+  /** The sample weights for the next round, $n$ values summing to 1. */
   sampleWeights: Tensor
-  /** The ensemble's votes Σ α_m 1[h_m(x) = k] on the training rows [n, K], and its training error. */
+  /** The ensemble's votes $\sum_m \alpha_m \indicator[h_m(\xvec_i) = k]$ on the training rows, $n \times K$. */
   votes: Tensor
+  /** The ensemble's training error rate (NaN before the first learner). */
   trainingError: number
   /** A learner had zero error (it is kept) or no better than chance (the run stops without it). */
   stopped: 'perfect' | 'chance' | null
 }
 
 /**
- * AdaBoost by SAMME as a traceable algorithm: each round fits a weighted tree, weights it by
- * α = η (log((1 − err)/err) + log(K − 1)), multiplies the weights of misclassified rows by e^α and renormalises. It
- * is done when a learner is perfect or no better than chance (err ≥ 1 − 1/K).
+ * AdaBoost by SAMME as a traceable algorithm (Zhu et al., 2009, Algorithm 2): each round fits a tree on the weighted
+ * rows, weights it by $\alpha = \eta(\log((1 - e)/e) + \log(K - 1))$ with $e$ its weighted error, multiplies the
+ * weights of misclassified rows by $e^{\alpha}$ and renormalises. It is done when a learner is perfect (kept, with
+ * weight 1, as in scikit-learn) or no better than chance ($e \ge 1 - 1/K$; not kept). No start, and no randomness.
+ * Throws `ShapeError` or `DomainError` for a bad `x` or labels.
+ *
+ * @param problem The data, the weak learner's parameters and the learning rate.
+ * @returns The algorithm, whose state holds the learners, their weights and errors, and the next sample weights.
+ *
+ * @example Three rounds of stumps on an interval
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const y = tensor([0, 0, 1, 1, 1, 0, 0, 0])
+ * const state = run(adaBoostSteps({ x, y }), undefined, 3)
+ * print('stumps:', state.learners.map((tree) => tree.nodes[0].label))
+ * print('alphas:', state.alphas)
+ * print('errors:', state.errors)
+ * print('ensemble training error:', state.trainingError)
  */
 export function adaBoostSteps(problem: AdaBoostProblem): Algorithm<void, AdaBoostState> {
   const { n } = matrix(problem.x, 'adaBoostSteps')
@@ -144,17 +162,39 @@ export interface AdaBoostModel
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'adaboost'
+  /** The learners $h_m$, in order. */
   readonly learners: DecisionTree[]
+  /** The weight $\alpha_m$ of each learner. */
   readonly alphas: Tensor
+  /** The weighted training error of each learner. */
   readonly errors: Tensor
+  /** The number of classes $K$. */
   readonly classes: number
-  /** Normalised votes Σ α_m 1[h_m(x) = k] / Σ α_m from the first `rounds` learners [m, K]. */
+  /**
+   * The normalised votes $\sum_m \alpha_m \indicator[h_m(\xvec) = k] / \sum_m \alpha_m$ of the first `rounds`
+   * learners, $m \times K$ for $m$ query rows.
+   */
   votesUpTo(x: Tensor, rounds: number): Tensor
 }
 
 /**
- * AdaBoost (SAMME) with `rounds` weak learners (default 50 stumps). `forward` and `score` are the normalised votes
- * [m, K]; `decide` is the class with the most weight.
+ * AdaBoost (SAMME) with up to `rounds` weak learners, as scikit-learn's `AdaBoostClassifier`. `forward` and `score`
+ * are the normalised votes, $m \times K$; `decide` is the class with the most weight (the lowest label on ties). The
+ * run (`adaBoostSteps`) is kept in `training`, recording the ensemble's `trainingError`, and ends early at a perfect
+ * or chance-level learner.
+ *
+ * @param params The number of `rounds` (default 50), the `learningRate` $\eta$ (default 1), and `base`, the weak
+ *   learner's tree parameters (default stumps, `{ maxDepth: 1 }`).
+ * @returns An estimator whose `fit({ x, y })` returns the fitted `AdaBoostModel`.
+ *
+ * @example Stumps combine into an interval
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const y = tensor([0, 0, 1, 1, 1, 0, 0, 0])
+ * const model = adaBoost({ rounds: 10 }).fit({ x, y })
+ * print('learners:', model.learners.length, ' alphas:', model.alphas)
+ * print('decisions:', model.decide(x))
+ * print('votes for class 1 after 1 round:', slice(model.votesUpTo(x, 1), null, 1))
+ * print('after 10 rounds:', slice(model.votesUpTo(x, 10), null, 1))
  */
 export function adaBoost(
   params: { rounds?: number; learningRate?: number; base?: TreeParams } = {},
@@ -217,15 +257,18 @@ export function adaBoost(
 
 // ── Gradient boosting ────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The loss gradient boosting minimises. */
+/** The loss gradient boosting minimises: squared error (regression) or the logistic deviance (classification). */
 export type BoostingLoss = 'squared' | 'logistic'
 
 /** The problem a gradient boosting run solves. */
 export interface GradientBoostingProblem {
+  /** The inputs, $n \times d$. */
   x: Tensor
-  /** Real targets (squared) or labels 0 … K−1 (logistic). */
+  /** The real targets (squared) or labels $0, \dots, K - 1$ (logistic), $n$ values. */
   y: Tensor
+  /** The loss. */
   loss: BoostingLoss
+  /** The shrinkage $\eta$ each stage is scaled by (default 0.1). */
   learningRate?: number
   /** Tree parameters for each stage (default `{ maxDepth: 3 }`). */
   tree?: Omit<TreeParams, 'criterion'>
@@ -235,26 +278,44 @@ export interface GradientBoostingProblem {
 
 /** One state of gradient boosting. */
 export interface GradientBoostingState extends Status {
-  /** Stages done. */
+  /** The number of stages done. */
   t: number
-  /** The initial raw prediction F₀ ([1] for squared or binary logistic, [K] for multinomial). */
+  /**
+   * The initial raw prediction $F_0$: the mean target (squared), the log-odds of class 1 (binary logistic), or the
+   * centred log class priors, $K$ values (multinomial).
+   */
   initial: number[]
-  /** Trees per stage: one, or K for the multinomial loss. Leaf values are the stage's Newton steps (before η). */
+  /**
+   * The trees of each stage: one, or $K$ for the multinomial loss. Leaf values are the stage's Newton steps (before
+   * $\eta$).
+   */
   stages: DecisionTree[][]
-  /** The raw prediction F on the training rows: [n] or [n, K]. */
+  /** The raw prediction $F$ on the training rows: $n$ values, or $n \times K$ (multinomial). */
   raw: Tensor
-  /** The negative gradients the latest stage fitted (the pseudo-residuals): [n] or [n, K]. */
+  /** The negative gradients the latest stage fitted (the pseudo-residuals): $n$ values, or $n \times K$. */
   residuals: Tensor
   /** The training loss: half the mean squared error, or the mean negative log-likelihood. */
   loss: number
 }
 
 /**
- * Gradient tree boosting as a traceable algorithm. Each stage computes the pseudo-residuals rᵢ = −∂L/∂F(xᵢ) (yᵢ − Fᵢ
- * for squared error, yᵢ − pᵢ for the logistic deviance), fits a regression tree to them (squared-error splits), sets
- * each leaf to a Newton step (the mean residual for squared error; Σr / Σp(1 − p) for the binomial loss, times
- * (K − 1)/K per class for the multinomial one), and adds η times the tree to F. With `subsample` < 1 the stage's
- * rows are drawn from the step's stream. No start.
+ * Gradient tree boosting as a traceable algorithm (Friedman, 2001). Each stage computes the pseudo-residuals
+ * $r_i = -\partial L / \partial F(\xvec_i)$ ($y_i - F_i$ for squared error, $y_i - p_i$ for the logistic deviance),
+ * fits a regression tree to them (squared-error splits), sets each leaf to a Newton step (the mean residual for squared
+ * error; $\sum_i r_i / \sum_i p_i(1 - p_i)$ over the leaf's rows for the binomial loss, times $(K - 1)/K$ per class
+ * for the multinomial one), and adds $\eta$ times the tree to $F$. With `subsample` below 1 the stage's rows are drawn
+ * without replacement from the step's stream; the others weigh 0 in the tree and the Newton steps. No start.
+ *
+ * @param problem The data, the loss, the shrinkage, the trees' parameters and the subsample fraction.
+ * @returns The algorithm, whose state holds the stages, the raw predictions and residuals on the training rows, and
+ *   the training loss.
+ *
+ * @example The squared loss over the first stages
+ * const x = tensor([[1], [2], [3], [4], [5], [6]])
+ * const y = tensor([1, 1.2, 0.8, 5, 5.4, 4.6])
+ * const alg = gradientBoostingSteps({ x, y, loss: 'squared', learningRate: 0.5 })
+ * for (const t of [0, 1, 2, 5]) print('stages:', t, ' loss =', run(alg, undefined, t).loss)
+ * print('raw after 5 stages:', run(alg, undefined, 5).raw)
  */
 export function gradientBoostingSteps(problem: GradientBoostingProblem): Algorithm<void, GradientBoostingState> {
   const { n } = matrix(problem.x, 'gradientBoostingSteps')
@@ -387,28 +448,55 @@ export interface GradientBoostingModel
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'gradient-boosting'
+  /** The loss it was fitted with. */
   readonly loss: BoostingLoss
+  /** The shrinkage $\eta$. */
   readonly learningRate: number
+  /** The initial raw prediction $F_0$ (one value, or $K$ for the multinomial loss). */
   readonly initial: number[]
+  /** The trees of each stage (one per stage, or $K$ for the multinomial loss). */
   readonly stages: DecisionTree[][]
-  /** Classes for the logistic loss (1 for squared error). */
+  /** The number of classes for the logistic loss (1 for squared error). */
   readonly classes: number
-  /** The raw prediction F(x) after the first `stages` stages: [m] or [m, K]. */
+  /** The raw prediction $F(\xvec)$ after the first `stages` stages: $m$ values, or $m \times K$ (multinomial). */
   rawUpTo(x: Tensor, stages: number): Tensor
   /**
-   * Logistic loss: the class law (Bernoulli or Categorical). Squared error: the plug-in Gaussian N(F(x), σ̂²), σ̂² the
-   * training mean squared error.
+   * Logistic loss: the class law (Bernoulli or Categorical). Squared error: the plug-in Gaussian
+   * $\Gauss(F(\xvec), \hat{\sigma}^2)$, $\hat{\sigma}^2$ the training mean squared error.
    */
   predictive(x: Tensor): AnyUnivariate
-  /** E[f(y) | x] under the predictive; F(x) for squared error without f. */
+  /** $\expect[f(y) \mid \xvec]$ under the predictive; its mean without `f` ($F(\xvec)$ for squared error). */
   expect: Expects<Tensor>['expect']
+  /** The raw prediction $F(\xvec)$, as `forward` (logistic loss only). */
   score?(x: Tensor): Tensor
 }
 
 /**
- * Gradient boosting (default 100 stages of depth-3 trees, η = 0.1). Squared error: `forward`, `decide` and `expect`
- * give F(x), `predictive` the plug-in Gaussian. Logistic: `forward`/`score` give F(x) (the log-odds [m] for two
- * classes, [m, K] scores otherwise), `predictive` the class law, `decide` the most probable class.
+ * Gradient boosting, as scikit-learn's `GradientBoostingRegressor` and `GradientBoostingClassifier`. Squared error:
+ * `forward`, `decide` and `expect` give $F(\xvec)$, `predictive` the plug-in Gaussian. Logistic: `forward` and `score`
+ * give $F(\xvec)$ (the log-odds, $m$ values, for two classes; $m \times K$ scores otherwise), `predictive` the class
+ * law, `decide` the most probable class. The run (`gradientBoostingSteps`) is kept in `training`, recording the `loss`.
+ *
+ * @param params The `loss` (default `'squared'`), the number of `stages` (default 100), the `learningRate` $\eta$
+ *   (default 0.1), the `tree` parameters of each stage (default `{ maxDepth: 3 }`), and the `subsample` fraction of
+ *   rows each stage fits on (default 1, every row).
+ * @returns An estimator whose `fit({ x, y }, { stream? })` returns the fitted `GradientBoostingModel`; the stream draws
+ *   the subsamples.
+ *
+ * @example The training loss falls stage by stage
+ * const x = uniform(stream(1), 0, 6, { shape: [50, 1] })
+ * const y = sin(slice(x, null, 0))
+ * const model = gradientBoosting({ stages: 20, learningRate: 0.3 }).fit({ x, y })
+ * print('half MSE by stage:', slice(model.training.series.loss, [0, 21, 4]))
+ * print('F at 1.5 (sin 1.5 = 0.997):', model.decide(tensor([[1.5]])))
+ *
+ * @example Logistic loss: class probabilities on two classes
+ * const x = tensor([[0], [1], [2], [3], [4], [5], [6], [7]])
+ * const y = tensor([0, 0, 0, 1, 0, 1, 1, 1])
+ * const model = gradientBoosting({ loss: 'logistic', stages: 30, tree: { maxDepth: 1 } }).fit({ x, y })
+ * print('log-odds:', model.forward(tensor([[0], [3.5], [7]])))
+ * print('P(class 1):', model.expect(tensor([[0], [3.5], [7]])))
+ * print('decisions:', model.decide(x))
  */
 export function gradientBoosting(
   params: {

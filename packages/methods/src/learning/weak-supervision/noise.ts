@@ -1,8 +1,9 @@
 /**
- * Estimating label noise by confident learning (Northcutt, Jiang and Chuang, 2021): from noisy labels ỹ and
- * out-of-sample predicted probabilities p̂(y | x), count the examples whose label disagrees with a class the model is
- * confident in (the confident joint), calibrate the counts to the label totals, and read off the joint distribution of
- * noisy and true labels, the noise rates P(ỹ = i | y = j) and the examples most likely mislabelled.
+ * Estimating label noise by confident learning (Northcutt, Jiang and Chuang, 2021): from noisy labels $\tilde{y}$ and
+ * out-of-sample predicted probabilities $\hat{p}(y \mid \xvec)$, count the examples whose label disagrees with a class
+ * the model is confident in (the confident joint), calibrate the counts to the label totals, and read off the joint
+ * distribution of noisy and true labels, the noise rates $p(\tilde{y} = i \mid y = j)$ and the examples likely
+ * mislabelled. Classes are $0, \dots, K - 1$.
  */
 
 import type { MatrixLike, Size } from 'aifn-compute/foundation/contracts'
@@ -11,25 +12,58 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 
 /** The estimates of `confidentLearning`. */
 export type ConfidentLearning = {
-  /** C[i][j]: examples labelled i whose confident class is j (K × K counts). */
+  /** $C_{ij}$: the number of examples labelled $i$ whose confident class is $j$ ($K \times K$ counts). */
   confidentJoint: Tensor
-  /** Q[i][j] ≈ P(ỹ = i, y = j), calibrated so each row sums to the share of examples labelled i. */
+  /**
+   * $Q_{ij} \approx p(\tilde{y} = i, y = j)$, $K \times K$, calibrated so each row sums to the share of examples
+   * labelled $i$ (when every label has at least one confident example; a row with none is 0) and the whole to 1.
+   */
   joint: Tensor
-  /** P(ỹ = i | y = j): the noise transition matrix (columns sum to 1). */
+  /**
+   * $p(\tilde{y} = i \mid y = j)$: the noise transition matrix, $K \times K$ (columns sum to 1; a column with no
+   * estimated mass is 0).
+   */
   noise: Tensor
-  /** P(y = j), the estimated distribution of the true labels. */
+  /** $p(y = j)$, the estimated distribution of the true labels ($K$ values, the column sums of $\Qmat$). */
   prior: Tensor
-  /** Per-class thresholds t_j: the mean predicted probability of class j over the examples labelled j. */
+  /**
+   * Per-class thresholds $t_j$: the mean predicted probability of class $j$ over the examples labelled $j$ (1 for a
+   * class with no examples).
+   */
   thresholds: Float64Array
-  /** Examples whose confident class differs from their label (likely label errors). */
+  /**
+   * Indices of the examples whose confident class differs from their label (likely label errors), in ascending order.
+   */
   issues: number[]
 }
 
 /**
- * Confident learning: thresholds t_j are the mean p̂_j over the examples labelled j; an example labelled i counts
- * towards C[i][j] for the class j = argmax{p̂_j : p̂_j ≥ t_j} when such a class exists; rows of C are rescaled to the
- * number of examples labelled i and the whole normalised, giving Q. `labels` are the noisy labels ỹ and
- * `probabilities` the [n, K] out-of-sample predictions of any classifier.
+ * Confident learning (Northcutt, Jiang and Chuang, 2021): thresholds $t_j$ are the mean $\hat{p}_j$ over the examples
+ * labelled $j$; an example labelled $i$ counts towards $C_{ij}$ for the class
+ * $j = \argmax \{\hat{p}_j : \hat{p}_j \ge t_j\}$ when such a class exists; rows of $\Cmat$ are rescaled to the
+ * number of examples labelled $i$ and the whole normalised, giving $\Qmat$. Throws `ShapeError` unless there is one
+ * label per row of probabilities.
+ *
+ * @param labels The noisy labels $\tilde{y}$, one per example, each a class in $0, \dots, K - 1$.
+ * @param probabilities The out-of-sample predictions of any classifier, $n \times K$: row $i$ holds
+ *   $\hat{p}(y = j \mid \xvec_i)$ for each class $j$.
+ * @returns The confident joint, the calibrated joint, the noise matrix, the prior, the thresholds and the flagged
+ *   examples.
+ *
+ * @example A fifth of class 0 relabelled as class 1, found from the predictions
+ * const s = stream(10)
+ * const truth = Array.from({ length: 300 }, (_, i) => i % 3)
+ * const labels = truth.map((y) => (y === 0 && uniform(s) < 0.2 ? 1 : y))
+ * const probabilities = truth.map((y) => {
+ *   const p = 0.6 + 0.3 * uniform(s)
+ *   return [0, 1, 2].map((k) => (k === y ? p : (1 - p) / 2))
+ * })
+ * const cl = confidentLearning(labels, probabilities)
+ * print('p(noisy label i | true class j):', cl.noise)
+ * print('prior of the true classes:', cl.prior)
+ * const flipped = labels.filter((l, i) => l !== truth[i]).length
+ * const caught = cl.issues.filter((i) => labels[i] !== truth[i]).length
+ * print('flipped:', flipped, ' flagged:', cl.issues.length, ' of which flipped:', caught)
  */
 export function confidentLearning(labels: ArrayLike<number>, probabilities: MatrixLike): ConfidentLearning {
   const P = dense.toMatrixF64(probabilities, 'confidentLearning')
@@ -76,7 +110,16 @@ export function confidentLearning(labels: ArrayLike<number>, probabilities: Matr
   }
 }
 
-/** The size of a class-count vector, for callers that pass labels without the number of classes. */
+/**
+ * The size of a class-count vector, for callers that pass labels without the number of classes: one more than the
+ * largest label (0 for no labels).
+ *
+ * @param labels The labels, classes counted from 0.
+ * @returns The number of classes $K$ the labels imply.
+ *
+ * @example Labels up to 3 imply four classes
+ * print('K =', classCount([0, 3, 1, 1]))
+ */
 export function classCount(labels: ArrayLike<number>): Size {
   let k = 0
   for (let i = 0; i < labels.length; i++) k = Math.max(k, labels[i] + 1)

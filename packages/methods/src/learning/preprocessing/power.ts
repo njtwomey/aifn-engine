@@ -1,4 +1,11 @@
-/** scikit-learn's `PowerTransformer` over the Box–Cox and Yeo–Johnson transforms and λ searches of `aifn-compute/probability/stats`. */
+/**
+ * scikit-learn's `PowerTransformer` over the Box–Cox and Yeo–Johnson transforms and $\lambda$ searches of
+ * `aifn-compute/probability/stats`, which this file also re-exports.
+ *
+ * Box–Cox (Box and Cox, 1964) is $(x^\lambda - 1)/\lambda$ ($\log x$ at $\lambda = 0$) and needs $x > 0$; Yeo–Johnson
+ * (Yeo and Johnson, 2000) extends it to every real $x$. Each column gets its own $\lambda$, by maximum likelihood under
+ * a normal model of the transformed column, so that skewed columns come out closer to normal.
+ */
 
 import {
   boxCox,
@@ -23,20 +30,41 @@ export interface PowerTransform extends FittedTransform, Invertible {
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'power-transform'
+  /** The transform: `'box-cox'` (positive data) or `'yeo-johnson'` (any real data). */
   readonly method: 'box-cox' | 'yeo-johnson'
-  /** λ of each column, [d]. */
+  /** The $\lambda$ of each column, $d$ values. */
   readonly lambdas: readonly number[]
-  /** The λ searches, per column. */
+  /** The $\lambda$ searches, per column, with their log-likelihoods and convergence. */
   readonly searches: readonly PowerLambda[]
-  /** Means and (population) standard deviations of the transformed columns, used when `standardize`. */
+  /** The means of the transformed training columns, subtracted when `standardize` (all 0 otherwise). */
   readonly mean: readonly number[]
+  /**
+   * The population standard deviations of the transformed training columns, divided by when `standardize` (all 1
+   * otherwise; 1 for a constant column).
+   */
   readonly scale: readonly number[]
+  /** Whether the transformed columns are standardised. */
   readonly standardize: boolean
 }
 
 /**
- * A power transform per column with λ by maximum likelihood, then (by default) standardisation to zero mean and unit
- * variance, as scikit-learn's `PowerTransformer`. Box–Cox needs positive data; Yeo–Johnson takes any real values.
+ * A power transform per column with $\lambda$ by maximum likelihood (`boxCoxLambda` or `yeoJohnsonLambda`), then (by
+ * default) standardisation to zero mean and unit population variance, as scikit-learn's `PowerTransformer`. Box–Cox
+ * needs positive data (`fit` throws `DomainError` otherwise); Yeo–Johnson takes any real values.
+ *
+ * @param options The transform and whether to standardise.
+ * @param options.method `'yeo-johnson'` (any real data) or `'box-cox'` (positive data).
+ * @param options.standardize Standardise each transformed column with its training mean and population standard
+ *   deviation.
+ * @returns An estimator whose `fit({ x })` on an $n \times d$ matrix returns the fitted `PowerTransform`.
+ *
+ * @example Log-normal data: $\lambda$ near 0, a log transform
+ * const x = exp(normal(stream(1), 0, 1, { shape: [200, 1] }))
+ * const model = powerTransform({ method: 'box-cox' }).fit({ x })
+ * print('lambda =', model.lambdas)
+ * const z = model.transform(x)
+ * print('mean of z =', mean(z), ' sd of z =', std(z))
+ * print('round trip of the first rows:', slice(model.inverseTransform(z), [0, 3]), slice(x, [0, 3]))
  */
 export function powerTransform({
   method = 'yeo-johnson',

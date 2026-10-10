@@ -1,9 +1,10 @@
 /**
  * The perceptron (Rosenblatt, 1958): a linear classifier trained one example at a time, updating only on mistakes.
- * Novikoff's (1962) theorem bounds the number of mistakes on separable data by (R/γ)². The averaged perceptron
- * (Freund and Schapire, 1999, "Large margin classification using the perceptron algorithm", Machine Learning 37)
- * predicts with the mean of the weight vectors over every example visited, which is far less sensitive to the last
- * few updates on data that are not separable.
+ * Novikoff's (1962) theorem bounds the number of mistakes on separable data by $(R/\gamma)^2$, with $R$ the largest
+ * norm of an example and $\gamma$ the margin of a separating hyperplane. The averaged perceptron (Freund and Schapire,
+ * 1999, "Large margin classification using the perceptron algorithm", Machine Learning 37) predicts with the mean of
+ * the weight vectors over every example visited, which is far less sensitive to the last few updates on data that are
+ * not separable.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -24,12 +25,15 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { bool, int, real, space } from 'aifn-compute/foundation/space'
 import { DomainError } from 'aifn-compute/foundation/errors'
 
-/** The problem a perceptron run solves: inputs [n, d] and labels ±1. */
+/** The problem a perceptron run solves: inputs and labels $\pm 1$. */
 export interface PerceptronProblem {
+  /** The inputs, $n \times d$. */
   x: Tensor
-  /** Labels −1 or +1, [n]. */
+  /** Labels $-1$ or $+1$, $n$ values. */
   y: Tensor
+  /** The step $\eta$ of each update (default 1). */
   learningRate?: number
+  /** Whether the bias is learned (default true); without it, the bias stays at its starting value. */
   intercept?: boolean
   /** Visit the rows in a fresh random order each epoch (drawn from the run's streams); default false (row order). */
   shuffle?: boolean
@@ -39,32 +43,52 @@ export interface PerceptronProblem {
 export interface PerceptronState extends Status {
   /** Examples visited. */
   t: number
+  /** The weights $\wvec$, $d$ values. */
   weights: Tensor
+  /** The bias $b$. */
   bias: number
-  /** The mean of the weights and bias after each of the t steps so far (the averaged perceptron); the start at t = 0. */
+  /**
+   * The mean of the weights after each of the $t$ steps so far (the averaged perceptron); the starting weights at
+   * $t = 0$.
+   */
   averageWeights: Tensor
+  /** The mean of the bias after each step, as `averageWeights`. */
   averageBias: number
-  /** The example visited in this step (−1 at the start), its margin y(w·x + b) before the update, and whether it updated. */
+  /** The example visited in this step ($-1$ at the start). */
   example: number
+  /** Its margin $y(\wvec^\top\xvec + b)$ before the update (NaN at the start). */
   margin: number
+  /** Whether this step updated the weights (the margin was not positive). */
   updated: boolean
-  /** Mistakes so far, and mistakes in the current epoch. */
+  /** Mistakes so far. */
   mistakes: number
+  /** Mistakes in the current epoch. */
   epochMistakes: number
+  /** Completed epochs (passes over the data). */
   epoch: number
   /** Position within the epoch's visiting order. */
   position: number
   /** The visiting order of the current epoch. */
   order: Tensor
-  /** A full epoch passed without a mistake. */
+  /** A full epoch passed without a mistake (true on the step that ends it, which stops a run). */
   converged: boolean
 }
 
 /**
- * The perceptron as a traceable algorithm: each step visits one example and, if y(w·x + b) ≤ 0, sets
- * w ← w + η y x and b ← b + η y. It has converged after an epoch without mistakes. `init` takes optional starting
- * weights. With `shuffle`, the first epoch's order comes from the `init` stream and each later one from the stream of
- * the step that ends the previous epoch.
+ * The perceptron as a traceable algorithm: each step visits one example and, if $y(\wvec^\top\xvec + b) \le 0$,
+ * sets $\wvec \leftarrow \wvec + \eta y \xvec$ and $b \leftarrow b + \eta y$. It has converged after an epoch without
+ * mistakes. `init` takes optional starting weights and bias (default zero). With `shuffle`, the first epoch's order
+ * comes from the `init` stream and each later one from the stream of the step that ends the previous epoch.
+ *
+ * @param problem The inputs, the labels $\pm 1$, the step $\eta$, whether to learn the bias, and whether to shuffle.
+ * @returns The algorithm, to run with `run` or `trace`; its start is `{ weights?, bias? }`.
+ *
+ * @example Four points: one mistake in the first epoch, none in the second
+ * const alg = perceptronSteps({ x: tensor([[1, 1], [2, 2], [-1, -1], [-2, -1]]), y: tensor([1, 1, -1, -1]) })
+ * for (const t of [1, 4, 8]) {
+ *   const s = run(alg, {}, t)
+ *   print('after', t, 'steps: w =', s.weights, ' b =', s.bias, ' mistakes =', s.mistakes, ' converged =', s.converged)
+ * }
  */
 export function perceptronSteps(
   problem: PerceptronProblem,
@@ -139,22 +163,44 @@ export function perceptronSteps(
 /** A fitted binary perceptron (labels 0/1). */
 export interface PerceptronModel
   extends Fitted<Tensor, Tensor>, Scores<Tensor>, Decides<Tensor, Tensor>, Trained<PerceptronState> {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'perceptron'
-  /** The weights and bias it predicts with: the final ones, or their averages with `average`. */
+  /** The weights it predicts with: the final ones, or their averages with `average`. */
   readonly weights: Tensor
+  /** The bias it predicts with, as `weights`. */
   readonly bias: number
+  /** Whether `weights` and `bias` are the averaged perceptron's. */
   readonly averaged: boolean
+  /** The mistakes made in training. */
   readonly mistakes: number
+  /** The completed passes over the data. */
   readonly epochs: number
+  /** Whether a pass ended without a mistake (otherwise the epoch limit was reached). */
   readonly converged: boolean
 }
 
 /**
- * The perceptron for labels 0/1 (mapped to ∓1): at most `epochs` passes (default 100), stopping after a pass without
- * mistakes. `score` is w·x + b [m]; `decide` is 1 where it is positive. With `average`, w and b are the averaged
- * perceptron's means over every step. With `shuffle`, `fit` needs a stream.
+ * The perceptron for labels 0 and 1 (mapped to $-1$ and $+1$): at most `epochs` passes, stopping after a pass without
+ * mistakes. `forward` and `score` are $\wvec^\top\xvec + b$ for each of $m$ rows; `decide` is 1 where it is positive.
+ * The run is kept in `training`, a trace that records the mistakes. `fit` throws `DomainError` for labels beyond 1.
+ *
+ * @param params `epochs`: the most passes over the data (default 100). `learningRate`: the step $\eta$ (default 1).
+ *   `intercept`: learn a bias (default true). `shuffle`: visit the rows in a fresh random order each pass, drawn from
+ *   `fit`'s stream (default `stream(0)`); default false, row order. `average`: predict with the averaged perceptron's
+ *   means over every step (default false).
+ * @returns The estimator: `fit({ x, y }, { stream, trace })` returns a `PerceptronModel`.
+ *
+ * @example Two separable classes: one mistake, then a clean pass
+ * // Two separable Gaussian classes of twenty points, centred at (2, 2) (label 1) and (-2, -2) (label 0).
+ * const positive = add(normals(stream(0), [20, 2]), tensor([2, 2]))
+ * const x = concat([positive, add(normals(stream(1), [20, 2]), tensor([-2, -2]))])
+ * const y = tensor(Array.from({ length: 40 }, (_, i) => (i < 20 ? 1 : 0)))
+ * const model = perceptron().fit({ x, y })
+ * print('weights =', model.weights, ' bias =', model.bias)
+ * print('mistakes =', model.mistakes, ' epochs =', model.epochs, ' converged =', model.converged)
+ * print('classes of (1, 1) and (-1, -1):', model.decide(tensor([[1, 1], [-1, -1]])))
  */
 export function perceptron(
   params: { epochs?: number; learningRate?: number; intercept?: boolean; shuffle?: boolean; average?: boolean } = {},

@@ -1,24 +1,29 @@
 /**
  * Label propagation for learning with label proportions (LP-LLP; Poyiadzi, Santos-Rodriguez and Twomey 2018, MLSP).
- * Points X = {x₁ … x_n} are split into disjoint bags B_k, and only each bag's class proportions π_k = (π_{k,1} … π_{k,c})
- * are known. Each point starts from its bag's proportions as a soft label, ŷ_i = π_k for x_i ∈ B_k; the scores then
- * spread over a similarity graph and are pulled back onto the bags' class masses, in turn:
+ * Points $\Xmat = \{\xvec_1, \dots, \xvec_n\}$ are split into disjoint bags $\Bcal_k$, and only each bag's class
+ * proportions $\pivec_k = (\pi_{k,1}, \dots, \pi_{k,c})$ are known. Each point starts from its bag's proportions as a
+ * soft label, $\hat{\yvec}_i = \pivec_k$ for $\xvec_i \in \Bcal_k$; the scores then spread over a similarity graph
+ * and are pulled back onto the bags' class masses, in turn:
  *
- * 1. W_ij = exp(−γ‖x_i − x_j‖²), W_ii = 0, and S = D⁻¹W (Algorithm 1 of the paper);
- * 2. propagate: F ← (1 − α)(I − αS)⁻¹F (the limit of label propagation started from F; Algorithm 2 step 2);
+ * 1. $W_{ij} = \exp(-\gamma \lVert \xvec_i - \xvec_j \rVert^2)$, $W_{ii} = 0$, and $\Smat = \Dmat^{-1}\Wmat$
+ *    (Algorithm 1 of the paper);
+ * 2. propagate: $\Fmat \leftarrow (1 - \alpha)(\Imat - \alpha\Smat)^{-1}\Fmat$ (the limit of label propagation
+ *    started from $\Fmat$; Algorithm 2 step 2);
  * 3. project: alternating projections (Boyd and Dattorro 2003) between the rows on the probability simplex and the
- *    bags' class masses Σ_{i ∈ B_k} F_{ic} = n_k π_{k,c} (the relaxed constraint A f = b of Eq. 2);
- * 4. repeat 2–3 until F stops changing; label each point by its largest score (sgn(f* − 0.5) for two classes).
+ *    bags' class masses $\sum_{i \in \Bcal_k} F_{ic} = n_k \pi_{k,c}$ (the relaxed constraint $\Amat\fvec = \bvec$ of
+ *    Eq. 2);
+ * 4. repeat 2–3 until $\Fmat$ stops changing; label each point by its largest score ($\sgn(f^* - 0.5)$ for two
+ *    classes).
  *
- * Readings of the paper (logged in the progress file): Algorithm 2 writes (I − αS)⁻¹ without the (1 − α) of
- * Algorithm 1; with it the propagation is an average (row-stochastic), so the scores stay on the simplex scale.
- * `normalise: false` uses the unscaled form. The two-class problem with scores f ∈ [0, 1]ⁿ is the case c = 2 of the
- * multiclass form (rows (1 − f, f)): the simplex projection of such a row clips f to [0, 1], and the bag constraint
- * shifts both columns by opposite amounts.
+ * Readings of the paper (logged in the progress file): Algorithm 2 writes $(\Imat - \alpha\Smat)^{-1}$ without the
+ * $(1 - \alpha)$ of Algorithm 1; with it the propagation is an average (row-stochastic), so the scores stay on the
+ * simplex scale. `normalise: false` uses the unscaled form. The two-class problem with scores $\fvec \in [0, 1]^n$ is
+ * the case $c = 2$ of the multiclass form (rows $(1 - f, f)$): the simplex projection of such a row clips $f$ to
+ * $[0, 1]$, and the bag constraint shifts both columns by opposite amounts.
  *
- * Also the paper's baselines and two classical ones, each transductive (trained on every point, labels for every point):
- * inverse calibration (InvCal; Rüping 2010), alternating ∝SVM (Yu et al. 2013), MeanMap (Quadrianto et al. 2009); the
- * proportion-loss classifier is `proportionClassifier`.
+ * Also the paper's baselines and two classical ones, each transductive (trained on every point, labels for every
+ * point): inverse calibration (InvCal; Rüping 2010), alternating $\propto$SVM (Yu et al. 2013), MeanMap (Quadrianto
+ * et al. 2009); the proportion-loss classifier is `proportionClassifier`. A bag index of $-1$ marks a point in no bag.
  */
 
 import type { MatrixLike, Size, Status } from 'aifn-compute/foundation/contracts'
@@ -60,19 +65,35 @@ import { proportionClassifier } from './classifiers'
 
 /** Bags and their class proportions as the algorithms read them. */
 export interface BagProportions {
-  /** Each point's bag (0 … B − 1), or −1 for a point in no bag. */
+  /** Each point's bag ($0, \dots, B - 1$), or $-1$ for a point in no bag. */
   readonly bags: Int32Array
-  /** π [B, C]. */
+  /** The proportions $\pi_{k,c}$, $B \times C$ row-major, each row summing to 1. */
   readonly proportions: Float64Array
+  /** The number of bags $B$. */
   readonly bagCount: Size
+  /** The number of classes $C$. */
   readonly classes: Size
-  /** Points per bag n_k. */
+  /** Points per bag, $n_k$. */
   readonly sizes: Float64Array
-  /** The class masses the bags fix, n_k π_{k,c} [B, C]. */
+  /** The class masses the bags fix, $n_k \pi_{k,c}$, $B \times C$ row-major. */
   readonly targets: Float64Array
 }
 
-/** Read bags and proportions, checking shapes; proportions rows are renormalised to sum to one. */
+/**
+ * Read bags and proportions, checking them: each row of proportions is renormalised to sum to one (a row of zeros
+ * becomes uniform). Throws `DomainError` for a bag index that is neither $-1$ nor in $0, \dots, B - 1$, or a negative
+ * proportion.
+ *
+ * @param bags Each point's bag index in $0, \dots, B - 1$, or $-1$ for a point in no bag.
+ * @param proportions The bags' class proportions, $B \times C$; $B$ and $C$ are read from its shape.
+ * @param where The caller's name, for error messages.
+ * @returns The bags with their normalised proportions, sizes and class masses.
+ *
+ * @example Two bags, a point in none, and a row of proportions that does not sum to one
+ * const info = readBags([0, 0, 1, 1, -1], [[1, 1], [0.25, 0.75]])
+ * print('proportions:', info.proportions)
+ * print('sizes:', info.sizes, ' class masses:', info.targets)
+ */
 export function readBags(bags: ArrayLike<number>, proportions: MatrixLike, where = 'readBags'): BagProportions {
   const P = dense.toMatrixF64(proportions, where)
   const B = P.m
@@ -99,7 +120,19 @@ export function readBags(bags: ArrayLike<number>, proportions: MatrixLike, where
   return { bags: b, proportions: pi, bagCount: B, classes: C, sizes, targets }
 }
 
-/** The class proportions [B, C] of bags given each point's true label: what an LLP oracle reveals. */
+/**
+ * The class proportions of bags given each point's true label: what an LLP oracle reveals. Points in no bag are
+ * skipped, and an empty bag gets the uniform distribution.
+ *
+ * @param bags Each point's bag index in $0, \dots, B - 1$, or a negative value for none.
+ * @param labels Each point's class in $0, \dots, C - 1$.
+ * @param bagCount The number of bags $B$.
+ * @param classes The number of classes $C$.
+ * @returns The proportions, $B \times C$.
+ *
+ * @example Two bags of labelled points
+ * print(bagProportionsOf([0, 0, 0, 1, 1, -1], [0, 1, 1, 1, 1, 0], 2, 2))
+ */
 export function bagProportionsOf(
   bags: ArrayLike<number>,
   labels: ArrayLike<number>,
@@ -121,11 +154,24 @@ export function bagProportionsOf(
 
 /**
  * Split labelled points into bags with given class proportions, as the paper's experiments do ("the data is first
- * generated … and then separated into the bags, respecting the desired bag proportions"): bag k gets `sizes[k]` points
- * (default: n split evenly, as scikit-learn's splits), of which round(sizes[k] π_{k,c}) of class c (largest remainders),
- * drawn without replacement from each class in a random order. When a class runs out, the bag is filled from the class
- * with the most points left, so the realised proportions (returned) can differ from the requested ones. Points not
- * placed (when the sizes sum to less than n) get bag −1.
+ * generated … and then separated into the bags, respecting the desired bag proportions"): bag $k$ gets `sizes[k]`
+ * points (default: $n$ split evenly, as scikit-learn's splits), of which `sizes[k]` times $\pi_{k,c}$ of class $c$,
+ * rounded by largest remainders, drawn without replacement from each class in a random order. When a class runs out,
+ * the bag is filled from the class with the most points left, so the realised proportions (returned) can differ from
+ * the requested ones. Points not placed (when the sizes sum to less than $n$) get bag $-1$. Throws `ShapeError` when
+ * there is not one size per bag and `DomainError` when the sizes add up to more than $n$.
+ *
+ * @param s The stream that orders each class's points (class $c$ uses `child(s, 'class', c)`).
+ * @param labels Each point's class in $0, \dots, C - 1$.
+ * @param proportions The requested proportions, $B \times C$ (rows renormalised; a row of zeros is uniform).
+ * @param options `sizes`, the number of points in each bag.
+ * @returns Each point's bag, and the proportions the bags realise ($B \times C$).
+ *
+ * @example Twelve points of two classes into a mostly-0 and a mostly-1 bag
+ * const labels = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+ * const { bags, proportions } = bagsByProportion(stream(0), labels, [[0.75, 0.25], [0.25, 0.75]])
+ * print('bags:', bags)
+ * print('realised proportions:', proportions)
  */
 export function bagsByProportion(
   s: Stream,
@@ -171,48 +217,77 @@ export function bagsByProportion(
 
 /** Options of LP-LLP. */
 export interface LpLlpOptions {
-  /** α ∈ (0, 1): the weight of the neighbours against the point's own score (default 0.5, as the paper). */
+  /** $\alpha \in (0, 1)$: the weight of the neighbours against the point's own score (default 0.5, as the paper). */
   alpha?: number
-  /** γ of the similarity exp(−γ‖x_i − x_j‖²) (default 1). */
+  /** $\gamma$ of the similarity $\exp(-\gamma \lVert \xvec_i - \xvec_j \rVert^2)$ (default 1). */
   gamma?: number
-  /** Keep only each point's k nearest neighbours (symmetrised); default 0, the full graph as in the paper. */
+  /** Keep only each point's $k$ nearest neighbours (symmetrised); default 0, the full graph as in the paper. */
   neighbours?: Size
-  /** Use (1 − α)(I − αS)⁻¹ (default true); false uses (I − αS)⁻¹ as Algorithm 2 prints it. */
+  /**
+   * Use $(1 - \alpha)(\Imat - \alpha\Smat)^{-1}$ (default true); false uses $(\Imat - \alpha\Smat)^{-1}$ as
+   * Algorithm 2 prints it.
+   */
   normalise?: boolean
-  /** Stop when an outer step moves F by less than this in the max norm (default 1e-4). */
+  /** Stop when an outer step moves $\Fmat$ by less than this in the max norm (default 1e-4). */
   tolerance?: number
-  /** Tolerance and cycle limit of the alternating projections (default 1e-9 and 2000). */
+  /** Tolerance of the alternating projections (default 1e-9). */
   projectionTolerance?: number
+  /** The most cycles of the alternating projections per step (default 2000). */
   maxProjections?: Size
 }
 
 /** One state of LP-LLP: the scores after t propagate-and-project steps. */
 export interface LpLlpState extends Status {
-  /** F [n, C] after the projection: rows on the simplex, bag masses fixed. At t = 0, the bags' proportions. */
+  /**
+   * $\Fmat$, $n \times C$, after the projection: rows on the simplex, bag masses fixed. At $t = 0$, the bags'
+   * proportions (uniform for a point in no bag).
+   */
   readonly scores: Tensor
-  /** F [n, C] after the propagation of this step, before the projection (equal to `scores` at t = 0). */
+  /**
+   * $\Fmat$, $n \times C$, after the propagation of this step, before the projection (equal to `scores` at $t = 0$).
+   */
   readonly propagated: Tensor
   /** The predicted class of every point (argmax of its row; int32). */
   readonly labels: Tensor
-  /** The bags' class masses Σ_{i ∈ B_k} F_{ic} after the projection [B, C], and before it. */
+  /** The bags' class masses $\sum_{i \in \Bcal_k} F_{ic}$ after the projection, $B \times C$. */
   readonly mass: Tensor
+  /** The same before the projection. */
   readonly propagatedMass: Tensor
-  /** max |mass − n_k π_k| before the projection: how far the propagation pulled the bags off their constraints. */
+  /**
+   * $\max \lvert \text{mass} - n_k \pi_{k,c} \rvert$ before the projection: how far the propagation pulled the bags off
+   * their constraints.
+   */
   readonly violation: number
   /** Alternating-projection cycles this step took. */
   readonly projections: number
-  /** max |F_t − F_{t−1}| (Infinity at t = 0). */
+  /** $\max \lvert \Fmat_t - \Fmat_{t-1} \rvert$ (Infinity at $t = 0$). */
   readonly change: number
 }
 
-/** The graph LP-LLP propagates over: the affinity W, the random-walk matrix S and the propagation matrix P. */
+/** The graph LP-LLP propagates over, each matrix $n \times n$. */
 export interface LpLlpGraph {
+  /** The affinity $\Wmat$, with a zero diagonal. */
   readonly affinity: Tensor
+  /** The random-walk matrix $\Smat = \Dmat^{-1}\Wmat$. */
   readonly walk: Tensor
+  /** The propagation matrix $\Pmat = (1 - \alpha)(\Imat - \alpha\Smat)^{-1}$ (or $(\Imat - \alpha\Smat)^{-1}$). */
   readonly propagation: Tensor
 }
 
-/** Build LP-LLP's graph from points: W, S = D⁻¹W and P = (1 − α)(I − αS)⁻¹ (or (I − αS)⁻¹). */
+/**
+ * Build LP-LLP's graph from points: $\Wmat$, $\Smat = \Dmat^{-1}\Wmat$ and
+ * $\Pmat = (1 - \alpha)(\Imat - \alpha\Smat)^{-1}$ (or $(\Imat - \alpha\Smat)^{-1}$ without `normalise`).
+ *
+ * @param x The points, $n \times d$.
+ * @param options `alpha`, `gamma`, `neighbours` and `normalise` of `LpLlpOptions`; the rest is unused.
+ * @returns The affinity, random-walk and propagation matrices.
+ *
+ * @example Three points on a line: the scaled propagation matrix averages
+ * const g = lpllpGraph([[0], [1], [3]])
+ * print('S =', g.walk)
+ * print('P =', g.propagation)
+ * print('row sums of P:', sum(g.propagation, 1))
+ */
 export function lpllpGraph(x: MatrixLike, options: LpLlpOptions = {}): LpLlpGraph {
   const { alpha = 0.5, gamma = 1, neighbours = 0, normalise = true } = options
   const affinity = pointAffinity(x, { gamma, neighbours })
@@ -220,6 +295,14 @@ export function lpllpGraph(x: MatrixLike, options: LpLlpOptions = {}): LpLlpGrap
   return { affinity, walk, propagation: spreadingResolvent(walk, alpha, { scaled: normalise }) }
 }
 
+/**
+ * The argmax of each row (the first column on a tie).
+ *
+ * @param F The scores, $n \times C$ row-major.
+ * @param n The number of rows.
+ * @param C The number of columns.
+ * @returns The column of each row's largest score.
+ */
 function argmaxRows(F: Float64Array, n: number, C: number): Int32Array {
   return Int32Array.from({ length: n }, (_, i) => {
     let best = 0
@@ -228,6 +311,13 @@ function argmaxRows(F: Float64Array, n: number, C: number): Int32Array {
   })
 }
 
+/**
+ * The bags' class masses $\sum_{i \in \Bcal_k} F_{ic}$ (points in no bag are left out).
+ *
+ * @param F The scores, $n \times C$ row-major.
+ * @param info The bags.
+ * @returns The masses, $B \times C$ row-major.
+ */
 function bagMass(F: Float64Array, info: BagProportions): Float64Array {
   const { bags, bagCount: B, classes: C } = info
   const mass = new Float64Array(B * C)
@@ -236,7 +326,16 @@ function bagMass(F: Float64Array, info: BagProportions): Float64Array {
   return mass
 }
 
-/** The projection of LP-LLP: rows onto the simplex, alternated with the bags' class masses. */
+/**
+ * The projection of LP-LLP: rows onto the simplex, alternated with the bags' class masses (the entries of points in no
+ * bag are free of the mass constraint).
+ *
+ * @param info The bags, with the class masses they fix.
+ * @param n The number of points.
+ * @param tolerance The alternating projections' tolerance.
+ * @param maxCycles Their most cycles.
+ * @returns A function from scores ($n \times C$ row-major) to the projected scores `F` and the `cycles` taken.
+ */
 function projector(info: BagProportions, n: number, tolerance: number, maxCycles: number) {
   const C = info.classes
   // Entry (i, c) belongs to the group (bag of i, c); entries of points in no bag are free.
@@ -254,9 +353,28 @@ function projector(info: BagProportions, n: number, tolerance: number, maxCycles
 }
 
 /**
- * LP-LLP as steps (module notes). `x` [n, d] holds the points, `bags` each point's bag (−1: in no bag; such a point
- * starts from the uniform distribution and is not constrained) and `proportions` [B, C] each bag's class proportions.
- * Step 0 is F(0) = ŷ, each point's bag proportions; each step propagates, then projects.
+ * LP-LLP as steps (see the file's notes). Step 0 is $\Fmat^{(0)} = \hat{\Ymat}$, each point's bag proportions; each
+ * step propagates, then projects, and the state is `converged` when a step moves $\Fmat$ by less than `tolerance`.
+ * Throws `ShapeError` unless there is one bag index per point, and as `readBags` does.
+ *
+ * @param x The points, $n \times d$.
+ * @param bags Each point's bag in $0, \dots, B - 1$, or $-1$ for none (such a point starts from the uniform
+ *   distribution and is not constrained).
+ * @param proportions Each bag's class proportions, $B \times C$.
+ * @param options The graph, the propagation and the stopping rules.
+ * @returns The algorithm, to run with `run` or `trace` (its input is unused).
+ *
+ * @example How far each propagation pulls the bags off their proportions, step by step
+ * const s = stream(20)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const { bags, proportions } = bagsByProportion(stream(21), y, [[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+ * const alg = lpllpSteps(x, bags, proportions)
+ * for (const t of [0, 1, 2, 5]) {
+ *   const st = run(alg, undefined, t)
+ *   const hit = y.filter((c, i) => st.labels.data[i] === c).length / y.length
+ *   print('step', st.t, ' pulled off by', st.violation, ' change', st.change, ' accuracy', hit)
+ * }
  */
 export function lpllpSteps(
   x: MatrixLike,
@@ -309,7 +427,24 @@ export function lpllpSteps(
   }
 }
 
-/** LP-LLP run to convergence (at most `maxSteps` propagate-and-project steps, default 300): the final state. */
+/**
+ * LP-LLP run to convergence (at most `maxSteps` propagate-and-project steps, default 300): the final state.
+ *
+ * @param x The points, $n \times d$.
+ * @param bags Each point's bag in $0, \dots, B - 1$, or $-1$ for none.
+ * @param proportions Each bag's class proportions, $B \times C$.
+ * @param options The options of `lpllpSteps`, and `maxSteps`.
+ * @returns The final state: scores, labels and the bags' masses.
+ *
+ * @example Label every point from four bags' proportions
+ * const s = stream(20)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const { bags, proportions } = bagsByProportion(stream(21), y, [[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+ * const accuracy = (labels) => y.filter((c, i) => labels[i] === c).length / y.length
+ * const fit = lpllp(x, bags, proportions)
+ * print('steps:', fit.t, ' accuracy:', accuracy(fit.labels.data))
+ */
 export function lpllp(
   x: MatrixLike,
   bags: ArrayLike<number>,
@@ -321,9 +456,27 @@ export function lpllp(
 }
 
 /**
- * The paper's choice of γ: run LP-LLP for each γ on a grid and keep the one with the largest smoothness score
- * Σ_c f̄_cᵀ S f̄_c, where f̄ = F* − 1/C is the converged scores centred on the uniform distribution (S of that γ). A
- * smooth labelling that is confident scores high; the uniform scores of an over-smoothed graph score zero.
+ * The paper's choice of $\gamma$: run LP-LLP for each $\gamma$ on a grid and keep the one with the largest smoothness
+ * score $\sum_c \bar{\fvec}_c^\top \Smat \bar{\fvec}_c$, where $\bar{\Fmat} = \Fmat^* - 1/C$ is the converged scores
+ * centred on the uniform distribution ($\Smat$ of that $\gamma$). A smooth labelling that is confident scores high; the
+ * uniform scores of an over-smoothed graph score zero. A tie keeps the earlier $\gamma$.
+ *
+ * @param x The points, $n \times d$.
+ * @param bags Each point's bag in $0, \dots, B - 1$, or $-1$ for none.
+ * @param proportions Each bag's class proportions, $B \times C$.
+ * @param gammas The grid of $\gamma$ to try (not empty).
+ * @param options The options of `lpllp`; their `gamma` is replaced by each of the grid.
+ * @returns The chosen `gamma`, the smoothness score of each, and the LP-LLP state of the chosen one.
+ *
+ * @example Pick the graph's scale
+ * const s = stream(20)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const { bags, proportions } = bagsByProportion(stream(21), y, [[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+ * const accuracy = (labels) => y.filter((c, i) => labels[i] === c).length / y.length
+ * const search = lpllpGammaSearch(x, bags, proportions, [0.1, 1, 10], { maxSteps: 20 })
+ * print('scores:', search.scores, ' chosen gamma:', search.gamma)
+ * print('accuracy with it:', accuracy(search.best.labels.data))
  */
 export function lpllpGammaSearch(
   x: MatrixLike,
@@ -355,22 +508,50 @@ export function lpllpGammaSearch(
 
 // ── Baselines ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Labels for every point from a label-proportion baseline, with its decision values (two classes: f > 0 is class 1). */
+/** Labels for every point from a label-proportion baseline, with its decision values. */
 export interface LlpPrediction {
+  /** The class of every point. */
   readonly labels: Int32Array
+  /** The decision value of every point (two classes: $f > 0$ leans to class 1). */
   readonly decision: Float64Array
 }
 
+/**
+ * Throws `DomainError` unless the bags have two classes, as the paper's baselines need.
+ *
+ * @param info The bags.
+ * @param where The caller's name, for error messages.
+ */
 const binaryOnly = (info: BagProportions, where: string) => {
   if (info.classes !== 2) throw new DomainError(where, `${where}: two classes only, as in the paper`)
 }
 
 /**
- * Inverse calibration (InvCal; Rüping 2010, ICML): each bag becomes a super-instance at its mean in the kernel's feature
- * space, m_k = (1/n_k) Σ_{i ∈ B_k} φ(x_i), with target t_k = −log(1/π_{k,1} − 1); an ε-insensitive support vector
- * regression f(x) = Σ_k β_k ⟨m_k, φ(x)⟩ + b fits the targets, and a point is labelled 1 when f(x) > 0 (its calibrated
- * probability σ(f(x)) exceeds ½). Solved in the dual, a QP in the 2B variables α⁺, α⁻ ∈ [0, C] with Σ(α⁺ − α⁻) = 0.
- * Proportions are clipped to [0.001, 0.999] so the targets are finite.
+ * Inverse calibration (InvCal; Rüping 2010, ICML): each bag becomes a super-instance at its mean in the kernel's
+ * feature space, $\mvec_k = \frac{1}{n_k} \sum_{i \in \Bcal_k} \phi(\xvec_i)$, with target
+ * $t_k = -\log(1/\pi_{k,1} - 1)$; an $\varepsilon$-insensitive support vector regression
+ * $f(\xvec) = \sum_k \beta_k \langle \mvec_k, \phi(\xvec) \rangle + b$ fits the targets, and a point is labelled 1
+ * when $f(\xvec) > 0$ (its calibrated probability $\sigma(f(\xvec))$ exceeds $\tfrac{1}{2}$). Solved in the dual
+ * (interior point), a QP in the $2B$ variables $\alpha^+, \alpha^- \in [0, C]$ with
+ * $\sum_k (\alpha^+_k - \alpha^-_k) = 0$. Proportions are clipped to $[0.001, 0.999]$ so the targets are finite. Two
+ * classes only (`DomainError` otherwise).
+ *
+ * @param x The points, $n \times d$.
+ * @param bags Each point's bag in $0, \dots, B - 1$, or $-1$ for none (still labelled).
+ * @param proportions Each bag's class proportions, $B \times 2$.
+ * @param options `gamma`, the RBF kernel's $\gamma$ (default 1); `C`, the box bound (default 10); and `epsilon`, the
+ *   tube's half-width $\varepsilon$ (default 0.01).
+ * @returns The labels and decision values $f(\xvec)$ of every point.
+ *
+ * @example InvCal on four bags
+ * const s = stream(20)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const { bags, proportions } = bagsByProportion(stream(21), y, [[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+ * const accuracy = (labels) => y.filter((c, i) => labels[i] === c).length / y.length
+ * const r = inverseCalibration(x, bags, proportions)
+ * print('accuracy:', accuracy(r.labels))
+ * print('decision values of the first four points:', r.decision.slice(0, 4), ' their classes:', y.slice(0, 4))
  */
 export function inverseCalibration(
   x: MatrixLike,
@@ -455,9 +636,17 @@ export function inverseCalibration(
 }
 
 /**
- * The soft-margin kernel SVM in the dual with the bias folded into the kernel (k(x, x′) + 1, a regularised bias as in
- * LIBLINEAR), so the dual is a box-constrained QP: minimise ½αᵀ(yyᵀ ∘ (K + 1))α − 1ᵀα over 0 ≤ α ≤ C, solved by
- * `boxQuadprog` (warm-started). Returns α and the decision values f(x_i) = Σ_j α_j y_j (K_ij + 1).
+ * The soft-margin kernel SVM in the dual with the bias folded into the kernel ($k(\xvec, \xvec') + 1$, a regularised
+ * bias as in LIBLINEAR), so the dual is a box-constrained QP: minimise
+ * $\tfrac{1}{2}\alphavec^\top(\yvec\yvec^\top \circ (\Kmat + 1))\alphavec - \ones^\top\alphavec$ over
+ * $0 \le \alpha_i \le C$, solved by `boxQuadprog` (warm-started; at most 200 steps).
+ *
+ * @param K The kernel matrix $\Kmat$, $n \times n$ row-major.
+ * @param y The labels, 0 or 1 (taken as $-1$ and $+1$).
+ * @param C The box bound $C$.
+ * @param warm A starting $\alphavec$ (default: the solver's own).
+ * @returns `alpha`, the dual solution; `decision`, $f(\xvec_i) = \sum_j \alpha_j y_j (K_{ij} + 1)$; and `wNorm`,
+ *   $\lVert \wvec \rVert^2 = \sum_i \alpha_i y_i f(\xvec_i)$ (the bias's square included).
  */
 function svmDual(K: Float64Array, y: Int32Array, C: number, warm?: Float64Array) {
   const n = y.length
@@ -486,12 +675,34 @@ function svmDual(K: Float64Array, y: Int32Array, C: number, warm?: Float64Array)
 }
 
 /**
- * Alternating ∝SVM (alter-∝SVM; Yu et al. 2013, ICML, Algorithm 1) in the limit of a hard proportion constraint: start
- * from random labels with each bag's proportion; repeat: fit a soft-margin SVM with the RBF kernel exp(−γ‖x − x′‖²) to
- * the current labels, then relabel each bag by giving class 1 to its round(n_k π_{k,1}) points with the largest
- * decision values (the labels that minimise the hinge loss under the proportion); stop when no label changes. Of
- * `restarts` random starts, the labelling with the smallest SVM objective ½‖w‖² + C Σ hinge is kept. The paper's
- * annealing of the label weight is left out, and the SVM's bias is folded into the kernel (logged).
+ * Alternating $\propto$SVM (alter-$\propto$SVM; Yu et al. 2013, ICML, Algorithm 1) in the limit of a hard proportion
+ * constraint: start from random labels with each bag's proportion; repeat: fit a soft-margin SVM with the RBF kernel
+ * $\exp(-\gamma \lVert \xvec - \xvec' \rVert^2)$ to the current labels, then relabel each bag by giving class 1 to its
+ * $\operatorname{round}(n_k \pi_{k,1})$ points with the largest decision values (the labels that minimise the hinge
+ * loss under the proportion), and each point in no bag by the sign of its decision value; stop when no label changes
+ * or after `maxRounds` rounds. Of `restarts` random starts, the labelling with the smallest SVM objective
+ * $\tfrac{1}{2}\lVert \wvec \rVert^2 + C \sum \text{hinge}$ is kept. The paper's annealing of the label weight is left
+ * out, and the SVM's bias is folded into the kernel (logged). Two classes only (`DomainError` otherwise).
+ *
+ * @param s The stream of the random starts (and of the flips that keep both classes present).
+ * @param x The points, $n \times d$.
+ * @param bags Each point's bag in $0, \dots, B - 1$, or $-1$ for none.
+ * @param proportions Each bag's class proportions, $B \times 2$.
+ * @param options `gamma`, the RBF kernel's $\gamma$ (default 1); `C`, the SVM's box bound (default 1); `restarts`, the
+ *   random starts (default 5); and `maxRounds`, the most fit-and-relabel rounds per start (default 20).
+ * @returns The kept labels, the decision values of the last SVM fitted from that start, and its objective (on the
+ *   labels it was fitted to).
+ *
+ * @example alter-SVM on four bags, with a narrow and a wide kernel
+ * const s = stream(20)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const { bags, proportions } = bagsByProportion(stream(21), y, [[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+ * const accuracy = (labels) => y.filter((c, i) => labels[i] === c).length / y.length
+ * for (const gamma of [1, 0.1]) {
+ *   const r = alterProportionSvm(stream(22), x, bags, proportions, { gamma, restarts: 2 })
+ *   print('gamma =', gamma, ' accuracy:', accuracy(r.labels), ' objective:', r.objective)
+ * }
  */
 export function alterProportionSvm(
   s: Stream,
@@ -552,7 +763,17 @@ export function alterProportionSvm(
   return best!
 }
 
-/** Random Fourier features of the RBF kernel exp(−γ‖x − x′‖²): z(x) = √(2/D) cos(Ωᵀx + b), Ω ~ N(0, 2γI). */
+/**
+ * Random Fourier features of the RBF kernel $\exp(-\gamma \lVert \xvec - \xvec' \rVert^2)$ (Rahimi and Recht, 2007):
+ * $\zvec(\xvec) = \sqrt{2/D} \cos(\Omegamat^\top \xvec + \bvec)$, $\Omegamat \sim \Gauss(\zeros, 2\gamma\Imat)$,
+ * $b_k \sim \Unif[0, 2\pi)$.
+ *
+ * @param s The stream the frequencies and phases are drawn from.
+ * @param X The points: `data` row-major, `m` rows and `n` columns.
+ * @param D The number of features $D$.
+ * @param gamma The kernel's $\gamma$.
+ * @returns The features, $m \times D$ row-major.
+ */
 function fourierFeatures(
   s: Stream,
   X: { data: ArrayLike<number>; m: number; n: number },
@@ -572,12 +793,35 @@ function fourierFeatures(
 }
 
 /**
- * MeanMap (Quadrianto, Smola, Caetano and Le 2009, JMLR): a conditional exponential family p(y | x, θ) ∝ exp(θ_yᵀφ(x))
- * fitted without labels. Assuming p(x | y, bag) = p(x | y), each bag's mean feature is a mixture of the class means,
- * m_k = Σ_y π_{k,y} μ_y, so the class means are the least-squares solution of M = ΠU (needs at least C bags); the
- * sufficient statistic μ_XY = Σ_y p(y) e_y ⊗ μ_y then replaces the labels in the regularised log-likelihood
- * Σ_i log Σ_y exp(θ_yᵀφ(x_i)) − n μ_XYᵀθ + λ‖θ‖², minimised by L-BFGS. φ is the identity with a constant (`linear`) or
- * D random Fourier features of exp(−γ‖x − x′‖²) (`rbf`, default).
+ * MeanMap (Quadrianto, Smola, Caetano and Le 2009, JMLR): a conditional exponential family
+ * $p(y \mid \xvec, \thetavec) \propto \exp(\thetavec_y^\top \phi(\xvec))$ fitted without labels. Assuming
+ * $p(\xvec \mid y, \text{bag}) = p(\xvec \mid y)$, each bag's mean feature is a mixture of the class means,
+ * $\mvec_k = \sum_y \pi_{k,y} \muvec_y$, so the class means are the least-squares solution of
+ * $\Mmat = \Pimat\Umat$ (needs at least $C$ bags, or `DomainError`); the sufficient statistic
+ * $\muvec_{XY} = \sum_y p(y) \evec_y \otimes \muvec_y$ then replaces the labels in the regularised negative
+ * log-likelihood $\sum_i \log \sum_y \exp(\thetavec_y^\top \phi(\xvec_i)) - n \muvec_{XY}^\top \thetavec + \lambda
+ * \lVert \thetavec \rVert^2$, minimised by L-BFGS from $\thetavec = \zeros$. $\phi$ is the identity with a constant
+ * (`linear`) or $D$ random Fourier features of $\exp(-\gamma \lVert \xvec - \xvec' \rVert^2)$ (`rbf`, default), with
+ * the constant too. The class prior $p(y)$ is the bags' proportions weighted by their sizes.
+ *
+ * @param s The stream of the random Fourier features.
+ * @param x The points, $n \times d$.
+ * @param bags Each point's bag in $0, \dots, B - 1$, or $-1$ for none.
+ * @param proportions Each bag's class proportions, $B \times C$.
+ * @param options `features`, `linear` or `rbf` (default); `gamma`, the RBF kernel's $\gamma$ (default 1); `dimension`,
+ *   the number $D$ of Fourier features (default 100); `l2`, $\lambda$ (default 0.01); and `steps`, the most L-BFGS
+ *   steps (default 200).
+ * @returns The labels (argmax of the scores), the decision values (for two classes the class-1 score minus the class-0
+ *   score, otherwise zeros), and the scores $\thetavec_y^\top \phi(\xvec_i)$, $n \times C$.
+ *
+ * @example MeanMap with linear features on four bags
+ * const s = stream(20)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const { bags, proportions } = bagsByProportion(stream(21), y, [[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+ * const accuracy = (labels) => y.filter((c, i) => labels[i] === c).length / y.length
+ * const r = meanMap(stream(22), x, bags, proportions, { features: 'linear' })
+ * print('accuracy:', accuracy(r.labels))
  */
 export function meanMap(
   s: Stream,
@@ -644,42 +888,73 @@ export function meanMap(
 
 // ── Comparison ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The LLP methods {@link llpComparison} runs. */
+/**
+ * The LLP methods {@link llpComparison} runs: LP-LLP, InvCal, alter-$\propto$SVM, MeanMap and the proportion-loss
+ * classifier.
+ */
 export type LlpMethod = 'lpllp' | 'invcal' | 'alter-svm' | 'meanmap' | 'proportion-loss'
 
 /** Options of {@link llpComparison}. */
 export interface LlpComparisonOptions {
   /**
-   * One labelled dataset per repeat (features [n, d] and labels 0/1), e.g. draws of the Gaussian XOR (the paper's
-   * Table 1) or the half-kernel (Table 2) from `aifn-methods/data/synthetic`.
+   * One labelled dataset per repeat (features $n \times d$ and labels 0/1), e.g. draws of the Gaussian XOR (the
+   * paper's Table 1) or the half-kernel (Table 2) from `aifn-methods/data/synthetic`.
    */
   datasets: readonly { x: Tensor; y: Tensor }[]
-  /** Bag sizes to try (each run splits the n points into ⌈n / size⌉ bags); default [75, 30, 10]. */
+  /**
+   * Bag sizes to try (each run splits the $n$ points into $\lceil n / \text{size} \rceil$ bags); default
+   * $[75, 30, 10]$.
+   */
   bagSizes?: readonly number[]
-  /** Bag purities p: bags alternate proportions p and 1 − p of class 1 (0.5: no information); default [0.6, 0.75, 0.9]. */
+  /**
+   * Bag purities $p$: bags alternate proportions $p$ and $1 - p$ of class 1 (0.5: no information); default
+   * $[0.6, 0.75, 0.9]$.
+   */
   purities?: readonly number[]
+  /** The methods to run (default all five). */
   methods?: readonly LlpMethod[]
-  /** γ of LP-LLP's graph and of the RBF kernels of the baselines (default 4). */
+  /** $\gamma$ of LP-LLP's graph and of the RBF kernels of the baselines (default 4). */
   gamma?: number
+  /** Seed of the bags, the baselines' random draws and the proportion-loss classifier's weights (default 0). */
   seed?: number | string
 }
 
 /** The progress and results of {@link llpComparison}: mean and sd of the accuracy per method, bag size and purity. */
 export interface LlpComparison {
+  /** The methods run. */
   readonly methods: readonly LlpMethod[]
+  /** The bag sizes tried. */
   readonly bagSizes: readonly number[]
+  /** The purities tried. */
   readonly purities: readonly number[]
-  /** mean[m][b][p] and sd[m][b][p] over the repeats done so far (NaN before the first). */
+  /** `mean[m][b][p]`: the mean accuracy over the repeats done so far (NaN before the first). */
   readonly mean: number[][][]
+  /** `sd[m][b][p]`: the sample standard deviation of the same (0 after one repeat, NaN before the first). */
   readonly sd: number[][][]
+  /** Cells (bag size, purity and dataset) done so far. */
   readonly done: number
+  /** Cells in all. */
   readonly total: number
 }
 
 /**
  * Accuracy of LP-LLP against the baselines as bag size and purity vary, as a generator: one partial result per cell
- * (bag size × purity × dataset), so a figure fills in while it runs. Every method sees the same bags and proportions,
- * and is scored on all n points (transductive, as the paper).
+ * (dataset, bag size and purity), so a figure fills in while it runs. Every method sees the same bags (made by
+ * `bagsByProportion`) and the proportions they realise, and is scored on all $n$ points (transductive, as the paper).
+ * alter-$\propto$SVM runs with two restarts, and the proportion-loss classifier is an MLP with 16 hidden units trained
+ * for 150 steps.
+ *
+ * @param options The datasets, the grid of bag sizes and purities, the methods, $\gamma$ and the seed.
+ * @returns A generator of partial results, one after each cell; it returns the final one.
+ *
+ * @example LP-LLP and MeanMap on one small dataset, one bag size and one purity
+ * const s = stream(23)
+ * const y = Array.from({ length: 40 }, (_, i) => i % 2)
+ * const x = y.map((c) => [normal(s, c === 1 ? 1.5 : -1.5, 1), normal(s, 0, 1)])
+ * const options = { bagSizes: [10], purities: [0.8], methods: ['lpllp', 'meanmap'], gamma: 1 }
+ * let last
+ * for (const r of llpComparison({ datasets: [{ x: tensor(x), y: tensor(y) }], ...options })) last = r
+ * print(last.methods, ' mean accuracy:', last.mean.map((m) => m[0][0]), ' cells:', last.done, 'of', last.total)
  */
 export function* llpComparison(options: LlpComparisonOptions): Generator<LlpComparison, LlpComparison> {
   const {

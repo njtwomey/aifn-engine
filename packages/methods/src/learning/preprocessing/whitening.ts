@@ -1,4 +1,12 @@
-/** PCA and ZCA whitening. */
+/**
+ * PCA and ZCA whitening: a linear map $\zvec = \Wmat^\top (\xvec - \bar{\xvec})$ of each row to uncorrelated features
+ * of unit variance.
+ *
+ * Both come from the eigendecomposition $\Cmat = \Vmat \Lambdamat \Vmat^\top$ of the sample covariance (divided by
+ * $n - 1$). PCA whitening projects onto the leading eigenvectors and rescales each (scikit-learn's `PCA(whiten=True)`);
+ * ZCA whitening rotates back to the original axes, giving the whitened data closest to the input (Bell and Sejnowski,
+ * 1997; Kessy, Lewin and Strimmer, 2018, "Optimal whitening and decorrelation", The American Statistician 72).
+ */
 
 import { eigh } from 'aifn-compute/numerics/linalg'
 import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -12,25 +20,62 @@ export interface Whitening extends FittedTransform, Invertible {
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'whitening'
+  /** `'pca'` (project onto the leading axes) or `'zca'` (rotate back to the input axes). */
   readonly method: 'pca' | 'zca'
-  /** Column means [d]. */
+  /** The column means $\bar{\xvec}$, $d$ values. */
   readonly mean: Tensor
-  /** Principal axes as columns [d, k], in order of decreasing variance, each signed so its largest entry is positive. */
+  /**
+   * The principal axes as columns, $d \times k$, in order of decreasing variance, each signed (as `eigh` signs them)
+   * so that its entry of largest magnitude is positive.
+   */
   readonly components: Tensor
-  /** Variances along the kept axes (sample covariance eigenvalues, ÷ (n − 1)), [k], descending. */
+  /** The variances along the kept axes (sample covariance eigenvalues, divided by $n - 1$), $k$ values, descending. */
   readonly explainedVariance: Tensor
-  /** The matrix W with z = (x − mean) W: [d, k] for PCA, [d, d] for ZCA. */
+  /**
+   * The matrix $\Wmat$ with $\zvec^\top = (\xvec - \bar{\xvec})^\top \Wmat$ for each row: $d \times k$ for PCA,
+   * $d \times d$ for ZCA.
+   */
   readonly whitener: Tensor
-  /** True when a kept eigenvalue plus `epsilon` is not above d·ε_machine·λ_max: the whitened values are then unreliable. */
+  /**
+   * True when a kept eigenvalue plus `epsilon` is not above $d \varepsilon \lambda_{\max}$ ($\varepsilon$ the machine
+   * epsilon): the whitened values are then unreliable.
+   */
   readonly singular: boolean
 }
 
 /**
- * Whitening: z = (x − x̄) W with W such that z has identity sample covariance. With C = V Λ Vᵀ the sample covariance
- * (÷ (n − 1)), PCA whitening keeps the top `components` axes, W = V_k (Λ_k + εI)^{−½} (scikit-learn's `PCA(whiten=True)`,
- * with the same component signs); ZCA whitening rotates back, W = V (Λ + εI)^{−½} Vᵀ, the whitening closest to the
- * identity (Bell and Sejnowski, 1997; Kessy, Lewin and Strimmer, 2018, "Optimal whitening and decorrelation", The
- * American Statistician 72). `inverse` maps back (exactly when all axes are kept, else to the rank-k reconstruction).
+ * Whitening: each row becomes $\zvec^\top = (\xvec - \bar{\xvec})^\top \Wmat$, with $\Wmat$ such that the whitened
+ * training rows have identity sample covariance. With $\Cmat = \Vmat \Lambdamat \Vmat^\top$ the sample covariance
+ * (divided by $n - 1$), PCA whitening keeps the top `components` axes,
+ * $\Wmat = \Vmat_k (\Lambdamat_k + \epsilon \Imat)^{-1/2}$ (scikit-learn's `PCA(whiten=True)`, with the same component
+ * signs); ZCA whitening rotates back, $\Wmat = \Vmat (\Lambdamat + \epsilon \Imat)^{-1/2} \Vmat^\top$, the whitening
+ * closest to the identity (Bell and Sejnowski, 1997; Kessy, Lewin and Strimmer, 2018, "Optimal whitening and
+ * decorrelation", The American Statistician 72). `inverseTransform` maps back (exactly when all axes are kept, else to
+ * the rank-$k$ reconstruction). `fit` throws `DomainError` for fewer than two rows; a covariance too close to singular
+ * is reported in `singular`, not thrown.
+ *
+ * @param options The kind of whitening, how many axes to keep, and the regularisation.
+ * @param options.method `'pca'` (the $k$ leading axes, as rotated coordinates) or `'zca'` (all $d$ axes, rotated back
+ *   to the input's).
+ * @param options.components The number $k$ of axes PCA keeps (all $d$ when left out, and at most $d$); ignored by ZCA.
+ * @param options.epsilon The $\epsilon \ge 0$ added to every eigenvalue before the inverse square root, which bounds
+ *   the scaling of low-variance axes (the output covariance is then $\Lambdamat (\Lambdamat + \epsilon \Imat)^{-1}$,
+ *   not $\Imat$).
+ * @returns An estimator whose `fit({ x })` on an $n \times d$ matrix returns the fitted `Whitening`.
+ *
+ * @example PCA whitening of correlated points gives an identity covariance
+ * const x = matmul(normal(stream(1), 0, 1, { shape: [300, 2] }), tensor([[2, 1], [0, 0.5]]))
+ * const model = whitening().fit({ x })
+ * print('explained variance =', model.explainedVariance)
+ * const z = model.transform(x)
+ * print('cov(z) =', div(matmul(transpose(z), z), 299))
+ *
+ * @example ZCA's whitener is symmetric, PCA's is not; the inverse recovers the inputs
+ * const x = matmul(normal(stream(2), 0, 1, { shape: [300, 2] }), tensor([[2, 1], [0, 0.5]]))
+ * const zca = whitening({ method: 'zca' }).fit({ x })
+ * print('ZCA whitener =', zca.whitener)
+ * print('PCA whitener =', whitening().fit({ x }).whitener)
+ * print('first row:', slice(x, 0), ' back:', slice(zca.inverseTransform(zca.transform(x)), 0))
  */
 export function whitening({
   method = 'pca',

@@ -1,24 +1,33 @@
 /**
  * The relevance vector machine for regression (Tipping, 2001, "Sparse Bayesian learning and the relevance vector
- * machine", JMLR 1): y = Σᵢ wᵢ φᵢ(x) + ε with a bias φ₀ = 1 and one kernel basis function φᵢ(x) = k(x, xᵢ) per training
- * input, wᵢ ~ N(0, αᵢ⁻¹) and ε ~ N(0, β⁻¹). For an active set M of basis functions (those with finite αᵢ),
+ * machine", JMLR 1): $y = \sum_i w_i \phi_i(\xvec) + \varepsilon$ with a bias $\phi_0 = 1$ and one kernel basis
+ * function $\phi_i(\xvec) = k(\xvec, \xvec_i)$ per training input, $w_i \sim \Gauss(0, \alpha_i^{-1})$ and
+ * $\varepsilon \sim \Gauss(0, \beta^{-1})$. For an active set $\Mcal$ of basis functions (those with finite
+ * $\alpha_i$), with $\Amat = \diag(\alpha_i)$ and $\Phimat_{\Mcal}$ the design matrix's active columns, the weight
+ * posterior has covariance $\Sigmamat = (\Amat + \beta\Phimat_{\Mcal}^\top\Phimat_{\Mcal})^{-1}$ and mean
+ * $\muvec = \beta\Sigmamat\Phimat_{\Mcal}^\top\yvec$, and the log marginal likelihood is
+ * $\mathcal{L}(\alphavec, \beta) = \frac{1}{2}[N \ln \beta + \sum_{\Mcal} \ln \alpha_i - \ln\abs{\Sigmamat^{-1}} - E]$,
+ * with $E = \beta\lVert \yvec - \Phimat_{\Mcal}\muvec \rVert^2 + \muvec^\top\Amat\muvec + N \ln 2\pi$.
  *
- *   Σ = (A + βΦ_MᵀΦ_M)⁻¹,   μ = βΣΦ_Mᵀy,
- *   L(α, β) = ½[N ln β + Σ_M ln αᵢ − ln|Σ⁻¹| − β‖y − Φ_Mμ‖² − μᵀAμ − N ln 2π].
+ * Two fits, both traceable algorithms whose states carry the active set, $\alphavec$, $\beta$, the log marginal
+ * likelihood and what the step did:
  *
- * Two fits, both traceable algorithms whose states carry the active set, α, β, the log marginal likelihood and what
- * the step did:
+ * - `rvmFastSteps`: Tipping and Faul's (2003) fast marginal-likelihood maximisation. From one basis function, each
+ *   step takes the single change with the largest exact gain $\Delta\mathcal{L}$: add an inactive $\phi_i$,
+ *   re-estimate an active $\alpha_i$, delete an active $\phi_i$, or re-estimate $\beta$. The gains come from the
+ *   sparsity and quality factors $s_i = \phivec_i^\top\Cmat_{-i}^{-1}\phivec_i$ and
+ *   $q_i = \phivec_i^\top\Cmat_{-i}^{-1}\yvec$, with
+ *   $\ell(\alpha_i) = \frac{1}{2}[\ln \alpha_i - \ln(\alpha_i + s_i) + q_i^2/(\alpha_i + s_i)]$ the part of
+ *   $\mathcal{L}$ that depends on $\alpha_i$, maximised at $\alpha_i = s_i^2/(q_i^2 - s_i)$ when $q_i^2 > s_i$ and at
+ *   $\infty$ otherwise. A $\beta$ update is taken only when it raises $\mathcal{L}$, so $\mathcal{L}$ never decreases.
+ * - `rvmReestimationSteps`: the original re-estimation, all basis functions at once:
+ *   $\gamma_i = 1 - \alpha_i\Sigma_{ii}$, $\alpha_i \leftarrow \gamma_i/\mu_i^2$,
+ *   $\beta \leftarrow (N - \sum_i \gamma_i)/\lVert \yvec - \Phimat\muvec \rVert^2$ (MacKay, 1992), pruning $\phi_i$
+ *   when $\alpha_i$ passes a threshold.
  *
- * - `rvmFastSteps`: Tipping and Faul's (2003) fast marginal-likelihood maximisation. From one basis function, each step
- *   takes the single change with the largest exact gain ΔL: add an inactive φᵢ, re-estimate an active αᵢ, delete an
- *   active φᵢ, or re-estimate β. The gains come from the sparsity and quality factors sᵢ = φᵢᵀC₋ᵢ⁻¹φᵢ and
- *   qᵢ = φᵢᵀC₋ᵢ⁻¹y, with L(αᵢ) = ½[ln αᵢ − ln(αᵢ + sᵢ) + qᵢ²/(αᵢ + sᵢ)] + const maximised at αᵢ = sᵢ²/(qᵢ² − sᵢ)
- *   when qᵢ² > sᵢ and at ∞ otherwise. A β update is taken only when it raises L, so L never decreases.
- * - `rvmReestimationSteps`: the original re-estimation, all basis functions at once: γᵢ = 1 − αᵢΣᵢᵢ, αᵢ ← γᵢ/μᵢ²,
- *   β ← (N − Σγᵢ)/‖y − Φμ‖² (MacKay, 1992), pruning φᵢ when αᵢ passes a threshold.
- *
- * Linear algebra is aifn's: the Cholesky factor of Σ⁻¹ and triangular solves, with S and Q for every basis function
- * from one solve against the M × B block of ΦᵀΦ, so a step costs O(BM² + M³) after the O(NB²) set-up.
+ * Linear algebra is aifn's: the Cholesky factor of $\Sigmamat^{-1}$ and triangular solves, with $S$ and $Q$ for every
+ * basis function from one solve against the $M \times B$ block of $\Phimat^\top\Phimat$, so a step costs
+ * $O(BM^2 + M^3)$ after the $O(NB^2)$ set-up.
  */
 
 import { fromData, matmul, reshape, toFlat, transpose, type Tensor } from 'aifn-compute/foundation/tensor'
@@ -48,26 +57,49 @@ const LOG_2PI = Math.log(2 * Math.PI)
 
 /** The RVM's basis on the training data, with the products every step reuses. */
 export interface RvmProblem {
+  /** The kernel $k$ of the basis functions. */
   readonly kernel: Kernel
-  /** Training inputs [N, d] and targets [N]. */
+  /** Training inputs, `[N, d]`. */
   readonly x: Tensor
+  /** Training targets, `[N]`. */
   readonly y: Tensor
-  /** Whether basis function 0 is the constant 1 (then φᵢ is centred on training input i − 1). */
+  /** Whether basis function 0 is the constant 1 (then $\phi_i$ is centred on training input $i - 1$). */
   readonly bias: boolean
-  /** N and the number of candidate basis functions B = N (+ 1 with the bias). */
+  /** The number of training points $N$. */
   readonly n: number
+  /** The number of candidate basis functions $B = N$ ($+ 1$ with the bias). */
   readonly size: number
-  /** ΦᵀΦ [B·B] row-major, Φᵀy [B], yᵀy. */
+  /** $\Phimat^\top\Phimat$, $B \times B$, row-major. */
   readonly phiTphi: Float64Array
+  /** $\Phimat^\top\yvec$, $B$ values. */
   readonly phiTy: Float64Array
+  /** $\yvec^\top\yvec$. */
   readonly yTy: number
-  /** The design matrix at inputs xs [s, d] (or [s]): [s, B]. */
+  /** The design matrix at inputs `xs` (`[s, d]` or `[s]`): `[s, B]`. */
   basis(xs: Tensor): Tensor
   /** The training row a basis function is centred on (null for the bias). */
   centre(i: number): number | null
 }
 
-/** Build the RVM problem for inputs x [N, d] (or [N]) and targets y [N] with kernel basis functions. */
+/**
+ * Build the RVM problem with kernel basis functions: the design matrix's products, computed once. Throws
+ * `ShapeError` when the numbers of inputs and targets differ.
+ *
+ * @param kernel The kernel $k$; basis function $i$ is $k(\cdot, \xvec_i)$.
+ * @param x The training inputs, `[N, d]` or `[N]`.
+ * @param y The targets, `[N]` or `[N, 1]`.
+ * @param options `bias`: add the constant basis function as basis function 0 (default true).
+ * @returns The problem.
+ *
+ * @example Three inputs: the bias and one basis function per input
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const problem = rvmProblem(rbf({ lengthscale: 1, variance: 1 }), tensor([[0], [1], [2]]), tensor([1, 2, 3]))
+ * print('candidates', problem.size, ' centres', [0, 1, 2, 3].map(problem.centre))
+ * print('design matrix at 0 and 1', problem.basis(tensor([[0], [1]])))
+ */
 export function rvmProblem(kernel: Kernel, x: Tensor, y: Tensor, options: { bias?: boolean } = {}): RvmProblem {
   const { bias = true } = options
   const X = asRows(x) as Tensor
@@ -108,20 +140,45 @@ export function rvmProblem(kernel: Kernel, x: Tensor, y: Tensor, options: { bias
 
 /** The weight posterior on an active set, the log marginal likelihood, and S, Q for every basis function. */
 export type RvmPosterior = {
-  /** μ and Σ over the active weights (in `active` order). */
+  /** The posterior mean $\muvec$ of the active weights (in `active` order). */
   mean: Float64Array
+  /** The posterior covariance $\Sigmamat$ of the active weights, $M \times M$. */
   covariance: Tensor
+  /** The log marginal likelihood $\mathcal{L}(\alphavec, \beta)$. */
   logMarginal: number
-  /** γᵢ = 1 − αᵢΣᵢᵢ over the active weights. */
+  /** $\gamma_i = 1 - \alpha_i\Sigma_{ii}$ over the active weights. */
   gamma: Float64Array
-  /** ‖y − Φ_Mμ‖². */
+  /** $\lVert \yvec - \Phimat_{\Mcal}\muvec \rVert^2$. */
   residual: number
-  /** Sᵢ = φᵢᵀC⁻¹φᵢ and Qᵢ = φᵢᵀC⁻¹y for every candidate [B] (with C the current model's covariance). */
+  /**
+   * $S_i = \phivec_i^\top\Cmat^{-1}\phivec_i$ for every candidate, $B$ values (with $\Cmat$ the current model's
+   * covariance of $\yvec$).
+   */
   S: Float64Array
+  /** $Q_i = \phivec_i^\top\Cmat^{-1}\yvec$ for every candidate, $B$ values. */
   Q: Float64Array
 }
 
-/** The posterior of the active weights at precisions α (the entries at `active`) and noise precision β. */
+/**
+ * The posterior of the active weights at precisions $\alphavec$ (the entries at `active`) and noise precision
+ * $\beta$, the log marginal likelihood, and $S_i$, $Q_i$ for every candidate basis function.
+ *
+ * @param problem The problem from `rvmProblem`.
+ * @param active The active basis functions (indices into the $B$ candidates).
+ * @param alpha The precisions $\alpha_i$ of all $B$ candidates; only the entries at `active` are read.
+ * @param beta The noise precision $\beta = 1/\sigma^2$.
+ * @returns The posterior.
+ *
+ * @example The bias and the basis function at 1, on three points
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const problem = rvmProblem(rbf({ lengthscale: 1, variance: 1 }), tensor([[0], [1], [2]]), tensor([1, 2, 3]))
+ * const post = rvmPosterior(problem, [0, 2], [1, Infinity, 1, Infinity], 100)
+ * print('weights', post.mean, ' gamma', post.gamma, ' log marginal', post.logMarginal)
+ * print('S', post.S, ' Q', post.Q)
+ */
 export function rvmPosterior(
   problem: RvmProblem,
   active: readonly number[],
@@ -187,6 +244,12 @@ export function rvmPosterior(
   return { mean, covariance, logMarginal, gamma, residual, S, Q }
 }
 
+/**
+ * The $m \times m$ identity as a row-major array.
+ *
+ * @param m The number of rows and columns.
+ * @returns $\Imat$, $m^2$ values.
+ */
 function identity(m: number): Float64Array {
   const out = new Float64Array(m * m)
   for (let i = 0; i < m; i++) out[i * m + i] = 1
@@ -205,13 +268,15 @@ export type RvmAction = 'add' | 're-estimate' | 'delete' | 'noise' | 'update' | 
 export type RvmState = Status & {
   /** The active basis functions, ascending. */
   active: number[]
-  /** αᵢ for every candidate basis function [B]; Infinity for the inactive (pruned) ones. */
+  /** $\alpha_i$ for every candidate basis function, $B$ values; Infinity for the inactive (pruned) ones. */
   alpha: Float64Array
-  /** Noise precision β = 1/σ². */
+  /** Noise precision $\beta = 1/\sigma^2$. */
   beta: number
   /** Posterior mean of the active weights (in `active` order). */
   mean: Float64Array
+  /** The log marginal likelihood $\mathcal{L}(\alphavec, \beta)$. */
   logMarginal: number
+  /** What this step did. */
   action: RvmAction
   /** The basis function acted on (null for noise, update and none). */
   index: number | null
@@ -223,17 +288,24 @@ export type RvmState = Status & {
 
 /** Options shared by the RVM fits. */
 export type RvmOptions = {
-  /** Starting noise variance σ² = 1/β (default 0.1 × the variance of y). */
+  /** Starting noise variance $\sigma^2 = 1/\beta$ (default 0.1 times the variance of $\yvec$, or 0.1 if that is 0). */
   noiseVariance?: number
-  /** Re-estimate β (default true). */
+  /** Re-estimate $\beta$ (default true). */
   fitNoise?: boolean
   /**
    * Stop when the best gain is at most this (fast; default 1e-6 nats), or when no basis function is pruned and
-   * max |Δ ln αᵢ| is at most this (re-estimation; default 1e-3).
+   * $\max_i \lvert \Delta \ln \alpha_i \rvert$ is at most this (re-estimation; default 1e-3).
    */
   tolerance?: number
 }
 
+/**
+ * The starting noise precision: $1/\sigma^2$ for the given noise variance, else $1/(0.1 \operatorname{var} \yvec)$.
+ *
+ * @param problem The problem, whose targets set the default.
+ * @param noiseVariance The starting noise variance, when given.
+ * @returns $\beta$.
+ */
 const startBeta = (problem: RvmProblem, noiseVariance?: number) => {
   const yv = toFlat(problem.y)
   const mean = yv.reduce((a, v) => a + v, 0) / yv.length
@@ -241,6 +313,16 @@ const startBeta = (problem: RvmProblem, noiseVariance?: number) => {
   return 1 / (noiseVariance ?? 0.1 * variance)
 }
 
+/**
+ * A fit state at an active set, $\alphavec$ and $\beta$, with the posterior it was computed from.
+ *
+ * @param problem The problem from `rvmProblem`.
+ * @param active The active basis functions, ascending.
+ * @param alpha The precisions of all $B$ candidates (Infinity for the inactive).
+ * @param beta The noise precision $\beta$.
+ * @param rest The step count, the action and its basis function, the pruned ones, the gain and any status flags.
+ * @returns The state, and the posterior (for the next step's use).
+ */
 function stateAt(
   problem: RvmProblem,
   active: number[],
@@ -254,14 +336,32 @@ function stateAt(
 
 // ── Fast marginal-likelihood maximisation (Tipping and Faul, 2003) ──────────────────────────────────────────────────
 
-/** ½[ln a − ln(a + s) + q²/(a + s)]: the part of L that depends on one αᵢ = a (∞ gives 0). */
+/**
+ * $\frac{1}{2}[\ln a - \ln(a + s) + q^2/(a + s)]$: the part of $\mathcal{L}$ that depends on one $\alpha_i = a$
+ * ($\infty$ gives 0).
+ *
+ * @param a The precision $a = \alpha_i$, or Infinity for an inactive basis function.
+ * @param s The sparsity factor $s_i$.
+ * @param q The quality factor $q_i$.
+ * @returns $\ell(a)$.
+ */
 const ell = (a: number, s: number, q: number) =>
   a === Infinity ? 0 : 0.5 * (Math.log(a) - Math.log(a + s) + (q * q) / (a + s))
 
 /** One candidate change and its exact gain in L. */
 type Move = { action: 'add' | 're-estimate' | 'delete' | 'noise'; index: number | null; gain: number; value: number }
 
-/** The best single change at a state (Tipping and Faul, 2003, §4): its action, basis function, gain and new value. */
+/**
+ * The best single change at a state (Tipping and Faul, 2003, §4): its action, basis function, gain and new value. A
+ * deletion is never proposed for the last active basis function.
+ *
+ * @param problem The problem from `rvmProblem`.
+ * @param s The state's active set, $\alphavec$ and $\beta$.
+ * @param post The posterior at `s`, from `rvmPosterior`.
+ * @param fitNoise Whether a $\beta$ re-estimate is a candidate.
+ * @returns The move with the largest finite gain (the new $\alpha_i$, or the new $\beta$, in `value`), or null when
+ *   there is none.
+ */
 function bestMove(
   problem: RvmProblem,
   s: Pick<RvmState, 'active' | 'alpha' | 'beta'>,
@@ -302,9 +402,28 @@ function bestMove(
 
 /**
  * Tipping and Faul's (2003) fast sequential RVM fit as a traceable algorithm. Step 0 holds the one basis function
- * with the largest normalised projection on y, at its optimal αᵢ; each step then takes the add, re-estimate, delete or
- * noise update with the largest exact gain in L, so the log marginal likelihood never decreases. It converges when no
- * change gains more than `tolerance`.
+ * with the largest normalised projection on $\yvec$, at its optimal $\alpha_i$ (or 1000 when it has none); each step
+ * then takes the add, re-estimate, delete or noise update with the largest exact gain in $\mathcal{L}$, so the log
+ * marginal likelihood never decreases. It converges when no change gains more than `tolerance`.
+ *
+ * @param problem The problem from `rvmProblem`.
+ * @param options The starting noise variance, whether to fit it, and the tolerance.
+ * @returns The algorithm; run it with `run` or `trace`.
+ *
+ * @example A noisy sinc: the log marginal likelihood rises with each change, and few basis functions stay
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const v = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+ * const x = tensor(v.map((u) => [u]))
+ * const y = add(tensor(v.map((u) => (u === 0 ? 1 : Math.sin(u) / u))), mul(0.05, normals(stream(0), [11])))
+ * const problem = rvmProblem(rbf({ lengthscale: 1, variance: 1 }), x, y)
+ * const tr = trace(rvmFastSteps(problem), undefined, 50, { record: { logMarginal: (s) => s.logMarginal } })
+ * print('log marginal', tr.series.logMarginal)
+ * const label = (s) => (s.index === null ? s.action : s.action + ' ' + s.index)
+ * print('first actions', tr.steps.slice(1, 8).map(label).join(', '))
+ * print('active', tr.final.active, ' noise variance', 1 / tr.final.beta, ' converged', tr.final.converged)
  */
 export function rvmFastSteps(problem: RvmProblem, options: RvmOptions = {}): Algorithm<void, RvmState> {
   const { fitNoise = true, tolerance = 1e-6 } = options
@@ -364,10 +483,29 @@ export function rvmFastSteps(problem: RvmProblem, options: RvmOptions = {}): Alg
 // ── Re-estimation (Tipping, 2001) ────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Tipping's (2001) re-estimation as a traceable algorithm: every basis function starts active at αᵢ = `initialAlpha`
- * (default 1), and each step applies αᵢ ← γᵢ/μᵢ² to all of them and β ← (N − Σγᵢ)/‖y − Φμ‖², then prunes every φᵢ whose
- * αᵢ exceeds `pruneAt` (default 1e9). Each step costs O(M³) for M active basis functions, so the early steps are the
- * expensive ones. L usually rises but is not guaranteed to at every step.
+ * Tipping's (2001) re-estimation as a traceable algorithm: every basis function starts active at
+ * $\alpha_i =$ `initialAlpha` (default 1), and each step applies $\alpha_i \leftarrow \gamma_i/\mu_i^2$ to all of them
+ * and $\beta \leftarrow (N - \sum_i \gamma_i)/\lVert \yvec - \Phimat\muvec \rVert^2$ (kept when not positive and
+ * finite), then prunes every $\phi_i$ whose $\alpha_i$ exceeds `pruneAt` (default 1e9), never the last one. Each step
+ * costs $O(BM^2 + M^3)$ for $M$ active basis functions, so the early steps are the expensive ones. $\mathcal{L}$
+ * usually rises but is not guaranteed to at every step.
+ *
+ * @param problem The problem from `rvmProblem`.
+ * @param options The starting noise variance, whether to fit it, the tolerance, `initialAlpha` and `pruneAt`.
+ * @returns The algorithm; run it with `run` or `trace`.
+ *
+ * @example A noisy sinc: basis functions are pruned as their precisions grow
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const v = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+ * const x = tensor(v.map((u) => [u]))
+ * const y = add(tensor(v.map((u) => (u === 0 ? 1 : Math.sin(u) / u))), mul(0.05, normals(stream(0), [11])))
+ * const problem = rvmProblem(rbf({ lengthscale: 1, variance: 1 }), x, y)
+ * const tr = trace(rvmReestimationSteps(problem), undefined, 200, { record: { active: (s) => s.active.length } })
+ * print('active basis functions', tr.series.active)
+ * print('active', tr.final.active, ' log marginal', tr.final.logMarginal, ' converged', tr.final.converged)
  */
 export function rvmReestimationSteps(
   problem: RvmProblem,
@@ -429,21 +567,51 @@ export function rvmReestimationSteps(
 
 /** An RVM at a state of its fit: the relevance vectors and the predictive distribution. */
 export interface RvmModel {
+  /** The brand of a model. */
   readonly kind: 'model'
+  /** The model's name. */
   readonly name: 'relevance-vector-machine'
+  /** The problem the model was fitted on. */
   readonly problem: RvmProblem
+  /** The active basis functions (indices into the candidates). */
   readonly active: readonly number[]
   /** The training rows of the active kernel basis functions (the relevance vectors). */
   readonly relevanceVectors: number[]
+  /** $\alpha_i$ for every candidate (Infinity for the inactive). */
   readonly alpha: Float64Array
+  /** The noise precision $\beta$. */
   readonly beta: number
+  /** The posterior mean $\muvec$ of the active weights (in `active` order). */
   readonly weights: Float64Array
+  /** The log marginal likelihood $\mathcal{L}(\alphavec, \beta)$. */
   readonly logMarginal: number
-  /** Predictive mean μᵀφ(x*) and variance φ(x*)ᵀΣφ(x*) (+ 1/β with `noise`) at xs [s, d] (or [s]). */
+  /**
+   * Predictive mean $\muvec^\top\phivec(\xvec_*)$ and variance $\phivec(\xvec_*)^\top\Sigmamat\phivec(\xvec_*)$
+   * (plus $1/\beta$ with `noise`) at `xs` (`[s, d]` or `[s]`).
+   */
   predict(xs: Tensor, options?: { noise?: boolean }): { mean: Tensor; variance: Tensor }
 }
 
-/** The model at a state of an RVM fit (or any active set, α and β): factors Σ⁻¹ once. */
+/**
+ * The model at a state of an RVM fit (or any active set, $\alphavec$ and $\beta$): factors $\Sigmamat^{-1}$ once.
+ *
+ * @param problem The problem from `rvmProblem`.
+ * @param state The active set, the precisions $\alphavec$ and the noise precision $\beta$, as a fit state holds them.
+ * @returns The model, with `predict` at new inputs.
+ *
+ * @example The relevance vectors of a fast fit, and its predictions
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const v = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+ * const x = tensor(v.map((u) => [u]))
+ * const y = add(tensor(v.map((u) => (u === 0 ? 1 : Math.sin(u) / u))), mul(0.05, normals(stream(0), [11])))
+ * const problem = rvmProblem(rbf({ lengthscale: 1, variance: 1 }), x, y)
+ * const model = rvmModel(problem, run(rvmFastSteps(problem), undefined, 50))
+ * print('relevance vectors (training rows)', model.relevanceVectors, ' weights', model.weights)
+ * print('prediction at 0 and 0.5', model.predict(tensor([[0], [0.5]]), { noise: true }))
+ */
 export function rvmModel(problem: RvmProblem, state: Pick<RvmState, 'active' | 'alpha' | 'beta'>): RvmModel {
   const { active, alpha, beta } = state
   const post = rvmPosterior(problem, active, alpha, beta)
@@ -487,9 +655,11 @@ export function rvmModel(problem: RvmProblem, state: Pick<RvmState, 'active' | '
 
 /** Hyperparameters of `relevanceVectorMachine`. */
 export type RelevanceVectorMachineParams = RvmOptions & {
+  /** The kernel $k$ of the basis functions (required). */
   kernel: Kernel
   /** `fast` (Tipping and Faul, 2003; default) or `reestimation` (Tipping, 2001). */
   method?: 'fast' | 'reestimation'
+  /** Add the constant basis function (default true). */
   bias?: boolean
   /** Steps of the fit at most (default 500). */
   maxSteps?: number
@@ -503,15 +673,35 @@ export interface RelevanceVectorMachineModel
     Predicts<Tensor, Univariate<Tensor>>,
     Expects<Tensor>,
     Trained<RvmState> {
+  /** The brand of a model. */
   readonly kind: 'model'
+  /** The model's name. */
   readonly name: 'relevance-vector-machine'
+  /** The RVM at the fit's final state. */
   readonly rvm: RvmModel
 }
 
 /**
- * RVM regression as an estimator: the fit runs `rvmFastSteps` (or `rvmReestimationSteps`) to convergence and keeps its
- * trace in `training`. Capabilities: `forward` and `decide` (the predictive mean), `predictive` (normals N(mean,
- * φᵀΣφ + 1/β)), `expect`.
+ * RVM regression as an estimator: the fit runs `rvmFastSteps` (or `rvmReestimationSteps`) to convergence or
+ * `maxSteps` and keeps its trace in `training`. Capabilities: `forward` and `decide` (the predictive mean),
+ * `predictive` (normals $\Gauss(\mu, \phivec^\top\Sigmamat\phivec + 1/\beta)$), `expect`.
+ *
+ * @param params The kernel, the method, the bias, the step limit and the options of the fit.
+ * @returns The estimator: `fit({ x, y })` on inputs `[N, d]` (or `[N]`) and targets `[N]` returns a
+ *   `RelevanceVectorMachineModel`.
+ *
+ * @example A noisy sinc from six relevance vectors
+ * // An RBF kernel on 1-d inputs, as `rbf` of aifn-compute/learning/kernels makes it
+ * const rbf = (p) => ({ kind: 'kernel', name: 'rbf', params: p, stationary: true, withParams: rbf,
+ *   evaluate: (a, b) => mul(p.variance, exp(div(square(sub(a, transpose(b ?? a))), mul(-2, square(p.lengthscale))))),
+ *   diagonal: (a) => mul(p.variance, ones([shapeOfValue(a)[0]])) })
+ * const v = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+ * const x = tensor(v.map((u) => [u]))
+ * const y = add(tensor(v.map((u) => (u === 0 ? 1 : Math.sin(u) / u))), mul(0.05, normals(stream(0), [11])))
+ * const model = relevanceVectorMachine({ kernel: rbf({ lengthscale: 1, variance: 1 }) }).fit({ x, y })
+ * print('relevance vectors', model.rvm.relevanceVectors, ' noise variance', 1 / model.rvm.beta)
+ * print('mean at 0 and 0.5', model.forward(tensor([[0], [0.5]])), ' sinc there', 1, Math.sin(0.5) / 0.5)
+ * print('predictive variance', model.predictive(tensor([[0], [0.5]])).variance())
  */
 export function relevanceVectorMachine(
   params: RelevanceVectorMachineParams,

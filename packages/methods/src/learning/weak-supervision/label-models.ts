@@ -3,7 +3,8 @@
  * any true labels. Majority vote counts votes; the Dawid–Skene model (Dawid and Skene, 1979) learns each voter's full
  * confusion matrix by expectation–maximisation; the data-programming label model (Ratner et al., 2016) learns each
  * labelling function's accuracy and coverage by maximising the marginal likelihood of the votes. A vote is a class in
- * 0 … K − 1, or −1 for an abstention (the voter said nothing).
+ * $0, \dots, K - 1$, or $-1$ for an abstention (the voter said nothing). Every model returns posterior class
+ * probabilities as an $n \times K$ tensor, one row per example.
  */
 
 import type { Size, Status } from 'aifn-compute/foundation/contracts'
@@ -26,10 +27,26 @@ import type { Algorithm } from 'aifn-compute/foundation/trace'
 import { methodTraining } from 'aifn-compute/nn/training'
 import { logSigmoid, logSoftmax, softmax } from 'aifn-compute/numerics/special'
 
-/** Votes: an n × m matrix of classes, −1 where voter j abstained on example i. */
+/**
+ * Votes: an $n \times m$ matrix of classes, $-1$ where voter $j$ abstained on example $i$. `n` is the number of
+ * examples, `m` the number of voters, and `votes` the matrix, row-major: voter `j`'s vote on example `i` is
+ * `votes[i * m + j]`.
+ */
 export type Votes = { readonly n: Size; readonly m: Size; readonly votes: Int32Array }
 
-/** Votes from rows (example by voter) or an int32 tensor [n, m]. */
+/**
+ * Votes from rows (example by voter) or a tensor of shape $[n, m]$. The values are copied into an `Int32Array`, so a
+ * fractional vote is truncated; nothing is checked.
+ *
+ * @param v The votes: one row per example with one entry per voter, each a class in $0, \dots, K - 1$ or $-1$ for an
+ *   abstention. With rows, `m` is the length of the first row (0 when there are none).
+ * @returns The votes as `Votes`.
+ *
+ * @example Three examples, two voters, one abstention
+ * const v = votesOf([[0, 1], [1, 1], [-1, 0]])
+ * print('n =', v.n, ' m =', v.m)
+ * print('votes =', v.votes)
+ */
 export function votesOf(v: Tensor | readonly (readonly number[])[]): Votes {
   if (Array.isArray(v)) {
     const rows = v as number[][]
@@ -40,8 +57,16 @@ export function votesOf(v: Tensor | readonly (readonly number[])[]): Votes {
 }
 
 /**
- * Majority vote: each example's class probabilities are the shares of its non-abstaining votes, ties split evenly; an
- * example with no votes gets the uniform distribution. Returns [n, K].
+ * Majority vote: each example's whole probability goes to the class with the most non-abstaining votes, split evenly
+ * between the classes tied for most; an example with no votes gets the uniform distribution.
+ *
+ * @param votes The votes, $n$ examples by $m$ voters. A vote outside $0, \dots, K - 1$ other than $-1$ is not counted.
+ * @param classes The number of classes $K$.
+ * @returns The posteriors, $n \times K$: 1 on the winning class, $1/t$ on each of $t$ tied classes, 0 elsewhere.
+ *
+ * @example A clear winner, a tie and an example nobody voted on
+ * const v = votesOf([[0, 0, 1], [0, 1, -1], [-1, -1, -1]])
+ * print('posteriors =', majorityVote(v, 2))
  */
 export function majorityVote(votes: Votes, classes: Size): Tensor {
   const { n, m } = votes
@@ -61,7 +86,7 @@ export function majorityVote(votes: Votes, classes: Size): Tensor {
 
 // ── Dawid–Skene ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Options of `dawidSkeneSteps`. */
+/** Options of `dawidSkeneSteps` and `dawidSkene`. */
 export type DawidSkeneOptions = {
   /** Pseudo-counts added to every confusion cell and class count in the M-step (default 0.01). */
   smoothing?: number
@@ -69,23 +94,47 @@ export type DawidSkeneOptions = {
 
 /** The state of `dawidSkeneSteps`. */
 export interface DawidSkeneState extends Status {
+  /** EM steps taken (0 after the start from majority vote). */
   t: Size
-  /** Class priors π [K]. */
+  /** Class priors $\pivec$, $K$ values. */
   priors: Tensor
-  /** Confusion matrices θ [m, K, K]: θ_j[k][l] = P(voter j says l | class k). */
+  /**
+   * Confusion matrices $\thetavec$, $m \times K \times K$: $\theta_{jkl} = p(\text{voter } j \text{ says } l \mid
+   * \text{class } k)$, each row summing to 1.
+   */
   confusions: Tensor
-  /** Posterior class probabilities T [n, K]. */
+  /** Posterior class probabilities $\Tmat$, $n \times K$. */
   posteriors: Tensor
   /** The log-likelihood of the votes under the current parameters. */
   logLikelihood: number
 }
 
 /**
- * The Dawid–Skene model fitted by expectation–maximisation, as a step-through algorithm. Each class k has a prior π_k
- * and each voter j a confusion matrix θ_j; given the class, votes are independent. The E-step sets
- * T_ik ∝ π_k Π_j θ_j[k][v_ij] over the votes cast; the M-step sets π_k ∝ Σ_i T_ik and θ_j[k][l] ∝ Σ_i T_ik 1[v_ij = l].
- * The first M-step starts from the majority-vote posteriors. With `smoothing` the M-step is a MAP step under a
- * Dirichlet prior, so the quantity that never decreases is the log-likelihood plus that log prior. Deterministic.
+ * The Dawid–Skene model (Dawid and Skene, 1979) fitted by expectation–maximisation, as a step-through algorithm. Each
+ * class $k$ has a prior $\pi_k$ and each voter $j$ a confusion matrix $\thetavec_j$; given the class, votes are
+ * independent. The E-step sets $T_{ik} \propto \pi_k \prod_j \theta_{jk v_{ij}}$ over the votes cast; the M-step sets
+ * $\pi_k \propto s + \sum_i T_{ik}$ and $\theta_{jkl} \propto s + \sum_i T_{ik} \indicator[v_{ij} = l]$, with $s$ the
+ * `smoothing`. The start is an M-step from the majority-vote posteriors and an E-step; each step is one M-step and one
+ * E-step, and the state is `converged` when the log-likelihood changes by less than $10^{-9}(1 + \lvert \ell \rvert)$.
+ * With `smoothing` the M-step is a MAP step under a Dirichlet prior, so the quantity that never decreases is the
+ * log-likelihood plus that log prior. Deterministic: the stream is not used.
+ *
+ * @param votes The votes, $n$ examples by $m$ voters, $-1$ for an abstention.
+ * @param classes The number of classes $K$.
+ * @param options The `smoothing` pseudo-count.
+ * @returns The algorithm, to run with `run` or `trace` (its input is unused).
+ *
+ * @example Three annotators, one of them careless, step by step
+ * const s = stream(1)
+ * const right = [0.9, 0.8, 0.55]
+ * const truth = Array.from({ length: 60 }, () => (uniform(s) < 0.5 ? 1 : 0))
+ * const rows = truth.map((y) => right.map((a) => (uniform(s) < a ? y : 1 - y)))
+ * const alg = dawidSkeneSteps(votesOf(rows), 2)
+ * const ll = [0, 1, 2, 5, 50].map((t) => run(alg, undefined, t).logLikelihood)
+ * print('log-likelihood after 0, 1, 2, 5 and 50 steps:', ll)
+ * const end = run(alg, undefined, 50)
+ * print('P(class 1) of the first five examples:', end.posteriors.data.filter((_, i) => i % 2).slice(0, 5))
+ * print('their true classes:', truth.slice(0, 5))
  */
 export function dawidSkeneSteps(
   votes: Votes,
@@ -158,7 +207,27 @@ export function dawidSkeneSteps(
   }
 }
 
-/** Run Dawid–Skene EM to convergence (or `maxSteps`, default 200) and return the final state. */
+/**
+ * Run Dawid–Skene EM (`dawidSkeneSteps`) to convergence, or for `maxSteps` steps, and return the final state.
+ *
+ * @param votes The votes, $n$ examples by $m$ voters, $-1$ for an abstention.
+ * @param classes The number of classes $K$.
+ * @param options The `smoothing` pseudo-count of `DawidSkeneOptions`, and `maxSteps`, the most EM steps taken (default
+ *   200).
+ * @returns The final state: priors, confusion matrices, posteriors and log-likelihood.
+ *
+ * @example Recover five annotators' accuracies without any true label
+ * const s = stream(2)
+ * const right = [0.95, 0.85, 0.75, 0.65, 0.55]
+ * const truth = Array.from({ length: 100 }, () => (uniform(s) < 0.4 ? 1 : 0))
+ * const rows = truth.map((y) => right.map((a) => (uniform(s) < a ? y : 1 - y)))
+ * const fit = dawidSkene(votesOf(rows), 2)
+ * const c = fit.confusions.data
+ * print('true accuracies:', right)
+ * print('P(says 0 | class 0) per annotator:', [0, 1, 2, 3, 4].map((j) => c[4 * j]))
+ * print('P(says 1 | class 1) per annotator:', [0, 1, 2, 3, 4].map((j) => c[4 * j + 3]))
+ * print('priors (truth has 40% of class 1):', fit.priors, ' EM steps:', fit.t)
+ */
 export function dawidSkene(
   votes: Votes,
   classes: Size,
@@ -173,28 +242,39 @@ export function dawidSkene(
 
 // ── The data-programming label model ─────────────────────────────────────────────────────────────────────────────────
 
-/** Parameters of the label model: log class balance, and each function's accuracy and coverage on the logit scale. */
+/**
+ * Parameters of the label model: `classBalance`, $K$ unnormalised log class priors (the priors are its softmax), and
+ * `accuracy` and `coverage`, $m$ values each, every labelling function's $\alpha_j$ and $\beta_j$ on the logit scale.
+ */
 export type LabelModelParams = { classBalance: Tensor; accuracy: Tensor; coverage: Tensor }
 
 /** A fitted label model: the estimates and the posteriors they give. */
 export type LabelModel = {
-  /** Class priors [K]. */
+  /** Class priors $\pivec$, $K$ values (uniform with `fixedBalance`). */
   classBalance: Float64Array
-  /** P(λ_j = y | λ_j votes) for each function. */
+  /** $\alpha_j = p(\lambda_j = y \mid \lambda_j \ne -1)$ for each function $j$. */
   accuracy: Float64Array
-  /** P(λ_j votes) for each function. */
+  /** $\beta_j = p(\lambda_j \ne -1)$ for each function $j$. */
   coverage: Float64Array
-  /** Posterior class probabilities [n, K]. */
+  /** Posterior class probabilities, $n \times K$. */
   posteriors: Tensor
-  /** The final negative log-likelihood per example. */
+  /** The final negative log marginal likelihood, averaged over the examples. */
   loss: number
+  /** L-BFGS steps taken. */
   steps: Size
 }
 
 /**
- * The log-likelihood of each example's votes under the label model, log Σ_y π_y Π_j p(λ_ij | y), with
- * p(λ = −1 | y) = 1 − β_j, p(λ = y | y) = β_j α_j and p(λ = l | y) = β_j (1 − α_j)/(K − 1) for each wrong class l, as a
- * differentiable [n, K] matrix of per-class terms (before the log-sum-exp over y).
+ * The log-likelihood of each example's votes under the label model, $\log \sum_y \pi_y \prod_j p(\lambda_{ij} \mid y)$,
+ * with $p(\lambda = -1 \mid y) = 1 - \beta_j$, $p(\lambda = y \mid y) = \beta_j \alpha_j$ and
+ * $p(\lambda = l \mid y) = \beta_j (1 - \alpha_j)/(K - 1)$ for each wrong class $l$, as a differentiable $n \times K$
+ * matrix of the per-class terms $\log \pi_y + \sum_j \log p(\lambda_{ij} \mid y)$ (before the log-sum-exp over $y$).
+ * With $K = 1$ the divisor $K - 1$ is taken as 1.
+ *
+ * @param p The parameters: logits of the class balance, the accuracies $\alpha_j$ and the coverages $\beta_j$.
+ * @param votes The votes, $n$ examples by $m$ voters, $-1$ for an abstention.
+ * @param K The number of classes.
+ * @returns The $n \times K$ matrix of per-class log terms.
  */
 function jointTerms(p: LabelModelParams, votes: Votes, K: Size): Value {
   const { n, m } = votes
@@ -226,7 +306,7 @@ function jointTerms(p: LabelModelParams, votes: Votes, K: Size): Value {
 
 /** Options of `labelModel`. */
 export type LabelModelOptions = {
-  /** L-BFGS steps at most (default 200). */
+  /** The most L-BFGS steps taken (default 200). */
   maxSteps?: Size
   /** Fix the class balance at uniform instead of learning it (default false). */
   fixedBalance?: boolean
@@ -234,11 +314,39 @@ export type LabelModelOptions = {
 
 /**
  * The data-programming label model (Ratner, De Sa, Wu, Selsam and Ré, 2016; the generative model behind Snorkel):
- * labelling functions are conditionally independent given the class; function j votes with probability β_j and, when
- * it votes, is right with probability α_j and otherwise names one of the K − 1 wrong classes uniformly. The class
- * balance, α and β are fitted by maximising the marginal likelihood Σ_i log Σ_y π_y Π_j p(λ_ij | y), with gradients from
- * `aifn-compute/foundation/autodiff` and full-batch L-BFGS from `aifn-compute/nn/training`; the posteriors weight each function by its
- * learned accuracy. Accuracies start at 0.7 so the solution with the classes' names swapped is not chosen.
+ * labelling functions are conditionally independent given the class; function $j$ votes with probability $\beta_j$
+ * and, when it votes, is right with probability $\alpha_j$ and otherwise names one of the $K - 1$ wrong classes
+ * uniformly. The class balance $\pivec$, $\alphavec$ and $\betavec$ are fitted by maximising the marginal likelihood
+ * $\sum_i \log \sum_y \pi_y \prod_j p(\lambda_{ij} \mid y)$, with gradients from `aifn-compute/foundation/autodiff`
+ * and full-batch L-BFGS from `aifn-compute/nn/training`, until it stops or after `maxSteps` steps; the posteriors
+ * weight each function by its learned accuracy. Accuracies start at 0.7 so the solution with the classes' names
+ * swapped is not chosen; coverages start at 0.5 and the class balance at uniform. Deterministic.
+ *
+ * @param votes The votes, $n$ examples by $m$ labelling functions, $-1$ for an abstention.
+ * @param classes The number of classes $K$.
+ * @param options The most L-BFGS steps, and whether the class balance is fixed at uniform.
+ * @returns The estimated class balance, accuracies and coverages, the posteriors, the final loss and the steps taken.
+ *
+ * @example Three noisy labelling functions with known accuracies and coverages
+ * const s = stream(3)
+ * const acc = [0.9, 0.75, 0.6]
+ * const cov = [0.5, 0.7, 0.9]
+ * const truth = Array.from({ length: 200 }, () => (uniform(s) < 0.5 ? 1 : 0))
+ * const rows = truth.map((y) => acc.map((a, j) => (uniform(s) < cov[j] ? (uniform(s) < a ? y : 1 - y) : -1)))
+ * const fit = labelModel(votesOf(rows), 2)
+ * print('true accuracy:', acc, ' estimated:', fit.accuracy)
+ * print('true coverage:', cov, ' estimated:', fit.coverage)
+ * print('class balance:', fit.classBalance, ' steps:', fit.steps)
+ *
+ * @example Two functions disagree: the posterior sides with the more accurate one
+ * const s = stream(4)
+ * const acc = [0.95, 0.6, 0.6]
+ * const truth = Array.from({ length: 200 }, () => (uniform(s) < 0.5 ? 1 : 0))
+ * const rows = truth.map((y) => acc.map((a) => (uniform(s) < a ? y : 1 - y)))
+ * const fit = labelModel(votesOf([...rows, [0, 1, 1]]), 2)
+ * print('accuracies:', fit.accuracy)
+ * print('posterior of the votes [0, 1, 1]:', fit.posteriors.data.slice(-2))
+ * print('majority vote of the same:', majorityVote(votesOf([[0, 1, 1]]), 2))
  */
 export function labelModel(votes: Votes, classes: Size, options: LabelModelOptions = {}): LabelModel {
   const K = classes

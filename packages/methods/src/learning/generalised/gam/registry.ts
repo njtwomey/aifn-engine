@@ -13,6 +13,7 @@ import * as model from './model'
 import * as problem from './problem'
 import * as terms from './terms'
 
+/** A registry table: entries keyed by factory or function name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const fn = definer<FunctionInfo>('function', 'learning/generalised/gam')
 const GAM = ['generalised-additive-model']

@@ -1,4 +1,4 @@
-/** The registry of `aifn-methods/learning/survival`. */
+/** Registry entries of `aifn-methods/learning/survival`: the Cox and AFT fits and their properties, with citations. */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as aft from './aft'

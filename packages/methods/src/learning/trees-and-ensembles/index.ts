@@ -1,7 +1,20 @@
 /**
- * `aifn-methods/learning/trees-and-ensembles`: decision trees and their ensembles. The shared layer holds CART
- * (growth, split search, cost-complexity pruning, importances) and the `decisionTree` and `regressionTree` estimators;
- * children: bagging, boosting.
+ * `aifn-methods/learning/trees-and-ensembles`: decision trees by CART and their ensembles, as scikit-learn's `tree`
+ * and `ensemble`.
+ *
+ * - The estimators: `decisionTree` (classification, Gini or entropy) and `regressionTree` (squared error), each with
+ *   optional cost-complexity pruning (`pruneAlpha`) and its growth traced node by node.
+ * - Growth: `growTree` grows a tree to completion; `treeGrowthSteps` is the same growth as a traceable algorithm, one
+ *   node per step, depth-, breadth- or best-first; `splitSearch` and `splitCurve` expose the search at a node.
+ * - Reading a tree: `predictTree` (class shares or means), `decideTree`, `applyTree` (the leaf reached),
+ *   `decisionPath`, `nodeRegion` (a node's box), `nodePrediction`, `nodeLabel`, `treeSize` and `featureImportances`.
+ * - Pruning: `costComplexityPath` (the weakest-link $\alpha$ sequence), `pruneTree` (prune at an $\alpha$) and
+ *   `keptNodes` (read a pruned tree in the full tree's ids).
+ * - Ensembles, in the child modules: `bagging` (`randomForest`) and `boosting` (`adaBoost`, `gradientBoosting`).
+ *
+ * A tree is plain data, an `aifn-compute/graph` binary tree whose nodes record their split, rows, statistics and the
+ * search made there. Splits are $x_f \le t$ with $t$ halfway between consecutive distinct values, and nodes are
+ * numbered in creation order, as scikit-learn numbers them.
  */
 
 export {

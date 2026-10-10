@@ -1,20 +1,44 @@
 /**
- * Label shift: p(x | y) is the same in both domains but the class priors differ. Two estimators of the target priors
- * from a classifier trained on the source:
+ * Label shift: $p(\xvec \mid y)$ is the same in both domains but the class priors differ. Two estimators of the
+ * target priors from a classifier trained on the source:
  *
- * - **black-box shift estimation** (BBSE; Lipton, Wang and Smola, 2018): with C the joint confusion matrix
- *   C_ij = P_source(ŷ = i, y = j) from held-out source data and μ the target's distribution of predictions
- *   μ_i = P_target(ŷ = i), the importance weights w = p_target(y)/p_source(y) solve C w = μ;
+ * - **black-box shift estimation** (BBSE; Lipton, Wang and Smola, 2018): with $\Cmat$ the joint confusion matrix
+ *   $C_{ij} = P_{\mathrm{source}}(\hat y = i, y = j)$ from held-out source data and $\muvec$ the target's
+ *   distribution of predictions $\mu_i = P_{\mathrm{target}}(\hat y = i)$, the importance weights
+ *   $w_j = p_{\mathrm{target}}(y = j) / p_{\mathrm{source}}(y = j)$ solve $\Cmat\wvec = \muvec$;
  * - **EM** (Saerens, Latinne and Decaestecker, 2002): alternate posteriors re-weighted by the prior ratio,
- *   p_t(y | x) ∝ p_s(y | x) π_t(y)/π_s(y), and priors π_t as their mean over the target.
+ *   $p_t(y \mid \xvec) \propto p_s(y \mid \xvec) \pi_t(y) / \pi_s(y)$, and priors $\pi_t$ as their mean over the
+ *   target.
  *
- * The corrected posteriors re-weight the classifier's outputs by the estimated prior ratio.
+ * The corrected posteriors re-weight the classifier's outputs by the estimated prior ratio. Classes are the integers
+ * $0, \dots, k - 1$; labels are used as indices and not checked.
  */
 
 import { dense, fromData, toFlat, type MatrixLike, type VectorLike } from 'aifn-compute/foundation/tensor'
 import { solve } from 'aifn-compute/numerics/linalg'
 
-/** BBSE: importance weights w (clipped at 0) and the target priors w ⊙ π_source. */
+/**
+ * Black-box shift estimation: the importance weights $\wvec$ that solve $\Cmat\wvec = \muvec$ (clipped at 0), and the
+ * target priors $\wvec \odot \pivec_{\mathrm{source}}$ renormalised to sum to 1, where $\pivec_{\mathrm{source}}$ is
+ * the class frequency of `sourceTrue`. The linear solve throws when $\Cmat$ is singular (a class never predicted, or
+ * never seen, on the source).
+ *
+ * @param sourceTrue The true labels of held-out source points, $n$ of them.
+ * @param sourcePredicted The classifier's predicted labels for the same points.
+ * @param targetPredicted The classifier's predicted labels for the target points.
+ * @param classes The number of classes $k$.
+ * @returns `weights` $\wvec$ ($k$ values), `priors` (the estimated target priors, $k$ values) and `confusion`
+ *   ($\Cmat$, row-major $k \times k$, rows the predicted class and columns the true one).
+ *
+ * @example A classifier right 80% of the time on a balanced source predicts class 1 for 70% of the target
+ * const sourceTrue = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+ * const sourcePredicted = [0, 0, 0, 0, 1, 1, 1, 1, 1, 0]
+ * const targetPredicted = [0, 0, 0, 1, 1, 1, 1, 1, 1, 1]
+ * const { weights, priors, confusion } = blackBoxShiftEstimate(sourceTrue, sourcePredicted, targetPredicted, 2)
+ * print('confusion C:', confusion)
+ * print('importance weights:', weights)
+ * print('target priors:', priors)
+ */
 export function blackBoxShiftEstimate(
   sourceTrue: VectorLike,
   sourcePredicted: VectorLike,
@@ -39,7 +63,25 @@ export function blackBoxShiftEstimate(
   return { weights: w, priors: p.map((v) => v / z), confusion: C }
 }
 
-/** EM for the target priors from source posteriors on target points [n, k] and the source priors. */
+/**
+ * EM for the target priors from the source classifier's posteriors on target points: each iteration re-weights every
+ * posterior by $\pi_t(y) / \pi_s(y)$, renormalises it, and takes the mean over the points as the new $\pi_t$, starting
+ * from $\pi_t = \pi_s$. It stops when no prior moves by more than `tolerance`.
+ *
+ * @param posteriors The source posteriors $p_s(y \mid \xvec)$ on $n$ target points, $n \times k$.
+ * @param sourcePriors The source priors $\pi_s$, $k$ values.
+ * @param options The stopping rule.
+ * @param options.maxIterations The most EM iterations.
+ * @param options.tolerance Stop when the largest change of a prior is below this.
+ * @returns `priors` (the estimated $\pi_t$), `iterations` (the iterations taken, or `maxIterations` when it did not
+ *   stop) and `path` (the priors at the start and after each iteration).
+ *
+ * @example Five target points whose posteriors lean to class 1
+ * const posteriors = [[0.9, 0.1], [0.6, 0.4], [0.3, 0.7], [0.2, 0.8], [0.1, 0.9]]
+ * const { priors, iterations, path } = priorShiftEm(posteriors, [0.5, 0.5])
+ * print('target priors:', priors, 'after', iterations, 'iterations')
+ * print('the first steps:', path.slice(0, 3))
+ */
 export function priorShiftEm(
   posteriors: MatrixLike,
   sourcePriors: readonly number[],
@@ -67,7 +109,19 @@ export function priorShiftEm(
   return { priors: pi, iterations: maxIterations, path }
 }
 
-/** Posteriors [n, k] re-weighted by target/source prior ratios and renormalised. */
+/**
+ * Posteriors re-weighted by the target-to-source prior ratios and renormalised:
+ * $p_t(y \mid \xvec) \propto p_s(y \mid \xvec) \pi_t(y) / \pi_s(y)$.
+ *
+ * @param posteriors The source posteriors $p_s(y \mid \xvec)$, $n \times k$.
+ * @param sourcePriors The source priors $\pi_s$, $k$ values.
+ * @param targetPriors The target priors $\pi_t$, $k$ values (such as `priorShiftEm` or `blackBoxShiftEstimate`
+ *   estimates).
+ * @returns The corrected posteriors, row-major $n \times k$.
+ *
+ * @example Balanced-source posteriors moved towards a target where class 1 has prior 0.8
+ * print(reweightPosteriors([[0.9, 0.1], [0.5, 0.5]], [0.5, 0.5], [0.2, 0.8]))
+ */
 export function reweightPosteriors(
   posteriors: MatrixLike,
   sourcePriors: readonly number[],

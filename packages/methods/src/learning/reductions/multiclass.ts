@@ -1,19 +1,17 @@
 /**
- * Multiclass classification from binary classifiers, and one natively multiclass SVM.
+ * Multiclass classification from binary classifiers: $K$ classes reduced to binary problems whose margins are combined.
  *
- * - `oneVersusRest`, `oneVersusOne`: the classical reductions (Rifkin and Klautau, 2004, "In defense of one-vs-all
- *   classification"); one-versus-one breaks vote ties with confidences as scikit-learn's `OneVsOneClassifier`.
- * - `outputCode` with code matrices `oneVersusRestCode`, `oneVersusOneCode`, `exhaustiveCode`, `randomCode`: error-
- *   correcting output codes (Dietterich and Bakiri, 1995) with ternary entries and Hamming or loss-based decoding
- *   (Allwein, Schapire and Singer, 2000); `codeDistance` gives the minimum row distance.
- * - `nestedDichotomies`: a binary tree over the classes, with class probabilities as products of the binary
- *   probabilities along each path (Frank and Kramer, 2004).
- * - `crammerSingerSteps`, `crammerSinger`: the Crammer–Singer (2001) multiclass linear SVM by sequential dual
- *   coordinate ascent (Keerthi, Sundararajan, Chang, Hsieh and Lin, 2008, "A sequential dual method for large scale
- *   multi-class linear SVMs", KDD), as LIBLINEAR's `MCSVM_CS`.
+ * The classical reductions are one-versus-rest and one-versus-one (Rifkin and Klautau, 2004, "In defense of one-vs-all
+ * classification"); one-versus-one breaks vote ties with confidences as scikit-learn's `OneVsOneClassifier`. Both are
+ * error-correcting output codes (Dietterich and Bakiri, 1995): a $K \times L$ code matrix $\Cmat$ with entries
+ * $+1$, $-1$ and $0$ trains one binary model per column, and a point goes to the class whose row is nearest its $L$
+ * margins, in Hamming or loss-based distance (Allwein, Schapire and Singer, 2000). Nested dichotomies instead arrange
+ * the classes in a binary tree and multiply the binary probabilities along each path (Frank and Kramer, 2004).
  *
- * A binary base estimator takes labels 0/1 and must have `score` or `forward` giving a real margin [m] (positive for
- * class 1), such as `logisticRegression`, `supportVectorMachine`, `linearSvm` or `perceptron`.
+ * A binary base estimator is fitted on labels 0 and 1, and its model must have `score` or `forward` giving one real
+ * margin per row (positive for class 1), such as `logisticRegression`, `supportVectorMachine`, `linearSvm` or
+ * `perceptron`. Labels are the integers $0, \dots, K - 1$. Binary model $l$ is fitted with the stream
+ * `child(stream, 'model', l)` (`'node'` for a nested dichotomy) of the fit options.
  */
 
 import {
@@ -37,15 +35,25 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { oneOf, space } from 'aifn-compute/foundation/space'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
-/** A fitted binary model with a real-valued margin. */
+/**
+ * A fitted binary model with a real-valued margin: `score` (or, without it, `forward`) gives one margin per query row,
+ * positive for class 1; `predictive`, when present, marks the model as probabilistic (see `oneVersusRest`).
+ */
 export type BinaryModel = { score?(x: Tensor): Tensor; forward?(x: Tensor): Tensor; predictive?(x: Tensor): unknown }
 
-/** A binary estimator: fits labels 0/1. */
+/** A binary estimator: `fit` takes an $n \times d$ matrix `x` and labels `y` of 0 and 1, and returns the model. */
 export type BinaryEstimator<M extends BinaryModel = BinaryModel> = {
   fit(data: Supervised<Tensor, Tensor>, options?: FitOptions): M
 }
 
-/** The margin [m] of a binary model (from `score`, else `forward`). */
+/**
+ * The margins of a binary model on $m$ query rows (from `score`, else `forward`). Throws `DomainError` when the model
+ * has neither, and `ShapeError` when it does not give a vector.
+ *
+ * @param model The fitted binary model.
+ * @param x The query matrix, $m \times d$.
+ * @returns The $m$ margins.
+ */
 function margin(model: BinaryModel, x: Tensor): Float64Array {
   const f = model.score ?? model.forward
   if (!f) throw new DomainError('multiclass', 'multiclass: the binary model needs score or forward')
@@ -55,7 +63,16 @@ function margin(model: BinaryModel, x: Tensor): Float64Array {
   return values(s)
 }
 
-/** Rows of x whose labels are in `keep`, with binary targets 1 where `positive(label)`. */
+/**
+ * The binary subproblem of one model: the rows of `x` whose labels are kept, with target 1 where the label is
+ * positive and 0 elsewhere.
+ *
+ * @param x The training matrix, $n \times d$.
+ * @param y The integer label of each row.
+ * @param keep Whether rows of a class are trained on.
+ * @param positive Whether a class is the positive one (target 1).
+ * @returns The kept rows `x` and their 0/1 targets `y`, as tensors, and `rows`, their indices in the full data.
+ */
 function subproblem(x: Tensor, y: Int32Array, keep: (c: number) => boolean, positive: (c: number) => boolean) {
   const [, d] = x.shape
   const v = values(x)
@@ -73,22 +90,38 @@ function subproblem(x: Tensor, y: Int32Array, keep: (c: number) => boolean, posi
   }
 }
 
-/** A fitted multiclass reduction. */
+/** A fitted multiclass reduction. `score` gives $m \times K$ class scores and `decide` their argmax. */
 export interface ReductionModel<M extends BinaryModel = BinaryModel>
   extends Fitted<Tensor, Tensor>, Scores<Tensor>, Decides<Tensor, Tensor> {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'one-versus-rest' | 'one-versus-one' | 'output-code'
+  /** The number of classes $K$. */
   readonly classes: number
   /** The binary models, one per column of `code`. */
   readonly models: M[]
-  /** The K × L code matrix with entries −1, 0 (not trained on) and +1 (the class is positive for that model). */
+  /**
+   * The $K \times L$ code matrix with entries $-1$, $0$ (not trained on) and $+1$ (the class is positive for that
+   * model).
+   */
   readonly code: Tensor
-  /** The binary margins of every model [m, L]. */
+  /** The margins of every binary model on $m$ query rows, $m \times L$. */
   margins(x: Tensor): Tensor
 }
 
-/** Fit one binary model per column of a ternary code. */
+/**
+ * Fit one binary model per column of a ternary code: column $l$ trains on the classes with a non-zero entry, the
+ * $+1$ classes positive.
+ *
+ * @param base The binary estimator.
+ * @param x The training matrix, $n \times d$.
+ * @param y The integer label of each row.
+ * @param code The $K \times L$ code, row-major.
+ * @param L The number of columns of the code.
+ * @param options The fit options, passed on; model $l$ gets the stream `child(stream, 'model', l)` when one is given.
+ * @returns The $L$ fitted models, in column order.
+ */
 function fitCode<M extends BinaryModel>(
   base: BinaryEstimator<M>,
   x: Tensor,
@@ -112,6 +145,13 @@ function fitCode<M extends BinaryModel>(
   return models
 }
 
+/**
+ * The margins of several binary models on the same query rows.
+ *
+ * @param models The $L$ fitted binary models.
+ * @param x The query matrix, $m \times d$.
+ * @returns The margins, $m \times L$ row-major (model $l$ in column $l$).
+ */
 function marginsOf(models: BinaryModel[], x: Tensor): Float64Array {
   const m = x.shape[0]
   const L = models.length
@@ -124,9 +164,32 @@ function marginsOf(models: BinaryModel[], x: Tensor): Float64Array {
 }
 
 /**
- * One-versus-rest: K binary models, model k separating class k from the others. `score` gives the K margins [m, K]
- * and `decide` their argmax. When the base model has probabilities, `predictive` normalises the K positive-class
- * probabilities (scikit-learn's `OneVsRestClassifier.predict_proba`); otherwise it is absent.
+ * One-versus-rest: $K$ binary models, model $k$ separating class $k$ (positive) from the others. `score` gives the
+ * $m \times K$ margins and `decide` their argmax. When every binary model has a `predictive`, the fitted model has
+ * one too: it reads each margin $s_k$ as a logit, and normalises the $K$ positive-class probabilities
+ * $\sigma(s_k)$ to sum to 1 (as scikit-learn's `OneVsRestClassifier.predict_proba`); otherwise it is absent. `fit`
+ * throws `ShapeError` or `DomainError` for data that is not a matrix with integer labels.
+ *
+ * @param base The binary estimator fitted once per class.
+ * @returns The estimator: `fit({ x, y })` returns a `ReductionModel` whose `code` is `oneVersusRestCode(K)`.
+ *
+ * @example One-versus-rest on three Gaussian classes
+ * // A tiny binary base: the margin is how much nearer the class-1 mean a row is than the class-0 mean.
+ * const nearerMean = {
+ *   fit({ x, y }) {
+ *     const centre = (c) => div(sum(mul(x, reshape(equalTo(y, c), [-1, 1])), 0), sum(equalTo(y, c)))
+ *     const [m0, m1] = [centre(0), centre(1)]
+ *     return { score: (q) => sub(sum(square(sub(q, m0)), -1), sum(square(sub(q, m1)), -1)) }
+ *   },
+ * }
+ * // Three Gaussian classes of ten points, centred at (0, 0), (4, 0) and (0, 4).
+ * const block = (s, c) => add(normals(stream(s), [10, 2]), tensor(c))
+ * const x = concat([block(0, [0, 0]), block(1, [4, 0]), block(2, [0, 4])])
+ * const y = tensor(Array.from({ length: 30 }, (_, i) => Math.floor(i / 10)))
+ * const model = oneVersusRest(nearerMean).fit({ x, y })
+ * const q = tensor([[0, 0], [4, 0], [0, 4]])
+ * print('margins =', model.score(q))
+ * print('classes =', model.decide(q))
  */
 export function oneVersusRest<M extends BinaryModel>(
   base: BinaryEstimator<M>,
@@ -171,9 +234,32 @@ export function oneVersusRest<M extends BinaryModel>(
 }
 
 /**
- * One-versus-one: K(K − 1)/2 binary models, one per pair (j, k) with j < k trained on those two classes only (class j
- * positive). Each model votes; `score` [m, K] is the votes plus the summed confidences squashed into (−⅓, ⅓), so ties
- * go to the more confident class (scikit-learn's `_ovr_decision_function`).
+ * One-versus-one: $K(K - 1)/2$ binary models, one per pair $(j, k)$ with $j < k$, trained on those two classes only
+ * (class $j$ positive). Each model votes for $j$ when its margin $s$ is positive and for $k$ otherwise; the
+ * $m \times K$ `score` is the votes plus each class's summed confidence $t$ squashed to $t / (3(\lvert t \rvert + 1))$,
+ * inside $(-\tfrac13, \tfrac13)$, so ties go to the more confident class (scikit-learn's `_ovr_decision_function`).
+ *
+ * @param base The binary estimator fitted once per pair of classes.
+ * @returns The estimator: `fit({ x, y })` returns a `ReductionModel` whose `code` is `oneVersusOneCode(K)`.
+ *
+ * @example Pairwise votes on three Gaussian classes
+ * // A tiny binary base: the margin is how much nearer the class-1 mean a row is than the class-0 mean.
+ * const nearerMean = {
+ *   fit({ x, y }) {
+ *     const centre = (c) => div(sum(mul(x, reshape(equalTo(y, c), [-1, 1])), 0), sum(equalTo(y, c)))
+ *     const [m0, m1] = [centre(0), centre(1)]
+ *     return { score: (q) => sub(sum(square(sub(q, m0)), -1), sum(square(sub(q, m1)), -1)) }
+ *   },
+ * }
+ * // Three Gaussian classes of ten points, centred at (0, 0), (4, 0) and (0, 4).
+ * const block = (s, c) => add(normals(stream(s), [10, 2]), tensor(c))
+ * const x = concat([block(0, [0, 0]), block(1, [4, 0]), block(2, [0, 4])])
+ * const y = tensor(Array.from({ length: 30 }, (_, i) => Math.floor(i / 10)))
+ * const model = oneVersusOne(nearerMean).fit({ x, y })
+ * const q = tensor([[0, 0], [4, 0], [0, 4]])
+ * print('margins of (0, 1), (0, 2), (1, 2) =', model.margins(q))
+ * print('votes =', model.score(q))
+ * print('classes =', model.decide(q))
  */
 export function oneVersusOne<M extends BinaryModel>(
   base: BinaryEstimator<M>,
@@ -223,13 +309,48 @@ export function oneVersusOne<M extends BinaryModel>(
 }
 
 /**
- * Error-correcting output codes: one binary model per column of the K × L code (entries +1, −1, and 0 for classes a
- * model is not trained on). Decoding picks the class whose row is nearest the vector of margins:
+ * Error-correcting output codes (Dietterich and Bakiri, 1995; Allwein, Schapire and Singer, 2000): one binary model
+ * per column of the $K \times L$ code $\Cmat$ (entries $+1$, $-1$, and $0$ for classes a model is not trained on).
+ * Decoding picks the class whose row is nearest the margins $s_1, \dots, s_L$:
  *
- * - `hamming` (default): Σₗ (1 − sign(sₗ)·C_kl)/2, so a zero entry costs ½ whatever the model says;
- * - `loss`: Σₗ ℓ(C_kl sₗ) with the logistic loss ℓ(z) = log(1 + e^(−z)) (zero entries cost nothing).
+ * - `hamming` (default): $\sum_l (1 - \sgn(s_l) C_{kl})/2$, so a zero entry costs $\tfrac12$ whatever the model says;
+ * - `loss`: $\sum_l \ell(C_{kl} s_l)$ with the logistic loss $\ell(z) = \log(1 + e^{-z})$ (zero entries cost
+ *   nothing).
  *
- * `score` returns minus the decoding distances [m, K], so larger is better and `decide` is its argmax.
+ * `score` returns minus the $m \times K$ decoding distances, so larger is better and `decide` is its argmax. Throws
+ * `DomainError` at once when a column lacks a $+1$ or a $-1$, and from `fit` when the labels reach beyond the $K$ rows.
+ *
+ * @param base The binary estimator fitted once per column.
+ * @param code The code matrix $\Cmat$, $K \times L$, as a tensor or as rows of numbers; row $k$ is the codeword of
+ *   class $k$. `oneVersusRestCode`, `oneVersusOneCode`, `exhaustiveCode` and `randomCode` build one.
+ * @param params `decoding`, the distance between margins and codewords: `'hamming'` (default) or `'loss'`.
+ * @returns The estimator: `fit({ x, y })` returns a `ReductionModel` with `distances`, the $m \times K$ decoding
+ *   distances.
+ *
+ * @example The exhaustive code on three Gaussian classes
+ * // A tiny binary base: the margin is how much nearer the class-1 mean a row is than the class-0 mean.
+ * const nearerMean = {
+ *   fit({ x, y }) {
+ *     const centre = (c) => div(sum(mul(x, reshape(equalTo(y, c), [-1, 1])), 0), sum(equalTo(y, c)))
+ *     const [m0, m1] = [centre(0), centre(1)]
+ *     return { score: (q) => sub(sum(square(sub(q, m0)), -1), sum(square(sub(q, m1)), -1)) }
+ *   },
+ * }
+ * // Three Gaussian classes of ten points, centred at (0, 0), (4, 0) and (0, 4).
+ * const block = (s, c) => add(normals(stream(s), [10, 2]), tensor(c))
+ * const x = concat([block(0, [0, 0]), block(1, [4, 0]), block(2, [0, 4])])
+ * const y = tensor(Array.from({ length: 30 }, (_, i) => Math.floor(i / 10)))
+ * const model = outputCode(nearerMean, exhaustiveCode(3)).fit({ x, y })
+ * const q = tensor([[0, 0], [4, 0], [0, 4]])
+ * print('Hamming distances =', model.distances(q))
+ * print('classes =', model.decide(q))
+ *
+ * @example A column without both signs is refused
+ * try {
+ *   outputCode({ fit: () => ({}) }, [[1, 1], [-1, 1], [-1, 1]])
+ * } catch (e) {
+ *   print(e.message)
+ * }
  */
 export function outputCode<M extends BinaryModel>(
   base: BinaryEstimator<M>,
@@ -300,7 +421,15 @@ export function outputCode<M extends BinaryModel>(
 
 // ── Code matrices ────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The one-versus-rest code: K × K, +1 on the diagonal and −1 elsewhere. */
+/**
+ * The one-versus-rest code: $K \times K$, $+1$ on the diagonal and $-1$ elsewhere.
+ *
+ * @param K The number of classes.
+ * @returns The $K \times K$ code.
+ *
+ * @example The code for three classes
+ * print(oneVersusRestCode(3))
+ */
 export function oneVersusRestCode(K: number): Tensor {
   return fromData(
     Float64Array.from({ length: K * K }, (_, j) => (Math.floor(j / K) === j % K ? 1 : -1)),
@@ -308,7 +437,16 @@ export function oneVersusRestCode(K: number): Tensor {
   )
 }
 
-/** The one-versus-one code: K × K(K − 1)/2, column (i, j) is +1 for class i, −1 for class j and 0 for the rest. */
+/**
+ * The one-versus-one code: $K \times K(K - 1)/2$, the column of pair $(i, j)$ with $i < j$ is $+1$ for class $i$,
+ * $-1$ for class $j$ and $0$ for the rest. Pairs are in the order $(0, 1), (0, 2), \dots, (K - 2, K - 1)$.
+ *
+ * @param K The number of classes.
+ * @returns The $K \times K(K - 1)/2$ code.
+ *
+ * @example The code for three classes
+ * print(oneVersusOneCode(3))
+ */
 export function oneVersusOneCode(K: number): Tensor {
   const L = (K * (K - 1)) / 2
   const out = new Float64Array(K * L)
@@ -325,7 +463,16 @@ export function oneVersusOneCode(K: number): Tensor {
 
 /**
  * Dietterich and Bakiri's (1995) exhaustive code: every split of the classes into two non-empty groups once,
- * 2^(K−1) − 1 columns, with class 0 always +1. Any two rows differ in 2^(K−2) columns.
+ * $2^{K-1} - 1$ columns, with class 0 always $+1$. Any two rows differ in $2^{K-2}$ columns. Throws `DomainError`
+ * unless $2 \le K \le 16$.
+ *
+ * @param K The number of classes.
+ * @returns The $K \times (2^{K-1} - 1)$ code.
+ *
+ * @example Four classes: seven columns, any two rows four apart
+ * const C = exhaustiveCode(4)
+ * print(C)
+ * print('distance =', codeDistance(C))
  */
 export function exhaustiveCode(K: number): Tensor {
   if (K < 2 || K > 16) throw new DomainError('exhaustiveCode', 'exhaustiveCode: K must be between 2 and 16')
@@ -338,8 +485,19 @@ export function exhaustiveCode(K: number): Tensor {
 }
 
 /**
- * A random dense (±1 with probability ½) or sparse (0 with probability ½, else ±1 equally) code with L columns; a
- * column without both signs is redrawn. Column l draws from `child(s, 'column', l)`.
+ * A random dense ($\pm 1$ with probability $\tfrac12$ each) or sparse ($0$ with probability $\tfrac12$, else
+ * $\pm 1$ equally) code with $L$ columns (Allwein, Schapire and Singer, 2000); a column without both signs is
+ * redrawn, so $K$ must be at least 2 (with $K = 1$ it never ends). Column $l$ draws from `child(s, 'column', l)`.
+ *
+ * @param s The random stream.
+ * @param K The number of classes (rows).
+ * @param L The number of columns (binary models).
+ * @param params `sparse`: draw a ternary code with zeros (default false, a dense binary code).
+ * @returns The $K \times L$ code.
+ *
+ * @example A dense and a sparse code for four classes
+ * print(randomCode(stream(0), 4, 5))
+ * print(randomCode(stream(0), 4, 5, { sparse: true }))
  */
 export function randomCode(s: Stream, K: number, L: number, params: { sparse?: boolean } = {}): Tensor {
   const out = new Float64Array(K * L)
@@ -363,7 +521,16 @@ export function randomCode(s: Stream, K: number, L: number, params: { sparse?: b
 
 /**
  * The minimum distance between two rows of a code, counting a column only when both rows are non-zero there (a model
- * says nothing reliable about a class it was not trained on). A code corrects ⌊(distance − 1)/2⌋ binary errors.
+ * says nothing reliable about a class it was not trained on). A code corrects $\lfloor (d - 1)/2 \rfloor$ binary
+ * errors, $d$ the distance.
+ *
+ * @param code The $K \times L$ code matrix.
+ * @returns The smallest number of columns in which two rows have opposite non-zero entries (Infinity when $K < 2$).
+ *
+ * @example The distances of three codes for four classes
+ * print('one-versus-rest:', codeDistance(oneVersusRestCode(4)))
+ * print('one-versus-one:', codeDistance(oneVersusOneCode(4)))
+ * print('exhaustive:', codeDistance(exhaustiveCode(4)))
  */
 export function codeDistance(code: Tensor): number {
   const [K, L] = code.shape
@@ -385,18 +552,45 @@ export function codeDistance(code: Tensor): number {
 export type Dichotomy = number | [Dichotomy, Dichotomy]
 
 /**
- * A class tree: `balanced` (halve the sorted classes recursively) or `chain` (peel off one class at a time: 0 vs rest,
- * then 1 vs rest, …). `randomDichotomyTree` draws a random one.
+ * A class tree: `balanced` (halve the sorted classes recursively, the smaller half on the left) or `chain` (peel off
+ * one class at a time: 0 versus the rest, then 1 versus the rest, and so on). `randomDichotomyTree` draws a random one.
+ *
+ * @param K The number of classes, at least 1.
+ * @param shape The shape of the tree: `'balanced'` or `'chain'`.
+ * @returns The tree over the classes $0, \dots, K - 1$.
+ *
+ * @example Balanced and chain trees over five classes
+ * print('balanced:', dichotomyTree(5))
+ * print('chain:', dichotomyTree(5, 'chain'))
  */
 export function dichotomyTree(K: number, shape: 'balanced' | 'chain' = 'balanced'): Dichotomy {
   return buildDichotomy(K, shape, undefined)
 }
 
-/** A random class tree: a random split of the classes at every node, node `path` drawing from `child(s, 'node', path)`. */
+/**
+ * A random class tree: at every node the classes are shuffled and cut at a uniform point into two non-empty groups.
+ * The node at `path` (`''` for the root, then `'L'` and `'R'` for each step down) draws from `child(s, 'node', path)`.
+ *
+ * @param s The random stream.
+ * @param K The number of classes, at least 1.
+ * @returns The tree over the classes $0, \dots, K - 1$.
+ *
+ * @example Two random trees over five classes
+ * print(randomDichotomyTree(stream(0), 5))
+ * print(randomDichotomyTree(stream(1), 5))
+ */
 export function randomDichotomyTree(s: Stream, K: number): Dichotomy {
   return buildDichotomy(K, 'random', s)
 }
 
+/**
+ * Build a class tree by splitting the classes recursively: in half, one class off the front, or at random.
+ *
+ * @param K The number of classes.
+ * @param shape `'balanced'`, `'chain'` or `'random'`.
+ * @param s The random stream of a `'random'` tree (unused otherwise).
+ * @returns The tree over the classes $0, \dots, K - 1$.
+ */
 function buildDichotomy(K: number, shape: 'balanced' | 'chain' | 'random', s: Stream | undefined): Dichotomy {
   const build = (classes: number[], path: string): Dichotomy => {
     if (classes.length === 1) return classes[0]
@@ -422,24 +616,61 @@ function buildDichotomy(K: number, shape: 'balanced' | 'chain' | 'random', s: St
   )
 }
 
+/**
+ * The classes at the leaves of a tree, left to right.
+ *
+ * @param t The tree or subtree.
+ * @returns Its leaf classes.
+ */
 const classesOf = (t: Dichotomy): number[] => (typeof t === 'number' ? [t] : [...classesOf(t[0]), ...classesOf(t[1])])
 
 /** A fitted nested dichotomy. */
 export interface NestedDichotomyModel<M extends BinaryModel = BinaryModel>
   extends Fitted<Tensor, Tensor>, Scores<Tensor>, Decides<Tensor, Tensor>, Predicts<Tensor, AnyUnivariate> {
+  /** Always `'model'`. */
   readonly kind: 'model'
   /** The model's name. */
   readonly name: 'nested-dichotomies'
+  /** The number of classes $K$. */
   readonly classes: number
+  /** The class tree the models were fitted on. */
   readonly tree: Dichotomy
-  /** One binary model per internal node, in preorder; model i gives P(left child | node i's classes). */
+  /**
+   * One binary model per internal node, in preorder; model $i$ gives the probability of the left child given node
+   * $i$'s classes.
+   */
   readonly models: M[]
 }
 
 /**
- * Nested dichotomies: each internal node of a class tree has a binary model for "left group versus right group",
- * trained only on its classes; P(y = k | x) is the product of the branch probabilities on the path to k. The binary
- * probability of the left group is σ(margin) (the base's margin read as a logit).
+ * Nested dichotomies (Frank and Kramer, 2004): each internal node of a class tree has a binary model for "left group
+ * versus right group", trained only on its classes; $p(y = k \mid \xvec)$ is the product of the branch probabilities
+ * on the path to $k$. The probability of the left group is $\sigma(s)$, the base's margin $s$ read as a logit.
+ * `forward` and `score` are the $m \times K$ log-probabilities, `predictive` the class law and `decide` the most
+ * probable class. `fit` throws `DomainError` unless the tree holds every class $0, \dots, K - 1$ exactly once.
+ *
+ * @param base The binary estimator fitted once per internal node.
+ * @param tree The class tree, or a function of $K$ that builds it (default `dichotomyTree(K)`, balanced).
+ * @returns The estimator: `fit({ x, y })` returns a `NestedDichotomyModel`.
+ *
+ * @example A balanced tree over three Gaussian classes
+ * // A tiny binary base: the margin is how much nearer the class-1 mean a row is than the class-0 mean.
+ * const nearerMean = {
+ *   fit({ x, y }) {
+ *     const centre = (c) => div(sum(mul(x, reshape(equalTo(y, c), [-1, 1])), 0), sum(equalTo(y, c)))
+ *     const [m0, m1] = [centre(0), centre(1)]
+ *     return { score: (q) => sub(sum(square(sub(q, m0)), -1), sum(square(sub(q, m1)), -1)) }
+ *   },
+ * }
+ * // Three Gaussian classes of ten points, centred at (0, 0), (4, 0) and (0, 4).
+ * const block = (s, c) => add(normals(stream(s), [10, 2]), tensor(c))
+ * const x = concat([block(0, [0, 0]), block(1, [4, 0]), block(2, [0, 4])])
+ * const y = tensor(Array.from({ length: 30 }, (_, i) => Math.floor(i / 10)))
+ * const model = nestedDichotomies(nearerMean).fit({ x, y })
+ * const q = tensor([[0, 0], [4, 0], [0, 4]])
+ * print('tree =', model.tree)
+ * print('log-probabilities =', model.forward(q))
+ * print('classes =', model.decide(q))
  */
 export function nestedDichotomies<M extends BinaryModel>(
   base: BinaryEstimator<M>,
@@ -518,7 +749,15 @@ export function nestedDichotomies<M extends BinaryModel>(
   }
 }
 
-/** Softmax of scores [m, K] as class probabilities, for reductions whose scores are logits. */
+/**
+ * Row-wise softmax of class scores as class probabilities, for reductions whose scores are logits.
+ *
+ * @param scores The $m \times K$ scores.
+ * @returns The $m \times K$ probabilities; each row sums to 1.
+ *
+ * @example Scores to probabilities
+ * print(softmaxScores(tensor([[2, 0, 0], [0, 0, 0]])))
+ */
 export function softmaxScores(scores: Tensor): Tensor {
   const [m, K] = scores.shape
   return fromData(softmaxRows(values(scores), m, K), [m, K])

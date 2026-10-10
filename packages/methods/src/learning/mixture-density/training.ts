@@ -1,8 +1,12 @@
 /**
- * Training mixture density networks: `mdnTraining`, Adam on the network's loss as a traceable `trainingLoop`;
- * `mixtureDensityRun`, a generator that trains an MDN and the squared-error network of the same body side by side on
- * one dataset and yields snapshots (curves and parameters at checkpoints) for a page to plot and play; and
- * `mixtureDensityNetwork`, the MDN as a registered estimator whose predictive is the mixture.
+ * Training mixture density networks: Adam on the network's loss as a traceable `trainingLoop` of
+ * `aifn-compute/nn/training`, a side-by-side run of an MDN and the squared-error network of the same body that yields
+ * snapshots (curves and parameters at checkpoints) for a page to plot and play, and the MDN as a registered estimator
+ * whose predictive is the mixture.
+ *
+ * Every network sees inputs standardised by the training data's column means and standard deviations
+ * (`inputStandardisation`), and the gradient's global norm is clipped at 10 by default. Training stops early when the
+ * loss diverges.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
@@ -35,7 +39,7 @@ import {
   type MdnSpec,
 } from './model'
 
-/** Inputs [n, d] and targets [n] or [n, D]. */
+/** Training data: inputs `x`, $n \times d$ (or $n$ values, one column), and targets `y`, $n$ values or $n \times D$. */
 export type MdnData = { x: Tensor; y: Tensor }
 
 /** Options of `mdnTraining`. */
@@ -48,7 +52,26 @@ export type MdnTrainingOptions = {
   clipNorm?: number
 }
 
-/** Adam on the network's loss (mixture NLL or squared error), as a traceable `trainingLoop`. */
+/**
+ * Adam on the network's loss (the mixture NLL or the squared error, by the model's objective), as a traceable
+ * `trainingLoop`: a step-through algorithm to run with `run` or `trace`, whose state carries the parameters, the
+ * loss, the gradients and whether the run `diverged`.
+ *
+ * @param model The network, from `mdnModel`.
+ * @param data The training inputs and targets.
+ * @param options Adam's step size, the minibatch size and the gradient clipping, as `MdnTrainingOptions`.
+ * @returns The algorithm; its start is `{ params }`, such as `{ params: model.init(stream(0)) }`.
+ *
+ * @example The loss falls as Adam trains a small MDN
+ * // Bishop's (1994) inverse problem: x = y + 0.3 sin(2 pi y) + noise, so y given x has up to three branches.
+ * const y = uniform(stream(0), 0, 1, { shape: [60] })
+ * const x = reshape(add(add(y, mul(sin(mul(y, 2 * Math.PI)), 0.3)), mul(normals(stream(1), [60]), 0.02)), [60, 1])
+ * const model = mdnModel({ inputs: 1, components: 3, hidden: [8], ...inputStandardisation(x) })
+ * const alg = mdnTraining(model, { x, y }, { stepSize: 0.05 })
+ * const start = { params: model.init(stream(2)) }
+ * print('NLL at the start =', run(alg, start, 0).loss)
+ * print('after 100 steps =', run(alg, start, 100).loss)
+ */
 export function mdnTraining(
   model: MdnModel,
   data: MdnData,
@@ -68,54 +91,85 @@ export function mdnTraining(
 
 /** Options of `mixtureDensityRun`. */
 export type MdnRunOptions = Omit<MdnConfig, 'inputs' | 'outputs' | 'objective'> & {
+  /** The training data; it also sets the input width, the target dimension and the input standardisation. */
   data: MdnData
-  /** Adam updates (default 2000). */
+  /** Training steps (default 2000). */
   steps?: Size
-  /** Keep both networks' parameters every this many steps for the player (default steps/50, at least 1). */
+  /**
+   * Keep both networks' parameters, and yield a snapshot, every this many steps (default $\text{steps}/50$ rounded, at
+   * least 1).
+   */
   every?: Size
+  /** Adam's step size, for the default `method` (default 0.01). */
   stepSize?: number
+  /** Rows per Adam step, for the default `method` (default all: full-batch). */
   batchSize?: Size
   /**
    * How both networks train (default Adam with `stepSize` and `batchSize`); `{ method: 'lbfgs' }` trains them by
    * full-batch L-BFGS, one line-searched step per step.
    */
   method?: TrainingMethod
-  /** The root stream's seed (default 'mdn'); both networks start from its child `init`. */
+  /**
+   * The root stream's seed (default `'mdn'`); the networks are initialised from its children `init, mixture` and
+   * `init, mean`, and step $t$ of both draws from `step, t`.
+   */
   seed?: string | number
 }
 
-/** Curves of a run, one entry per recorded step, on the training data. */
+/** Curves of a run on the training data, one entry per recorded step (about 200 over the run). */
 export type MdnHistory = {
+  /** The step of each entry. */
   step: number[]
   /** The MDN's negative log-likelihood per row. */
   nll: number[]
   /** The squared-error network's, as a Gaussian with its residual variance. */
   meanNll: number[]
-  /** The squared error of the MDN's mean E[y | x]. */
+  /** The squared error of the MDN's mean $\expect[\yvec \mid \xvec]$. */
   mse: number[]
   /** The squared-error network's. */
   meanMse: number[]
 }
 
-/** Both networks' parameters at one step. */
+/** Both networks' parameters at one step: `mixture` the MDN's, `mean` the squared-error network's. */
 export type MdnCheckpoint = { readonly step: Size; readonly mixture: Params[]; readonly mean: Params[] }
 
 /** A snapshot of `mixtureDensityRun`. */
 export type MdnSnapshot = {
+  /** The steps taken so far. */
   readonly step: Size
+  /** The steps of the whole run (fewer than asked when it stopped early). */
   readonly steps: Size
+  /** Whether this is the last snapshot. */
   readonly done: boolean
-  /** The MDN's and the squared-error network's specs (rebuild them with `mdnModel`). */
+  /** The MDN's spec (rebuild the network with `mdnModel`). */
   readonly spec: MdnSpec
+  /** The squared-error network's spec. */
   readonly meanSpec: MdnSpec
+  /** The curves so far. */
   readonly history: MdnHistory
   /** Parameters at step 0, every `every` steps and at the last step. */
   readonly checkpoints: readonly MdnCheckpoint[]
 }
 
 /**
- * Train an MDN with K components and the squared-error network with the same hidden layers on `data`, by Adam from
- * the same seed, yielding a snapshot every `every` steps: a generator, so a worker can stream the run to a page.
+ * Train an MDN with $K$ components and the squared-error network with the same hidden layers on `data`, side by side
+ * by the same method (Adam by default) from one root stream, yielding a snapshot at step 0 and every `every` steps: a
+ * generator, so a worker can stream the run to a page. The run ends early, with a last snapshot, when either network
+ * diverges or both have stopped (a converged L-BFGS).
+ *
+ * @param options The data, the shared structure (`components`, `hidden`, `activation`, `scale`, `floor`), the
+ *   training method and its length, and the seed, as `MdnRunOptions`.
+ * @returns A generator of snapshots; the last has `done` true.
+ *
+ * @example A short run: the mixture's NLL against the squared-error network's
+ * // Bishop's (1994) inverse problem: x = y + 0.3 sin(2 pi y) + noise, so y given x has up to three branches.
+ * const y = uniform(stream(0), 0, 1, { shape: [60] })
+ * const x = reshape(add(add(y, mul(sin(mul(y, 2 * Math.PI)), 0.3)), mul(normals(stream(1), [60]), 0.02)), [60, 1])
+ * const snapshots = [...mixtureDensityRun({ data: { x, y }, steps: 60, every: 30, hidden: [8], stepSize: 0.05 })]
+ * print('snapshots at steps', snapshots.map((s) => s.step))
+ * const { history } = snapshots[snapshots.length - 1]
+ * print('NLL of the mixture:', history.nll[history.nll.length - 1])
+ * print('NLL of the squared-error network:', history.meanNll[history.meanNll.length - 1])
  */
 export function* mixtureDensityRun(options: MdnRunOptions): Generator<MdnSnapshot> {
   const {
@@ -199,7 +253,7 @@ export function* mixtureDensityRun(options: MdnRunOptions): Generator<MdnSnapsho
 
 /** Hyperparameters of `mixtureDensityNetwork`. */
 export type MixtureDensityNetworkParams = {
-  /** Mixture components K (default 3). */
+  /** Mixture components $K$ (default 3). */
   components?: Size
   /** Units of the single tanh hidden layer (default 20). */
   hidden?: Size
@@ -207,15 +261,34 @@ export type MixtureDensityNetworkParams = {
   steps?: Size
   /** Adam's step size (default 0.01). */
   stepSize?: number
-  /** σ = floor + exp(s) (default) or floor + softplus(s). */
+  /**
+   * How a raw output $s$ becomes a standard deviation: $\sigma = 10^{-3} + e^s$ (`'exp'`, default) or
+   * $10^{-3} + \operatorname{softplus}(s)$.
+   */
   scale?: ScaleLink
 }
 
 /**
- * The mixture density network as an estimator: an MLP with one tanh hidden layer and a K-component Gaussian mixture
- * head, fitted by full-batch Adam on the mixture NLL. Capabilities: `forward` (the head), `decide` (the most probable
- * mode, the answer on an inverse problem where the mean solves nothing), `predictive` (the mixture), `expect` and
- * `sample` (from the predictive).
+ * The mixture density network as an estimator: an MLP with one tanh hidden layer and a $K$-component Gaussian mixture
+ * head, fitted on standardised inputs by full-batch Adam on the mixture NLL (stopping early if it diverges).
+ * Capabilities: `forward` (the raw head, $m \times K(1 + 2D)$), `decide` (the most probable mode, the answer on an
+ * inverse problem where the mean solves nothing), `predictive` (the mixture), `expect` and `sample` (from the
+ * predictive). The fitted model also keeps its `spec`, its `params` and `mixture`, the `mdnPredict` mixture of a
+ * query.
+ *
+ * @param params The number of components, the hidden width, the training length and step size, and the scale link,
+ *   as `MixtureDensityNetworkParams`.
+ * @returns The estimator: `fit({ x, y }, { stream })` returns the fitted model (the stream defaults to
+ *   `stream('mixture-density-network')`).
+ *
+ * @example On an inverse problem, the most probable answer is not the mean
+ * // Bishop's (1994) inverse problem: x = y + 0.3 sin(2 pi y) + noise, so y given x has up to three branches.
+ * const y = uniform(stream(0), 0, 1, { shape: [60] })
+ * const x = reshape(add(add(y, mul(sin(mul(y, 2 * Math.PI)), 0.3)), mul(normals(stream(1), [60]), 0.02)), [60, 1])
+ * const model = mixtureDensityNetwork({ hidden: 8, steps: 150, stepSize: 0.05 }).fit({ x, y }, { stream: stream(2) })
+ * const q = tensor([[0.2], [0.5], [0.8]])
+ * print('most probable y =', model.decide(q))
+ * print('mean of y =', model.expect(q))
  */
 export function mixtureDensityNetwork(params: MixtureDensityNetworkParams = {}) {
   const { components = 3, hidden = 20, steps = 1000, stepSize = 0.01, scale = 'exp' } = params

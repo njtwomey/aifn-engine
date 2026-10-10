@@ -1,4 +1,7 @@
-/** The functions of `aifn-methods/learning/reductions`: multiclass codes and dichotomy trees. */
+/**
+ * Registry entries of `aifn-methods/learning/reductions`: the code matrices, `codeDistance`, the class trees and
+ * `softmaxScores`, each with its notes.
+ */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as multiclass from './multiclass'
