@@ -147,7 +147,9 @@ enough for a supporting function.
   `@example` with code on the tag's line and no title is shown as plain code and never run: avoid it.)
 - In scope: every export of the function's module, and the common surface of `aifn-compute` (`tensor`, `matmul`,
   `transpose`, `grad`, `sum`, `run`, `trace`, streams, ...). Write the code as if those were imported; the page shows
-  the import lines it works out.
+  the import lines it works out. Anything from another module is named by an import line of the example's own, on
+  a line by itself: `import { rbf, gram as g } from 'aifn-compute/learning/kernels'` (any node of `aifn-compute` or
+  `aifn-methods`). The page shows it as written; a module or name that does not exist fails the example.
 - **Every example prints at least one thing.** Show results with `print(label, value)`: a cell that computes and
   shows nothing teaches nothing, and the check fails it. Print what the reader should look at (the result, and where
   it helps a check on it, such as $\Lmat\Lmat^\top$ beside $\Amat$), each with a label. A bare expression on a line
@@ -159,7 +161,8 @@ enough for a supporting function.
 
 ### Maths
 
-Write maths as TeX between single dollar signs; it is set by KaTeX. No Unicode superscripts, subscripts, operators,
+Write maths as TeX between single dollar signs; it is set by KaTeX. A long or central equation goes on its own as
+display maths, between `$$` on lines of their own (or `$$ … $$` on one line), and is set centred and larger. No Unicode superscripts, subscripts, operators,
 Greek letters or accents (`LLᵀ`, `n×n`, `Σ`, `λ`, `Ā`), and no bare variable names in prose where a formula is meant
 ("the factor L of A" is "the factor $\Lmat$ of $\Amat$").
 

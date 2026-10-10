@@ -20,15 +20,30 @@ function inline(text: string): ReactNode {
   )
 }
 
-type Block = { kind: 'p' | 'li' | 'code'; text: string }
+type Block = { kind: 'p' | 'li' | 'code' | 'math'; text: string }
 
-/** A doc comment as blocks: paragraphs, list items (with their continuation lines) and fenced code. */
+/**
+ * A doc comment as blocks: paragraphs, list items (with their continuation lines), fenced code, and display maths
+ * (`$$ … $$` opening a line, on one line or several).
+ */
 function blocks(text: string): Block[] {
   const out: Block[] = []
   let fence: string[] | null = null
+  let maths: string[] | null = null
   let open: Block | null = null
   for (const line of text.split('\n')) {
-    if (/^\s*```/.test(line)) {
+    if (maths) {
+      maths.push(line)
+      if (/\$\$\s*$/.test(line)) {
+        out.push({ kind: 'math', text: maths.join(' ').trim().slice(2, -2).trim() })
+        maths = null
+      }
+    } else if (!fence && /^\s*\$\$/.test(line)) {
+      const one = line.trim()
+      if (one.length > 2 && one.endsWith('$$')) out.push({ kind: 'math', text: one.slice(2, -2).trim() })
+      else maths = [one]
+      open = null
+    } else if (/^\s*```/.test(line)) {
       if (fence) out.push({ kind: 'code', text: fence.join('\n') })
       fence = fence ? null : []
       open = null
@@ -46,13 +61,19 @@ export function Inline({ text }: { text: string }) {
   return <>{inline(text)}</>
 }
 
-/** The prose of a doc comment: the few Markdown forms the source uses (paragraphs, lists, code, maths, strong). */
+/** The prose of a doc comment: the few Markdown forms the source uses (paragraphs, lists, code, inline and display maths, strong). */
 export function Markdown({ text, className }: { text: string; className?: string }) {
   const all = blocks(text)
   const out: ReactNode[] = []
   for (let i = 0; i < all.length; i++) {
     const b = all[i]
     if (b.kind === 'code') out.push(<CodeBlock key={i} code={b.text} />)
+    else if (b.kind === 'math')
+      out.push(
+        <div key={i} className="overflow-x-auto py-1">
+          <Tex display>{b.text}</Tex>
+        </div>,
+      )
     else if (b.kind === 'p') out.push(<p key={i}>{inline(b.text)}</p>)
     else {
       const items: Block[] = []

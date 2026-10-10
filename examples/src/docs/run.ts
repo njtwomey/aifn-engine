@@ -1,7 +1,8 @@
 /**
  * Running a documentation example: the code is compiled with `new Function`, with the exports of the module it
  * documents and the common surface of `aifn-compute` (tensors, `grad`, streams, runners) in scope, as if imported by
- * name. It reads like a notebook cell: every statement that is an expression on a line of its own shows its value,
+ * name. Anything else is named by an import line of the example's own (`import { rbf } from
+ * 'aifn-compute/learning/kernels'`), which `withImports` loads into the scope. It reads like a notebook cell: every statement that is an expression on a line of its own shows its value,
  * and `print` adds lines of output. The code runs in its own block, so its `const apply` or `let sum` shadows a name
  * of the scope instead of colliding with it.
  *
@@ -27,17 +28,65 @@ export async function scopeOf(pkg: DocPackage, path: string): Promise<Scope> {
   return { names: { ...base, ...own }, own: new Set(Object.keys(own)) }
 }
 
+/**
+ * An example's own import line, `import { a, b as c } from 'aifn-compute/learning/kernels'`, on a line of its own:
+ * how an example names something from another module than the one it documents.
+ */
+const IMPORT_LINE = /^\s*import\s*\{([^}]*)\}\s*from\s*['"]aifn-(compute|methods)(?:\/([^'"]+))?['"];?\s*$/
+
+/** The names an example's import lines bring in, as `[local, imported, pkg, path]` (path '' for the package root). */
+function explicitImports(code: string): [string, string, DocPackage, string][] {
+  const out: [string, string, DocPackage, string][] = []
+  for (const line of code.split('\n')) {
+    const m = IMPORT_LINE.exec(line)
+    if (!m) continue
+    for (const part of m[1].split(',')) {
+      const [imported, local = imported] = part.trim().split(/\s+as\s+/)
+      if (imported) out.push([local.trim(), imported.trim(), m[2] as DocPackage, m[3] ?? ''])
+    }
+  }
+  return out
+}
+
+/**
+ * The scope with whatever the example's own import lines bring in, loaded from the modules they name. Throws for a
+ * module that is not a node or a name it does not export, so the example fails with that message.
+ */
+export async function withImports(scope: Scope, code: string): Promise<Scope> {
+  const wanted = explicitImports(code)
+  if (!wanted.length) return scope
+  const names = { ...scope.names }
+  for (const [local, imported, pkg, path] of wanted) {
+    if (!path) {
+      if (!(imported in base)) throw new Error(`'aifn-${pkg}' exports no '${imported}'`)
+      names[local] = (base as Record<string, unknown>)[imported]
+      continue
+    }
+    const load = MODULES[`../../../packages/${pkg}/src/${path}/index.ts`]
+    if (!load) throw new Error(`no module 'aifn-${pkg}/${path}' to import from`)
+    const mod = await load()
+    if (!(imported in mod)) throw new Error(`'aifn-${pkg}/${path}' exports no '${imported}'`)
+    names[local] = mod[imported]
+  }
+  return { names, own: scope.own }
+}
+
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/
 
 /** The import lines the example stands for: the names it uses, from the node and from the common surface. */
 export function importsOf(code: string, scope: Scope, specifier: string): string[] {
-  // Names in comments, in strings and after a dot are not references to the scope.
+  // Names in comments, in strings and after a dot are not references to the scope; the example's own import lines
+  // show themselves, so the names they bring in are left out here.
+  const imported = new Set(explicitImports(code).map(([local]) => local))
   const bare = code
+    .split('\n')
+    .filter((line) => !IMPORT_LINE.test(line))
+    .join('\n')
     .replace(/\/\/.*$/gm, '')
     .replace(/'[^'\n]*'|"[^"\n]*"|`[^`]*`/g, '')
     .replace(/\.[A-Za-z_$][\w$]*/g, '')
   const used = new Set(bare.match(/[A-Za-z_$][\w$]*/g) ?? [])
-  const names = Object.keys(scope.names).filter((n) => used.has(n))
+  const names = Object.keys(scope.names).filter((n) => used.has(n) && !imported.has(n))
   const own = names.filter((n) => scope.own.has(n)).sort()
   const common = names.filter((n) => !scope.own.has(n)).sort()
   return [
@@ -124,7 +173,13 @@ export function runExample(code: string, scope: Scope): ExampleResult {
   }
   const print = (...args: unknown[]) => void output.push(args.map((a) => format(a)).join(' '))
   const names = Object.keys(scope.names).filter((n) => IDENTIFIER.test(n) && n !== 'print')
-  const source = shown(code)
+  // The example's import lines are resolved into the scope by `withImports`; here they are blanked, keeping line numbers.
+  const source = shown(
+    code
+      .split('\n')
+      .map((line) => (IMPORT_LINE.test(line) ? '' : line))
+      .join('\n'),
+  )
   const t0 = performance.now()
   const done = (ok: boolean, value: string, error: string): ExampleResult => ({
     ok,

@@ -3,7 +3,7 @@
  * modules, so the pages under `/compute` and `/methods` are generated and cannot drift from the code.
  *
  * - `virtual:aifn-docs/tree`: every node of both packages (a directory with an `index.ts`), nested as on disk, with
- *   its one-sentence summary and, for a module, its source files and the names each declares. The sidebar and the
+ *   its one-sentence summary and its own source files with the names each declares. The sidebar and the
  *   overview pages import it eagerly.
  * - `virtual:aifn-docs/content`: per node, the doc comment that opens its `index.ts`, its `@example` blocks, and its
  *   source files' declarations (name, kind, signature, doc comment, examples): every function, class and type, each
@@ -67,7 +67,7 @@ export type DocTreeNode = {
   /** How many runnable (titled) examples the node holds (its own and its exports'). */
   examples: number
   children: DocTreeNode[]
-  /** A leaf module's source files, by name. */
+  /** The module's own source files (beside any child modules), by name. */
   files: DocFile[]
 }
 export type DocTree = Record<DocPackage, DocTreeNode[]>
@@ -103,12 +103,12 @@ function splitDoc(text: string): Tags {
     if (param) params.set(param[1], param[2])
     else returns = flat.replace(/^@returns? ?/, '')
   }
-  // The code of an example may be fenced (``` or ```js, ```ts, …) and may open with its imports: the fence lines and
-  // the import lines are dropped (the names are in scope when it runs, and the page shows the imports it works out).
+  // The code of an example may be fenced (``` or ```js, ```ts, …) and may open with its imports: the fence lines are
+  // dropped, while import lines are kept so withImports can widen the example scope.
   const unfenced = (code: string) =>
     code
       .split('\n')
-      .filter((line) => !/^\s*```[\w-]*\s*$/.test(line) && !/^\s*import\s.*\sfrom\s+['"][^'"]+['"];?\s*$/.test(line))
+      .filter((line) => !/^\s*```[\w-]*\s*$/.test(line))
       .join('\n')
       .trim()
   const examples = blocks.map((block) => {
@@ -344,12 +344,14 @@ function build(): Built {
         const header = /^\s*\/\*\*[\s\S]*?\*\//.exec(sf.text)?.[0] ?? ''
         const { doc, examples } = splitDoc(unframe(header.trim()))
         const children = walk(pkg, path.join(dir, d.name), at)
-        // A parent's page lists its children; a leaf module lists its source files and everything they declare.
+        // A module's page lists its children, if it has any, and its own source files with everything they declare: a
+        // family's files beside its child modules (`gym/mdp.ts`, `graph/graph.ts`) get pages like a leaf's. An index of
+        // re-exports declares nothing, so a family without files of its own lists none.
         const exports: DocExport[] = []
         const fileDocs: Record<string, string> = {}
         const files: DocFile[] = []
         const runnable = (list: DocExample[]) => list.filter((e) => e.title !== '').length
-        if (!children.length) {
+        {
           const isPublic = new Set(exportsOf(index).map((e) => `${e.file}:${e.line}`))
           const moduleDir = path.join(dir, d.name)
           const sources = fs

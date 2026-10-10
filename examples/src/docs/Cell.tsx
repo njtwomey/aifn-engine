@@ -2,7 +2,16 @@ import { Play } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Button, CodeEditor, cn } from 'aifn-render'
 import type { DocExample, DocPackage } from './data'
-import { importsOf, runExample, scopeOf, type ExampleResult, type Scope } from './run'
+import { importsOf, runExample, scopeOf, withImports, type ExampleResult, type Scope } from './run'
+
+/** Run code in a scope widened by its own import lines; a bad import fails the run with its message. */
+async function runIn(code: string, scope: Scope): Promise<ExampleResult> {
+  try {
+    return runExample(code, await withImports(scope, code))
+  } catch (e) {
+    return { ok: false, value: '', output: [], error: e instanceof Error ? e.message : String(e), ms: 0 }
+  }
+}
 
 /** One runnable example: the imports it stands for, the code (editable), and the values its expressions give. */
 export function Cell({ pkg, path, example }: { pkg: DocPackage; path: string; example: DocExample }) {
@@ -11,16 +20,16 @@ export function Cell({ pkg, path, example }: { pkg: DocPackage; path: string; ex
   const [result, setResult] = useState<ExampleResult | null>(null)
   useEffect(() => {
     let live = true
-    void scopeOf(pkg, path).then((s) => {
+    void scopeOf(pkg, path).then(async (s) => {
       if (!live) return
       setScope(s)
-      setResult(runExample(example.code, s))
+      setResult(await runIn(example.code, s))
     })
     return () => {
       live = false
     }
   }, [pkg, path, example.code])
-  const run = () => scope && setResult(runExample(code, scope))
+  const run = () => scope && void runIn(code, scope).then(setResult)
   const imports = scope ? importsOf(code, scope, `aifn-${pkg}/${path}`) : []
   return (
     <div className="overflow-hidden rounded-lg border bg-card">

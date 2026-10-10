@@ -122,7 +122,7 @@ try {
 
   // Every documentation example runs, in the scope the page gives it.
   const { default: content } = await server.ssrLoadModule('virtual:aifn-docs/content')
-  const { scopeOf, runExample } = await server.ssrLoadModule('/src/docs/run.ts')
+  const { scopeOf, runExample, withImports } = await server.ssrLoadModule('/src/docs/run.ts')
   type Example = { title: string; code: string }
   type Content = {
     doc: string
@@ -140,17 +140,18 @@ try {
       examples: Example[]
     }[]
   }
-  // Every `$…$` of a doc comment sets in KaTeX with the shared notation macros.
+  // Every `$…$` and display `$$…$$` of a doc comment sets in KaTeX with the shared notation macros.
   const { defaultMathMacros } = await server.ssrLoadModule('aifn-render')
   // Maths written as plain text (Unicode superscripts, subscripts, operators, Greek, accents) instead of TeX: every
   // character of it outside `code` and `$…$` is reported under --missing.
   const PLAIN_MATHS =
-    /[\u2070-\u209f\u1d40-\u1d6a\u00b2\u00b3\u00b9\u00d7\u00b7\u2212\u2200-\u22ff\u2190-\u21ff\u27f5-\u27ff\u2016\u0370-\u03ff]|\p{M}/u
+    /[\u2070-\u209f\u1d40-\u1d6a\u00b2\u00b3\u00b9\u00d7\u00b7\u2212\u2032\u2033\u2200-\u22ff\u2190-\u21ff\u27f5-\u27ff\u2016\u0370-\u03ff]|\p{M}/u
   const plainMaths = (at: string, what: string, text: string) => {
     if (missingFor === null || !at.startsWith(missingFor)) return
     // Code, formulas and quoted titles (a cited paper keeps its own characters) are not prose.
     const prose = text
       .replace(/`[^`]*`/g, '')
+      .replace(/\$\$[\s\S]*?\$\$/g, '')
       .replace(/\$[^$\n]+\$/g, '')
       .replace(/"[^"]*"/g, '')
     const m = PLAIN_MATHS.exec(prose)
@@ -160,14 +161,23 @@ try {
     }
   }
   const checkMaths = (where: string, text: string) => {
-    for (const m of text.replace(/`[^`]*`/g, '').matchAll(/\$([^$\n]+)\$/g)) {
+    const set = (tex: string, displayMode: boolean, shown: string) => {
       try {
-        katex.renderToString(m[1], { throwOnError: true, strict: 'ignore', macros: { ...defaultMathMacros } })
+        katex.renderToString(tex, {
+          throwOnError: true,
+          strict: 'ignore',
+          displayMode,
+          macros: { ...defaultMathMacros },
+        })
       } catch (e) {
         mathErrors++
-        console.error(`FAIL  ${where}: $${m[1]}$ does not set: ${(e as Error).message.split('\n')[0]}`)
+        console.error(`FAIL  ${where}: ${shown} does not set: ${(e as Error).message.split('\n')[0]}`)
       }
     }
+    const noCode = text.replace(/`[^`]*`/g, '')
+    for (const m of noCode.matchAll(/\$\$([\s\S]*?)\$\$/g))
+      set(m[1].replace(/\s+/g, ' ').trim(), true, `$$${m[1].trim()}$$`)
+    for (const m of noCode.replace(/\$\$[\s\S]*?\$\$/g, '').matchAll(/\$([^$\n]+)\$/g)) set(m[1], false, `$${m[1]}$`)
   }
   for (const node of nodes) {
     const c = (content as Record<string, Content>)[`${node.pkg}/${node.path}`]
@@ -215,7 +225,11 @@ try {
     const scope = await scopeOf(node.pkg, node.path)
     for (const { at, e } of all) {
       examples++
-      const r = runExample(e.code, scope)
+      // An example's own import lines widen its scope; a bad one fails the example with its message.
+      const r = await withImports(scope, e.code).then(
+        (s: unknown) => runExample(e.code, s),
+        (err: Error) => ({ ok: false, value: '', output: [], error: err.message, ms: 0 }),
+      )
       const silent = r.ok && r.output.length === 0 && r.value === ''
       if (!r.ok || silent) {
         exampleFailures++
