@@ -1,16 +1,21 @@
 /**
- * A dynamic topic model (Blei & Lafferty, 2006, "Dynamic topic models", ICML): the corpus is split into time slices,
- * and each topic's natural parameters drift between slices as a Gaussian random walk, β_{t,k} ~ N(β_{t−1,k}, σ²I), with
- * word distribution φ_{t,k} = softmax(β_{t,k}). Documents of slice t are LDA documents over the slice's topics, with
- * proportions θ_d ~ Dir(α) (fixed α, as gensim's `LdaSeqModel`).
+ * A dynamic topic model (Blei and Lafferty, 2006, "Dynamic topic models", ICML): the corpus is split into time slices,
+ * and each topic's natural parameters drift between slices as a Gaussian random walk,
+ * $\betavec_{t,k} \sim \Gauss(\betavec_{t-1,k}, \sigma^2\Imat)$, with word distribution
+ * $\phivec_{t,k} = \operatorname{softmax}(\betavec_{t,k})$. Documents of slice $t$ are LDA documents over the slice's
+ * topics, with proportions $\thetavec_d \sim \Dir(\alpha)$ (fixed $\alpha$, as gensim's `LdaSeqModel`).
  *
  * Fitted by a MAP variant of the paper's variational EM ("DTM-lite"), so that one objective rises at every step:
- * - E-step: mean-field variational LDA for each document given its slice's topics (Blei, Ng & Jordan, 2003): word
- *   responsibilities r_wk ∝ exp(E[log θ_k]) φ_{t,k,w} and γ_dk = α + Σ_w n_dw r_wk, warm-started from the last step.
- * - M-step: for each topic, the whole chain β_{1:T,k} at the mode of Σ_t Σ_w n_tkw log φ_{t,k,w} − Σ_t ‖β_t − β_{t−1}‖²/2σ²
- *   − ‖β_1‖²/2σ₀², n_tkw the expected counts, by L-BFGS with automatic gradients. Blei and Lafferty instead keep a
- *   Gaussian posterior over the chain, computed by a variational Kalman filter and smoother; the mode is the
- *   point-estimate limit of that posterior, and the random-walk prior is what ties neighbouring slices together.
+ * - E-step: mean-field variational LDA for each document given its slice's topics (Blei, Ng and Jordan, 2003): word
+ *   responsibilities $r_{wk} \propto \exp(\expect[\log \theta_k])\,\phi_{t,k,w}$ and
+ *   $\gamma_{dk} = \alpha + \sum_w n_{dw} r_{wk}$, warm-started from the last step.
+ * - M-step: for each topic, the whole chain $\betavec_{1:T,k}$ at the mode of
+ *   $\sum_t \sum_w n_{tkw} \log \phi_{t,k,w} - \sum_t \lVert \betavec_t - \betavec_{t-1} \rVert^2 / 2\sigma^2 -
+ *   \lVert \betavec_1 \rVert^2 / 2\sigma_0^2$, $n_{tkw}$ the expected counts, by L-BFGS with automatic gradients
+ *   (a chain is kept when L-BFGS does not improve it). Blei and Lafferty instead keep a Gaussian posterior over the
+ *   chain, computed by a variational Kalman filter and smoother; the mode is the point-estimate limit of that
+ *   posterior, and the random-walk prior is what ties neighbouring slices together.
+ *
  * The topics start from a static LDA fitted to all slices pooled. The objective (the evidence lower bound plus the log
  * prior of the topics) never decreases.
  */
@@ -41,18 +46,26 @@ import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** Options of `dynamicTopicSteps`. */
 export type DynamicTopicOptions = {
+  /** The corpus, as word ids. */
   documents: Documents
-  /** Each document's time slice, an integer in 0 … T − 1. */
+  /**
+   * Each document's time slice, a non-negative integer; the number of slices $T$ is the largest plus one (a slice may
+   * hold no documents).
+   */
   times: ArrayLike<number>
+  /** The number of topics $K$. */
   topics: Size
+  /** The vocabulary size $V$. */
   vocabulary: Size
-  /** Dirichlet concentration of the documents' proportions (default 0.1). */
+  /** $\alpha$, the Dirichlet concentration of the documents' proportions (default 0.1). */
   alpha?: number
-  /** Variance σ² of a topic's drift between neighbouring slices (default 0.5) and σ₀² of the first slice (10). */
+  /** $\sigma^2$, the variance of a topic's drift between neighbouring slices (default 0.5). */
   variance?: number
+  /** $\sigma_0^2$, the prior variance of the first slice's natural parameters (default 10). */
   initialVariance?: number
-  /** Variational iterations per document in each E-step (default 10) and L-BFGS steps per topic in the M-step (25). */
+  /** Variational iterations per document in each E-step (default 10). */
   innerSteps?: Size
+  /** L-BFGS steps per topic in each M-step (default 25). */
   topicSteps?: Size
   /**
    * Collapsed Gibbs sweeps of a static LDA over all slices pooled, whose topics start every slice (default 50, as
@@ -63,20 +76,50 @@ export type DynamicTopicOptions = {
 
 /** The state of `dynamicTopicSteps`. */
 export interface DynamicTopicState extends Status {
+  /** EM steps done. */
   t: Size
-  /** The topics' natural parameters β [T, K, V] and word distributions φ = softmax(β) [T, K, V]. */
+  /** The topics' natural parameters $\betavec$, $T \times K \times V$. */
   logTopics: Tensor
+  /**
+   * The topics' word distributions $\phivec = \operatorname{softmax}(\betavec)$ over the last axis,
+   * $T \times K \times V$.
+   */
   topicWord: Tensor
-  /** Variational Dirichlet parameters γ [D, K], and the proportions E[θ] = γ/Σγ [D, K]. */
+  /** The variational Dirichlet parameters $\gamma_{dk}$, $D \times K$. */
   gamma: Tensor
+  /** The proportions $\expect[\theta_{dk}] = \gamma_{dk} / \sum_j \gamma_{dj}$, $D \times K$. */
   docTopic: Tensor
   /** The evidence lower bound plus the topics' log prior (up to a constant); non-decreasing. */
   objective: number
-  /** Σ_d Σ_w n_dw log Σ_k E[θ_dk] φ_{t_d,k,w} / N: the per-token log-likelihood at the point estimates. */
+  /**
+   * $\frac{1}{N}\sum_d \sum_w n_{dw} \log \sum_k \expect[\theta_{dk}]\,\phi_{t_d,k,w}$, $N$ the number of tokens: the
+   * per-token log-likelihood at the point estimates.
+   */
   logLikelihood: number
 }
 
-/** DTM-lite as a step-through algorithm: each step is one E-step over every document and one M-step per topic. */
+/**
+ * DTM-lite as a step-through algorithm: each step is one E-step over every document and one M-step per topic. `init`
+ * fits the static LDA (`ldaCollapsedGibbs` with $\beta = 0.05$, from `child(stream, 'lda')`) or draws random topics,
+ * copies them to every slice, and spreads each document's $\gamma$ evenly ($\alpha + N_d/K$). A state is flagged
+ * `diverged` when its objective is not finite; nothing sets `converged`.
+ *
+ * @param options The corpus, its time slices, the number of topics and the fitting settings. Throws `ShapeError` when
+ *   `times` does not have one entry per document, and `DomainError` when a time is not a non-negative integer or
+ *   $\alpha$, $\sigma^2$ or $\sigma_0^2$ is not positive.
+ * @returns The algorithm, run with no start.
+ *
+ * @example A topic whose third word changes between two slices
+ * const documents = [[0, 1, 2, 0, 1, 2], [2, 0, 1, 1, 0, 2], [3, 4, 5, 3, 4, 5], [5, 4, 3, 4, 3, 5],
+ *   [0, 1, 6, 0, 1, 6], [6, 0, 1, 1, 0, 6], [3, 4, 5, 3, 4, 5], [5, 4, 3, 4, 3, 5]]
+ * const times = [0, 0, 0, 0, 1, 1, 1, 1]
+ * const alg = dynamicTopicSteps({ documents, times, topics: 2, vocabulary: 7, initialSweeps: 10 })
+ * const final = run(alg, undefined, 5, { stream: stream(0) })
+ * const [first, second] = toArray(final.topicWord)
+ * print('topics in slice 0', first)
+ * print('topics in slice 1', second)
+ * print('objective', final.objective, 'log-likelihood per token', final.logLikelihood)
+ */
 export function dynamicTopicSteps(options: DynamicTopicOptions): Algorithm<void, DynamicTopicState> {
   const { documents, topics: K, vocabulary: V, alpha = 0.1, variance = 0.5, initialVariance = 10 } = options
   const { innerSteps = 10, topicSteps = 25, initialSweeps = 50 } = options
@@ -122,8 +165,9 @@ export function dynamicTopicSteps(options: DynamicTopicOptions): Algorithm<void,
   }
 
   /**
-   * The responsibilities of one document given γ and the topics, and its ELBO; with `update`, then γ's optimum given
-   * them. Expected counts are added to `expected` [T, K, V] when given.
+   * The responsibilities of one document given $\gamma$ and the topics, and its ELBO; with `iterations` above 0, first
+   * that many rounds of responsibilities then $\gamma$'s optimum given them (updating `gamma` in place). Expected
+   * counts are added to `expected` ($T \times K \times V$) when given.
    */
   const document = (
     d: number,
@@ -295,33 +339,60 @@ export function dynamicTopicSteps(options: DynamicTopicOptions): Algorithm<void,
   }
 }
 
-/** Options of `dynamicTopicRun`. */
+/** Options of `dynamicTopicRun`: those of `dynamicTopicSteps`, and how long to run and how often to report. */
 export type DynamicTopicRunOptions = DynamicTopicOptions & {
-  /** EM steps (default 30) and a checkpoint every this many (default steps/15). */
+  /** EM steps (default 30). */
   steps?: Size
+  /** Keep a checkpoint every this many steps (default `steps / 15`, rounded, at least 1). */
   every?: Size
+  /** The seed of the root stream (default `'dtm'`). */
   seed?: string | number
 }
 
-/** One checkpoint of `dynamicTopicRun`: the topics of every slice [T, K, V] and the proportions [D, K], row-major. */
+/** One checkpoint of `dynamicTopicRun`. */
 export type DynamicTopicCheckpoint = {
+  /** The step it was taken at. */
   readonly step: Size
+  /** The topics of every slice, $T \times K \times V$ row-major. */
   readonly topicWord: Float64Array
+  /** The documents' proportions, $D \times K$ row-major. */
   readonly docTopic: Float64Array
 }
 
 /** A snapshot of `dynamicTopicRun`. */
 export type DynamicTopicSnapshot = {
+  /** The step it was taken at. */
   readonly step: Size
+  /** The total number of steps of the run. */
   readonly steps: Size
+  /** True for the last snapshot. */
   readonly done: boolean
-  /** Slices T, topics K and vocabulary V. */
+  /** The number of slices $T$, topics $K$ and words $V$. */
   readonly shape: { T: Size; K: Size; V: Size }
+  /** The objective and the per-token log-likelihood at every step so far. */
   readonly history: { step: number[]; objective: number[]; logLikelihood: number[] }
+  /** Every checkpoint so far, oldest first. */
   readonly checkpoints: readonly DynamicTopicCheckpoint[]
 }
 
-/** Fit DTM-lite step by step and yield a snapshot at every checkpoint: a generator, so a worker can stream it. */
+/**
+ * Fit DTM-lite step by step and yield a snapshot at every checkpoint: a generator, so a worker can stream it. The
+ * first snapshot is the initial state (step 0); one follows every `every` steps and at the last step. The run's draws
+ * derive from `stream(seed)`: `init` from its child `'init'`, step $t$ from its child `('step', t)`.
+ *
+ * @param options The options of `dynamicTopicSteps`, with the number of steps, the checkpoint spacing and the seed.
+ * @returns A generator of snapshots, each holding the whole history and every checkpoint so far.
+ *
+ * @example The objective rises; the last snapshot is done
+ * const documents = [[0, 1, 2, 0, 1, 2], [2, 0, 1, 1, 0, 2], [3, 4, 5, 3, 4, 5], [5, 4, 3, 4, 3, 5],
+ *   [0, 1, 6, 0, 1, 6], [6, 0, 1, 1, 0, 6], [3, 4, 5, 3, 4, 5], [5, 4, 3, 4, 3, 5]]
+ * const times = [0, 0, 0, 0, 1, 1, 1, 1]
+ * const options = { documents, times, topics: 2, vocabulary: 7, initialSweeps: 10, steps: 4, every: 2 }
+ * const snapshots = [...dynamicTopicRun(options)]
+ * print('snapshots at steps', snapshots.map((s) => s.step), 'done', snapshots.at(-1).done)
+ * print('objective', snapshots.at(-1).history.objective)
+ * print('shape', snapshots.at(-1).shape)
+ */
 export function* dynamicTopicRun(options: DynamicTopicRunOptions): Generator<DynamicTopicSnapshot> {
   const { steps = 30, seed = 'dtm' } = options
   const every = Math.max(1, options.every ?? Math.round(steps / 15))

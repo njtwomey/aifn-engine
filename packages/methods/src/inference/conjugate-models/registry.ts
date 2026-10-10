@@ -5,6 +5,7 @@
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as cavi from './cavi'
 
+/** A registry table: the entries of one kind (algorithms or functions), keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'inference/conjugate-models')
 const fn = definer<FunctionInfo>('function', 'inference/conjugate-models')

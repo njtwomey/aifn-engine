@@ -1,8 +1,14 @@
 /**
- * Variational Bayesian Gaussian mixture by coordinate ascent (Bishop, 2006, §10.2; Attias, 2000). The model:
- * π ~ Dir(α₀), Λₖ ~ Wishart(W₀, ν₀), μₖ | Λₖ ~ N(m₀, (β₀Λₖ)⁻¹), zₙ ~ Cat(π), xₙ | zₙ = k ~ N(μₖ, Λₖ⁻¹); the family
- * q(Z)q(π)Πₖq(μₖ, Λₖ) with q(π) = Dir(α), q(μₖ, Λₖ) = N(mₖ, (βₖΛₖ)⁻¹)W(Λₖ | Wₖ, νₖ) and responsibilities rₙₖ.
- * With a small α₀, components the data do not need are emptied (their Nₖ → 0) and E[πₖ] → 0.
+ * Variational Bayesian Gaussian mixture by coordinate ascent (CAVI), and its predictive density (Bishop, 2006, §10.2;
+ * Attias, 2000).
+ *
+ * The model is $\pivec \sim \Dir(\alpha_0)$, $\Lambdamat_k \sim \Wishart(\Wmat_0, \nu_0)$,
+ * $\muvec_k \mid \Lambdamat_k \sim \Gauss(\mvec_0, (\beta_0\Lambdamat_k)^{-1})$, $z_n \sim \Cat(\pivec)$ and
+ * $\xvec_n \mid z_n = k \sim \Gauss(\muvec_k, \Lambdamat_k^{-1})$. The variational family is
+ * $q(\Zmat)\,q(\pivec)\prod_k q(\muvec_k, \Lambdamat_k)$ with $q(\pivec) = \Dir(\alphavec)$,
+ * $q(\muvec_k, \Lambdamat_k) = \Gauss(\mvec_k, (\beta_k\Lambdamat_k)^{-1})\,\Wishart(\Lambdamat_k \mid \Wmat_k, \nu_k)$
+ * and $q(\Zmat)$ given by the responsibilities $r_{nk}$. With a small $\alpha_0$, components the data do not need are
+ * emptied (their $N_k \to 0$) and $\expect[\pi_k] \to 0$. Data and parameters are held as row-major float64 arrays.
  */
 
 import { inverse, logDet } from 'aifn-compute/numerics/linalg'
@@ -25,17 +31,37 @@ import { ShapeError } from 'aifn-compute/foundation/errors'
 type F64 = dense.F64
 
 const LOG_2PI = Math.log(2 * Math.PI)
+/**
+ * The digamma function $\psi(x)$, as a number.
+ *
+ * @param x The argument, a positive number.
+ * @returns $\psi(x)$.
+ */
 const dg = (x: number) => digamma(x) as number
+/**
+ * The log-gamma function $\ln\Gamma(x)$, as a number.
+ *
+ * @param x The argument, a positive number.
+ * @returns $\ln\Gamma(x)$.
+ */
 const lg = (x: number) => logGamma(x) as number
 
-/** Prior hyperparameters (Bishop's notation). Defaults are data-scaled, see `caviGaussianMixture`. */
+/**
+ * Prior hyperparameters of `caviGaussianMixture`, in Bishop's notation. Each one left out takes a data-scaled default.
+ */
 export type MixturePrior = {
+  /** $\alpha_0$, the concentration of the symmetric Dirichlet prior on the weights (default $1/K$). */
   alpha0?: number
+  /** $\beta_0$, the prior precision of each mean as a multiple of $\Lambdamat_k$ (default 1). */
   beta0?: number
-  /** m₀ (length D). */
+  /** $\mvec_0$, the prior mean of every component mean, $D$ values (default the data mean). */
   mean0?: ArrayLike<number>
-  /** W₀ (D×D, row-major or rows). */
+  /**
+   * $\Wmat_0$, the Wishart scale matrix, $D \times D$ as a tensor or as rows (default $(\nu_0\hat{\Sigmamat})^{-1}$,
+   * $\hat{\Sigmamat}$ the data covariance, so that $\expect[\Lambdamat] = \hat{\Sigmamat}^{-1}$).
+   */
   W0?: Tensor | readonly (readonly number[])[]
+  /** $\nu_0$, the Wishart degrees of freedom (default $D$). */
   nu0?: number
 }
 
@@ -43,28 +69,51 @@ export type MixturePrior = {
 export type MixtureState = Status & {
   /** Coordinate sweeps done. */
   t: number
-  /** Responsibilities rₙₖ (N×K). */
+  /** Responsibilities $r_{nk}$, $N \times K$; each row sums to 1. */
   responsibilities: Matrix
-  /** Nₖ = Σₙ rₙₖ. */
+  /** The effective counts $N_k = \sum_n r_{nk}$, $K$ values. */
   counts: Vector
-  /** q(π) = Dir(α) and E[πₖ] = αₖ/Σα. */
+  /** The parameters $\alpha_k = \alpha_0 + N_k$ of $q(\pivec) = \Dir(\alphavec)$, $K$ values. */
   alpha: Vector
+  /** The expected weights $\expect[\pi_k] = \alpha_k / \sum_j \alpha_j$, $K$ values. */
   weights: Vector
-  /** q(μₖ, Λₖ): mₖ (K×D), βₖ, Wₖ (K×D×D), νₖ. */
+  /** The means $\mvec_k$ of $q(\muvec_k, \Lambdamat_k)$, $K \times D$. */
   means: Matrix
+  /** $\beta_k = \beta_0 + N_k$, the precision of $q(\muvec_k \mid \Lambdamat_k)$ as a multiple of $\Lambdamat_k$. */
   beta: Vector
+  /** The Wishart scale matrices $\Wmat_k$ of $q(\Lambdamat_k)$, $K \times D \times D$. */
   W: Tensor
+  /** The Wishart degrees of freedom $\nu_k = \nu_0 + N_k$, $K$ values. */
   nu: Vector
-  /** E[Λₖ]⁻¹ = (νₖWₖ)⁻¹ (K×D×D), a point summary of each component's covariance. */
+  /**
+   * $\expect[\Lambdamat_k]^{-1} = (\nu_k\Wmat_k)^{-1}$, $K \times D \times D$: a point summary of each component's
+   * covariance.
+   */
   covariances: Tensor
+  /** The evidence lower bound at this state. */
   elbo: number
+  /** The change in the ELBO since the previous state (NaN at step 0). */
   elboChange: number
+  /** True when the ELBO changed by less than `tolerance` times $\max(1, \lvert \text{ELBO} \rvert)$. */
   converged: boolean
+  /** True when the ELBO is not finite. */
   diverged: boolean
 }
 
+/**
+ * The variational parameters after an M-like step, row-major: `alpha`, `beta`, `nu` and `counts` ($K$ values each:
+ * $\alpha_k$, $\beta_k$, $\nu_k$, $N_k$), `m` ($K \times D$, the means $\mvec_k$) and `W` ($K \times D \times D$, the
+ * Wishart scales $\Wmat_k$).
+ */
 type Params = { alpha: F64; beta: F64; m: F64; W: F64; nu: F64; counts: F64 }
 
+/**
+ * The data as a row-major float64 copy with its shape: an $N \times D$ matrix, or $N$ numbers taken as $D = 1$.
+ *
+ * @param x The data: a tensor ($N \times D$, or a vector of $N$ values), an array of rows, or an array of numbers.
+ *   Not modified.
+ * @returns `data`, the $N D$ values row by row, with `N` and `D`. Throws `ShapeError` for a tensor of rank above 2.
+ */
 function toMatrix(x: Tensor | readonly (readonly number[])[] | ArrayLike<number>): { data: F64; N: number; D: number } {
   if (!isTensor(x) && typeof (x as ArrayLike<unknown>)[0] === 'number') {
     const data = Float64Array.from(x as ArrayLike<number>)
@@ -77,11 +126,44 @@ function toMatrix(x: Tensor | readonly (readonly number[])[] | ArrayLike<number>
   return { data: Float64Array.from(toFlat(t)), N: t.shape[0], D: t.shape[1] }
 }
 
+/**
+ * A $D \times D$ tensor viewing a row-major array.
+ *
+ * @param a The $D^2$ entries, row by row.
+ * @param D The number of rows (and columns).
+ * @returns The $D \times D$ matrix.
+ */
 const mat = (a: F64, D: number) => fromData(a, [D, D])
+/**
+ * The inverse of a $D \times D$ matrix, by `inverse`.
+ *
+ * @param a The matrix as $D^2$ row-major values; not modified.
+ * @param D The number of rows (and columns).
+ * @returns The inverse as a new row-major array of $D^2$ values.
+ */
 const invD = (a: F64, D: number): F64 => Float64Array.from(toFlat(inverse(mat(a, D))))
+/**
+ * The log-determinant $\ln\lvert \Amat \rvert$ of a $D \times D$ matrix, by `logDet`.
+ *
+ * @param a The matrix $\Amat$ as $D^2$ row-major values; not modified.
+ * @param D The number of rows (and columns).
+ * @returns $\ln\lvert \Amat \rvert$.
+ */
 const logDetD = (a: F64, D: number): number => logDet(mat(a, D)) as number
 
-/** (x − m)ᵀ A (x − m). */
+/**
+ * The quadratic form $(\xvec - \mvec)^\top \Amat (\xvec - \mvec)$, on vectors and a matrix read at offsets into larger
+ * row-major arrays.
+ *
+ * @param x The array holding $\xvec$ at entries `xo` to `xo + D - 1`.
+ * @param m The array holding $\mvec$ at entries `mo` to `mo + D - 1`.
+ * @param A The array holding $\Amat$, row-major $D \times D$, at entries `Ao` to `Ao + D * D - 1`.
+ * @param D The dimension of the vectors.
+ * @param xo The offset of $\xvec$ in `x`.
+ * @param mo The offset of $\mvec$ in `m`.
+ * @param Ao The offset of $\Amat$ in `A`.
+ * @returns The value of the form.
+ */
 function quad(
   x: F64 | ArrayLike<number>,
   m: ArrayLike<number>,
@@ -97,7 +179,14 @@ function quad(
   return s
 }
 
-/** ln B(W, ν), the Wishart normaliser (Bishop, 2006, eq. B.79). */
+/**
+ * $\ln B(\Wmat, \nu)$, the log normaliser of the Wishart density (Bishop, 2006, eq. B.79).
+ *
+ * @param logDetW $\ln\lvert \Wmat \rvert$, the log-determinant of the scale matrix.
+ * @param nu The degrees of freedom $\nu$.
+ * @param D The dimension $D$ of $\Wmat$.
+ * @returns $\ln B(\Wmat, \nu)$.
+ */
 function logWishartB(logDetW: number, nu: number, D: number) {
   let s = 0
   for (let i = 1; i <= D; i++) s += lg((nu + 1 - i) / 2)
@@ -105,11 +194,45 @@ function logWishartB(logDetW: number, nu: number, D: number) {
 }
 
 /**
- * CAVI for the Bayesian Gaussian mixture (Bishop, 2006, §10.2.1): the M-like step updates q(π) and q(μₖ, Λₖ) from
- * the responsibilities (eqs. 10.51–10.63), the E-like step updates rₙₖ ∝ exp(E[ln πₖ] + ½E[ln|Λₖ|] − D/(2βₖ) −
- * (νₖ/2)(xₙ − mₖ)ᵀWₖ(xₙ − mₖ)) (eqs. 10.46–10.67), and the ELBO is eqs. 10.70–10.77, which never decreases.
- * Defaults: α₀ = 1/K, β₀ = 1, m₀ the data mean, ν₀ = D, W₀ = (ν₀Σ̂)⁻¹ so that E[Λ] = Σ̂⁻¹ (Σ̂ the data covariance).
- * `x` is N×D, or N numbers for D = 1. `init` places the K means at distinct data points drawn from the stream and assigns each point to its nearest.
+ * CAVI for the Bayesian Gaussian mixture (Bishop, 2006, §10.2.1), as a step-through algorithm. Each step is an M-like
+ * update of $q(\pivec)$ and $q(\muvec_k, \Lambdamat_k)$ from the responsibilities (eqs. 10.51 to 10.63), then an
+ * E-like update
+ * $r_{nk} \propto \exp(\expect[\ln \pi_k] + \tfrac{1}{2}\expect[\ln\lvert \Lambdamat_k \rvert] - D/(2\beta_k) -
+ * \tfrac{\nu_k}{2}(\xvec_n - \mvec_k)^\top \Wmat_k (\xvec_n - \mvec_k))$ (eqs. 10.46 to 10.67). The ELBO
+ * (eqs. 10.70 to 10.77) never decreases; the run stops when it changes by less than `tolerance` relative to its size
+ * (`converged`), or when it is not finite (`diverged`).
+ *
+ * `init` draws $\min(K, N)$ distinct data points from its stream as centres, assigns each point to its nearest
+ * centre, and makes one M-like and one E-like update from those hard assignments: that is step 0. The algorithm takes
+ * no start value (`run(alg, undefined, n)`). CAVI finds a local optimum: from an unlucky start, one component can
+ * end up covering two clusters, so the run's stream matters.
+ *
+ * @param x The data: an $N \times D$ tensor or array of rows, or $N$ numbers (or a vector) for $D = 1$. Copied, not
+ *   modified. Throws `ShapeError` for a tensor of rank above 2.
+ * @param K The number of components. Surplus components are emptied when $\alpha_0$ is small.
+ * @param prior The prior hyperparameters; each one left out takes its data-scaled default: $\alpha_0 = 1/K$,
+ *   $\beta_0 = 1$, $\mvec_0$ the data mean, $\nu_0 = D$ and $\Wmat_0 = (\nu_0\hat{\Sigmamat})^{-1}$, so that
+ *   $\expect[\Lambdamat] = \hat{\Sigmamat}^{-1}$ ($\hat{\Sigmamat}$ the data covariance).
+ * @param options The stopping rule.
+ * @param options.tolerance The relative change in the ELBO below which a state is `converged` (default $10^{-8}$).
+ * @returns The algorithm, whose states (`MixtureState`) hold the variational parameters, the responsibilities, the
+ *   expected weights, the covariance summaries and the ELBO.
+ *
+ * @example Two blobs in the plane: the means and weights recovered
+ * const s = stream(0)
+ * const x = concat([normals(s, [20, 2], 0, 0.5), normals(s, [20, 2], 4, 0.5)])
+ * const final = run(caviGaussianMixture(x, 2), undefined, 100, { stream: stream(0) })
+ * print('means', final.means)
+ * print('weights', final.weights)
+ * print('sweeps', final.t, 'converged', final.converged)
+ *
+ * @example A surplus component is emptied
+ * const s = stream(2)
+ * const x = concat([normals(s, [30], -3, 0.5), normals(s, [30], 3, 0.5)])
+ * const final = run(caviGaussianMixture(x, 4, { alpha0: 0.01 }), undefined, 300, { stream: stream(3) })
+ * print('counts N_k', final.counts)
+ * print('weights', final.weights)
+ * print('means', final.means)
  */
 export function caviGaussianMixture(
   x: Tensor | readonly (readonly number[])[] | ArrayLike<number>,
@@ -138,7 +261,10 @@ export function caviGaussianMixture(
   const W0inv = invD(W0, D)
   const logDetW0 = logDetD(W0, D)
 
-  /** q(π), q(μ, Λ) from responsibilities (Bishop eqs. 10.51–10.53, 10.58, 10.60–10.63). */
+  /**
+   * $q(\pivec)$ and $q(\muvec_k, \Lambdamat_k)$ from responsibilities (Bishop eqs. 10.51 to 10.53, 10.58, 10.60 to
+   * 10.63).
+   */
   function mStep(r: F64): Params {
     const counts = new Float64Array(K)
     const xbar = new Float64Array(K * D)
@@ -206,7 +332,10 @@ export function caviGaussianMixture(
     return r
   }
 
-  /** The ELBO (Bishop eqs. 10.70–10.77), with the statistics Nₖ, x̄ₖ, Sₖ recomputed from r. */
+  /**
+   * The ELBO (Bishop eqs. 10.70 to 10.77), with the statistics $N_k$, $\bar{\xvec}_k$, $\Smat_k$ recomputed from
+   * `r`.
+   */
   function elboOf(p: Params, r: F64): number {
     const { alphaHat, logPi, logDetW, logLambda } = expectations(p)
     const counts = new Float64Array(K)
@@ -325,9 +454,24 @@ export function caviGaussianMixture(
 }
 
 /**
- * The predictive density p(x̂ | X) of the variational mixture (Bishop, 2006, eq. 10.81): a mixture of Student t
- * distributions, (1/α̂) Σₖ αₖ St(x̂ | mₖ, Lₖ, νₖ + 1 − D) with precision Lₖ = ((νₖ + 1 − D)βₖ/(1 + βₖ))Wₖ. `points`
- * is M×D (or a vector of M points when D = 1); returns the M densities, and each component's weighted density (K×M).
+ * The predictive density $p(\hat{\xvec} \mid \Xmat)$ of the variational mixture (Bishop, 2006, eqs. 10.81 and 10.82):
+ * a mixture of Student t densities,
+ * $\frac{1}{\hat{\alpha}} \sum_k \alpha_k \operatorname{St}(\hat{\xvec} \mid \mvec_k, \Lmat_k, \nu_k + 1 - D)$ with
+ * $\hat{\alpha} = \sum_k \alpha_k$ and precision $\Lmat_k = \frac{(\nu_k + 1 - D)\beta_k}{1 + \beta_k}\Wmat_k$.
+ *
+ * @param state A state of `caviGaussianMixture`; its `alpha`, `beta`, `nu`, `means` and `W` are read.
+ * @param points The $M$ points to evaluate at: an $M \times D$ tensor or array of rows, read row by row; for $D = 1$,
+ *   any $M$ numbers.
+ * @returns `density`, the $M$ predictive densities, and `components` ($K \times M$), each component's weighted term
+ *   $\frac{\alpha_k}{\hat{\alpha}}\operatorname{St}(\cdot)$, whose columns sum to `density`.
+ *
+ * @example The predictive density of a fitted mixture of two blobs on a line
+ * const s = stream(4)
+ * const x = concat([normals(s, [30], -2, 0.5), normals(s, [30], 2, 0.5)])
+ * const final = run(caviGaussianMixture(x, 2), undefined, 100, { stream: stream(5) })
+ * const { density, components } = mixturePredictiveDensity(final, [-2, 0, 2])
+ * print('density at -2, 0, 2', density)
+ * print('per component', components)
  */
 export function mixturePredictiveDensity(
   state: MixtureState,

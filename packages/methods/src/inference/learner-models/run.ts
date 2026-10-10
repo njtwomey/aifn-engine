@@ -1,8 +1,12 @@
 /**
- * Experiments with learner models on simulated students (Twomey et al., 2022, §3.3): fit IRT, a linear knowledge-tracing
- * machine and IRT-ZILM to the same training responses and compare ability recovery, bias by group, held-out prediction
- * and, for IRT-ZILM, the posterior that each zero is structural; and a sweep of the zero-inflation gap between groups,
- * one dataset per gap, scoring each model's equity. Both are generators for streamed runs: each yields after every fit.
+ * Streamed experiments with learner models on simulated students: one comparison of the models, and a sweep of the
+ * zero-inflation rate.
+ *
+ * Following Twomey et al. (2022), §3.3, `learnerModelRun` fits IRT, a linear knowledge-tracing machine and IRT-ZILM to
+ * the same training responses and compares ability recovery, bias by group, held-out prediction and, for IRT-ZILM, the
+ * posterior that each zero is structural; `learnerEquitySweep` repeats the comparison on one dataset per
+ * zero-inflation rate of the conditions, scoring each model's equity. Both are generators for streamed runs: the
+ * comparison yields after every fit, the sweep after every dataset.
  */
 
 import { child, stream, units } from 'aifn-compute/foundation/random'
@@ -26,14 +30,21 @@ import {
 
 /** Simulated learners with their truth (the shape of `aifn-methods/data/synthetic` `learnerResponses`). */
 export interface LearnerData {
+  /** The responses, $P \times I$: 0, 1, or NaN for not attempted. */
   responses: Tensor
+  /** The student conditions $\Zmat$, $P \times K$ (0 or 1). */
   conditions: Tensor
+  /** The item features $\Xmat$, $I \times F$. */
   itemFeatures: Tensor
+  /** The true abilities $\theta_p$ (length $P$). */
   ability: Float64Array
+  /** The true difficulties $b_i$ (length $I$). */
   difficulty: Float64Array
+  /** The true discriminations $a_i$ (length $I$). */
   discrimination: Float64Array
-  /** True π [students × items] and which zeros were structural; optional (real data has neither). */
+  /** The true $\pi$ ($P \times I$, row-major); optional (real data has none). */
   pi?: Float64Array
+  /** Which responses were structural zeros (1), $P \times I$ row-major; optional (real data has none). */
   structural?: Uint8Array
   /** Each student's group (0: no condition). */
   group: Int32Array
@@ -41,25 +52,32 @@ export interface LearnerData {
 
 /** Options of `learnerModelRun` and `learnerEquitySweep`. */
 export interface LearnerRunOptions {
-  /** The models to fit, in order (default irt, ktm, zilm). */
+  /** The models to fit, in order (default `irt`, `ktm`, `zilm`). */
   models?: readonly LearnerModelKind[]
   /** Share of the observed responses held out for the predictive scores (default 0.2). */
   testShare?: number
   /** Most L-BFGS steps per fit (default 1000). */
   maxSteps?: number
+  /** The seed of the train/test split (default 0). */
   seed?: number | string
 }
 
 /** One fitted model with its evaluation. */
 export interface LearnerModelResult {
+  /** Which model. */
   model: LearnerModelKind
+  /** The fit on the training responses. */
   fit: LearnerModelFit
+  /** Its ability bias by group and equity gap (`abilityEquity`, group 0 the reference). */
   equity: AbilityEquity
+  /** The correlations of its abilities, difficulties and discriminations with the truth. */
   recovery: { ability: ParameterRecovery; difficulty: ParameterRecovery; discrimination: ParameterRecovery }
+  /** Its scores on the held-out responses. */
   test: ResponseScores
   /**
-   * IRT-ZILM only: for every observed zero, the posterior that it is structural, its fitted π, whether it was
-   * structural (1; when the data carry the truth) and the AUROC of the posterior for that truth.
+   * IRT-ZILM only: for every zero among the responses (training and held out), its student and item, the posterior
+   * that it is structural, its fitted $\pi$, whether it was structural (1; empty unless the data carry the truth) and
+   * the AUROC of the posterior for that truth (NaN without it).
    */
   zeros?: {
     student: Int32Array
@@ -73,8 +91,11 @@ export interface LearnerModelResult {
 
 /** A learner-model comparison so far. */
 export interface LearnerModelRunResult {
+  /** The models fitted so far, in order. */
   results: LearnerModelResult[]
+  /** The number of models the run fits. */
   total: number
+  /** Whether every model has been fitted. */
   finished: boolean
   /** The held-out mask (1 test) over the response matrix. */
   test: Uint8Array
@@ -84,7 +105,15 @@ export interface LearnerModelRunResult {
 
 const DEFAULT_MODELS: readonly LearnerModelKind[] = ['irt', 'ktm', 'zilm']
 
-/** The training and test masks over the observed responses. */
+/**
+ * The training and test masks over the observed responses: each observed response is held out with probability
+ * `testShare`, by uniform draws from the child `split` of the stream `seed`.
+ *
+ * @param responses The $P \times I$ responses (NaN: not attempted, in neither mask).
+ * @param testShare The probability that an observed response is held out.
+ * @param seed The seed of the root stream.
+ * @returns The flat responses `y` and the row-major masks `train` and `test` (1: in the set).
+ */
 function split(responses: Tensor, testShare: number, seed: number | string) {
   const y = toFlat(responses)
   const u = units(child(stream(seed), 'split'), y.length)
@@ -94,7 +123,19 @@ function split(responses: Tensor, testShare: number, seed: number | string) {
   return { y, train, test }
 }
 
-/** Fit one model on the training responses and evaluate it. */
+/**
+ * Fit one model on the training responses and evaluate it: ability equity, parameter recovery and held-out scores,
+ * and for IRT-ZILM the structural-zero posterior of every zero.
+ *
+ * @param data The learners, with their truth.
+ * @param model The model to fit.
+ * @param y The flat responses (row-major), as `split` returns them.
+ * @param train The training mask over the responses.
+ * @param test The held-out mask over the responses.
+ * @param maxSteps The most L-BFGS steps.
+ * @param init A fit to start from (the IRT fit, for the later models), or none.
+ * @returns The fit and its evaluation.
+ */
 function evaluate(
   data: LearnerData,
   model: LearnerModelKind,
@@ -149,9 +190,42 @@ function evaluate(
 }
 
 /**
- * Fit the learner models to the same training responses (a random `1 − testShare` of the observed ones) and evaluate
- * each: ability bias by group and the equity gap, parameter recovery, held-out scores and (IRT-ZILM) structural-zero
- * posteriors. Yields after every fit. Deterministic in `seed`.
+ * Fit the learner models to the same training responses (a random share $1 - \text{testShare}$ of the observed ones)
+ * and evaluate each: ability bias by group and the equity gap, parameter recovery, held-out scores and (IRT-ZILM)
+ * structural-zero posteriors. Models after an IRT fit start from it. Yields once before the first fit and after every
+ * fit. Deterministic in `seed`.
+ *
+ * @param data The learners, with their truth.
+ * @param options The models, the held-out share, the L-BFGS limit and the seed of the split.
+ * @returns A generator of the comparison so far; its return value is the finished comparison.
+ *
+ * @example IRT and IRT-ZILM on simulated students
+ * // 45 students, a third with a condition; the odd items are timed, and a timed item gives a student with the
+ * // condition a zero with probability 0.9 whatever their ability. On data this small IRT-ZILM finds no zero
+ * // inflation here (its intercept runs far negative) and matches IRT.
+ * const s = stream(1)
+ * const ability = toFlat(normal(s, 0, 1, { shape: [45] }))
+ * const timed = [0, 1, 0, 1, 0, 1, 0, 1]
+ * const difficulty = Float64Array.from(timed, (_, i) => -1 + (2 * i) / 7)
+ * const group = Int32Array.from(ability, (_, p) => (p % 3 === 0 ? 1 : 0))
+ * const y = (p, b) => bernoulli(s, zilmProbability(ability[p], 1, b))
+ * const answer = (g, p, b, i) => (g && timed[i] && uniform(s) < 0.9 ? 0 : y(p, b))
+ * const rows = Array.from(group, (g, p) => Array.from(difficulty, (b, i) => answer(g, p, b, i)))
+ * const data = {
+ *   responses: tensor(rows),
+ *   conditions: tensor(Array.from(group, (g) => [g])),
+ *   itemFeatures: tensor(timed.map((t) => [t])),
+ *   ability,
+ *   difficulty,
+ *   discrimination: new Float64Array(8).fill(1),
+ *   group,
+ * }
+ * let last
+ * for (const r of learnerModelRun(data, { models: ['irt', 'zilm'] })) last = r
+ * for (const r of last.results) {
+ *   print(r.model, 'gap:', r.equity.gap, 'ability r:', r.recovery.ability.pearson, 'test accuracy:', r.test.accuracy)
+ * }
+ * print('IRT-ZILM intercept:', last.results[1].fit.intercept, 'zeros scored:', last.results[1].zeros.posterior.length)
  */
 export function* learnerModelRun(
   data: LearnerData,
@@ -181,10 +255,14 @@ export function* learnerModelRun(
 
 /** One point of the equity sweep: one dataset, every model's equity and scores. */
 export interface LearnerSweepPoint {
-  /** The zero-inflation rate r of the conditions in this dataset. */
+  /** The zero-inflation rate $r$ of the conditions in this dataset. */
   rate: number
-  /** The realised share of structural zeros among the responses of students with and without a condition. */
+  /**
+   * The realised share of structural zeros among the observed responses of students with and without a condition (0
+   * when the data carry no truth).
+   */
   structuralShare: { with: number; without: number }
+  /** Each model's ability bias and gap, ability recovery and held-out scores. */
   models: {
     model: LearnerModelKind
     equity: AbilityEquity
@@ -195,15 +273,52 @@ export interface LearnerSweepPoint {
 
 /** An equity sweep so far. */
 export interface LearnerSweepResult {
+  /** The datasets done so far, in order. */
   points: LearnerSweepPoint[]
+  /** The number of datasets. */
   total: number
+  /** Whether every dataset is done. */
   finished: boolean
 }
 
 /**
  * The equity sweep: for each dataset (simulated with zero-inflation rate `rates[j]` for every condition), fit the
- * models and record each one's ability bias by group, equity gap, ability recovery and held-out scores. Yields after
- * every dataset.
+ * models and record each one's ability bias by group, equity gap, ability recovery and held-out scores. Every dataset
+ * is split with the same `seed`, and models after `irt` start from its fit. Yields once before the first dataset and
+ * after every dataset.
+ *
+ * @param datasets The datasets, one per point.
+ * @param rates The zero-inflation rate each dataset was simulated with, in the same order; only recorded.
+ * @param options The models, the held-out share, the L-BFGS limit and the seed of the split.
+ * @returns A generator of the sweep so far; its return value is the finished sweep.
+ *
+ * @example Two datasets, without and with zero inflation
+ * // 45 students, a third with a condition; on the odd (timed) items a student with the condition gets a structural
+ * // zero with probability `rate`. Datasets this small give noisy gaps, and here IRT-ZILM finds no zero inflation
+ * // and matches IRT; the paper's datasets have hundreds of students.
+ * const simulate = (rate) => {
+ *   const s = stream(1)
+ *   const ability = toFlat(normal(s, 0, 1, { shape: [45] }))
+ *   const timed = [0, 1, 0, 1, 0, 1, 0, 1]
+ *   const difficulty = Float64Array.from(timed, (_, i) => -1 + (2 * i) / 7)
+ *   const group = Int32Array.from(ability, (_, p) => (p % 3 === 0 ? 1 : 0))
+ *   const structural = new Uint8Array(45 * 8)
+ *   const y = (p, b) => bernoulli(s, zilmProbability(ability[p], 1, b))
+ *   const zero = (p, i) => (structural[p * 8 + i] = group[p] && timed[i] && uniform(s) < rate ? 1 : 0)
+ *   const rows = Array.from(group, (_, p) => Array.from(difficulty, (b, i) => (zero(p, i) ? 0 : y(p, b))))
+ *   const conditions = tensor(Array.from(group, (g) => [g]))
+ *   const itemFeatures = tensor(timed.map((t) => [t]))
+ *   const discrimination = new Float64Array(8).fill(1)
+ *   const data = { responses: tensor(rows), conditions, itemFeatures, ability, difficulty, discrimination }
+ *   return { ...data, structural, group }
+ * }
+ * const rates = [0, 0.9]
+ * let last
+ * for (const r of learnerEquitySweep(rates.map(simulate), rates, { models: ['irt', 'zilm'] })) last = r
+ * for (const pt of last.points) {
+ *   print(`rate ${pt.rate}: structural share with the condition`, pt.structuralShare.with)
+ *   for (const m of pt.models) print(`  ${m.model} gap:`, m.equity.gap, 'ability r:', m.ability.pearson)
+ * }
  */
 export function* learnerEquitySweep(
   datasets: readonly LearnerData[],

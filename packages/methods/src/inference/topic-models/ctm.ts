@@ -1,10 +1,15 @@
 /**
  * A correlated topic model (Blei and Lafferty, 2007) fitted by a MAP variant of its variational EM ("CTM-lite"): each
- * document's topic proportions are θ_d = softmax(η_d) with η_d ~ N(μ, Σ), so topics can co-occur more or less than
- * independent Dirichlet draws allow. The E-step finds each η_d at the mode of its posterior given the topics,
- * −½(η − μ)ᵀΣ⁻¹(η − μ) + Σ_w n_dw log Σ_k θ_k β_kw, by L-BFGS with automatic gradients (Blei and Lafferty fit a Gaussian
- * variational posterior instead; the mode is its point-estimate limit); the M-step re-estimates the topics β from the
- * expected counts and (μ, Σ) from the modes, with Σ shrunk towards the identity.
+ * document's topic proportions are $\thetavec_d = \operatorname{softmax}(\etavec_d)$ with
+ * $\etavec_d \sim \Gauss(\muvec, \Sigmamat)$, so topics can co-occur more or less than independent Dirichlet draws
+ * allow.
+ *
+ * The E-step finds each $\etavec_d$ at the mode of its log posterior given the topics, which is, up to a constant,
+ * $-\tfrac{1}{2}(\etavec - \muvec)^\top \Sigmamat^{-1} (\etavec - \muvec)$ plus
+ * $\sum_w n_{dw} \log \sum_k \theta_k\beta_{kw}$,
+ * by L-BFGS with automatic gradients (Blei and Lafferty fit a Gaussian variational posterior instead; the mode is its
+ * point-estimate limit). The M-step re-estimates the topics $\betavec_k$ from the expected counts and
+ * $(\muvec, \Sigmamat)$ from the modes, with $\Sigmamat$ shrunk towards the identity.
  */
 
 import type { Size, Status } from 'aifn-compute/foundation/contracts'
@@ -33,12 +38,18 @@ import type { Documents } from './corpus'
 
 /** Options of `correlatedTopicSteps`. */
 export type CorrelatedTopicOptions = {
+  /** The corpus, as word ids. */
   documents: Documents
+  /** The number of topics $K$. */
   topics: Size
+  /** The vocabulary size $V$. */
   vocabulary: Size
-  /** Pseudo-count added to every topic–word count in the M-step (default 0.01). */
+  /** Pseudo-count added to every topic-word count in the M-step (default 0.01). */
   smoothing?: number
-  /** Weight of the identity in the covariance update Σ ← (1 − s)·cov(η) + s·I (default 0.1). */
+  /**
+   * $s$, the weight of the identity in the covariance update
+   * $\Sigmamat \leftarrow (1 - s)\operatorname{cov}(\etavec) + s\Imat$ (default 0.1).
+   */
   shrinkage?: number
   /** L-BFGS steps per document in the E-step (default 15). */
   innerSteps?: Size
@@ -46,20 +57,33 @@ export type CorrelatedTopicOptions = {
 
 /** The state of `correlatedTopicSteps`. */
 export interface CorrelatedTopicState extends Status {
+  /** EM steps done. */
   t: Size
-  /** Topics β [K, V], each a distribution over words. */
+  /** The topics $\betavec_k$, $K \times V$, each a distribution over words. */
   topicWord: Tensor
-  /** Each document's logistic-normal coordinates η_d [D, K]; its proportions are softmax(η_d). */
+  /**
+   * Each document's logistic-normal coordinates $\etavec_d$, $D \times K$; its proportions are
+   * $\operatorname{softmax}(\etavec_d)$.
+   */
   eta: Tensor
-  /** Topic proportions θ = softmax(η) [D, K]. */
+  /** The topic proportions $\thetavec_d = \operatorname{softmax}(\etavec_d)$, $D \times K$. */
   docTopic: Tensor
-  /** μ [K] and Σ [K, K] of the logistic normal. */
+  /** The mean $\muvec$ of the logistic normal ($K$ values). */
   mean: Tensor
+  /** The covariance $\Sigmamat$ of the logistic normal, $K \times K$. */
   covariance: Tensor
-  /** Σ_d Σ_w n_dw log Σ_k θ_dk β_kw at the current estimates. */
+  /** $\sum_d \sum_w n_{dw} \log \sum_k \theta_{dk} \beta_{kw}$ at the current estimates. */
   logLikelihood: number
 }
 
+/**
+ * The softmax of each row of a $D \times K$ row-major array, computed stably.
+ *
+ * @param eta The rows $\etavec_d$, $D \times K$ row-major; not modified.
+ * @param D The number of rows.
+ * @param K The number of columns.
+ * @returns The rows $\operatorname{softmax}(\etavec_d)$, a new $D \times K$ row-major array.
+ */
 const softmaxRows = (eta: Float64Array, D: Size, K: Size) => {
   const out = new Float64Array(D * K)
   for (let d = 0; d < D; d++) {
@@ -72,7 +96,24 @@ const softmaxRows = (eta: Float64Array, D: Size, K: Size) => {
   return out
 }
 
-/** CTM-lite as a step-through algorithm: each step is one E-step over every document and one M-step. */
+/**
+ * CTM-lite as a step-through algorithm: each step is one E-step over every document and one M-step. `init` draws
+ * random topics from its stream (each entry $0.5 + u$ with $u$ uniform, normalised) and starts with
+ * $\etavec_d = \zeros$, $\muvec = \zeros$ and $\Sigmamat = \Imat$. A state is flagged `diverged` when its
+ * log-likelihood is not finite; nothing sets `converged`.
+ *
+ * @param options The corpus, the number of topics and the fitting settings.
+ * @returns The algorithm, run with no start.
+ *
+ * @example Two vocabularies, two topics that do not co-occur
+ * const documents = [[0, 1, 2, 0, 1, 2], [1, 2, 0, 0, 2, 1], [0, 0, 1, 2, 2, 1],
+ *   [3, 4, 5, 3, 4, 5], [4, 5, 3, 3, 5, 4], [5, 3, 4, 4, 3, 5]]
+ * const alg = correlatedTopicSteps({ documents, topics: 2, vocabulary: 6 })
+ * const final = run(alg, undefined, 10, { stream: stream(0) })
+ * print('top words of each topic', topWords(final.topicWord, 3))
+ * print('topic proportions', final.docTopic)
+ * print('topic correlations', topicCorrelations(final.covariance))
+ */
 export function correlatedTopicSteps(options: CorrelatedTopicOptions): Algorithm<void, CorrelatedTopicState> {
   const { documents, topics: K, vocabulary: V, smoothing = 0.01, shrinkage = 0.1, innerSteps = 15 } = options
   const D = documents.length
@@ -177,7 +218,16 @@ export function correlatedTopicSteps(options: CorrelatedTopicOptions): Algorithm
   }
 }
 
-/** The correlation matrix of the logistic normal's covariance: how strongly topics co-occur across documents. */
+/**
+ * The correlation matrix $C_{ab} = \Sigma_{ab} / \sqrt{\Sigma_{aa}\Sigma_{bb}}$ of the logistic normal's covariance:
+ * how strongly topics co-occur across documents.
+ *
+ * @param covariance The covariance $\Sigmamat$, $K \times K$, with a positive diagonal.
+ * @returns The $K \times K$ correlation matrix, with a unit diagonal.
+ *
+ * @example A covariance as correlations
+ * print(topicCorrelations(tensor([[4, -1], [-1, 1]])))
+ */
 export function topicCorrelations(covariance: Tensor): Tensor {
   const [K] = covariance.shape
   const c = toFlat(covariance)

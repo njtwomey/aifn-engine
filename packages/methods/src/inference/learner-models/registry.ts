@@ -1,5 +1,6 @@
 /**
- * The registry of `aifn-methods/inference/learner-models`.
+ * The registry of `aifn-methods/inference/learner-models`: the catalogue entries (name, summary, role, notes and
+ * citations) of its functions.
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

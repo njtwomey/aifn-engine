@@ -9,6 +9,7 @@ import * as examples from './examples'
 import * as irt from './irt'
 import * as paired from './paired'
 
+/** A registry table: the entries of one kind (algorithms or functions), keyed by name. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
 const algorithm = definer<AlgorithmInfo>('algorithm', 'inference/rating-models')
 const fn = definer<FunctionInfo>('function', 'inference/rating-models')

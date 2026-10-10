@@ -1,5 +1,6 @@
 /**
- * The registry of `aifn-methods/inference/topic-models`.
+ * The registry of `aifn-methods/inference/topic-models`: the samplers and EM fits as algorithms, and the corpus
+ * helpers, estimators and runners as functions, each with its name, summary, notes and citations.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -12,9 +13,13 @@ import * as lda from './lda'
 import * as plsa from './plsa'
 import * as run from './run'
 
+/** A registry table: entries keyed by function name, each the function with its information `I`. */
 type Table<I extends AlgorithmInfo | FunctionInfo> = Readonly<Record<string, Entry<(...args: never[]) => unknown, I>>>
+/** Registers an algorithm of the module. */
 const algorithm = definer<AlgorithmInfo>('algorithm', 'inference/topic-models')
+/** Registers a function of the module. */
 const fn = definer<FunctionInfo>('function', 'inference/topic-models')
+/** The note every LDA entry links to. */
 const notes = ['latent-dirichlet-allocation']
 
 algorithm(
@@ -231,6 +236,7 @@ fn(
   run.topicModelRun,
 )
 
+/** The files whose registered entries the tables collect. */
 const sources = [lda, hdp, dtm, plsa, ctm, factor, corpus, run]
 /** The algorithms of the module. */
 export const topicModelAlgorithms: Table<AlgorithmInfo> = entries<AlgorithmInfo>(

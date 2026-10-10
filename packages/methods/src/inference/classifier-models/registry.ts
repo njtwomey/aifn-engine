@@ -1,5 +1,6 @@
 /**
- * The registry of `aifn-methods/inference/classifier-models`.
+ * The registry of `aifn-methods/inference/classifier-models`: the catalogue entries (name, summary, role, notes and
+ * citations) of the Bayes point machine, as an algorithm, and of its prediction and the AdPredictor functions.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

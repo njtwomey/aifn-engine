@@ -1,7 +1,13 @@
 /**
- * Minka's clutter problem (Minka, 2001, "A family of algorithms for approximate Bayesian inference", §3.3), part of
- * `aifn-methods/inference/mixture-models`: its structure in the model language, its tilted moments for EP, sampling,
- * and the exact posterior on a grid.
+ * Minka's clutter problem (Minka, 2001, "A family of algorithms for approximate Bayesian inference", §3.3): its
+ * structure in the model language, its tilted moments for EP, its likelihood, sampling, and the exact posterior on a
+ * grid.
+ *
+ * A scalar $\theta \sim \Gauss(0, v_0)$ is observed through points that are each signal,
+ * $x_i \sim \Gauss(\theta, 1)$, with probability $1 - w$, and clutter, $x_i \sim \Gauss(0, c^2)$, with probability
+ * $w$. The posterior is a mixture of $2^n$ Gaussians, which is what makes it a test of approximate inference: EP
+ * (`clutterEp`) is compared with the exact posterior (`clutterPosterior`). The defaults are Minka's, $v_0 = 100$ and
+ * $c^2 = 10$.
  */
 
 import { lift, type Out } from 'aifn-compute/inference/expectation-propagation'
@@ -12,20 +18,40 @@ import type { EpOptions } from 'aifn-compute/inference/expectation-propagation'
 import { tiltedByQuadrature, type Tilted } from 'aifn-compute/inference/expectation-propagation'
 import { dist, model, type Model } from 'aifn-compute/inference/model'
 
-/** Options of {@link clutterTilted}: Minka's clutter model. */
+/** Options of {@link clutterTilted}: the parameters of Minka's clutter factor. */
 export interface ClutterFactorOptions {
-  /** w, the prior probability that a point is clutter. */
+  /** $w$, the prior probability that a point is clutter, in $(0, 1)$. */
   weight: number
-  /** The clutter distribution's variance (it has mean 0). Default 10. */
+  /** $c^2$, the variance of the clutter distribution (it has mean 0). Default 10. */
   clutterVariance?: number
-  /** The signal's noise variance around θ. Default 1. */
+  /** $\sigma^2$, the variance of a signal point around $\theta$. Default 1. */
   noiseVariance?: number
 }
 
 /**
- * Minka's clutter factor t(θ) = (1 − w) N(x; θ, σ²) + w N(x; 0, c²) times a Gaussian cavity (Minka 2001, §3.3.1).
- * r is the probability, under the cavity, that x is signal; with d = x − m and s = v + σ²:
- * mean = m + r v d/s, variance = v − r v²/s + r(1 − r) v² d²/s².
+ * The tilted moments of Minka's clutter factor $t(\theta) = (1 - w)\Gauss(x; \theta, \sigma^2) + w\Gauss(x; 0, c^2)$
+ * against a Gaussian cavity $\Gauss(\theta; m, v)$ (Minka, 2001, §3.3.1), in closed form and elementwise over
+ * broadcast arguments. With $s = v + \sigma^2$, $d = x - m$ and $r$ the probability under the cavity that $x$ is
+ * signal, the tilted mean is $m + r v d / s$ and the variance $v - r v^2 / s + r(1 - r) v^2 d^2 / s^2$. Not
+ * differentiable.
+ *
+ * @param x The observation $x$: a number, or a tensor broadcast against `mean` and `variance`.
+ * @param mean The cavity mean $m$.
+ * @param variance The cavity variance $v$.
+ * @param options The factor's parameters.
+ * @param options.weight $w$, the prior probability that a point is clutter, in $(0, 1)$.
+ * @param options.clutterVariance $c^2$, the variance of the zero-mean clutter distribution.
+ * @param options.noiseVariance $\sigma^2$, the variance of a signal point around $\theta$.
+ * @returns `logZ`, the log normaliser $\log \int t(\theta)\Gauss(\theta; m, v)\,d\theta$, the tilted `mean` and
+ *   `variance`, and `signal`, the probability $r$: numbers when every argument is a number, otherwise tensors of the
+ *   broadcast shape.
+ *
+ * @example A point near the cavity mean is signal; a far one is clutter
+ * const near = clutterTilted(0.5, 0, 1, { weight: 0.2 })
+ * const far = clutterTilted(8, 0, 1, { weight: 0.2 })
+ * print('near: signal', near.signal, 'mean', near.mean, 'variance', near.variance)
+ * print('far:  signal', far.signal, 'mean', far.mean, 'variance', far.variance)
+ * print('over a tensor of points', clutterTilted(tensor([0.5, 2, 8]), 0, 1, { weight: 0.2 }).mean)
  */
 export function clutterTilted<X extends number | Tensor, M extends number | Tensor, S extends number | Tensor>(
   x: X,
@@ -52,20 +78,32 @@ export function clutterTilted<X extends number | Tensor, M extends number | Tens
 
 // ── The clutter problem ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Minka's clutter problem: θ ~ N(0, priorVariance); each xᵢ is N(θ, 1) with probability 1 − w, else N(0, c²). */
+/**
+ * Minka's clutter problem: $\theta \sim \Gauss(0, v_0)$, and each $x_i$ is $\Gauss(\theta, 1)$ with probability
+ * $1 - w$, else $\Gauss(0, c^2)$.
+ */
 export interface ClutterProblem {
-  /** w, the clutter probability. */
+  /** $w$, the probability that a point is clutter, in $(0, 1)$. */
   weight: number
-  /** Default 100. */
+  /** $v_0$, the variance of the zero-mean Gaussian prior on $\theta$. Default 100. */
   priorVariance?: number
-  /** Default 10. */
+  /** $c^2$, the variance of the zero-mean clutter distribution. Default 10. */
   clutterVariance?: number
 }
 
 /**
- * The clutter problem's structure in the model language (Minka 2001, §3.3): θ ~ N(0, priorVariance) and a plate of N
- * points, each with a signal indicator s_n ~ Bernoulli(1 − w) and x_n ~ N(s_n θ, σ_n²), where σ_n = 1 for signal and
- * √c² for clutter (a table indexed by s_n).
+ * The clutter problem's structure in the model language (Minka, 2001, §3.3), for diagrams and model-driven inference:
+ * $\theta \sim \Gauss(0, v_0)$ and a plate of $N$ points, each with a signal indicator $s_n \sim \Bern(1 - w)$ and
+ * $x_n \sim \Gauss(s_n\theta, \sigma_n^2)$, where $\sigma_n$ is 1 for signal and $c$ for clutter (a table indexed by
+ * $s_n$).
+ *
+ * @param problem The clutter problem; `priorVariance` and `clutterVariance` default to 100 and 10.
+ * @returns The model, named `'clutter problem'`, with $N$ left symbolic.
+ *
+ * @example The nodes and plate of the model
+ * const m = clutterModel({ weight: 0.2 })
+ * print('nodes:', m.attributes.map((n) => `${n.name} (${n.role}, in ${n.group})`))
+ * print('plates:', m.groups.map((g) => `${g.name} of size ${g.size}`))
  */
 export function clutterModel(problem: ClutterProblem): Model {
   const { weight, priorVariance, clutterVariance } = defaults(problem)
@@ -79,16 +117,44 @@ export function clutterModel(problem: ClutterProblem): Model {
   })
 }
 
-/** log N(x; m, v) for variance v. */
+/**
+ * The Gaussian log density $\log\Gauss(x; m, v)$.
+ *
+ * @param x The point.
+ * @param m The mean.
+ * @param v The variance (not the standard deviation).
+ * @returns $\log\Gauss(x; m, v)$.
+ */
 const logNormal = (x: number, m: number, v: number): number => normalLogPdf((x - m) / Math.sqrt(v)) - 0.5 * Math.log(v)
 
+/**
+ * A clutter problem with its defaults filled in.
+ *
+ * @param p The problem as given.
+ * @returns `weight`, `priorVariance` (default 100) and `clutterVariance` (default 10).
+ */
 const defaults = (p: ClutterProblem) => ({
   weight: p.weight,
   priorVariance: p.priorVariance ?? 100,
   clutterVariance: p.clutterVariance ?? 10,
 })
 
-/** log p(x | θ) = Σᵢ log[(1 − w) N(xᵢ; θ, 1) + w N(xᵢ; 0, c²)]. */
+/**
+ * The log-likelihood of the clutter problem,
+ * $\log p(\xvec \mid \theta) = \sum_i \log[(1 - w)\Gauss(x_i; \theta, 1) + w\Gauss(x_i; 0, c^2)]$, each term
+ * computed by log-sum-exp.
+ *
+ * @param theta The value of $\theta$.
+ * @param x The observations $x_i$.
+ * @param problem The clutter problem; its `weight` and `clutterVariance` are used (the prior is not).
+ * @returns The log-likelihood, 0 for no observations.
+ *
+ * @example The likelihood peaks near the signal, whatever the clutter
+ * const x = [1.8, 2.1, 2.3, -6, 9]
+ * print('theta = 0:', clutterLogLikelihood(0, x, { weight: 0.3 }))
+ * print('theta = 2:', clutterLogLikelihood(2, x, { weight: 0.3 }))
+ * print('theta = 5:', clutterLogLikelihood(5, x, { weight: 0.3 }))
+ */
 export function clutterLogLikelihood(theta: number, x: ArrayLike<number>, problem: ClutterProblem): number {
   const { weight, clutterVariance } = defaults(problem)
   let total = 0
@@ -101,7 +167,23 @@ export function clutterLogLikelihood(theta: number, x: ArrayLike<number>, proble
   return total
 }
 
-/** Draw n observations of the clutter problem at a true θ (float64 vector). */
+/**
+ * Draw observations of the clutter problem at a true $\theta$: each is clutter, $\Gauss(0, c^2)$, with probability
+ * $w$, and otherwise signal, $\Gauss(\theta, 1)$. Observation $i$ is drawn from its own child stream `child(s, i)`, so
+ * the first $n$ draws do not depend on how many are asked for.
+ *
+ * @param s The stream the draws derive from.
+ * @param n The number of observations.
+ * @param theta The true value of $\theta$.
+ * @param problem The clutter problem; its `weight` and `clutterVariance` are used (the prior is not).
+ * @returns The $n$ observations, a float64 vector. The functions here that take observations take an
+ *   `ArrayLike<number>`, so pass them `toArray` of it.
+ *
+ * @example Mostly near the true value, with some clutter
+ * const x = sampleClutter(stream(0), 10, 2, { weight: 0.3 })
+ * print('x', x)
+ * print('within 3 of theta', toArray(x).filter((v) => Math.abs(v - 2) < 3).length, 'of 10')
+ */
 export function sampleClutter(s: Stream, n: number, theta: number, problem: ClutterProblem): Vector {
   const { weight, clutterVariance } = defaults(problem)
   const out = new Float64Array(n)
@@ -116,8 +198,20 @@ export function sampleClutter(s: Stream, n: number, theta: number, problem: Clut
 }
 
 /**
- * EP options for the clutter problem, ready for `expectationPropagation`: closed-form tilted moments for α = 1,
- * quadrature for power EP.
+ * EP options for the clutter problem, ready for `expectationPropagation` (in
+ * `aifn-compute/inference/expectation-propagation`): the prior $\Gauss(0, v_0)$, one factor per observation, and
+ * their tilted moments, in closed form (`clutterTilted`) for power $\alpha = 1$ and by quadrature for power EP.
+ *
+ * @param x The observations $x_i$, one EP factor each; copied.
+ * @param problem The clutter problem; `priorVariance` and `clutterVariance` default to 100 and 10.
+ * @param options EP settings passed through unchanged: `damping`, `power`, `order` and `tolerance`.
+ * @returns The `EpOptions`: `prior`, `factors` (the number of observations), `tilted`, and the settings of `options`.
+ *
+ * @example The options, and one factor's tilted moments against the prior
+ * const ep = clutterEp([1.8, 2.1, -6], { weight: 0.3 })
+ * print('prior', ep.prior, 'factors', ep.factors)
+ * print('factor 0, closed form', ep.tilted(0, ep.prior, 1))
+ * print('factor 0, power 0.5', ep.tilted(0, ep.prior, 0.5))
  */
 export function clutterEp(
   x: ArrayLike<number>,
@@ -139,8 +233,26 @@ export function clutterEp(
 }
 
 /**
- * The exact posterior of the clutter problem on an even grid (trapezoid rule): density, mean, variance and
- * log evidence. The grid must hold the posterior mass; the default ±40 does for the usual prior.
+ * The exact posterior of the clutter problem on an even grid of $\theta$, by the trapezoid rule: its density, mean,
+ * variance and log evidence, the reference EP is compared with. The grid must hold the posterior mass; the default
+ * $[-40, 40]$ does for the usual prior.
+ *
+ * @param x The observations $x_i$.
+ * @param problem The clutter problem; `priorVariance` and `clutterVariance` default to 100 and 10.
+ * @param options The grid.
+ * @param options.lower The smallest $\theta$ of the grid.
+ * @param options.upper The largest $\theta$ of the grid.
+ * @param options.points The number of grid points, ends included.
+ * @returns `grid`, the values of $\theta$; `density`, the posterior density at each (it integrates to 1 on the grid);
+ *   the posterior `mean` and `variance`; and `logEvidence`, $\log \int p(\theta) p(\xvec \mid \theta)\,d\theta$.
+ *
+ * @example The posterior of twenty points drawn at theta = 2
+ * const x = sampleClutter(stream(1), 20, 2, { weight: 0.3 })
+ * const exact = clutterPosterior(toArray(x), { weight: 0.3 })
+ * print('mean', exact.mean, 'variance', exact.variance)
+ * print('log evidence', exact.logEvidence)
+ * const density = toArray(exact.density)
+ * print('peak at theta =', toArray(exact.grid)[density.indexOf(Math.max(...density))])
  */
 export function clutterPosterior(
   x: ArrayLike<number>,

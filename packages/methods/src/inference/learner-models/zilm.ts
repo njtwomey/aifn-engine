@@ -1,29 +1,38 @@
 /**
- * Zero-inflated learner models (Twomey, McMullan, Elhalal, Poyiadzi and Vaquero, 2022, "Equitable Ability Estimation
- * in Neurodivergent Student Populations with Zero-Inflated Learner Models"). A learner model (LM) explains a zero (an
+ * Zero-inflated learner models: IRT-ZILM and its two baselines, their objective, fit and predictions, and the
+ * posterior that a zero is structural.
+ *
+ * The models are those of Twomey, McMullan, Elhalal, Poyiadzi and Vaquero (2022), "Equitable Ability Estimation in
+ * Neurodivergent Student Populations with Zero-Inflated Learner Models". A learner model (LM) explains a zero (an
  * incorrect or unanswered item) by low ability. A zero-inflated learner model (ZILM) admits a second explanation: a low
- * learning quality factor (LQF), the delivery and response type (DRT) of the item being unsuitable for the student. With
- * p the base model's probability of a correct answer and π the zero-inflation probability (LQF = 1 − π), the paper's
- * Eqn (1) is
+ * learning quality factor (LQF), the delivery and response type (DRT) of the item being unsuitable for the student.
+ * With $p$ the base model's probability of a correct answer and $\pi$ the zero-inflation probability (LQF $= 1 - \pi$),
+ * the paper's Eqn (1) is
  *
- *   Pr(Y = 0 | x) = π(x_π) + (1 − π(x_π))(1 − p(x_p)),   Pr(Y = 1 | x) = (1 − π(x_π)) p(x_p),
+ * $\pr(Y = 0 \mid \xvec) = \pi(\xvec_\pi) + (1 - \pi(\xvec_\pi))(1 - p(\xvec_p))$ and
+ * $\pr(Y = 1 \mid \xvec) = (1 - \pi(\xvec_\pi))\, p(\xvec_p)$,
  *
- * the zero-inflated Bernoulli `ZeroInflated({ logits: η }, Bernoulli({ logits: z }))` of `aifn-compute/probability/distributions`.
- * In IRT-ZILM the base is the two-parameter IRT model, z = aᵢ(θₚ − bᵢ), and π = σ(η) is logistic in the student's
- * neurodivergent conditions (NDCs) crossed with the item's DRT and content features:
+ * the zero-inflated Bernoulli `ZeroInflated({ logits: η }, Bernoulli({ logits: z }))` of
+ * `aifn-compute/probability/distributions`. In IRT-ZILM the base is the two-parameter IRT model, with logit
+ * $z_{pi} = a_i(\theta_p - b_i)$ for student $p$ and item $i$, and $\pi = \sigma(\eta)$ is logistic in the student's
+ * neurodivergent conditions (NDCs, the 0 or 1 entries $Z_{pk}$ of a $P \times K$ matrix $\Zmat$) crossed with the
+ * item's DRT and content features (the $I \times F$ matrix $\Xmat$):
  *
- *   η_{pi} = w₀ + Σ_k z_{pk} Σ_f x_{if} W_{fk},
+ * $\eta_{pi} = w_0 + \sum_k Z_{pk} \sum_f X_{if} W_{fk}$,
  *
- * so the model learns which DRTs depress which conditions' answers. When π does not depend on the student, (1 − π) is
- * the upper asymptote of Barton and Lord's (1981) four-parameter model. Two baselines share the base model and the
- * fitter: `irt` (π ≡ 0, so IRT-ZILM with the zero inflation switched off is exactly this model) and `ktm`, a linear
- * knowledge-tracing machine in the sense of Vie and Kashima (2019), which adds the same context features to the logit,
- * logit Pr(Y = 1) = aᵢ(θₚ − bᵢ) + Σ_k z_{pk} Σ_f x_{if} W_{fk}, instead of to a separate cause of zeros.
+ * so the model learns, through the $F \times K$ weights $\Wmat$, which DRTs depress which conditions' answers. When
+ * $\pi$ does not depend on the student, $1 - \pi$ is the upper asymptote of Barton and Lord's (1981) four-parameter
+ * model. Two baselines share the base model and the fitter: `irt` ($\pi \equiv 0$, so IRT-ZILM with the zero
+ * inflation switched off is exactly this model) and `ktm`, a linear knowledge-tracing machine in the sense of Vie and
+ * Kashima (2019), which adds the same context to the logit,
+ * $\operatorname{logit} \pr(Y = 1) = a_i(\theta_p - b_i) + \sum_k Z_{pk} \sum_f X_{if} W_{fk}$, instead of to a
+ * separate cause of zeros.
  *
- * Fitting follows the paper: the negative log-likelihood of the training responses is minimised over every parameter at
- * once (abilities, difficulties, discriminations and the π weights), with gradients by autodiff, here by L-BFGS, and
- * weak Gaussian priors θ ~ N(0, 1), b ~ N(0, 2²), log a ~ N(0, 1), W ~ N(0, 2²) that fix the scale of θ and keep the
- * estimates finite. IRT-ZILM starts from the IRT fit.
+ * Fitting follows the paper: the negative log-likelihood of the training responses is minimised over every parameter
+ * at once (abilities, difficulties, discriminations and the $\pi$ weights), with gradients by autodiff, here by
+ * L-BFGS, and weak Gaussian priors $\theta \sim \Gauss(0, 1)$, $b \sim \Gauss(0, 2^2)$, $\log a \sim \Gauss(0, 1)$,
+ * $W \sim \Gauss(0, 2^2)$ (none on $w_0$) that fix the scale of $\theta$ and keep the estimates finite. IRT-ZILM
+ * starts from the IRT fit. Responses are a $P \times I$ matrix of 0 and 1, with NaN for an item not attempted.
  */
 
 import { valueAndGrad } from 'aifn-compute/foundation/autodiff'
@@ -51,16 +60,45 @@ import { minimize } from 'aifn-compute/optim/minimize'
 /** The learner models: two-parameter IRT, a linear knowledge-tracing machine and IRT-ZILM. */
 export type LearnerModelKind = 'irt' | 'ktm' | 'zilm'
 
+/**
+ * The logistic function.
+ *
+ * @param v The logit.
+ * @returns $\sigma(v) = 1 / (1 + e^{-v})$.
+ */
 const sigmoid = (v: number) => 1 / (1 + Math.exp(-v))
 
-/** Pr(Y = 1) = (1 − π) σ(a(θ − b)): IRT-ZILM's probability of a correct answer (π = 0 gives the 2PL model). */
+/**
+ * $\pr(Y = 1) = (1 - \pi)\, \sigma(a(\theta - b))$: IRT-ZILM's probability of a correct answer ($\pi = 0$ gives the
+ * 2PL model).
+ *
+ * @param theta The student's ability $\theta$.
+ * @param a The item's discrimination $a$.
+ * @param b The item's difficulty $b$.
+ * @param pi The zero-inflation probability $\pi$ (0 for plain IRT).
+ * @returns The probability of a correct answer.
+ *
+ * @example An even match, then the context taking 20%
+ * print('2PL:', zilmProbability(0, 1, 0))
+ * print('π = 0.2:', zilmProbability(0, 1, 0, 0.2))
+ * print('able student, steep item:', zilmProbability(2, 1.5, 0.5))
+ */
 export function zilmProbability(theta: number, a: number, b: number, pi = 0): number {
   return (1 - pi) * sigmoid(a * (theta - b))
 }
 
 /**
- * The posterior probability that an observed zero is structural (caused by the context, probability π) rather than an
- * ability-driven incorrect answer (probability (1 − π)(1 − p)): π / (π + (1 − π)(1 − p)), Bayes' rule on Eqn (1).
+ * The posterior probability that an observed zero is structural (caused by the context, probability $\pi$) rather
+ * than an ability-driven incorrect answer (probability $(1 - \pi)(1 - p)$): $\pi / (\pi + (1 - \pi)(1 - p))$, Bayes'
+ * rule on Eqn (1). Returns 0 when both are 0 (a zero that cannot occur).
+ *
+ * @param pi The zero-inflation probability $\pi$.
+ * @param p The base model's probability $p$ of a correct answer.
+ * @returns The posterior that the zero is structural.
+ *
+ * @example A zero from an able student is more likely the context's
+ * print('p = 0.9:', structuralZeroPosterior(0.2, 0.9))
+ * print('p = 0.1:', structuralZeroPosterior(0.2, 0.1))
  */
 export function structuralZeroPosterior(pi: number, p: number): number {
   const structural = pi
@@ -68,50 +106,72 @@ export function structuralZeroPosterior(pi: number, p: number): number {
   return structural + driven === 0 ? 0 : structural / (structural + driven)
 }
 
-/** Options of `fitLearnerModel`. */
+/** Options of `fitLearnerModel` and `learnerObjective`. */
 export interface LearnerModelOptions {
   /** `irt`, `ktm` or `zilm` (default `zilm`). */
   model?: LearnerModelKind
-  /** Student conditions [students, K] (0 or 1) and item features [items, F]; required by `ktm` and `zilm`. */
+  /** Student conditions $\Zmat$, $P \times K$ (0 or 1); required by `ktm` and `zilm`. */
   conditions?: Tensor
+  /** Item features $\Xmat$, $I \times F$; required by `ktm` and `zilm`. */
   itemFeatures?: Tensor
-  /** Prior standard deviations of θ, b, log a and the context weights W (1, 2, 1, 2). */
+  /** Prior standard deviation of the abilities $\theta$ (default 1). */
   abilitySd?: number
+  /** Prior standard deviation of the difficulties $b$ (default 2). */
   difficultySd?: number
+  /** Prior standard deviation of the log discriminations $\log a$ (default 1). */
   logDiscriminationSd?: number
+  /** Prior standard deviation of the context weights $\Wmat$ (default 2). */
   weightSd?: number
-  /**
-   * Most L-BFGS steps (default 1000) and the gradient-norm tolerance that ends the fit (default 10⁻⁴ per observed
-   * response: the objective is a sum over responses, so its gradient grows with them).
-   */
+  /** The most L-BFGS steps (default 1000). */
   maxSteps?: number
+  /**
+   * The gradient-norm tolerance that ends the fit (default $10^{-4}$ per observed response: the objective is a sum
+   * over responses, so its gradient grows with them).
+   */
   tolerance?: number
-  /** A fit to start from (its θ, b and a): IRT-ZILM otherwise starts from an IRT fit of its own. */
+  /** A fit to start from (its $\theta$, $b$ and $a$): IRT-ZILM otherwise starts from an IRT fit of its own. */
   init?: LearnerModelFit
 }
 
-/** A fitted learner model. */
+/** A fitted learner model (plain data). */
 export interface LearnerModelFit {
+  /** Which model was fitted. */
   readonly model: LearnerModelKind
-  /** Abilities θ (one per student; MAP), difficulties b and discriminations a (one per item). */
+  /** The abilities $\theta_p$, one per student (MAP estimates). */
   readonly ability: Float64Array
+  /** The difficulties $b_i$, one per item. */
   readonly difficulty: Float64Array
+  /** The discriminations $a_i$, one per item. */
   readonly discrimination: Float64Array
-  /** w₀, the logit of π for a student without conditions (`zilm`; −∞ otherwise). */
+  /** $w_0$, the logit of $\pi$ for a student without conditions (`zilm`; $-\infty$ otherwise). */
   readonly intercept: number
-  /** Context weights W [F × K] row-major: π's logit (`zilm`) or the answer's logit (`ktm`); empty for `irt`. */
+  /**
+   * The context weights $\Wmat$ ($F \times K$, row-major): in $\pi$'s logit (`zilm`) or the answer's logit (`ktm`);
+   * empty for `irt`.
+   */
   readonly weights: Float64Array
+  /** $F$, the number of item features (0 for `irt`). */
   readonly features: number
+  /** $K$, the number of conditions (0 for `irt`). */
   readonly conditions: number
   /** The log-likelihood of the training responses at the fit (without the priors). */
   readonly logLikelihood: number
+  /** Whether L-BFGS met the tolerance. */
   readonly converged: boolean
+  /** The L-BFGS steps taken. */
   readonly steps: number
 }
 
 /**
  * The observed (training) responses as a list: student and item of each, and the answer. The likelihood is evaluated
- * on these pairs only, not on the whole [students, items] matrix.
+ * on these pairs only, not on the whole $P \times I$ matrix. Throws `DomainError` (naming `fitLearnerModel`) for a
+ * finite response other than 0 or 1.
+ *
+ * @param responses The $P \times I$ responses: 0, 1, or NaN for not attempted.
+ * @param train A row-major mask over the responses: only those with a non-zero entry are kept. All observed ones when
+ *   left out.
+ * @returns `student` and `item` (int32) and the answers `y` (a tensor), one entry per kept response, in row-major
+ *   order.
  */
 function observed(responses: Tensor, train?: Uint8Array) {
   const raw = toFlat(responses)
@@ -134,7 +194,19 @@ function observed(responses: Tensor, train?: Uint8Array) {
   }
 }
 
-/** The log-likelihood of each observed response [N], from its z = a(θ − b), context and (IRT-ZILM) intercept. */
+/**
+ * The log-likelihood of each observed response (length $N$), from its base logit $z = a(\theta - b)$, its context
+ * and (IRT-ZILM) the intercept: `Bernoulli` on $z$ (`irt`), on $z$ plus the context (`ktm`), or `ZeroInflated` with
+ * $\pi$'s logit $w_0$ plus the context (`zilm`).
+ *
+ * @param model The learner model.
+ * @param y The observed answers, 0 or 1 (length $N$).
+ * @param z The base logits $a_i(\theta_p - b_i)$ of the responses (length $N$).
+ * @param context The context $\sum_k Z_{pk} \sum_f X_{if} W_{fk}$ of each response; null for `irt`, and required
+ *   otherwise.
+ * @param intercept The intercept $w_0$ (length 1); used by `zilm` only.
+ * @returns The log-probabilities of the answers (length $N$), differentiable in the parameters.
+ */
 function pointwise(
   model: LearnerModelKind,
   y: Tensor,
@@ -147,12 +219,18 @@ function pointwise(
   return ZeroInflated({ logits: add(intercept!, context!) }, Bernoulli({ logits: z })).logProb(y)
 }
 
-/** A learner model's objective over a flat parameter vector x = [θ (P), b (I), log a (I), w₀ (zilm), W (F × K)]. */
+/**
+ * A learner model's objective over a flat parameter vector $\xvec$: $\thetavec$ ($P$ values), $\bvec$ ($I$),
+ * $\log \avec$ ($I$), $w_0$ (`zilm` only) and $\Wmat$ ($F \times K$, row-major), in that order.
+ */
 export interface LearnerObjective {
+  /** Which model the objective is of. */
   readonly model: LearnerModelKind
-  /** The length of x, and the offsets of w₀ (zilm; −1 otherwise) and W. */
+  /** The length of $\xvec$. */
   readonly dim: number
+  /** The offset of $w_0$ in $\xvec$ (`zilm`; $-1$ otherwise). */
   readonly interceptAt: number
+  /** The offset of $\Wmat$ in $\xvec$ (equal to `dim` for `irt`, which has none). */
   readonly weightsAt: number
   /** Observed (training) responses the likelihood sums over. */
   readonly n: number
@@ -163,9 +241,30 @@ export interface LearnerObjective {
 }
 
 /**
- * The objective of `irt`, `ktm` or `zilm` on responses [students, items] of 0 and 1 (NaN: not attempted), over the
- * responses selected by `train` (a row-major mask; all observed ones by default). The log-likelihood is a sum over the
- * observed pairs only, with the answer's log-probability from `Bernoulli` (irt, ktm) or `ZeroInflated` (zilm).
+ * The objective of `irt`, `ktm` or `zilm` on responses ($P \times I$, of 0 and 1, NaN for not attempted), over the
+ * responses selected by `train`. The log-likelihood is a sum over the observed pairs only, with the answer's
+ * log-probability from `Bernoulli` (`irt`, `ktm`) or `ZeroInflated` (`zilm`); the objective adds the Gaussian prior
+ * penalties. Both are differentiable in $\xvec$. Throws `DomainError` when `ktm` or `zilm` lacks `conditions` or
+ * `itemFeatures` (or a response is not 0, 1 or NaN), and `ShapeError` when they do not have one row per student and
+ * per item.
+ *
+ * @param responses The $P \times I$ responses.
+ * @param options The model, its context and its priors; `maxSteps`, `tolerance` and `init` are not read here.
+ * @param train A row-major mask over the responses selecting the training ones (non-zero: used). All observed ones
+ *   when left out.
+ * @returns The objective, with the layout of $\xvec$ and the number of responses it sums over.
+ *
+ * @example At zero parameters every answer has probability one half
+ * const f = learnerObjective(tensor([[1, 0, NaN], [1, 1, 0]]), { model: 'irt' })
+ * print('dim:', f.dim, 'responses:', f.n)
+ * print('objective:', f.objective(zeros([f.dim])), '= 5 log 2:', 5 * Math.log(2))
+ * print('gradient:', grad(f.objective)(zeros([f.dim])))
+ *
+ * @example IRT-ZILM's parameter layout
+ * const conditions = tensor([[0], [1]])
+ * const itemFeatures = tensor([[1, 0], [0, 1], [1, 1]])
+ * const f = learnerObjective(tensor([[1, 0, NaN], [1, 1, 0]]), { model: 'zilm', conditions, itemFeatures })
+ * print('dim:', f.dim, 'w0 at', f.interceptAt, 'W at', f.weightsAt)
  */
 export function learnerObjective(
   responses: Tensor,
@@ -232,9 +331,49 @@ export function learnerObjective(
 }
 
 /**
- * Fit `irt`, `ktm` or `zilm` to responses [students, items] of 0 and 1 (NaN: not attempted) by penalised joint maximum
- * likelihood (`learnerObjective`, L-BFGS). `train`, a mask over the response matrix (row-major), restricts the fit to
- * some responses.
+ * Fit `irt`, `ktm` or `zilm` to responses ($P \times I$, of 0 and 1, NaN for not attempted) by penalised joint
+ * maximum likelihood (`learnerObjective`, L-BFGS from `aifn-compute/optim/minimize`). IRT starts from zeros; IRT-ZILM
+ * starts from `init`, or from an IRT fit of its own, with $\pi = 0.05$ everywhere. Throws as `learnerObjective` does.
+ *
+ * @param responses The $P \times I$ responses.
+ * @param options The model, its context and priors, the L-BFGS limits and a fit to start from.
+ * @param train A row-major mask over the responses that restricts the fit to some of them (non-zero: used). All
+ *   observed ones when left out.
+ * @returns The fitted parameters, the log-likelihood of the training responses, and whether L-BFGS converged.
+ *
+ * @example Two-parameter IRT on six students and four items
+ * const responses = tensor([
+ *   [1, 1, 1, 0],
+ *   [1, 1, 0, 0],
+ *   [1, 0, 0, 0],
+ *   [1, 1, 1, 1],
+ *   [0, 1, 0, 0],
+ *   [1, 1, 0, NaN],
+ * ])
+ * const fit = fitLearnerModel(responses, { model: 'irt' })
+ * print('ability:', fit.ability)
+ * print('difficulty:', fit.difficulty)
+ * print('converged:', fit.converged, 'in', fit.steps, 'steps')
+ *
+ * @example Zeros caused by the context: IRT lowers the ability, IRT-ZILM raises pi
+ * // 60 students, a third with a condition; the odd items are timed, and a timed item gives a student with the
+ * // condition a zero with probability 0.9 whatever their ability. On data this small the fit can also settle on
+ * // pi near 0 (a large negative intercept) and reproduce IRT; the paper's experiments have hundreds of students.
+ * const s = stream(1)
+ * const ability = toFlat(normal(s, 0, 1, { shape: [60] }))
+ * const timed = [0, 1, 0, 1, 0, 1, 0, 1]
+ * const difficulty = timed.map((_, i) => -1 + (2 * i) / 7)
+ * const group = Array.from(ability, (_, p) => (p % 3 === 0 ? 1 : 0))
+ * const y = (p, b) => bernoulli(s, zilmProbability(ability[p], 1, b))
+ * const rows = group.map((g, p) => difficulty.map((b, i) => (g && timed[i] && uniform(s) < 0.9 ? 0 : y(p, b))))
+ * const context = { conditions: tensor(group.map((g) => [g])), itemFeatures: tensor(timed.map((t) => [t])) }
+ * const irt = fitLearnerModel(tensor(rows), { model: 'irt' })
+ * const zilm = fitLearnerModel(tensor(rows), { model: 'zilm', ...context, init: irt })
+ * const bias = (fit) => fit.ability.reduce((a, v, p) => a + (group[p] ? v - ability[p] : 0), 0) / 20
+ * print('mean ability error with the condition: IRT', bias(irt), 'IRT-ZILM', bias(zilm))
+ * const sigmoid = (v) => 1 / (1 + Math.exp(-v))
+ * print('IRT-ZILM pi: without the condition', sigmoid(zilm.intercept))
+ * print('with it, on a timed item', sigmoid(zilm.intercept + zilm.weights[0]))
  */
 export function fitLearnerModel(
   responses: Tensor,
@@ -286,16 +425,41 @@ export function fitLearnerModel(
   }
 }
 
-/** A fitted model's predictions for every student and item. */
+/** A fitted model's predictions for every student and item, each $P \times I$ row-major. */
 export interface LearnerPredictions {
-  /** Pr(Y = 1) [students × items] row-major. */
+  /** $\pr(Y = 1)$. */
   correct: Float64Array
-  /** The base model's p (the answer's probability were the context suitable) and π (0 for `irt` and `ktm`). */
+  /** The base model's $p = \sigma(a_i(\theta_p - b_i))$: the answer's probability were the context suitable. */
   base: Float64Array
+  /** The zero-inflation probability $\pi$ (0 for `irt` and `ktm`). */
   pi: Float64Array
 }
 
-/** Predictions of a fitted learner model for every student and item, given the same conditions and item features. */
+/**
+ * Predictions of a fitted learner model for every student and item, given the same conditions and item features it
+ * was fitted with. Throws `DomainError` when a `ktm` or `zilm` fit is given no conditions or item features.
+ *
+ * @param fit The fitted model (only its fields are read, so a fit written by hand works too).
+ * @param conditions The student conditions $\Zmat$, $P \times K$; not needed for `irt`.
+ * @param itemFeatures The item features $\Xmat$, $I \times F$; not needed for `irt`.
+ * @returns $\pr(Y = 1)$, $p$ and $\pi$ for every student and item.
+ *
+ * @example One timed item, a student without and one with the condition
+ * const fit = {
+ *   model: 'zilm',
+ *   ability: [0, 1],
+ *   difficulty: [0],
+ *   discrimination: [1],
+ *   intercept: -2,
+ *   weights: [3],
+ *   features: 1,
+ *   conditions: 1,
+ * }
+ * const pred = predictLearner(fit, tensor([[0], [1]]), tensor([[1]]))
+ * print('p = σ(θ):', pred.base)
+ * print('π = σ(-2), σ(1):', pred.pi)
+ * print('Pr(correct):', pred.correct)
+ */
 export function predictLearner(fit: LearnerModelFit, conditions?: Tensor, itemFeatures?: Tensor): LearnerPredictions {
   const P = fit.ability.length
   const I = fit.difficulty.length

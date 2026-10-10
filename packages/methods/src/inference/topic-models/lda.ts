@@ -1,8 +1,13 @@
 /**
- * Latent Dirichlet allocation (Blei, Ng and Jordan, 2003, JMLR 3), part of `aifn-methods/inference/topic-models`: the
- * model in the model language (a structured graph with the topic, document and word plates as groups), its match,
- * collapsed Gibbs sampling (Griffiths and Steyvers, 2004, PNAS 101), and the engine to pass to
- * `aifn-compute/inference/engines`' `infer`.
+ * Latent Dirichlet allocation (Blei, Ng and Jordan, 2003, JMLR 3): the model in the model language (a structured graph
+ * with the topic, document and word plates as groups), its match, collapsed Gibbs sampling (Griffiths and Steyvers,
+ * 2004, PNAS 101), and the engine to pass to `aifn-compute/inference/engines`' `infer`.
+ *
+ * Each topic is a distribution over the $V$ words, $\phivec_k \sim \Dir(\beta)$; each document mixes the $K$ topics,
+ * $\thetavec_d \sim \Dir(\alpha)$; and each token picks a topic $z_{dn} \sim \Cat(\thetavec_d)$ and then a word
+ * $w_{dn} \sim \Cat(\phivec_{z_{dn}})$. Both Dirichlet priors are symmetric. The sampler integrates out
+ * $\thetavec$ and $\phivec$ and keeps only the topic assignments and the counts they imply: $n_{dk}$ (tokens of
+ * document $d$ in topic $k$), $n_{kw}$ (tokens of word $w$ in topic $k$) and $n_k = \sum_w n_{kw}$.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -25,11 +30,23 @@ import { DomainError } from 'aifn-compute/foundation/errors'
 
 // ── LDA ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The plan's LDA description: topics φ_k ~ Dir(β), mixtures θ_d ~ Dir(α), z_dn ~ Cat(θ_d), w_dn ~ Cat(φ_{z_dn}). */
+/**
+ * LDA in the model language: topics $\phivec_k \sim \Dir(\beta)$, mixtures $\thetavec_d \sim \Dir(\alpha)$,
+ * $z_{dn} \sim \Cat(\thetavec_d)$ and $w_{dn} \sim \Cat(\phivec_{z_{dn}})$, with sizes `K` and `V`, constants `α` and
+ * `β`, and plates of topics, documents and words. The same model object is returned on every call.
+ *
+ * @returns The model, which `matchLda` recognises and `ldaEngine` runs.
+ *
+ * @example The nodes of the model, and what `matchLda` finds in it
+ * const m = ldaModel()
+ * print('nodes:', m.attributes.map((n) => `${n.name} (${n.role}, in ${n.group})`))
+ * print('match:', matchLda(m))
+ */
 export function ldaModel(): Model {
   return ldaDescription
 }
 
+/** The model `ldaModel` returns, built once. */
 const ldaDescription: Model = describe('Latent Dirichlet allocation', (m) => {
   const K = m.size('K')
   const V = m.size('V')
@@ -44,7 +61,21 @@ const ldaDescription: Model = describe('Latent Dirichlet allocation', (m) => {
   words.observed('w', dist.Categorical(phi.at(z)), { label: 'w_{dn}' })
 })
 
-/** The names of an LDA-shaped model's nodes, or null when the model is not LDA-shaped. */
+/**
+ * The names of an LDA-shaped model's nodes and its hyperparameters, or null when the model is not LDA-shaped. A model
+ * is LDA-shaped when it has an observed categorical $w$ whose probabilities are a Dirichlet node $\phivec$ selected by
+ * a latent categorical $z$ in the same plate, and $z$'s probabilities are a Dirichlet node $\thetavec$ in a plate that
+ * encloses $z$'s.
+ *
+ * @param m The model to examine.
+ * @returns The node names `phi`, `theta`, `z` and `w`; `alpha` and `beta`, the first arguments of the Dirichlets on
+ *   $\thetavec$ and $\phivec$; and `K` and `V`, their second arguments (0 when absent). Each of the last four is an
+ *   argument as the model holds it: a number, or a reference to a constant or a size. Null when the model does not
+ *   match.
+ *
+ * @example The LDA model matches; its arguments are references to constants and sizes
+ * print(matchLda(ldaModel()))
+ */
 export function matchLda(
   m: Model,
 ): { phi: string; theta: string; z: string; w: string; alpha: Arg; beta: Arg; K: Arg; V: Arg } | null {
@@ -84,12 +115,15 @@ export function matchLda(
 
 /** The problem of {@link ldaCollapsedGibbs}. */
 export interface LdaOptions {
-  /** Documents as arrays of word ids in 0 … V − 1. */
+  /** Documents as arrays of word ids in $\{0, \dots, V - 1\}$. */
   documents: readonly (readonly number[])[]
+  /** The number of topics $K$. */
   topics: number
+  /** The vocabulary size $V$. */
   vocabulary: number
-  /** Symmetric Dirichlet concentrations on θ (α) and φ (β). */
+  /** $\alpha$, the symmetric Dirichlet concentration on each document's proportions $\thetavec_d$. */
   alpha: number
+  /** $\beta$, the symmetric Dirichlet concentration on each topic's word distribution $\phivec_k$. */
   beta: number
   /**
    * The topics each document may use (labelled LDA, Ramage et al., 2009: a document's labels are its topics); default
@@ -102,19 +136,29 @@ export interface LdaOptions {
 export interface LdaState extends Status {
   /** Sweeps done. */
   t: number
-  /** z_dn, per document (int32 vectors). */
+  /** The topic $z_{dn}$ of every token, one int32 vector per document. */
   assignments: Tensor[]
-  /** n_dk (D × K), n_kw (K × V) and n_k (K). */
+  /** The counts $n_{dk}$ of each document's tokens in each topic, $D \times K$. */
   docTopic: Matrix
+  /** The counts $n_{kw}$ of each word's tokens in each topic, $K \times V$. */
   topicWord: Matrix
+  /** The tokens in each topic, $n_k = \sum_w n_{kw}$ ($K$ values). */
   topicTotals: Tensor
-  /** log p(w | z) with φ integrated out. */
+  /** $\log p(\wvec \mid \zvec)$ with $\phivec$ integrated out (`ldaLogLikelihood`). */
   logLikelihood: number
 }
 
 /**
- * log p(w | z) with the topics φ_k ~ Dir(β) integrated out, from the topic–word counts n_kw (K × V, row-major) and
- * their totals n_k: Σ_k [log Γ(Vβ) − V log Γ(β) − log Γ(n_k + Vβ) + Σ_w log Γ(n_kw + β)]. Shared with the HDP sampler.
+ * $\log p(\wvec \mid \zvec)$ with the topics $\phivec_k \sim \Dir(\beta)$ integrated out, from the topic-word counts:
+ * $\sum_k [\log\Gamma(V\beta) - V\log\Gamma(\beta) - \log\Gamma(n_k + V\beta) + \sum_w \log\Gamma(n_{kw} + \beta)]$.
+ * Shared with the HDP sampler.
+ *
+ * @param nkw The counts $n_{kw}$, $K \times V$ row-major.
+ * @param nk The topic totals $n_k$, $K$ values.
+ * @param K The number of topics.
+ * @param V The vocabulary size.
+ * @param beta The symmetric Dirichlet concentration $\beta$ on the topics.
+ * @returns The log marginal likelihood of the words given the assignments.
  */
 export function ldaLogLikelihood(
   nkw: ArrayLike<number>,
@@ -132,11 +176,34 @@ export function ldaLogLikelihood(
 }
 
 /**
- * Collapsed Gibbs sampling for LDA as a traceable algorithm (Griffiths and Steyvers, 2004): θ and φ are integrated
- * out, and each step (a sweep) resamples every token's topic from p(z = k | rest) ∝ (n_dk + α)(n_kw + β)/(n_k + Vβ),
- * with the token's own counts removed. The initial topics come from the `init` stream; token (d, n) in a sweep draws
- * from `child(ctx.stream, d, n)`. No start. With `allowed`, each document's tokens are drawn only from its own topics:
- * labelled LDA, where the labels of a document are the topics it may use.
+ * Collapsed Gibbs sampling for LDA as a traceable algorithm (Griffiths and Steyvers, 2004): $\thetavec$ and $\phivec$
+ * are integrated out, and each step (a sweep) resamples every token's topic from
+ * $p(z = k \mid \text{rest}) \propto (n_{dk} + \alpha)(n_{kw} + \beta)/(n_k + V\beta)$, with the token's own counts
+ * removed. The initial topics are drawn uniformly from the `init` stream; token $(d, n)$ in a sweep draws from
+ * `child(ctx.stream, d, n)`. No start. With `allowed`, each document's tokens are drawn only from its own topics:
+ * labelled LDA, where the labels of a document are the topics it may use. The state is flagged `diverged` when its
+ * log-likelihood is NaN.
+ *
+ * @param options The corpus, the number of topics, the priors and, for labelled LDA, each document's topics. Throws
+ *   `DomainError` when a document's allowed set is empty or holds a topic outside $\{0, \dots, K - 1\}$.
+ * @returns The algorithm, run with no start; read point estimates of a state with `ldaEstimates`.
+ *
+ * @example Two vocabularies, two topics: a few sweeps separate them
+ * const documents = [[0, 1, 2, 0, 1, 2], [1, 2, 0, 0, 2, 1], [0, 0, 1, 2, 2, 1],
+ *   [3, 4, 5, 3, 4, 5], [4, 5, 3, 3, 5, 4], [5, 3, 4, 4, 3, 5]]
+ * const options = { documents, topics: 2, vocabulary: 6, alpha: 0.5, beta: 0.1 }
+ * const start = run(ldaCollapsedGibbs(options), undefined, 0, { stream: stream(0) })
+ * const final = run(ldaCollapsedGibbs(options), undefined, 20, { stream: stream(0) })
+ * print('counts n_dk at the start', start.docTopic)
+ * print('counts n_dk after 20 sweeps', final.docTopic)
+ * print('log p(w | z):', start.logLikelihood, '->', final.logLikelihood)
+ *
+ * @example Labelled LDA: each document restricted to its label's topic
+ * const documents = [[0, 1, 2, 0], [1, 2, 0, 2], [3, 4, 5, 3], [4, 5, 3, 5]]
+ * const options = { documents, topics: 2, vocabulary: 6, alpha: 0.5, beta: 0.1, allowed: [[0], [0], [1], [1]] }
+ * const final = run(ldaCollapsedGibbs(options), undefined, 3, { stream: stream(0) })
+ * print('counts n_dk', final.docTopic)
+ * print('top words', topWords(ldaEstimates(final, options).topicWord, 3))
  */
 export function ldaCollapsedGibbs(options: LdaOptions): Algorithm<void, LdaState> {
   const { topics: K, vocabulary: V, alpha, beta, documents } = options
@@ -211,7 +278,25 @@ export function ldaCollapsedGibbs(options: LdaOptions): Algorithm<void, LdaState
   }
 }
 
-/** Point estimates φ_kw = (n_kw + β)/(n_k + Vβ) (K × V) and θ_dk = (n_dk + α)/(N_d + Kα) (D × K) from a state. */
+/**
+ * Point estimates from a state of `ldaCollapsedGibbs`: the posterior means given the assignments,
+ * $\phi_{kw} = (n_{kw} + \beta)/(n_k + V\beta)$ and $\theta_{dk} = (n_{dk} + \alpha)/(N_d + K\alpha)$, with $N_d$ the
+ * length of document $d$. Each row sums to 1 (for labelled LDA too, where topics a document may not use keep their
+ * prior share).
+ *
+ * @param s The sampler's state.
+ * @param options The options the sampler was built with; `topics`, `vocabulary`, `alpha`, `beta` and the document
+ *   lengths are read.
+ * @returns `topicWord`, $\phivec$ as a $K \times V$ matrix, and `docTopic`, $\thetavec$ as a $D \times K$ matrix.
+ *
+ * @example Topics and proportions after a few sweeps
+ * const documents = [[0, 1, 2, 0, 1, 2], [1, 2, 0, 0, 2, 1], [0, 0, 1, 2, 2, 1],
+ *   [3, 4, 5, 3, 4, 5], [4, 5, 3, 3, 5, 4], [5, 3, 4, 4, 3, 5]]
+ * const options = { documents, topics: 2, vocabulary: 6, alpha: 0.5, beta: 0.1 }
+ * const { topicWord, docTopic } = ldaEstimates(run(ldaCollapsedGibbs(options), undefined, 20), options)
+ * print('top words of each topic', topWords(topicWord, 3))
+ * print('topic proportions', docTopic)
+ */
 export function ldaEstimates(s: LdaState, options: LdaOptions): { topicWord: Matrix; docTopic: Matrix } {
   const { topics: K, vocabulary: V, alpha, beta } = options
   const phi = s.topicWord.data.map((n, i) => (n + beta) / (s.topicTotals.data[Math.floor(i / V)] + V * beta))
@@ -222,6 +307,14 @@ export function ldaEstimates(s: LdaState, options: LdaOptions): { topicWord: Mat
   return { topicWord: fromData(phi, [K, V]), docTopic: fromData(theta, s.docTopic.shape) }
 }
 
+/**
+ * The number an argument of the model stands for under the bindings: a literal, a size, or a constant's bound value.
+ * Throws `DomainError` for anything else (a constant without a numeric binding, or a node).
+ *
+ * @param a The argument, as the model holds it.
+ * @param b The bindings, whose `sizes` and `constants` are read.
+ * @returns The number.
+ */
 const scalar = (a: Arg, b: Bindings): number => {
   if (typeof a === 'number') return a
   if (typeof a === 'object' && a !== null && 'kind' in a) {
@@ -232,7 +325,20 @@ const scalar = (a: Arg, b: Bindings): number => {
   throw new DomainError('lda', 'lda: α, β, K and V must be numbers')
 }
 
-/** The problem of an LDA-shaped model under its bindings (the words are the observed node's data). */
+/**
+ * The problem of an LDA-shaped model under its bindings: the words are the observed node's data, and $\alpha$,
+ * $\beta$, $K$ and $V$ are read from the bindings' constants and sizes (or the model's literals). Throws `DomainError`
+ * when the model is not LDA-shaped or one of the four is not a number.
+ *
+ * @param m The model; see `matchLda`.
+ * @param b The bindings: `data` holds the observed node's words, one array (or tensor) of word ids per document; with
+ *   no data the corpus is empty.
+ * @returns The options for `ldaCollapsedGibbs` (no `allowed`).
+ *
+ * @example The LDA model bound to a two-document corpus
+ * const bindings = { sizes: { K: 2, V: 4 }, constants: { 'α': 0.5, 'β': 0.1 }, data: { w: [[0, 1, 1], [2, 3]] } }
+ * print(ldaOptions(ldaModel(), bindings))
+ */
 export function ldaOptions(m: Model, b: Bindings): LdaOptions {
   const shape = matchLda(m)
   if (!shape) throw new DomainError('lda', `lda: ${m.name} is not LDA-shaped`)
@@ -250,8 +356,9 @@ export function ldaOptions(m: Model, b: Bindings): LdaOptions {
 }
 
 /**
- * The LDA engine: matches LDA-shaped models and runs collapsed Gibbs on the observed words. Pass it to `infer` through
- * an engine table, e.g. `infer(m, b, { engines: ldaEngines })`.
+ * The LDA engine: matches LDA-shaped models (`matchLda`) and runs collapsed Gibbs (`ldaCollapsedGibbs`) on the observed
+ * words, with the problem `ldaOptions` reads from the bindings. Pass it to `infer` through an engine table, e.g.
+ * `infer(m, b, { engines: ldaEngines })`.
  */
 export const ldaEngine: EngineRegistration = {
   name: 'lda-collapsed-gibbs',

@@ -1,26 +1,38 @@
 /**
- * The linear-chain CRF with CRF++-style feature templates (Lafferty, McCallum & Pereira 2001; Kudo 2005, CRF++;
- * Okazaki 2007, CRFsuite), in the notation of Twomey, Diethe & Flach (2016):
+ * The linear-chain CRF over CRF++-style feature templates: its potentials and decodings, its likelihood and gradient,
+ * and its training by L-BFGS, OWL-QN, SGD or Adam.
  *
- *   P(y | x) = (1/Z) Π_n ψ_n(y_n) Π_{n ≥ 1} Ψ_{n−1}(y_{n−1}, y_n),
- *   ψ_n(k) = exp Σ_{u fires at n} λ_{u,k},   Ψ_{n−1}(i, k) = exp Σ_{b fires at n} λ_{b,i,k}.
+ * The model is the linear-chain CRF of Lafferty, McCallum & Pereira (2001) with the features of CRF++ (Kudo 2005) and
+ * CRFsuite (Okazaki 2007), in the notation of Twomey, Diethe & Flach (2016):
  *
- * Every unigram string u of the feature index (`aifn-compute/text/features`) is K feature functions
- * f_{u,k}(y_n, x, n) = [u fires at n][y_n = k], and every bigram string b is K² functions
- * f_{b,i,k}(y_{n−1}, y_n, x, n) = [b fires at n][y_{n−1} = i][y_n = k]. The weights λ are one vector: the unigram
- * block (string u, label k at u·K + k), then the bigram block (string b, labels i, k at U·K + b·K² + i·K + k).
+ * $P(\yvec \mid \xvec) = \frac{1}{Z} \prod_n \psi_n(y_n) \prod_{n \ge 1} \Psi_{n-1}(y_{n-1}, y_n)$, with
+ * $\psi_n(k) = \exp \sum_{u \text{ fires at } n} \lambda_{u,k}$ and
+ * $\Psi_{n-1}(i, k) = \exp \sum_{b \text{ fires at } n} \lambda_{b,i,k}$.
  *
- * Inference runs the chain engines of `aifn-compute/inference/exact` on the log-potentials log ψ_n (N × K) and log Ψ_n
- * ((N − 1) × K × K): forward messages α_n = Ψ_{n−1}ᵀ γ_{n−1} with γ_n = α_n ⊙ ψ_n, backward messages
- * β_n = Ψ_n δ_{n+1} with δ_{n+1} = β_{n+1} ⊙ ψ_{n+1}, marginals ∝ α_n ⊙ ψ_n ⊙ β_n, and Viterbi.
+ * Every unigram string $u$ of the feature index (`aifn-compute/text/features`) is $K$ feature functions
+ * $f_{u,k}(y_n, \xvec, n) = [u \text{ fires at } n][y_n = k]$, and every bigram string $b$ is $K^2$ functions
+ * $f_{b,i,k}(y_{n-1}, y_n, \xvec, n) = [b \text{ fires at } n][y_{n-1} = i][y_n = k]$. The weights $\lambdavec$ are
+ * one vector: the unigram block (string $u$, label $k$ at $uK + k$), then the bigram block (string $b$, labels $i, k$
+ * at $UK + bK^2 + iK + k$), with $U$ and $B$ the numbers of unigram and bigram strings. A sequence is its token rows
+ * (one row of string columns per position), which the index encodes; strings the index does not hold fire nothing.
+ *
+ * Inference runs the chain engines of `aifn-compute/inference/exact` on the log-potentials $\log \psi_n$
+ * ($N \times K$) and $\log \Psi_n$ ($(N - 1) \times K \times K$): forward messages
+ * $\alphavec_n = \Psimat_{n-1}^\top \gammavec_{n-1}$ with $\gammavec_n = \alphavec_n \odot \psivec_n$, backward
+ * messages $\betavec_n = \Psimat_n \deltavec_{n+1}$ with $\deltavec_{n+1} = \betavec_{n+1} \odot \psivec_{n+1}$,
+ * marginals $\propto \alphavec_n \odot \psivec_n \odot \betavec_n$, and Viterbi.
  *
  * Training minimises the regularised negative conditional log-likelihood
  *
- *   L(λ) = −Σ_m log P(y_m | x_m) + c₁‖λ‖₁ + c₂‖λ‖²
+ * $L(\lambdavec) = -\sum_m \log P(\yvec_m \mid \xvec_m) + c_1 \norm{\lambdavec}_1 + c_2 \norm{\lambdavec}_2^2$
  *
- * (CRFsuite's c1 and c2; CRF++'s `-c C` is c₂ = 1/(2C) with L2, c₁ = 1/C with L1). Its gradient is expected minus
- * observed feature counts (Sutton & McCallum 2012, eq. 5.6), read from the node and pairwise marginals. L-BFGS (c₁ = 0)
- * and OWL-QN (c₁ > 0) come from `aifn-compute/optim/second-order`; SGD and Adam take minibatches of sequences.
+ * (CRFsuite's `c1` and `c2`; CRF++'s `-c C` is $c_2 = 1/(2C)$ with L2, $c_1 = 1/C$ with L1). Its gradient is expected
+ * minus observed feature counts (Sutton & McCallum 2012, eq. 5.6), read from the node and pairwise marginals. L-BFGS
+ * ($c_1 = 0$) and OWL-QN ($c_1 > 0$) come from `aifn-compute/optim/second-order`; SGD and Adam take minibatches of
+ * sequences.
+ *
+ * The examples write out the parse of a template file by hand, abridged to the fields the CRF reads, because
+ * `parseTemplates` of `aifn-compute/text/features` is not in their scope; in code, parse the file with it.
  */
 
 import type { Size, Status } from 'aifn-compute/foundation/contracts'
@@ -48,27 +60,71 @@ import {
   type TokenRows,
 } from 'aifn-compute/text/features'
 
-/** A training sequence: token rows (one per position, string columns) and a label per position. */
+/** A training sequence: token rows and a label per position. */
 export interface LabelledSequence {
+  /** The token rows: one row of string columns per position. */
   readonly rows: TokenRows
+  /** The label of each position, as a string (one per row). */
   readonly labels: readonly string[]
 }
 
-/** A linear-chain CRF over the strings of a feature index. */
+/** A linear-chain CRF over the strings of a feature index (plain data). */
 export interface TemplateCrf {
+  /** The tag `template-crf`. */
   readonly kind: 'template-crf'
+  /** The feature index: the templates and the unigram and bigram strings the weights belong to. */
   readonly index: FeatureIndex
   /** The label set, in weight order. */
   readonly labels: readonly string[]
-  /** λ: unigram block (U × K), then bigram block (B × K × K). */
+  /** $\lambdavec$: the unigram block ($U \times K$), then the bigram block ($B \times K \times K$), row-major. */
   readonly weights: Float64Array
 }
 
-/** The number of weights of a CRF over `index` with `K` labels: U·K + B·K². */
+/**
+ * The number of weights of a CRF over `index` with `K` labels: $UK + BK^2$.
+ *
+ * @param index The feature index, with $U$ unigram and $B$ bigram strings.
+ * @param K The number of labels.
+ * @returns The length of the weight vector $\lambdavec$.
+ *
+ * @example The word templates on three sentences
+ * // `parseTemplates('U00:%x[0,0]\nB')` of aifn-compute/text/features, abridged: the word, and label transitions
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus().slice(0, 3))
+ * print('U =', p.U, 'B =', p.index.bigram.length, 'K =', p.K)
+ * print('weights:', crfWeightCount(p.index, p.K))
+ */
 export const crfWeightCount = (index: FeatureIndex, K: Size): Size =>
   index.unigram.length * K + index.bigram.length * K * K
 
-/** A CRF over an index and labels, with zero weights unless given. */
+/**
+ * A CRF over an index and labels, with zero weights unless given. Throws `DomainError` for fewer than two labels, or
+ * for `weights` of the wrong length.
+ *
+ * @param index The feature index the weights belong to.
+ * @param labels The label set, in weight order; at least two.
+ * @param weights The weight vector $\lambdavec$, of length `crfWeightCount(index, labels.length)`; copied. Zeros when
+ *   left out.
+ * @returns The CRF.
+ *
+ * @example An untrained CRF labels every position alike
+ * // `parseTemplates('U00:%x[0,0]\nB')` of aifn-compute/text/features, abridged: the word, and label transitions
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels)
+ * print('labels:', crf.labels, 'weights:', crf.weights.length)
+ * print(templateCrfMarginals(crf, posRows(['The', 'dog', 'runs'])).marginals)
+ *
+ * @example With trained weights
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const fit = run(crfTraining(p), undefined, 30)
+ * const crf = templateCrf(p.index, p.labels, toFlat(fit.weights))
+ * print(templateCrfViterbi(crf, posRows(['They', 'watch', 'the', 'light', '.'])).labels)
+ */
 export function templateCrf(index: FeatureIndex, labels: readonly string[], weights?: ArrayLike<number>): TemplateCrf {
   const D = crfWeightCount(index, labels.length)
   if (labels.length < 2) throw new DomainError('templateCrf', 'templateCrf: needs at least two labels')
@@ -77,7 +133,15 @@ export function templateCrf(index: FeatureIndex, labels: readonly string[], weig
   return { kind: 'template-crf', index, labels, weights: weights ? Float64Array.from(weights) : new Float64Array(D) }
 }
 
-/** The labels of the data in order of first appearance. */
+/**
+ * The labels of the data in order of first appearance.
+ *
+ * @param data The labelled sequences.
+ * @returns Each distinct label once.
+ *
+ * @example The tags of two sentences
+ * print(labelSet(toyPosCorpus().slice(0, 2)))
+ */
 export function labelSet(data: readonly LabelledSequence[]): string[] {
   const seen = new Set<string>()
   for (const s of data) for (const y of s.labels) seen.add(y)
@@ -85,8 +149,25 @@ export function labelSet(data: readonly LabelledSequence[]): string[] {
 }
 
 /**
- * The log-potentials of an encoded sequence: log ψ_n(k) (N × K) and log Ψ_{n}(i, k) between positions n and n + 1
- * ((N − 1) × K × K), each the sum of the weights of the strings that fire.
+ * The log-potentials of an encoded sequence: $\log \psi_n(k)$ ($N \times K$) and $\log \Psi_n(i, k)$ between positions
+ * $n$ and $n + 1$ ($(N - 1) \times K \times K$), each the sum of the weights of the strings that fire.
+ *
+ * @param weights The weight vector $\lambdavec$ ($UK + BK^2$ values; see the file comment for its layout).
+ * @param e The sequence encoded against the index the weights belong to (`encodeTemplateRows`, or the `sequence` of
+ *   `encodeLabelled`).
+ * @param U The number of unigram strings of the index, which places the bigram block at $UK$.
+ * @param K The number of labels.
+ * @returns `logUnary` ($N \times K$) and `logPairwise` ($(N - 1) \times K \times K$, slice $n$ between positions $n$
+ *   and $n + 1$).
+ *
+ * @example With every weight 0.1, one word string and one `B` string fire at each position
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus().slice(0, 1))
+ * const w = new Float64Array(p.dimension).fill(0.1)
+ * const { logUnary, logPairwise } = crfLogPotentials(w, p.encoded[0].sequence, p.U, p.K)
+ * print('log ψ =', logUnary)
+ * print('log Ψ shape:', logPairwise.shape, 'first entry:', logPairwise.data[0])
  */
 export function crfLogPotentials(
   weights: ArrayLike<number>,
@@ -112,16 +193,57 @@ export function crfLogPotentials(
   return { logUnary: fromData(unary, [N, K]), logPairwise: fromData(pair, [Math.max(N - 1, 0), K, K]) }
 }
 
+/**
+ * The log-potentials of token rows under a CRF: the rows encoded against its index, then `crfLogPotentials`.
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence.
+ * @returns `logUnary` ($N \times K$) and `logPairwise` ($(N - 1) \times K \times K$).
+ */
 const potentialsOf = (crf: TemplateCrf, rows: TokenRows) =>
   crfLogPotentials(crf.weights, encodeTemplateRows(crf.index, rows), crf.index.unigram.length, crf.labels.length)
 
-/** Marginals of a sequence: log α, log β, P(y_n | x), pairwise marginals and log Z (log-space forward–backward). */
+/**
+ * The marginals of a sequence by log-space forward–backward (`chainForwardBackward`): $\log \alphavec_n$,
+ * $\log \betavec_n$, $P(y_n \mid \xvec)$, the pairwise marginals and $\log Z$.
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence, with the columns the templates read.
+ * @returns The log messages, the marginals ($N \times K$, in the order of `crf.labels`), the pairwise marginals and
+ *   $\log Z$.
+ *
+ * @example How sure the tagger is of each tag of "they watch the light"
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const m = templateCrfMarginals(crf, posRows(['They', 'watch', 'the', 'light', '.']))
+ * print('labels:', crf.labels)
+ * toRows(m.marginals).forEach((row, n) => print(`position ${n}:`, row))
+ */
 export function templateCrfMarginals(crf: TemplateCrf, rows: TokenRows): ChainMarginals {
   const p = potentialsOf(crf, rows)
   return chainForwardBackward(p.logUnary, p.logPairwise)
 }
 
-/** The Viterbi labelling of a sequence (`path` as label ids, `labels` as strings). */
+/**
+ * The Viterbi labelling of a sequence: the most probable labelling as a whole, by max-product in log space
+ * (`chainViterbi`).
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence.
+ * @returns The Viterbi result (`path` as label ids, `logProbability` its unnormalised log score, and the tables), with
+ *   `labels`, the path as strings.
+ *
+ * @example Tagging a sentence the CRF has not seen
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const v = templateCrfViterbi(crf, posRows(['They', 'watch', 'the', 'light', '.']))
+ * print('tags:', v.labels)
+ * print('log score:', v.logProbability)
+ */
 export function templateCrfViterbi(crf: TemplateCrf, rows: TokenRows): ViterbiResult & { labels: string[] } {
   const p = potentialsOf(crf, rows)
   const v = chainViterbi(p.logUnary, p.logPairwise)
@@ -129,9 +251,24 @@ export function templateCrfViterbi(crf: TemplateCrf, rows: TokenRows): ViterbiRe
 }
 
 /**
- * Posterior (max-marginal) decoding of a sequence, ŷ_n = argmax_k P(y_n = k | x) (`posteriorDecode` on the
- * forward–backward marginals), with the labels as strings and the path's unnormalised log score. It maximises the
- * expected number of correct labels; Viterbi maximises the probability of the whole labelling.
+ * Posterior (max-marginal) decoding of a sequence, $\hat{y}_n = \argmax_k P(y_n = k \mid \xvec)$ (`posteriorDecode`
+ * on the forward–backward marginals), with the labels as strings and the path's unnormalised log score. It maximises
+ * the expected number of correct labels; Viterbi maximises the probability of the whole labelling.
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence.
+ * @returns The decoding (`path`, `confidence` per position and `expectedCorrect`), with `labels`, the path as strings,
+ *   and `logScore`, its unnormalised log score.
+ *
+ * @example Each tag with its marginal probability
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const d = templateCrfPosterior(crf, posRows(['They', 'watch', 'the', 'light', '.']))
+ * print('tags:', d.labels)
+ * print('confidence:', d.confidence)
+ * print('expected correct:', d.expectedCorrect, 'of 5')
  */
 export function templateCrfPosterior(
   crf: TemplateCrf,
@@ -143,11 +280,38 @@ export function templateCrfPosterior(
   return { ...d, labels: path.map((k) => crf.labels[k]), logScore: pathScore(p, path, crf.labels.length) }
 }
 
-/** The unnormalised log score Σ_n log ψ_n(y_n) + Σ_n log Ψ_n−1(y_n−1, y_n) of a labelling (label ids). */
+/**
+ * The unnormalised log score $\sum_n \log \psi_n(y_n) + \sum_{n \ge 1} \log \Psi_{n-1}(y_{n-1}, y_n)$ of a labelling.
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence.
+ * @param path The labelling as label ids (indices into `crf.labels`), one per row.
+ * @returns The log score; subtract $\log Z$ (`templateCrfMarginals`) for $\log P(\yvec \mid \xvec)$.
+ *
+ * @example The Viterbi path scores highest
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const rows = posRows(['They', 'watch', 'the', 'light', '.'])
+ * const v = templateCrfViterbi(crf, rows)
+ * print(v.labels, templateCrfScore(crf, rows, toFlat(v.path)))
+ * const other = ['PRON', 'NOUN', 'DET', 'NOUN', '.']
+ * print(other, templateCrfScore(crf, rows, other.map((y) => crf.labels.indexOf(y))))
+ * print('log P(Viterbi path) =', templateCrfScore(crf, rows, toFlat(v.path)) - templateCrfMarginals(crf, rows).logZ)
+ */
 export function templateCrfScore(crf: TemplateCrf, rows: TokenRows, path: ArrayLike<number>): number {
   return pathScore(potentialsOf(crf, rows), path, crf.labels.length)
 }
 
+/**
+ * The unnormalised log score of a labelling from its log-potentials.
+ *
+ * @param p The log-potentials: `logUnary` ($N \times K$) and `logPairwise` ($(N - 1) \times K \times K$).
+ * @param path The labelling as label ids, one per position.
+ * @param K The number of labels.
+ * @returns $\sum_n \log \psi_n(y_n) + \sum_{n \ge 1} \log \Psi_{n-1}(y_{n-1}, y_n)$.
+ */
 function pathScore(p: { logUnary: Matrix; logPairwise: Tensor }, path: ArrayLike<number>, K: Size): number {
   let s = 0
   for (let n = 0; n < path.length; n++) {
@@ -157,13 +321,31 @@ function pathScore(p: { logUnary: Matrix; logPairwise: Tensor }, path: ArrayLike
   return s
 }
 
-/** The log-potentials of a sequence under a CRF (log ψ and log Ψ). */
+/**
+ * The log-potentials of a sequence under a CRF, $\log \psi_n$ and $\log \Psi_n$: its rows encoded against the CRF's
+ * index, then `crfLogPotentials`.
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence.
+ * @returns `logUnary` ($N \times K$) and `logPairwise` ($(N - 1) \times K \times K$).
+ *
+ * @example The potentials of a three-word sentence
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const { logUnary, logPairwise } = templateCrfPotentials(crf, posRows(['The', 'dog', 'runs']))
+ * print('labels:', crf.labels)
+ * print('log ψ of "dog":', toRows(logUnary)[1])
+ * print('log Ψ shape:', logPairwise.shape)
+ */
 export function templateCrfPotentials(crf: TemplateCrf, rows: TokenRows): { logUnary: Matrix; logPairwise: Tensor } {
   return potentialsOf(crf, rows)
 }
 
 /** A feature string that fires at a position, with the template it came from, its id and its weights. */
 export interface FiringFeature {
+  /** Whether the template is a unigram (`U`) or a bigram (`B`) one. */
   readonly kind: 'unigram' | 'bigram'
   /** The expanded string, e.g. `U01:o`. */
   readonly string: string
@@ -171,13 +353,36 @@ export interface FiringFeature {
   readonly template: string
   /** The template's macros: the cells %x[r,c] it reads. */
   readonly macros: readonly TemplateMacro[]
-  /** Its id in the index, or −1 when the string was not seen in training (it then fires nothing). */
+  /** Its id in the index, or $-1$ when the string was not seen in training (it then fires nothing). */
   readonly id: number
-  /** λ_{u,k} per label k (unigram, length K), or λ_{b,i,k} row-major (bigram, K × K). Zeros when unknown. */
+  /**
+   * $\lambda_{u,k}$ per label $k$ (unigram, length $K$), or $\lambda_{b,i,k}$ row-major (bigram, $K \times K$). Zeros
+   * when unknown.
+   */
   readonly weights: readonly number[]
 }
 
-/** Every template's string at position n (bigram templates only for n ≥ 1), with its weights. */
+/**
+ * Every template's string at position $n$ (bigram templates only for $n \ge 1$), with its weights: what the CRF sees
+ * at that position. A cell outside the sequence reads `_B-1`, `_B-2`, ... before it and `_B+1`, ... after it, as in
+ * CRF++.
+ *
+ * @param crf The CRF.
+ * @param rows The token rows of the sequence.
+ * @param n The position, from 0.
+ * @returns One entry per template that applies at `n`, in the order of the templates.
+ *
+ * @example What fires at "zebra" and at "runs"
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const rows = posRows(['The', 'zebra', 'runs'])
+ * firingFeatures(crf, rows, 1).forEach((f) => print(f.kind, f.string, 'id', f.id))
+ * const runs = firingFeatures(crf, rows, 2)[0]
+ * print('labels:', crf.labels)
+ * print(runs.string, 'weights:', runs.weights)
+ */
 export function firingFeatures(crf: TemplateCrf, rows: TokenRows, n: Size): FiringFeature[] {
   const K = crf.labels.length
   const U = crf.index.unigram.length
@@ -207,18 +412,36 @@ export function firingFeatures(crf: TemplateCrf, rows: TokenRows, n: Size): Firi
 
 /** A unigram string's weights per label, for ranking. */
 export interface WeightedString {
+  /** The expanded string, e.g. `U00:runs`. */
   readonly string: string
+  /** Its id among the index's unigram strings. */
   readonly id: number
-  /** λ_{u,k} per label k. */
+  /** $\lambda_{u,k}$ per label $k$ (length $K$). */
   readonly weights: readonly number[]
   /** How often it fired in training. */
   readonly count: number
 }
 
 /**
- * The unigram strings with the largest |λ_{u,k}| for label k (`label` given), or with the largest max_k |λ_{u,k}|
- * (no label), at most `count`; zero weights are left out. With `relative`, strings are ranked by how much they favour
- * label k over the others, λ_{u,k} − mean_j λ_{u,j}, largest first (with two labels, half the log-odds they add).
+ * The unigram strings with the largest $\lvert \lambda_{u,k} \rvert$ for label $k$ (`label` given), or with the largest
+ * $\max_k \lvert \lambda_{u,k} \rvert$ (no label), at most `count`, largest first; strings whose score is zero are left
+ * out. With `relative` and a label, strings are ranked instead by how much they favour label $k$ over the others,
+ * $\lambda_{u,k} - \frac{1}{K} \sum_j \lambda_{u,j}$ (with two labels, half the log-odds they add), and only those
+ * that favour it (a positive score) are kept.
+ *
+ * @param crf The CRF.
+ * @param count The most strings to return.
+ * @param label The label id $k$ (an index into `crf.labels`) to rank for; every label when left out.
+ * @param options `relative`: rank by the weight relative to the mean over labels (only with `label`; default false).
+ * @returns The strings with their ids, their weights per label and how often each fired in training.
+ *
+ * @example The words that most favour VERB
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const verb = crf.labels.indexOf('VERB')
+ * topFeatures(crf, 5, verb, { relative: true }).forEach((f) => print(f.string, f.weights[verb], 'seen', f.count))
  */
 export function topFeatures(
   crf: TemplateCrf,
@@ -251,7 +474,24 @@ export function topFeatures(
     }))
 }
 
-/** The K × K weights of the plain transition string `B` (or of another bigram string), or null if it is not indexed. */
+/**
+ * The $K \times K$ weights $\lambda_{b,i,k}$ of the plain transition string `B` (or of another bigram string), row $i$
+ * the previous label and column $k$ the current one, or null if the string is not indexed.
+ *
+ * @param crf The CRF.
+ * @param string The bigram string, as the index holds it.
+ * @returns The weights as rows, or null.
+ *
+ * @example What follows a determiner
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const crf = templateCrf(p.index, p.labels, toFlat(run(crfTraining(p), undefined, 30).weights))
+ * const T = transitionWeights(crf)
+ * print('labels:', crf.labels)
+ * print('after DET:', T[crf.labels.indexOf('DET')])
+ * print('B01:x is not indexed:', transitionWeights(crf, 'B01:x'))
+ */
 export function transitionWeights(crf: TemplateCrf, string = 'B'): number[][] | null {
   const id = crf.index.bigramIds.get(string)
   if (id === undefined) return null
@@ -260,7 +500,15 @@ export function transitionWeights(crf: TemplateCrf, string = 'B'): number[][] | 
   return Array.from({ length: K }, (_, i) => Array.from({ length: K }, (_, k) => crf.weights[base + i * K + k]))
 }
 
-/** The number of non-zero weights. */
+/**
+ * The number of non-zero weights.
+ *
+ * @param weights The weights.
+ * @returns How many are not zero.
+ *
+ * @example Two of four weights are active
+ * print(activeWeights([0, 1.5, 0, -2]))
+ */
 export function activeWeights(weights: ArrayLike<number>): Size {
   let a = 0
   for (let i = 0; i < weights.length; i++) if (weights[i] !== 0) a++
@@ -271,11 +519,40 @@ export function activeWeights(weights: ArrayLike<number>): Size {
 
 /** A sequence encoded once for training: feature ids and label ids. */
 export interface EncodedLabelled {
+  /** The ids of the strings that fire at each position (`encodeTemplateRows`). */
   readonly sequence: EncodedSequence
+  /** The label id of each position. */
   readonly labels: Int32Array
 }
 
-/** Encode training data against an index and a label set. Unknown labels throw. */
+/**
+ * Encode training data against an index and a label set. Throws `DomainError` for a label not in `labels`, or a
+ * sequence whose numbers of rows and labels differ.
+ *
+ * @param index The feature index; strings it does not hold are left out.
+ * @param labels The label set, in weight order: a label's id is its index here.
+ * @param data The labelled sequences.
+ * @returns One encoded sequence per input, in order.
+ *
+ * @example The first sentence of the toy corpus
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const data = toyPosCorpus().slice(0, 1)
+ * const p = crfProblem(templates, data)
+ * const [e] = encodeLabelled(p.index, p.labels, data)
+ * print('labels:', p.labels, 'ids:', e.labels)
+ * print('unigram ids:', e.sequence.unigramIds, 'bigram ids:', e.sequence.bigramIds)
+ *
+ * @example A label outside the set is refused
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus().slice(0, 1))
+ * try {
+ *   encodeLabelled(p.index, p.labels, [{ rows: [['dog']], labels: ['X'] }])
+ * } catch (e) {
+ *   print(e.message)
+ * }
+ */
 export function encodeLabelled(
   index: FeatureIndex,
   labels: readonly string[],
@@ -300,9 +577,38 @@ export function encodeLabelled(
 }
 
 /**
- * Σ −log P(y | x) over `data` and its gradient (added into `grad`): for each string u firing at n,
- * ∂/∂λ_{u,k} += P(y_n = k | x) − [y_n = k]; for each bigram string b firing at n ≥ 1,
- * ∂/∂λ_{b,i,k} += P(y_{n−1} = i, y_n = k | x) − [y_{n−1} = i, y_n = k].
+ * The negative log-likelihood $-\sum_m \log P(\yvec_m \mid \xvec_m)$ over `data`, and its gradient (added into
+ * `grad`): for each unigram string $u$ firing at $n$, $\partial / \partial \lambda_{u,k}$ gains
+ * $P(y_n = k \mid \xvec) - [y_n = k]$; for each bigram string $b$ firing at $n \ge 1$,
+ * $\partial / \partial \lambda_{b,i,k}$ gains $P(y_{n-1} = i, y_n = k \mid \xvec) - [y_{n-1} = i, y_n = k]$. Empty
+ * sequences add nothing.
+ *
+ * @param weights The weight vector $\lambdavec$ ($UK + BK^2$ values).
+ * @param data The encoded training sequences.
+ * @param U The number of unigram strings of the index, which places the bigram block at $UK$.
+ * @param K The number of labels.
+ * @param grad Where the gradient is accumulated, of the length of `weights`: added to, not overwritten, so pass zeros
+ *   for the gradient alone. Left out, only the value is computed.
+ * @returns The negative log-likelihood (without regularisation).
+ *
+ * @example At zero weights every labelling is equally likely
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const tokens = p.encoded.reduce((a, e) => a + e.labels.length, 0)
+ * print('NLL:', crfNegLogLikelihood(new Float64Array(p.dimension), p.encoded, p.U, p.K))
+ * print('tokens × log K:', tokens * Math.log(p.K))
+ *
+ * @example The gradient is expected minus observed counts
+ * // "the" is always DET: at zero weights each label expects count / K of its firings, and DET observes all of them.
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const g = new Float64Array(p.dimension)
+ * const nll = crfNegLogLikelihood(new Float64Array(p.dimension), p.encoded, p.U, p.K, g)
+ * const u = p.index.unigramIds.get('U00:the')
+ * print('labels:', p.labels, 'count of U00:the:', p.index.unigramCounts[u])
+ * print('gradient:', g.slice(u * p.K, u * p.K + p.K))
  */
 export function crfNegLogLikelihood(
   weights: ArrayLike<number>,
@@ -345,8 +651,22 @@ export function crfNegLogLikelihood(
 }
 
 /**
- * The smooth training objective −Σ log P(y | x) + c₂‖λ‖² as an `ObjectiveFn` of the weight vector (the L1 term is
- * OWL-QN's `l1`).
+ * The smooth training objective $-\sum_m \log P(\yvec_m \mid \xvec_m) + c_2 \lVert \lambdavec \rVert_2^2$ as an
+ * `ObjectiveFn` of the weight vector (the L1 term is OWL-QN's `l1`, not part of it).
+ *
+ * @param data The encoded training sequences.
+ * @param U The number of unigram strings of the index.
+ * @param K The number of labels.
+ * @param c2 The L2 strength $c_2$ (0 for none).
+ * @returns A function of the weight vector (length $UK + BK^2$) returning the objective's `value` and its `grad`.
+ *
+ * @example The objective and its gradient at zero weights
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus().slice(0, 5))
+ * const f = crfObjective(p.encoded, p.U, p.K, 0.01)
+ * const { value, grad } = f(zeros([p.dimension]))
+ * print('value:', value, 'gradient norm:', Math.hypot(...toFlat(grad)))
  */
 export function crfObjective(data: readonly EncodedLabelled[], U: Size, K: Size, c2: number) {
   return (w: Vector) => {
@@ -369,42 +689,56 @@ export type CrfOptimizer = 'lbfgs' | 'owlqn' | 'sgd' | 'adam'
 
 /** Options of `crfTraining`. */
 export interface CrfTrainingOptions {
-  /** L-BFGS (c₂ only), OWL-QN (c₁ and c₂: elastic net), SGD or Adam (c₂ only). Default 'lbfgs'. */
+  /** L-BFGS ($c_2$ only), OWL-QN ($c_1$ and $c_2$: elastic net), SGD or Adam ($c_2$ only). Default `'lbfgs'`. */
   optimizer?: CrfOptimizer
-  /** L1 strength c₁ (OWL-QN only). Default 0. */
+  /** L1 strength $c_1$ (OWL-QN only; ignored otherwise). Default 0. */
   c1?: number
-  /** L2 strength c₂. Default 0.01. */
+  /** L2 strength $c_2$. Default 0.01. */
   c2?: number
   /** Curvature pairs kept by L-BFGS / OWL-QN (default 10). */
   memory?: Size
-  /** Stop when the (pseudo-)gradient norm per sequence falls below this (default 1e-5). */
+  /**
+   * L-BFGS / OWL-QN: stop when the (pseudo-)gradient norm falls below this times the number of sequences (default
+   * $10^{-5}$). SGD and Adam ignore it and never report convergence.
+   */
   tolerance?: number
-  /** SGD / Adam: step size (defaults 0.1 and 0.05) and sequences per minibatch (default 16; 0 for all, full batch). */
+  /** SGD / Adam: the step size (defaults 0.1 for SGD and 0.05 for Adam). */
   stepSize?: number
+  /** SGD / Adam: sequences per minibatch (default 16; 0 for all of them, a full batch). */
   batchSize?: Size
 }
 
 /** The state of `crfTraining`: one quasi-Newton iteration, or one epoch of SGD / Adam, per step. */
 export interface CrfTrainingState extends Status {
-  /** λ. */
+  /** The weights $\lambdavec$. */
   readonly weights: Vector
-  /** The full objective L(λ) = NLL + c₁‖λ‖₁ + c₂‖λ‖². */
+  /** The full objective $L(\lambdavec) = \mathrm{NLL} + c_1 \norm{\lambdavec}_1 + c_2 \norm{\lambdavec}_2^2$. */
   readonly objective: number
-  /** −Σ log P(y | x) over the training data. */
+  /** $-\sum_m \log P(\yvec_m \mid \xvec_m)$ over the training data. */
   readonly nll: number
-  /** The norm of the (pseudo-)gradient of L. */
+  /** The norm of the (pseudo-)gradient of $L$. */
   readonly gradNorm: number
-  /** Non-zero weights. */
+  /** The number of non-zero weights. */
   readonly active: Size
-  /** Objective and gradient evaluations (full passes) so far, counting a minibatch pass as its share. */
+  /**
+   * Objective and gradient evaluations so far: the quasi-Newton count (line-search trials included), or for SGD /
+   * Adam one per epoch plus the first.
+   */
   readonly evaluations: number
   /** The quasi-Newton state (L-BFGS / OWL-QN), or null. */
   readonly inner: OwlqnState | null
   /** The first-order rule's state (SGD / Adam), or null. */
   readonly rule: unknown
+  /** True when the quasi-Newton line search made no progress (always false for SGD / Adam). */
   readonly stalled: boolean
 }
 
+/**
+ * The L1 norm.
+ *
+ * @param x The values.
+ * @returns $\sum_i \lvert x_i \rvert$.
+ */
 const l1Norm = (x: ArrayLike<number>) => {
   let a = 0
   for (let i = 0; i < x.length; i++) a += Math.abs(x[i])
@@ -412,10 +746,41 @@ const l1Norm = (x: ArrayLike<number>) => {
 }
 
 /**
- * Train a template CRF's weights on encoded data (see the module comment), as a step-through algorithm: each step is
+ * Train a template CRF's weights on encoded data (see the file comment), as a step-through algorithm: each step is
  * one L-BFGS or OWL-QN iteration (the line search included), or one epoch of minibatch SGD / Adam over a shuffled
  * order drawn from `ctx.stream`. The state carries the objective, the NLL, the gradient norm and the number of non-zero
- * weights. `init` takes the starting weights (zeros when undefined).
+ * weights. `init` takes the starting weights (zeros when undefined) and throws `DomainError` when their length is not
+ * the problem's `dimension`. The run is done when the quasi-Newton method converges or stalls, or the objective is
+ * not finite; SGD and Adam run until stopped. For SGD and Adam each minibatch's gradient is that of $L / M$ ($M$
+ * sequences) restricted to the minibatch, so a step size means the same whatever the size of the data.
+ *
+ * @param problem The training problem, from `crfProblem`.
+ * @param options The optimiser and its settings (see `CrfTrainingOptions`).
+ * @returns The algorithm, named `crf-` and the optimiser; its start is the initial weight vector or undefined.
+ *
+ * @example L-BFGS on the toy tagging corpus
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const s = run(crfTraining(p), undefined, 50)
+ * print('steps:', s.t, 'converged:', s.converged)
+ * print('objective:', s.objective, 'NLL:', s.nll, 'active weights:', s.active, 'of', p.dimension)
+ *
+ * @example OWL-QN: an L1 penalty sets weights to exactly zero
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * for (const c1 of [0, 0.1, 1]) {
+ *   const s = run(crfTraining(p, { optimizer: 'owlqn', c1 }), undefined, 50)
+ *   print(`c1 = ${c1}: active weights ${s.active} of ${p.dimension}, NLL ${s.nll.toFixed(2)}`)
+ * }
+ *
+ * @example Five epochs of Adam
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * const s = run(crfTraining(p, { optimizer: 'adam', batchSize: 8 }), undefined, 5, { stream: stream(1) })
+ * print('epochs:', s.t, 'objective:', s.objective, 'NLL:', s.nll)
  */
 export function crfTraining(
   problem: CrfProblem,
@@ -520,13 +885,19 @@ export function crfTraining(
   }
 }
 
+/**
+ * The squared L2 norm.
+ *
+ * @param x The values.
+ * @returns $\sum_i x_i^2$.
+ */
 const l2 = (x: ArrayLike<number>) => {
   let a = 0
   for (let i = 0; i < x.length; i++) a += x[i] * x[i]
   return a
 }
 
-/** Options of `fitTemplateCrf`. */
+/** Options of `crfTrainingRun`: those of `crfProblem` and `crfTraining`, and the length of the run. */
 export interface FitTemplateCrfOptions extends CrfTrainingOptions {
   /** CRF++'s `-f`: keep strings seen at least this often (default 1). */
   minFrequency?: Size
@@ -536,18 +907,42 @@ export interface FitTemplateCrfOptions extends CrfTrainingOptions {
   maxSteps?: Size
 }
 
-/** A training problem: the index of the data, the labels, the encoded data and the sizes (U strings, K labels). */
+/** A training problem, as `crfProblem` builds it and `crfTraining` takes it. */
 export interface CrfProblem {
+  /** The index of the data's feature strings. */
   readonly index: FeatureIndex
+  /** The label set, in weight order. */
   readonly labels: readonly string[]
+  /** The data, encoded against the index and the labels. */
   readonly encoded: readonly EncodedLabelled[]
+  /** $U$, the number of unigram strings. */
   readonly U: Size
+  /** $K$, the number of labels. */
   readonly K: Size
-  /** The number of weights, U·K + B·K². */
+  /** The number of weights, $UK + BK^2$. */
   readonly dimension: Size
 }
 
-/** Index the data's strings (with `minFrequency`) and encode it: what `crfTraining` takes. */
+/**
+ * Index the data's strings (keeping those seen at least `minFrequency` times) and encode the data: what `crfTraining`
+ * takes. Throws `DomainError` as `encodeLabelled` does.
+ *
+ * @param templates The parsed templates (`parseTemplates` of `aifn-compute/text/features`).
+ * @param data The labelled training sequences.
+ * @param options `minFrequency`, CRF++'s `-f` (default 1), and `labels`, the label set in weight order (default: the
+ *   data's labels in order of first appearance).
+ * @returns The problem: index, labels, encoded data and sizes.
+ *
+ * @example The toy corpus with word templates
+ * // `parseTemplates('U00:%x[0,0]\nB')` of aifn-compute/text/features, abridged: the word, and label transitions
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * const p = crfProblem(templates, toyPosCorpus())
+ * print('labels:', p.labels)
+ * print('U =', p.U, 'K =', p.K, 'weights =', p.dimension)
+ * const rare = crfProblem(templates, toyPosCorpus(), { minFrequency: 2 })
+ * print('seen twice or more: U =', rare.U, 'dropped:', rare.index.dropped)
+ */
 export function crfProblem(
   templates: FeatureTemplates,
   data: readonly LabelledSequence[],
@@ -565,7 +960,18 @@ export function crfProblem(
   return { index, labels, encoded, U, K, dimension: crfWeightCount(index, K) }
 }
 
-/** CRF++'s `-c C` as CRFsuite strengths: c₂ = 1/(2C) for L2, c₁ = 1/C for L1. */
+/**
+ * CRF++'s `-c C` as CRFsuite strengths: $c_2 = 1/(2C)$ for L2, $c_1 = 1/C$ for L1. Throws `DomainError` unless
+ * $C > 0$.
+ *
+ * @param C CRF++'s hyperparameter $C$: larger fits the data more closely.
+ * @param kind The regulariser CRF++ was run with (`-a CRF-L2` or `CRF-L1`).
+ * @returns `c1` and `c2` for `crfTraining`, the other one 0.
+ *
+ * @example CRF++'s default C = 1, and C = 10
+ * print(crfppRegularisation(1))
+ * print(crfppRegularisation(10, 'L1'))
+ */
 export function crfppRegularisation(C: number, kind: 'L1' | 'L2' = 'L2'): { c1: number; c2: number } {
   if (!(C > 0)) throw new DomainError('crfppRegularisation', 'crfppRegularisation: C must be > 0')
   return kind === 'L2' ? { c1: 0, c2: 1 / (2 * C) } : { c1: 1 / C, c2: 0 }
@@ -573,17 +979,22 @@ export function crfppRegularisation(C: number, kind: 'L1' | 'L2' = 'L2'): { c1: 
 
 /** A snapshot of `crfTrainingRun`. */
 export interface CrfSnapshot {
+  /** The steps taken (0 before the first). */
   readonly step: Size
+  /** The most steps the run takes. */
   readonly maxSteps: Size
+  /** The CRF with the weights so far (a copy). */
   readonly crf: TemplateCrf
-  /** Per step so far: objective, NLL, gradient norm and non-zero weights. */
+  /** Per step so far, from step 0: objective, NLL, gradient norm and non-zero weights. */
   readonly history: {
     readonly objective: readonly number[]
     readonly nll: readonly number[]
     readonly gradNorm: readonly number[]
     readonly active: readonly number[]
   }
+  /** Whether the optimiser has converged. */
   readonly converged: boolean
+  /** Whether this is the last snapshot: converged, stalled, diverged or at `maxSteps`. */
   readonly done: boolean
   /** Milliseconds since the run started. */
   readonly ms: number
@@ -592,6 +1003,22 @@ export interface CrfSnapshot {
 /**
  * Train a template CRF from token rows and labels, yielding a snapshot after every step (step 0 first): the model so
  * far and the objective, NLL, gradient norm and active-weight history. A generator, so the lab's worker streams it.
+ * It builds the problem with `crfProblem`, then runs `crfTraining` from zero weights with the root stream `seed`.
+ *
+ * @param templateSource The parsed templates (`parseTemplates` of `aifn-compute/text/features`).
+ * @param data The labelled training sequences.
+ * @param options Those of `crfProblem` and `crfTraining`, `maxSteps` (default 200), and `seed`, the root stream of
+ *   the run (default `'crf'`; it orders the SGD and Adam minibatches).
+ * @returns A generator of snapshots, the last with `done` set.
+ *
+ * @example Twenty L-BFGS steps, snapshot by snapshot
+ * // `parseTemplates('U00:%x[0,0]\nB')` of aifn-compute/text/features, abridged: the word, and label transitions
+ * const word = { kind: 'unigram', text: 'U00:%x[0,0]', pieces: ['U00:', ''], macros: [{ row: 0, column: 0 }] }
+ * const templates = { templates: [word, { kind: 'bigram', text: 'B', pieces: ['B'], macros: [] }] }
+ * let last
+ * for (const snap of crfTrainingRun(templates, toyPosCorpus(), { maxSteps: 20 })) last = snap
+ * print('step', last.step, 'of', last.maxSteps, 'done:', last.done, 'converged:', last.converged)
+ * print('objective:', last.history.objective.map((v) => Number(v.toFixed(1))))
  */
 export function* crfTrainingRun(
   templateSource: FeatureTemplates,

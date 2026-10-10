@@ -61,7 +61,17 @@ const SENTENCES = [
   'The/DET room/NOUN has/VERB a/DET small/ADJ light/NOUN ./.',
 ]
 
-/** The rows of a sentence's tokens: [word, last two letters, shape]. */
+/**
+ * The CRF++ rows of a sentence: one row per token of three columns, the word in lower case, its last two letters
+ * (the whole word when it has at most two), and its shape (`Xx` for a capital first letter, `x` for a lower-case one,
+ * `.` otherwise).
+ *
+ * @param words The tokens of the sentence, as written (case is read for the shape).
+ * @returns One row of three strings per token, in order.
+ *
+ * @example A sentence as token rows
+ * print(posRows(['The', 'dog', 'runs', 'in', 'it', '.']))
+ */
 export function posRows(words: readonly string[]): string[][] {
   return words.map((w) => {
     const shape = /^[A-Z]/.test(w) ? 'Xx' : /^[a-z]/.test(w) ? 'x' : '.'
@@ -70,7 +80,18 @@ export function posRows(words: readonly string[]): string[][] {
   })
 }
 
-/** The toy corpus as labelled sequences (see the module comment), in a fixed order. */
+/**
+ * The toy corpus as labelled sequences (see the file comment), in a fixed order: 46 sentences, each with its rows
+ * from `posRows` and one tag of `TOY_POS_TAGS` per token.
+ *
+ * @returns A new array of labelled sequences on every call.
+ *
+ * @example The first sentence
+ * const corpus = toyPosCorpus()
+ * print('sentences:', corpus.length)
+ * print('rows:', corpus[0].rows)
+ * print('tags:', corpus[0].labels)
+ */
 export function toyPosCorpus(): LabelledSequence[] {
   return SENTENCES.map((s) => {
     const tokens = s.split(' ').map((t) => {

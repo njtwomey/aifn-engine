@@ -1,9 +1,28 @@
 /**
- * `aifn-methods/inference/topic-models`: topic models. Latent Dirichlet allocation (the model, its match, collapsed
- * Gibbs sampling, labelled LDA through allowed topic sets, estimates, and its engine `ldaEngine` / `ldaEngines` for
- * `infer`); pLSA by EM; LSA and NMF topics; a correlated topic model (MAP EM); and the hierarchical Dirichlet process (`hdpGibbs`, the number of topics
- * inferred); a dynamic topic model whose topics drift over time slices (`dynamicTopicSteps`, `dynamicTopicRun`); and
- * `topicModelRun`, which streams any of the static models with its log-likelihood and NPMI coherence.
+ * `aifn-methods/inference/topic-models`: topic models of bag-of-words corpora, by Gibbs sampling, EM and matrix
+ * factorisation.
+ *
+ * - Latent Dirichlet allocation: `ldaCollapsedGibbs` samples the topic assignments with $\thetavec$ and $\phivec$
+ *   integrated out (labelled LDA through each document's allowed topics), and `ldaEstimates` reads the topics and
+ *   proportions from a state. `ldaModel` is LDA in the model language, `matchLda` recognises LDA-shaped models,
+ *   `ldaOptions` reads their problem from bindings, and `ldaEngine` (in the table `ldaEngines`) lets `infer` run them.
+ * - An unknown number of topics: `hdpGibbs`, the hierarchical Dirichlet process by direct-assignment Gibbs sampling,
+ *   with `hdpEstimates`.
+ * - Other static models: `plsaSteps` (pLSA by EM), `correlatedTopicSteps` (a correlated topic model by MAP EM, with
+ *   `topicCorrelations`), `lsaTopics` (a truncated SVD, signed) and NMF (`nmfTopicSteps`, normalised by `nmfTopics`,
+ *   or run to the end by `nmfTopicModel`).
+ * - Topics that drift over time slices: `dynamicTopicSteps`, a dynamic topic model by MAP EM, and `dynamicTopicRun`,
+ *   which streams its fit.
+ * - Corpora and evaluation: `bagOfWordsCorpus` turns texts into word ids, `groupByLabel` joins short texts,
+ *   `documentTermCounts` counts them, `topWords` lists each topic's heaviest words, and `logLikelihoodPerToken` scores
+ *   a fit. `topicModelRun` streams any static model (`TopicMethod`, listed in `TOPIC_METHODS`) with its log-likelihood
+ *   and NPMI coherence.
+ * - `topicModelAlgorithms` and `topicModelFunctions` are the module's registry entries.
+ *
+ * A corpus is `Documents`, arrays of word ids in $\{0, \dots, V - 1\}$. Every static model reports a $K \times V$
+ * topic-word matrix and a $D \times K$ document-topic matrix (the dynamic one a topic-word matrix per slice); the
+ * step-through ones are `Algorithm`s run with no start, whose random starts and draws come from the run's stream. None
+ * is differentiable.
  */
 export {
   ldaCollapsedGibbs,

@@ -3,9 +3,9 @@
  * an uncertainty per player after every round; TrueSkill Through Time as the smoother over the whole stream; and the
  * settings of real chess sites.
  *
- * Everything is on Elo's scale: a difference of 400 points means odds of 10 : 1 under the logistic model. A round is the
- * unit of time (a day, a rating period): systems with dynamics widen a player's uncertainty by the rounds elapsed since
- * their last game, and every game is rated on its own, in order, as chess sites do.
+ * Everything is on Elo's scale: a difference of 400 points means odds of $10 : 1$ under the logistic model. A round is
+ * the unit of time (a day, a rating period): systems with dynamics widen a player's uncertainty by the rounds elapsed
+ * since their last game, and every game is rated on its own, in order, as chess sites do.
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
@@ -13,45 +13,61 @@ import { normalCdf, normalQuantile } from 'aifn-compute/numerics/special'
 import { eloExpected, glicko2Update, glickoExpected, glickoUpdate, type GlickoRating, type PairedResult } from './elo'
 import { drawMargin, trueSkillUpdate, type Rating } from './examples'
 
-/** Points per unit of log-odds: 400/ln 10 ≈ 173.7. */
+/** Points per unit of log-odds: $400 / \ln 10 \approx 173.7$. */
 export const ELO_SCALE = 400 / Math.LN10
 
 /**
- * The performance noise β (Elo points) at which Thurstone's P(a beats b) = Φ((s_a − s_b)/(√2 β)) has the logistic's
- * slope at an even game: φ(0)/(√2 β) = ln 10/1600, so β = 1600 φ(0)/(√2 ln 10) ≈ 196.
+ * The performance noise $\beta$ (Elo points) at which Thurstone's $P(a \text{ beats } b) = \Phi((s_a - s_b) /
+ * (\sqrt{2}\,\beta))$ has the logistic's slope at an even game: $\phi(0) / (\sqrt{2}\,\beta) = \ln 10 / 1600$, so
+ * $\beta = 1600\,\phi(0) / (\sqrt{2} \ln 10) \approx 196$.
  */
 export const THURSTONE_BETA = 1600 / Math.sqrt(2 * Math.PI) / (Math.SQRT2 * Math.LN10)
 
-/** A game stream: the games of each round, in the order played. Scores are player a's: 1, ½ or 0. */
+/** A game stream: the games of each round, in the order played. Scores are player `a`'s: 1, $\tfrac{1}{2}$ or 0. */
 export interface GameStream {
+  /** The number of players; games index them from 0. */
   readonly players: number
+  /** The games of each round, in order; a round may be empty. */
   readonly rounds: readonly (readonly PairedResult[])[]
 }
 
-/** A belief about one player's skill on Elo's scale: sd is NaN for a system without one, 0 for a fixed player. */
+/** A belief about one player's skill on Elo's scale: `sd` is NaN for a system without one, 0 for a fixed player. */
 export interface SkillEstimate {
+  /** The rating (NaN for a FIDE newcomer not yet rated). */
   mean: number
+  /** Its standard deviation, in rating points. */
   sd: number
 }
 
 /** An online rating system over a fixed set of players. */
 export interface OnlineRater {
+  /** The system's display name, such as `Glicko-2`. */
   readonly name: string
   /** Player a's expected score against b before the game. */
   predict(a: number, b: number): number
   /** Rate one game played in `round` (rounds never decrease). */
   game(result: PairedResult, round: number): void
+  /** The current belief about a player's skill. */
   estimate(player: number): SkillEstimate
 }
 
 /** Starting ratings: one for everyone, or one per player. */
 type Starts = number | ArrayLike<number>
+/**
+ * The starting rating of one player.
+ *
+ * @param s The starting ratings: one number for everyone, or one per player.
+ * @param p The player's index.
+ */
 const startOf = (s: Starts, p: number) => (typeof s === 'number' ? s : s[p])
 
 /** Elo with a fixed K. */
 export interface EloSpec {
+  /** Selects Elo. */
   kind: 'elo'
+  /** The K-factor (default 32). */
   k?: number
+  /** The starting rating, one for everyone or one per player (default 1500). */
   initial?: Starts
   /** The lowest rating a player can fall to (default none). */
   floor?: number
@@ -59,55 +75,72 @@ export interface EloSpec {
 
 /**
  * FIDE's Elo (FIDE Rating Regulations from 1 March 2024, https://handbook.fide.com/chapter/B022024). A newcomer is
- * unrated for `entryGames` games; the initial rating is Ra + dp, Ra the mean rating of the opponents and two
- * hypothetical opponents rated 1800 with draws against them, dp from the normal table (8.1.a) of the score fraction,
- * capped at 2200. K is 40 for the first 30 rated games, 20 below 2400, 10 once 2400 has been reached; a rating
- * difference beyond 400 counts as 400. Unrated opponents count at `placeholder` (an assumption of a closed simulated
- * pool, where nobody is rated at the start).
+ * unrated for `entryGames` games; the initial rating is $R_a + dp$, $R_a$ the mean rating of the opponents and two
+ * hypothetical opponents rated 1800 with draws against them, $dp$ from the normal table (8.1.a) of the score fraction,
+ * rounded and capped at 2200. K is 40 for the first 30 rated games, 20 below 2400, 10 once 2400 has been reached; a
+ * rating difference beyond 400 counts as 400. Unrated opponents count at `placeholder` (an assumption of a closed
+ * simulated pool, where nobody is rated at the start).
  */
 export interface FideSpec {
+  /** Selects FIDE's Elo. */
   kind: 'fide'
+  /** Games a newcomer plays before receiving a rating (default 5). */
   entryGames?: number
+  /** The rating at which an unrated player counts, as an opponent and in predictions (default 1500). */
   placeholder?: number
+  /** Rated games played with K = 40 (default 30). */
   newcomerGames?: number
 }
 
-/** Glicko-1 with every game its own rating period and RD growing by c² per round without games. */
+/** Glicko-1 with every game its own rating period and the variance $\text{RD}^2$ growing by $c^2$ per round. */
 export interface GlickoSpec {
+  /** Selects Glicko-1. */
   kind: 'glicko'
+  /** The starting rating, one for everyone or one per player (default 1500). */
   initial?: Starts
   /** RD of a new player, also the cap (default 350). */
   deviation?: number
-  /** RD growth per round: RD ← √(RD² + c² t) (default 15). */
+  /** RD growth per round: $\text{RD} \gets \sqrt{\text{RD}^2 + c^2 t}$ after $t$ rounds (default 15). */
   c?: number
   /** The lowest RD (default 0; Glickman suggests about 30). */
   minDeviation?: number
+  /** The lowest rating a player can fall to (default none). */
   floor?: number
 }
 
-/** Glicko-2 with every game rated on its own and φ grown by the elapsed (possibly fractional) rating periods. */
+/** Glicko-2 with every game rated on its own and $\phi$ grown by the elapsed (possibly fractional) rating periods. */
 export interface Glicko2Spec {
+  /** Selects Glicko-2. */
   kind: 'glicko2'
+  /** The starting rating, one for everyone or one per player (default 1500). */
   initial?: Starts
+  /** RD of a new player, also the cap (default 350). */
   deviation?: number
+  /** The starting volatility $\sigma$ (default 0.06). */
   volatility?: number
+  /** The system constant $\tau$ (default 0.5). */
   tau?: number
   /** Rating periods per round (default 1). */
   periodsPerRound?: number
+  /** The lowest RD (default 0). */
   minDeviation?: number
+  /** The largest volatility (default none). */
   maxVolatility?: number
+  /** The lowest rating a player can fall to (default none). */
   floor?: number
 }
 
-/** TrueSkill on Elo's scale, with dynamics τ per round and a draw margin from the draw probability. */
+/** TrueSkill on Elo's scale, with dynamics $\tau$ per round and a draw margin from the draw probability. */
 export interface TrueSkillSpec {
+  /** Selects TrueSkill. */
   kind: 'trueskill'
+  /** The starting mean, one for everyone or one per player (default 1500). */
   initial?: Starts
-  /** σ₀ (default 350). */
+  /** $\sigma_0$ (default 350). */
   deviation?: number
-  /** Performance noise β (default `THURSTONE_BETA`). */
+  /** Performance noise $\beta$ (default `THURSTONE_BETA`). */
   beta?: number
-  /** Skill drift per round: σ² ← σ² + τ² t (default 10). */
+  /** Skill drift per round: $\sigma^2 \gets \sigma^2 + \tau^2 t$ after $t$ rounds (default 10). */
   tau?: number
   /** The chance of a draw between equals, setting the draw margin (default 0.1). */
   drawProbability?: number
@@ -116,19 +149,26 @@ export interface TrueSkillSpec {
 /**
  * A Kalman filter on the logistic model: each player's skill is a random walk with process sd `q` per round, and each
  * game is an extended-Kalman update with both players' variances (the vector form of Szczecinski and Tihon's
- * "simplified Kalman filter", 2023, https://doi.org/10.1515/jqas-2021-0061): with z = (μ_a − μ_b)/s, F = σ(z),
- * ω = (v_a + v_b)/s², μ_a += (v_a/s)(y − F)/(1 + F(1 − F)ω) and v_a ← v_a(1 − (v_a/s²)F(1 − F)/(1 + F(1 − F)ω)).
+ * "simplified Kalman filter", 2023, https://doi.org/10.1515/jqas-2021-0061): with $z = (\mu_a - \mu_b)/s$,
+ * $F = \sigma(z)$, $\omega = (v_a + v_b)/s^2$ and $s$ = `ELO_SCALE`,
+ * $\mu_a \gets \mu_a + (v_a/s)(y - F) / (1 + F(1 - F)\omega)$ and
+ * $v_a \gets v_a(1 - (v_a/s^2) F(1 - F) / (1 + F(1 - F)\omega))$ (and the mirror image for $b$).
  */
 export interface KalmanSpec {
+  /** Selects the Kalman filter. */
   kind: 'kalman'
+  /** The starting mean, one for everyone or one per player (default 1500). */
   initial?: Starts
+  /** The starting standard deviation (default 350). */
   deviation?: number
   /** Process noise sd per round, in points (default 10). */
   q?: number
 }
 
+/** The settings of any online rating system, told apart by `kind`. */
 export type RaterSpec = EloSpec | FideSpec | GlickoSpec | Glicko2Spec | TrueSkillSpec | KalmanSpec
 
+/** The display name of each kind of rater. */
 const RATER_NAMES: Record<RaterSpec['kind'], string> = {
   elo: 'Elo',
   fide: 'FIDE Elo',
@@ -138,14 +178,36 @@ const RATER_NAMES: Record<RaterSpec['kind'], string> = {
   kalman: 'Kalman (logistic)',
 }
 
-/** FIDE's dp: the rating difference of a score fraction p by the normal table, √2·200·Φ⁻¹(p), within ±800. */
+/**
+ * FIDE's $dp$: the rating difference of a score fraction $p$ by the normal table,
+ * $\sqrt{2} \cdot 200 \cdot \Phi^{-1}(p)$, within $\pm 800$.
+ *
+ * @param p The score fraction, clamped to $[0, 1]$.
+ * @returns The rating difference, in points.
+ *
+ * @example From a lost match to a whitewash
+ * print('dp at 0, 0.25, 0.5, 0.75, 1:', [0, 0.25, 0.5, 0.75, 1].map(fideDp))
+ */
 export function fideDp(p: number): number {
   return Math.max(-800, Math.min(800, Math.SQRT2 * 200 * normalQuantile(Math.min(1, Math.max(0, p)))))
 }
 
 /**
  * An online rater for `players` players. `fixed[p]` (not NaN) holds player p's known skill: the rater never updates it
- * and reports it with sd 0 (a field of known-strength opponents).
+ * and reports it with sd 0 (a field of known-strength opponents). Systems with dynamics widen a player's uncertainty
+ * by the rounds since their last game (since round $-1$ before their first) before rating it.
+ *
+ * @param spec The system and its settings.
+ * @param players The number of players.
+ * @param fixed Known skills, one per player, with NaN for a player to be rated (default: everyone is rated).
+ * @returns The rater, whose state changes with every `game`.
+ *
+ * @example One game between two new players, under four systems
+ * for (const kind of ['elo', 'glicko', 'trueskill', 'kalman']) {
+ *   const rater = createRater({ kind }, 2)
+ *   rater.game({ a: 0, b: 1, score: 1 }, 0)
+ *   print(rater.name, 'winner:', rater.estimate(0), 'loser:', rater.estimate(1))
+ * }
  */
 export function createRater(spec: RaterSpec, players: number, fixed?: ArrayLike<number>): OnlineRater {
   const isFixed = (p: number) => fixed !== undefined && !Number.isNaN(fixed[p])
@@ -345,10 +407,16 @@ export function createRater(spec: RaterSpec, players: number, fixed?: ArrayLike<
 
 /** Estimates of every player after every round of a stream. */
 export interface RatingTrace {
+  /** The system's display name. */
   readonly name: string
+  /** The number of players, the length of a row. */
   readonly players: number
+  /** The number of rounds. */
   readonly rounds: number
-  /** Means on Elo's scale, row-major [(rounds + 1) × players]: row 0 is the start, row r + 1 is after round r. */
+  /**
+   * Means on Elo's scale, row-major $(\text{rounds} + 1) \times \text{players}$: row 0 is the start, row $r + 1$ is
+   * after round $r$.
+   */
   readonly mean: Float64Array
   /** Their standard deviations, same layout (NaN for a system without one). */
   readonly sd: Float64Array
@@ -358,6 +426,12 @@ export interface RatingTrace {
   readonly predicted: Float64Array
 }
 
+/**
+ * The arrays of a `RatingTrace` for a stream: `played` filled in, `mean`, `sd` and `predicted` zeroed for the caller.
+ *
+ * @param stream The game stream.
+ * @returns The row-major means, standard deviations and games played, and one prediction slot per game.
+ */
 function traceArrays(stream: GameStream) {
   const { players } = stream
   const R = stream.rounds.length
@@ -378,7 +452,27 @@ function traceArrays(stream: GameStream) {
   }
 }
 
-/** Run a rating system over a stream (`fixed` as in `createRater`). */
+/**
+ * Run a rating system over a stream: each game is predicted and then rated, in order, and every player's estimate is
+ * recorded after each round.
+ *
+ * @param stream The games, round by round.
+ * @param spec The system and its settings.
+ * @param options Known skills of players who are not rated, `fixed`, as in `createRater`.
+ * @returns The estimates after every round, the games played and the prediction of each game.
+ *
+ * @example Glicko and TrueSkill on four rounds
+ * const rounds = [
+ *   [{ a: 0, b: 1, score: 1 }],
+ *   [{ a: 1, b: 2, score: 1 }],
+ *   [{ a: 0, b: 2, score: 1 }],
+ *   [{ a: 2, b: 1, score: 0.5 }],
+ * ]
+ * for (const kind of ['glicko', 'trueskill']) {
+ *   const trace = rateStream({ players: 3, rounds }, { kind })
+ *   print(trace.name, 'means:', trace.mean.slice(-3), 'sds:', trace.sd.slice(-3))
+ * }
+ */
 export function rateStream(
   stream: GameStream,
   spec: RaterSpec,
@@ -410,24 +504,31 @@ export function rateStream(
 
 /** Options of `trueSkillThroughTime`. */
 export interface TrueSkillThroughTimeOptions {
+  /** The prior mean at the start, one for everyone or one per player (default 1500). */
   initial?: Starts
+  /** The prior standard deviation $\sigma_0$ at the start (default 350). */
   deviation?: number
+  /** Performance noise $\beta$ (default `THURSTONE_BETA`). */
   beta?: number
-  /** Skill drift per round (default 10). */
+  /** Skill drift $\tau$ per round (default 10); must be positive. */
   tau?: number
+  /** The chance of a draw between equals, setting the draw margin (default 0.1; 0 ignores draws). */
   drawProbability?: number
   /** Known skills (NaN for a rated player), as in `createRater`. */
   fixed?: ArrayLike<number>
-  /** Sweeps at most (default 100), and the largest change of any mean that ends them (default 1e-3 points). */
+  /** Sweeps at most (default 100). */
   maxSweeps?: number
+  /** The largest change of any mean in a sweep that ends the sweeps (default 1e-3 points). */
   tolerance?: number
-  /** Weight of a game's old message in its update, in [0, 1) (default 0). */
+  /** Weight of a game's old message in its update, in $[0, 1)$ (default 0). */
   damping?: number
 }
 
 /** A smoothed trace: every estimate conditions on every game, before and after it. */
 export interface SmoothedTrace extends RatingTrace {
+  /** The sweeps run. */
   readonly sweeps: number
+  /** Whether the last sweep changed no mean by more than `tolerance`. */
   readonly converged: boolean
   /** The largest change of a mean in the last sweep. */
   readonly change: number
@@ -435,14 +536,34 @@ export interface SmoothedTrace extends RatingTrace {
 
 /**
  * TrueSkill Through Time (Dangauthier, Herbrich, Minka and Graepel, 2007) with a time step per round: each rated
- * player's skill is a chain s_p⁰ ~ N(μ₀, σ₀²) (row 0), s_pʳ ~ N(s_pʳ⁻¹, τ²) for every round r, and each game is the
- * TrueSkill factor on the two players' skills of its round. Expectation propagation alternates two phases until the
- * means stop moving: (1) the chains, which are Gaussian and exact: forward and backward messages along each chain and
- * the marginal of every node, given the games' current messages; (2) the games, in stream order: each game's cavity is
- * the node's marginal without the game's message, the two-player TrueSkill update (τ = 0) of the cavities gives new
+ * player's skill is a chain with $s_p^{\text{start}} \sim \Gauss(\mu_0, \sigma_0^2)$ (row 0) and
+ * $s_p^r \sim \Gauss(s_p^{r-1}, \tau^2)$ for every round $r$ (row $r + 1$), and each game is the TrueSkill factor on
+ * the two players' skills of its round. Expectation propagation alternates two phases until the means stop moving:
+ * (1) the chains, which are Gaussian and exact: forward and backward messages along each chain and the marginal of
+ * every node, given the games' current messages; (2) the games, in stream order: each game's cavity is the node's
+ * marginal without the game's message, the two-player TrueSkill update ($\tau = 0$) of the cavities gives new
  * marginals, and the new message is their ratio with the cavity. The result is the posterior of every skill at every
  * round given all games. `predicted` holds each game's expected score under these smoothed beliefs (hindsight, not a
- * forecast).
+ * forecast). A draw is skipped when the draw margin is 0, and a game whose cavity is not a proper Gaussian is skipped
+ * for that sweep. Throws `DomainError` when `tau` is not positive.
+ *
+ * @param stream The games, round by round.
+ * @param options The prior, $\beta$, $\tau$, the draw probability, known skills and the stopping rule.
+ * @returns The smoothed estimates after every round, with the sweeps run and whether they converged.
+ *
+ * @example Smoothing a short stream
+ * // The same four rounds as the online raters see them; the smoothed means barely move with the round.
+ * const rounds = [
+ *   [{ a: 0, b: 1, score: 1 }],
+ *   [{ a: 1, b: 2, score: 1 }],
+ *   [{ a: 0, b: 2, score: 1 }],
+ *   [{ a: 2, b: 1, score: 0.5 }],
+ * ]
+ * const smooth = trueSkillThroughTime({ players: 3, rounds })
+ * print('sweeps:', smooth.sweeps, 'converged:', smooth.converged)
+ * print('start:', smooth.mean.slice(0, 3))
+ * print('after the last round:', smooth.mean.slice(-3), 'sds:', smooth.sd.slice(-3))
+ * print('online TrueSkill:', rateStream({ players: 3, rounds }, { kind: 'trueskill' }).mean.slice(-3))
  */
 export function trueSkillThroughTime(stream: GameStream, options: TrueSkillThroughTimeOptions = {}): SmoothedTrace {
   const {
@@ -602,9 +723,26 @@ export function trueSkillThroughTime(stream: GameStream, options: TrueSkillThrou
 // ── Settling and scales ──────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Games a player needed to settle: the games played by the first row from which the rating stays within ±`tolerance`
- * (default 50) of its settled value (the mean over the last `tail`, default ¼, of the rows) for `hold` rows (default
- * 10; Infinity: to the end). NaN while never rated or never settled.
+ * Games a player needed to settle: the games played by the first row from which the rating stays within
+ * $\pm$`tolerance` (default 50) of its settled value (the mean over the last `tail`, default $\tfrac{1}{4}$, of the
+ * rows) for `hold` rows (default 10; infinity: to the end). NaN while never rated or never settled.
+ *
+ * @param trace The estimates of a run, from `rateStream` or `trueSkillThroughTime`.
+ * @param player The player's index.
+ * @param options The band around the settled value, the fraction of rows that defines it and the rows to hold.
+ * @param options.tolerance The half-width of the band, in rating points (default 50).
+ * @param options.tail The fraction of the last rows whose mean is the settled value (default 0.25).
+ * @param options.hold The rows the rating must stay inside the band (default 10; infinity: to the end).
+ * @returns The games the player had played by the first settled row, or NaN.
+ *
+ * @example A 1700 player against a known 1500 field
+ * // 80 rounds of one game each, won with Elo's probability (drawn from stream(0)); player 1 is fixed at 1500.
+ * const u = toArray(uniform(stream(0), 0, 1, { shape: [80] }))
+ * const rounds = u.map((ui) => [{ a: 0, b: 1, score: ui < eloExpected(1700, 1500) ? 1 : 0 }])
+ * const trace = rateStream({ players: 2, rounds }, { kind: 'elo', k: 20 }, { fixed: [NaN, 1500] })
+ * print('settled rating:', settledRatings(trace)[0])
+ * print('games to settle within 50:', settlingGames(trace, 0))
+ * print('games to settle within 25:', settlingGames(trace, 0, { tolerance: 25 }))
  */
 export function settlingGames(
   trace: RatingTrace,
@@ -629,7 +767,20 @@ export function settlingGames(
   return NaN
 }
 
-/** The settled value of every player: the mean of the last `tail` (default ¼) of the rows, skipping NaN. */
+/**
+ * The settled value of every player: the mean of the last `tail` (default $\tfrac{1}{4}$) of the rows, skipping NaN.
+ *
+ * @param trace The estimates of a run, from `rateStream` or `trueSkillThroughTime`.
+ * @param tail The fraction of the rows, counted from the end, to average.
+ * @returns One value per player (NaN for a player with no finite rating in those rows).
+ *
+ * @example The settled ratings of a short Elo run
+ * // Player 0 wins, wins, loses and wins against player 1.
+ * const rounds = [1, 1, 0, 1].map((score) => [{ a: 0, b: 1, score }])
+ * const trace = rateStream({ players: 2, rounds }, { kind: 'elo' })
+ * print('ratings by row:', trace.mean)
+ * print('last half:', settledRatings(trace, 0.5))
+ */
 export function settledRatings(trace: RatingTrace, tail = 0.25): Float64Array {
   const rows = trace.rounds + 1
   const P = trace.players
@@ -648,19 +799,33 @@ export function settledRatings(trace: RatingTrace, tail = 0.25): Float64Array {
   })
 }
 
-/** How one rating scale maps onto another for the same players: y ≈ intercept + slope·x. */
+/** How one rating scale maps onto another for the same players: $y \approx \text{intercept} + \text{slope} \cdot x$. */
 export interface ScaleMap {
+  /** The slope of the least-squares line (NaN when every $x$ is equal). */
   slope: number
+  /** The intercept of the line. */
   intercept: number
-  /** The mean of y − x: the offset between the scales. */
+  /** The mean of $y - x$: the offset between the scales. */
   offset: number
-  /** The sd of y − x across players, and of the residuals of the line. */
+  /** The sd of $y - x$ across players. */
   spread: number
+  /** The sd of the residuals of the line. */
   residualSd: number
+  /** The number of players with both ratings finite. */
   n: number
 }
 
-/** The least-squares line from ratings `x` to ratings `y` of the same players (pairs with a NaN skipped). */
+/**
+ * The least-squares line from ratings `x` to ratings `y` of the same players (pairs with a NaN skipped).
+ *
+ * @param x The ratings on the first scale, one per player.
+ * @param y The ratings on the second scale, indexed like `x`.
+ * @returns The line, the mean offset and the spreads.
+ *
+ * @example A stretched and shifted scale
+ * // The fourth player has no rating on the first scale.
+ * print(ratingScaleMap([1500, 1600, 1700, NaN, 1400], [1300, 1450, 1600, 1800, 1170]))
+ */
 export function ratingScaleMap(x: ArrayLike<number>, y: ArrayLike<number>): ScaleMap {
   const idx = Array.from({ length: Math.min(x.length, y.length) }, (_, i) => i).filter(
     (i) => Number.isFinite(x[i]) && Number.isFinite(y[i]),
@@ -695,9 +860,17 @@ export function ratingScaleMap(x: ArrayLike<number>, y: ArrayLike<number>): Scal
 /**
  * Lichess's Glicko-2 (sources: https://lichess.org/faq; lila's Glicko.scala,
  * https://github.com/lichess-org/lila/blob/master/modules/rating/src/main/Glicko.scala): start 1500 with RD 500
- * ("1500 ± 1000"), volatility 0.09 capped at 0.1, RD within [45, 500], ratings floored at 400, τ = 0.75, every game rated
- * on its own with 0.21436 rating periods per day elapsed (`periodsPerRound` assumes a round is a day). Provisional ("?")
- * while RD > 110.
+ * ("1500 ± 1000"), volatility 0.09 capped at 0.1, RD within $[45, 500]$, ratings floored at 400, $\tau = 0.75$, every
+ * game rated on its own with 0.21436 rating periods per day elapsed. Provisional ("?") while RD $> 110$.
+ *
+ * @param daysPerRound The days one round of the stream stands for, which scales `periodsPerRound`.
+ * @returns The settings, for `createRater` or `rateStream`.
+ *
+ * @example A new Lichess player wins a game
+ * const rater = createRater(lichessSpec(), 2)
+ * rater.game({ a: 0, b: 1, score: 1 }, 0)
+ * print('winner:', rater.estimate(0), 'loser:', rater.estimate(1))
+ * print('still provisional:', rater.estimate(0).sd > LICHESS_PROVISIONAL_RD)
  */
 export function lichessSpec(daysPerRound = 1): Glicko2Spec {
   return {
@@ -717,11 +890,18 @@ export function lichessSpec(daysPerRound = 1): Glicko2Spec {
 export const LICHESS_PROVISIONAL_RD = 110
 
 /**
- * Chess.com's Glicko-1 (https://support.chess.com/en/articles/8566476-how-do-ratings-work-on-chess-com: Glicko, RD grows
- * with inactivity). Starting ratings are chosen by the player's self-declared level (`chessComStarts`). Not public, so
- * assumed: RD₀ 350 and the cap (Glickman's default for an unrated player), the RD floor 30 (Glickman's suggested
- * threshold), c = 18 points per day (RD 50 → 350 in about a year of inactivity), the rating floor 100, every game its
- * own rating period.
+ * Chess.com's Glicko-1 (https://support.chess.com/en/articles/8566476-how-do-ratings-work-on-chess-com: Glicko, RD
+ * grows with inactivity). Starting ratings are chosen by the player's self-declared level (`chessComStarts`). Not public, so
+ * assumed: a starting RD of 350 and the cap (Glickman's default for an unrated player), the RD floor 30 (Glickman's
+ * suggested threshold), $c = 18$ points per day (RD 50 to 350 in about a year of inactivity), the rating floor 100,
+ * every game its own rating period.
+ *
+ * @param initial The starting ratings: one for everyone, or one per player (as `chessComStarts` gives them).
+ * @param daysPerRound The days one round of the stream stands for: $c$ per round is $18\sqrt{\text{days}}$.
+ * @returns The settings, for `createRater` or `rateStream`.
+ *
+ * @example Weekly rounds
+ * print(chessComSpec(1200, 7))
  */
 export function chessComSpec(initial: Starts, daysPerRound = 1): GlickoSpec {
   return { kind: 'glicko', initial, deviation: 350, c: 18 * Math.sqrt(daysPerRound), minDeviation: 30, floor: 100 }
@@ -731,9 +911,19 @@ export function chessComSpec(initial: Starts, daysPerRound = 1): GlickoSpec {
 export const CHESS_COM_LEVELS = [400, 800, 1200, 1600] as const
 
 /**
- * Starting ratings on chess.com's self-declared levels: each player picks the level nearest 1200 + (skill − pool
- * mean) + noise (an assumption: players judge themselves against an average club player, with `noise` points of
- * error). `relativeSkill` is each player's skill minus the pool's mean; `noise` holds standard-normal draws.
+ * Starting ratings on chess.com's self-declared levels (`CHESS_COM_LEVELS`): each player picks the level nearest
+ * $1200 + (\text{skill} - \text{pool mean}) + \text{error} \cdot z$ (an assumption: players judge themselves against
+ * an average club player, with a standard deviation of `error` points).
+ *
+ * @param relativeSkill Each player's skill minus the pool's mean, in rating points.
+ * @param noise One standard-normal draw $z$ per player.
+ * @param error The standard deviation of a player's misjudgement, in rating points.
+ * @returns The starting rating of each player, one of the levels.
+ *
+ * @example Five players judge themselves
+ * const skill = [-700, -300, 0, 300, 600]
+ * print('levels:', chessComStarts(skill, toArray(normals(stream(1), [5]))))
+ * print('judged exactly:', chessComStarts(skill, [0, 0, 0, 0, 0]))
  */
 export function chessComStarts(relativeSkill: ArrayLike<number>, noise: ArrayLike<number>, error = 200): Float64Array {
   return Float64Array.from(relativeSkill, (s, p) => {
@@ -744,7 +934,19 @@ export function chessComStarts(relativeSkill: ArrayLike<number>, noise: ArrayLik
   })
 }
 
-/** FIDE's Elo (`FideSpec`) with unrated opponents counted at 1500 (an assumption of the closed simulated pool). */
+/**
+ * FIDE's Elo (`FideSpec`) with unrated opponents counted at 1500 (an assumption of the closed simulated pool).
+ *
+ * @returns The settings, for `createRater` or `rateStream`.
+ *
+ * @example A newcomer's first rating
+ * // Player 0 meets known players rated 1600 and 1800 in turn, and scores 3.5 from the first five games.
+ * const rater = createRater(fideSpec(), 3, [NaN, 1600, 1800])
+ * const scores = [1, 0.5, 1, 0, 1, 1]
+ * scores.forEach((score, i) => rater.game({ a: 0, b: 1 + (i % 2), score }, i))
+ * print(fideSpec())
+ * print('rating after six games:', rater.estimate(0).mean)
+ */
 export function fideSpec(): FideSpec {
   return { kind: 'fide', entryGames: 5, placeholder: 1500, newcomerGames: 30 }
 }

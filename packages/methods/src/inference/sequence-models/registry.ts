@@ -1,5 +1,6 @@
 /**
- * The registry of `aifn-methods/inference/sequence-models`.
+ * The registry of `aifn-methods/inference/sequence-models`: the catalogue entries (name, role, notes and citations)
+ * of its functions and of its training algorithm, `crfTraining`.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'

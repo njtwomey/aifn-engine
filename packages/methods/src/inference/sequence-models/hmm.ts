@@ -1,9 +1,15 @@
 /**
- * Hidden Markov models (Rabiner 1989, "A tutorial on hidden Markov models", Proc. IEEE 77(2)), part of
- * `aifn-methods/inference/sequence-models`: the `Hmm` type and its constructor, its chain of potentials for the
- * generic engines of `aifn-compute/inference/exact` (`forwardBackward(hmmChain(h, x))`, `viterbi`, `sampleHiddenPath`), the
- * occasionally dishonest casino, sampling, and the HMM in the model language (a chain group, so
- * `aifn-compute/inference/engines`' `infer` runs forward–backward by its shape).
+ * Discrete hidden Markov models: the `Hmm` type and its constructor, its chain of potentials, the occasionally
+ * dishonest casino, sampling, and the HMM in the model language.
+ *
+ * An HMM with $K$ hidden states and $M$ symbols (Rabiner 1989, "A tutorial on hidden Markov models", Proc. IEEE
+ * 77(2)) has initial probabilities $\pivec$ (length $K$), a transition matrix $\Amat$ ($K \times K$, with
+ * $A_{uv} = p(y_{n+1} = v \mid y_n = u)$) and an emission matrix $\Bmat$ ($K \times M$, with
+ * $B_{km} = p(x_n = m \mid y_n = k)$). States and symbols are integer ids from 0. The HMM carries no inference of its
+ * own: `hmmChain` turns it and an observation sequence into the chain of potentials that the generic engines of
+ * `aifn-compute/inference/exact` take (`forwardBackward(hmmChain(h, x))`, `viterbi`, `sampleHiddenPath`), and
+ * `hmmModel` writes it in the model language as a chain group, so `aifn-compute/inference/engines`' `infer` runs
+ * forward–backward by its shape.
  */
 
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -22,22 +28,61 @@ import {
 import type { ChainPotentials } from 'aifn-compute/inference/exact'
 import { dist, model, type Model } from 'aifn-compute/inference/model'
 
-/** A discrete-emission HMM: π (K), A[u, v] = p(y_{n+1} = v | y_n = u) (K × K), B[k, m] = p(x = m | y = k) (K × M). */
+/** A discrete-emission HMM with $K$ states and $M$ symbols, as `hmm` builds it (plain data). */
 export interface Hmm {
+  /** The initial probabilities $\pi_k = p(y_0 = k)$ (length $K$). */
   initial: Vector
+  /** The transition matrix $\Amat$, $A_{uv} = p(y_{n+1} = v \mid y_n = u)$ ($K \times K$; each row sums to one). */
   transition: Matrix
+  /** The emission matrix $\Bmat$, $B_{km} = p(x_n = m \mid y_n = k)$ ($K \times M$; each row sums to one). */
   emission: Matrix
-  /** Names for display. */
+  /** Names of the states, for display. */
   stateNames?: readonly string[]
+  /** Names of the symbols, for display. */
   symbolNames?: readonly string[]
 }
 
 type Rows = readonly (readonly number[])[]
 
+/**
+ * A tensor as given, or a nested array made into one.
+ *
+ * @param v A tensor (returned as it is), a vector as an array, or a matrix as an array of rows.
+ * @returns The tensor.
+ */
 const asTensor = (v: Tensor | readonly number[] | Rows): Tensor =>
   'shape' in v ? v : tensor(v as number[] | number[][])
 
-/** Build an HMM from arrays or tensors, checking that π and each row of A and B sum to one (to 1e-9). */
+/**
+ * Build an HMM from arrays or tensors. Throws `ShapeError` unless $\pivec$ has length $K$, $\Amat$ is $K \times K$ and
+ * $\Bmat$ has $K$ rows, and `DomainError` unless $\pivec$ and every row of $\Amat$ and $\Bmat$ sums to one (to within
+ * $10^{-9}$). The entries themselves are not checked to be non-negative.
+ *
+ * @param initial The initial probabilities $\pivec$ (length $K$).
+ * @param transition The transition matrix $\Amat$ ($K \times K$, as rows or a tensor): row $u$ is the distribution of
+ *   the next state after state $u$.
+ * @param emission The emission matrix $\Bmat$ ($K \times M$, as rows or a tensor): row $k$ is the distribution of the
+ *   symbol emitted in state $k$.
+ * @param names Optional display names: `stateNames` (one per state) and `symbolNames` (one per symbol), copied onto
+ *   the result as given.
+ * @returns The HMM, with its arrays as tensors.
+ *
+ * @example A two-state weather model
+ * const h = hmm([0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]], [[0.1, 0.4, 0.5], [0.6, 0.3, 0.1]], {
+ *   stateNames: ['rainy', 'sunny'],
+ *   symbolNames: ['walk', 'shop', 'clean'],
+ * })
+ * print('π =', h.initial)
+ * print('A =', h.transition)
+ * print('B =', h.emission)
+ *
+ * @example Rows that do not sum to one are refused
+ * try {
+ *   hmm([0.5, 0.5], [[0.9, 0.2], [0.5, 0.5]], [[1, 0], [0, 1]])
+ * } catch (e) {
+ *   print(e.message)
+ * }
+ */
 export function hmm(
   initial: Tensor | readonly number[],
   transition: Tensor | Rows,
@@ -57,9 +102,31 @@ export function hmm(
 }
 
 /**
- * The chain of potentials of an HMM given observed symbols x (length N): node potentials ψ_n(k) = B[k, x_n] with π
- * folded into ψ_0 (N × K), and the transition matrix A. Its normaliser is the likelihood p(x), so
- * `forwardBackward(hmmChain(h, x)).logLikelihood` is log p(x).
+ * The chain of potentials of an HMM given observed symbols $\xvec$ (length $N$): node potentials
+ * $\psi_n(k) = B_{k x_n}$ with $\pivec$ folded into the first, $\psi_0(k) = \pi_k B_{k x_0}$ ($N \times K$), and the
+ * transition matrix $\Amat$ as the pairwise potential. Its normaliser is the likelihood $p(\xvec)$, so
+ * `forwardBackward(hmmChain(h, x)).logLikelihood` is $\log p(\xvec)$. Throws `DomainError` for a symbol that is not an
+ * integer in $0, \dots, M - 1$.
+ *
+ * @param h The HMM.
+ * @param observations The observed symbol ids $x_0, \dots, x_{N-1}$, each an integer in $0, \dots, M - 1$.
+ * @returns `nodePotentials` ($N \times K$, row $n$ holding $\psi_n$) and `transition`, the HMM's $\Amat$ itself.
+ *
+ * @example Four rolls of the casino's dice: three sixes, then a one
+ * const { nodePotentials, transition } = hmmChain(dishonestCasino(), [5, 5, 5, 0])
+ * print('ψ (fair, loaded) per roll:', nodePotentials)
+ * print('A =', transition)
+ *
+ * @example Filtered probability of the loaded die, by the forward recursion
+ * const { nodePotentials, transition } = hmmChain(dishonestCasino(), [5, 5, 5, 0])
+ * const A = toRows(transition)
+ * let f = [1, 1]
+ * toRows(nodePotentials).forEach((psi, n) => {
+ *   const prior = n === 0 ? [1, 1] : [0, 1].map((v) => f[0] * A[0][v] + f[1] * A[1][v])
+ *   const u = psi.map((p, k) => p * prior[k])
+ *   f = u.map((p) => p / (u[0] + u[1]))
+ *   print(`after roll ${n + 1}: p(loaded) =`, f[1])
+ * })
  */
 export function hmmChain(h: Hmm, observations: ArrayLike<number>): ChainPotentials {
   const K = h.initial.shape[0]
@@ -78,9 +145,19 @@ export function hmmChain(h: Hmm, observations: ArrayLike<number>): ChainPotentia
 }
 
 /**
- * An HMM in the model language (Rabiner, 1989): a chain `time` of length `T` with z₀ ~ Cat(π), z_t | z_{t−1} ~
- * Cat(A[z_{t−1}]) and x_t | z_t ~ Cat(B[z_t]), the parameters as constants. Its latent structure is a chain, so
+ * An HMM in the model language (Rabiner, 1989): a chain `time` of length `T` with $z_0 \sim \Cat(\pivec)$,
+ * $z_t \mid z_{t-1} \sim \Cat(\Amat_{z_{t-1}})$ and $x_t \mid z_t \sim \Cat(\Bmat_{z_t})$ ($\Amat_u$ the row $u$ of
+ * $\Amat$), the parameters as constants `π`, `A` and `B`. Its latent structure is a chain, so
  * `infer(hmmModel(h), { sizes: { T }, data: { x } })` picks forward–backward.
+ *
+ * @param h The HMM whose $\pivec$, $\Amat$ and $\Bmat$ become the model's constants.
+ * @returns The model, named `hidden Markov model`, with the length `T` left as a size to bind.
+ *
+ * @example The casino as a model
+ * const m = hmmModel(dishonestCasino())
+ * print('name:', m.name)
+ * print('nodes:', m.attributes.map((n) => n.name))
+ * print('sizes:', m.sizes)
  */
 export function hmmModel(h: Hmm): Model {
   return model('hidden Markov model', (m) => {
@@ -98,8 +175,17 @@ export function hmmModel(h: Hmm): Model {
 
 /**
  * The occasionally dishonest casino (Durbin et al. 1998, §3.2): a fair die (state 0) and a loaded die (state 1) that
- * rolls a six half the time; the casino switches from fair to loaded with probability 0.05 and back with 0.1. Symbols
- * 0 … 5 are the faces 1 … 6.
+ * rolls a six half the time and each other face with probability 0.1; the casino switches from fair to loaded with
+ * probability 0.05 and back with 0.1, and starts with either die with probability 0.5. Symbols $0, \dots, 5$ are the
+ * faces $1, \dots, 6$.
+ *
+ * @returns The HMM, with state names `fair` and `loaded` and symbol names `1` to `6`.
+ *
+ * @example The fair and the loaded die
+ * const casino = dishonestCasino()
+ * print('states:', casino.stateNames)
+ * print('A =', casino.transition)
+ * print('B =', casino.emission)
  */
 export function dishonestCasino(): Hmm {
   return hmm(
@@ -115,7 +201,20 @@ export function dishonestCasino(): Hmm {
 
 // ── Sampling ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Draw a state path and observations of length n from an HMM (int32 vectors). */
+/**
+ * Draw a state path and its observations from an HMM by ancestral sampling: $y_0 \sim \Cat(\pivec)$,
+ * $y_t \sim \Cat(\Amat_{y_{t-1}})$, $x_t \sim \Cat(\Bmat_{y_t})$. Deterministic in the stream.
+ *
+ * @param s The random stream; step $t$ draws from its children `step`, $t$.
+ * @param model The HMM to sample.
+ * @param n The length of the sequence.
+ * @returns `states` and `observations`, int32 vectors of length `n`.
+ *
+ * @example Twenty rolls at the casino
+ * const { states, observations } = sampleHmm(stream(1), dishonestCasino(), 20)
+ * print('die (1 loaded):', states)
+ * print('faces - 1:     ', observations)
+ */
 export function sampleHmm(s: Stream, model: Hmm, n: number): { states: Vector; observations: Vector } {
   const A = toRows(model.transition)
   const B = toRows(model.emission)

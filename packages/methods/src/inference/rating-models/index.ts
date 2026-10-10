@@ -1,9 +1,25 @@
 /**
- * `aifn-methods/inference/rating-models`: skill rating. Online ratings from paired results: Elo, Glicko and Glicko-2
- * (`elo.ts`); batch comparison models fitted by MM: Bradley–Terry and Plackett–Luce (`paired.ts`); item response
- * theory, 1PL and 2PL by penalised maximum likelihood (`irt.ts`); and TrueSkill: closed-form updates, expectation
- * propagation and its structure in the model language (`examples.ts`); and rating dynamics: every system as an online
- * rater on one game stream, TrueSkill Through Time as the smoother, and the chess sites' settings (`dynamics.ts`).
+ * `aifn-methods/inference/rating-models`: skill ratings from games and answers, online and in batch.
+ *
+ * - Online ratings from paired results: `eloExpected` and `eloUpdate` for one game and `eloRatings` over a sequence;
+ *   Glicko's `glickoG`, `glickoExpected` and `glickoUpdate`, Glicko-2's `glicko2Update`, and `glickoRatings` over
+ *   rating periods. `ratingAgreement` and `runningLogLoss` score a run against the truth and the results.
+ * - Batch comparison models fitted by MM: `bradleyTerry` for pairs and `plackettLuce` for rankings, with
+ *   `bradleyTerryProbability` and `plackettLuceLogProbability`, and `prequentialBradleyTerry` to compare its
+ *   predictions with an online rating's.
+ * - Item response theory: `irtProbability`, `itemInformation`, and `fitIrt` (1PL or 2PL, by marginal maximum
+ *   likelihood with abilities integrated out).
+ * - TrueSkill: the closed-form two-player `trueSkillUpdate` with its `drawMargin`, expectation propagation over a fixed
+ *   set of matches (`trueSkillEp`), and the same factor graph in the model language (`trueSkillModel`).
+ * - Rating dynamics: every system behind one `OnlineRater` interface (`createRater`, from a `RaterSpec`) run on a
+ *   `GameStream` by `rateStream`; `trueSkillThroughTime` as the smoother over the whole stream; `settlingGames`,
+ *   `settledRatings` and `ratingScaleMap` to compare runs; and the settings of real chess sites (`lichessSpec` with
+ *   `LICHESS_PROVISIONAL_RD`, `chessComSpec` with `chessComStarts` and `CHESS_COM_LEVELS`, `fideSpec` with `fideDp`).
+ * - Ratings are on Elo's scale (400 points for odds of $10 : 1$, `ELO_SCALE` points per unit of log-odds, and
+ *   `THURSTONE_BETA` the matching performance noise), except that `trueSkillUpdate`, `trueSkillEp` and
+ *   `trueSkillModel` default to TrueSkill's own $\mu_0 = 25$ scale. A result `{ a, b, score }` is player `a`'s score:
+ *   1, $\tfrac{1}{2}$ or 0. Histories are row-major, one row per step after a starting row.
+ * - `ratingModelAlgorithms` and `ratingModelFunctions` register the functions with the notes they serve.
  */
 
 export { drawMargin } from './examples'
