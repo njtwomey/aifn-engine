@@ -17,34 +17,41 @@ import {
 } from 'aifn-render'
 import { useMemo, useRef, useState } from 'react'
 import { grid } from '@examples/data'
-import { useFrames, useOnScreen } from './live'
+import { useFrames, useNarrow, useOnScreen } from './live'
 
-/** A banana: x₁ ~ N(0, 1.8²), and x₂ given x₁ normal about a parabola: a curved ridge that is hard to walk. */
-const banana = (a: number, b: number) => -0.5 * (a / 1.8) ** 2 - 0.5 * ((b - 1.6 + 0.35 * a * a) / 0.55) ** 2
+/** The doughnut's radius and the spread of the distance from the centre about it. */
+const RADIUS = 2.8
+const WIDTH = 0.4
+/**
+ * A doughnut: the distance from the origin normal about `RADIUS`, every angle alike. A walk has to go round a ring
+ * whose middle is empty, which a random walk does slowly and HMC's momentum carries it along.
+ */
+const doughnut = (a: number, b: number) => -0.5 * ((Math.hypot(a, b) - RADIUS) / WIDTH) ** 2
 const TARGET: LogDensity = {
   kind: 'log-density',
-  name: 'banana',
+  name: 'doughnut',
   dim: 2,
   normalised: false,
   logDensity: (theta) => {
     const [a, b] = toFlat(theta as Tensor)
-    return banana(a, b)
+    return doughnut(a, b)
   },
   grad: (theta) => {
     const [a, b] = toFlat(theta)
-    const r = (b - 1.6 + 0.35 * a * a) / 0.55 ** 2
-    return [-a / 1.8 ** 2 - r * 0.7 * a, -r]
+    const r = Math.max(Math.hypot(a, b), 1e-9)
+    const k = -(r - RADIUS) / (WIDTH * WIDTH * r)
+    return [k * a, k * b]
   },
 }
 
-const gx = grid(-5, 5, 240)
-const gy = grid(-5.5, 3, 240)
-const density = gy.map((b) => gx.map((a) => Math.exp(banana(a, b))))
+const BOX = 4.5
+const gx = grid(-BOX, BOX, 240)
+const density = gx.map((b) => gx.map((a) => Math.exp(doughnut(a, b))))
 /**
- * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ridge, pale where log π = −4
- * and blue in the tails.
+ * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ring, pale where log π = −4
+ * and blue in the middle and outside.
  */
-const shade = gy.map((b) => gx.map((a) => Math.max(-4, Math.min(4, banana(a, b) + 4))))
+const shade = gx.map((b) => gx.map((a) => Math.max(-4, Math.min(4, doughnut(a, b) + 4))))
 /** Draws kept on the plot: the oldest fall away. */
 const KEEP = 600
 
@@ -52,7 +59,7 @@ type Chain = { x: number[]; trajectory: number[][]; accepted: boolean }
 type Sampler = Algorithm<ChainStart, Status & { x: Tensor; accepted: boolean; trajectory?: Tensor }>
 
 /**
- * Hamiltonian Monte Carlo against random-walk Metropolis on a banana-shaped density, one step a frame. HMC's leapfrog
+ * Hamiltonian Monte Carlo against random-walk Metropolis on a doughnut-shaped density, one step a frame. HMC's leapfrog
  * trajectory is drawn as it goes; the draws build up behind. A click moves the chain there; changing the method or
  * step size starts it again.
  */
@@ -61,7 +68,7 @@ export function SamplerRace() {
     method: choice(['HMC', 'random walk'], 'HMC', { label: 'sampler' }),
     step: slider(0.05, 1.2, 0.25, { label: 'step size' }),
   })
-  const [start, setStart] = useState<[number, number]>([-3.5, -3])
+  const [start, setStart] = useState<[number, number]>([-3.6, -3.4])
   const sampler = useMemo(
     () =>
       (s.method === 'HMC'
@@ -91,6 +98,7 @@ export function SamplerRace() {
   }
   const box = useRef<HTMLDivElement>(null)
   const shown = useOnScreen(box)
+  const narrow = useNarrow()
   useFrames(
     shown,
     () => {
@@ -109,17 +117,19 @@ export function SamplerRace() {
     },
     12,
   )
-  const x = useAxis({ label: 'x₁', range: [-5, 5] })
-  const y = useAxis({ label: 'x₂', range: [-5.5, 3] })
+  const x = useAxis({ label: 'x₁', range: [-BOX, BOX] })
+  const y = useAxis({ label: 'x₂', range: [-BOX, BOX], equal: x })
   const now = draws.now
   return (
     <div ref={box}>
       <Figure
-        title="Sample a banana"
-        purpose="Hamiltonian Monte Carlo glides along the ridge; a random walk shuffles. Both target the same density."
+        title="Sample a doughnut"
+        purpose="Hamiltonian Monte Carlo sweeps round the ring; a random walk shuffles. Both target the same density."
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={0.9}
+        controlsCollapsed
         readouts={
           <StatusText>
             {draws.steps > 1
@@ -130,8 +140,17 @@ export function SamplerRace() {
         caption="Click to restart the chain there. Too large a step and proposals fail; too small and it crawls."
       >
         <Plot x={x} y={y} onPlotClick={([a, b]) => setStart([a, b])}>
-          <Raster x={gx} y={gy} z={shade} scale="diverging" range={[-4, 4]} fillOpacity={0.7} valueLabel="log π + 4" />
-          <Contours x={gx} y={gy} z={density} levels={[0.02, 0.1, 0.3, 0.6, 0.9]} labels={false} />
+          <Raster
+            x={gx}
+            y={gx}
+            z={shade}
+            scale="diverging"
+            range={[-4, 4]}
+            fillOpacity={0.7}
+            valueLabel="log π + 4"
+            colorBar={!narrow}
+          />
+          <Contours x={gx} y={gx} z={density} levels={[0.02, 0.1, 0.3, 0.6, 0.9]} labels={false} />
           <Points name="draws" x={draws.xs} y={draws.ys} slot={2} size={7} live />
           {now && now.trajectory.length > 1 && (
             <Curve

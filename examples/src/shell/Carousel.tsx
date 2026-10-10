@@ -38,6 +38,14 @@ export function Carousel({ slides }: { slides: readonly Slide[] }) {
     return () => clearTimeout(id)
   }, [playing, held, index, cycle, n, slides])
   const running = playing && !held
+  // On a narrow screen the tab strip scrolls: keep the slide on show in view (scrolling only the strip, not the page).
+  const strip = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = strip.current
+    const tab = el?.children[index] as HTMLElement | undefined
+    if (!el || !tab || el.scrollWidth <= el.clientWidth) return
+    el.scrollTo({ left: tab.offsetLeft - (el.clientWidth - tab.offsetWidth) / 2, behavior: 'smooth' })
+  }, [index])
   // The frame takes the height of the slide on show (slides differ), following it as the figure resizes.
   const panels = useRef<(HTMLDivElement | null)[]>([])
   const [height, setHeight] = useState<number>()
@@ -57,8 +65,13 @@ export function Carousel({ slides }: { slides: readonly Slide[] }) {
       onBlur={() => setHeld(false)}
       aria-roledescription="carousel"
     >
-      <div className="flex flex-wrap items-center gap-2">
-        <div role="tablist" className="flex flex-wrap gap-1 rounded-lg border bg-card p-1">
+      <div className="flex items-center gap-2">
+        {/* One row that scrolls sideways on a narrow screen, wrapping once there is room. */}
+        <div
+          ref={strip}
+          role="tablist"
+          className="flex min-w-0 [scrollbar-width:none] gap-1 overflow-x-auto rounded-lg border bg-card p-1 sm:flex-wrap"
+        >
           {slides.map((s, i) => (
             <button
               key={s.label}
@@ -66,7 +79,7 @@ export function Carousel({ slides }: { slides: readonly Slide[] }) {
               aria-selected={i === index}
               onClick={() => show(i)}
               className={cn(
-                'relative overflow-hidden rounded-md px-3 py-1.5 text-sm transition-colors',
+                'relative shrink-0 overflow-hidden rounded-md px-3 py-1.5 text-sm whitespace-nowrap transition-colors',
                 i === index ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
               )}
             >
@@ -81,7 +94,7 @@ export function Carousel({ slides }: { slides: readonly Slide[] }) {
             </button>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <Button variant="ghost" size="icon-sm" aria-label="Previous" onClick={() => show(index - 1)}>
             <ChevronLeft />
           </Button>

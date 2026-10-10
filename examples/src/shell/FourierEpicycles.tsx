@@ -117,6 +117,9 @@ const PIECES = 10
 const withAlpha = (hex: string, a: number) =>
   `rgba(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)}, ${a.toFixed(3)})`
 
+/** How much of a loop the pen's trail covers before it has faded out. */
+const TRAIL = 0.45
+
 /** Seconds the pen takes to go once round. */
 const PERIOD = 10
 
@@ -137,15 +140,15 @@ export function FourierEpicycles() {
   const terms = SERIES[s.shape].slice(0, s.terms)
   const centres = chain(terms, theta)
   const pen = centres[centres.length - 1]
-  // The pen's path over the last loop, behind it.
-  const trail = grid(theta - 2 * Math.PI, theta, 700).map((th) => chain(terms, th).at(-1)!)
+  // The pen's path over the last part of a loop (TRAIL of it), behind it.
+  const trail = grid(theta - 2 * Math.PI * TRAIL, theta, Math.round(700 * TRAIL)).map((th) => chain(terms, th).at(-1)!)
   // The trail in pieces counted back from the pen (piece 0 the newest), sharing an end point so they join up.
   const blue = seriesColor(useTheme().resolved, 0)
   const size = Math.ceil(trail.length / PIECES)
   const pieces = Array.from({ length: PIECES }, (_, k) => {
     const to = trail.length - k * size
     const span = trail.slice(Math.max(0, to - size - 1), to)
-    return { span, color: withAlpha(blue, (1 - k / PIECES) ** 1.4) }
+    return { span, color: withAlpha(blue, (1 - k / PIECES) ** 2.2) }
   }).filter((piece) => piece.span.length > 1)
   const rings = { x: [] as number[], y: [] as number[] }
   terms.forEach((t, i) => {
@@ -168,6 +171,8 @@ export function FourierEpicycles() {
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={0.9}
+        controlsCollapsed
         caption="Fewer circles round the shape off; the square's corners ring however many you add."
       >
         <Plot x={x} y={y}>

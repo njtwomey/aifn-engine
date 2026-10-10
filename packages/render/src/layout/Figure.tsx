@@ -96,6 +96,14 @@ export type FigureProps = {
   data?: unknown
   /** The initial size before the reader picks one (default M). */
   defaultSize?: FigureSize
+  /** Start the control rows collapsed, the chart first (a landing page's figures); the reader opens them. */
+  controlsCollapsed?: boolean
+  /**
+   * The least width over height the chart area keeps: where the area is narrow (a phone), its height shrinks to its
+   * width ÷ `aspect`, so a square plot stays square instead of floating in a tall frame. Wide areas keep the size's
+   * height. Left out, the height is the size's at any width.
+   */
+  aspect?: number
   /** Show the values under the pointer as readouts (default true). */
   hoverReadout?: boolean
   children: ReactNode
@@ -120,6 +128,8 @@ export function Figure({
   caption,
   data,
   defaultSize = 'M',
+  aspect,
+  controlsCollapsed = false,
   hoverReadout = true,
   children,
   className,
@@ -211,8 +221,8 @@ export function Figure({
       </header>
       {(state || controls) && (
         <div className="flex w-full flex-col gap-2">
-          {state && <FigureControls state={state} />}
-          {controls && wrapInControlGroup(controls)}
+          {state && <FigureControls state={state} collapsed={controlsCollapsed} />}
+          {controls && wrapInControlGroup(controls, controlsCollapsed)}
         </div>
       )}
       <div
@@ -223,7 +233,7 @@ export function Figure({
       <InsideFigure.Provider value={true}>
         <FrameSlotsContext.Provider value={slots}>
           <FrameContext.Provider value={frame}>
-            <ChartArea width={box.width} height={box.height} onResize={choose}>
+            <ChartArea width={box.width} height={box.height} aspect={aspect} onResize={choose}>
               <FigureBoundary>{children}</FigureBoundary>
             </ChartArea>
           </FrameContext.Provider>
@@ -269,11 +279,11 @@ function hasAnyControlGroup(node: ReactNode): boolean {
   return false
 }
 
-function wrapInControlGroup(controls: ReactNode): ReactNode {
+function wrapInControlGroup(controls: ReactNode, collapsed: boolean): ReactNode {
   if (!controls) return null
   if (hasAnyControlGroup(controls)) return controls
   return (
-    <ControlGroup title="Configuration" collapsible defaultCollapsed={false}>
+    <ControlGroup title="Configuration" collapsible defaultCollapsed={collapsed}>
       {controls}
     </ControlGroup>
   )
@@ -396,15 +406,27 @@ function CopyData({ data }: { data: () => unknown }) {
 function ChartArea({
   width,
   height,
+  aspect,
   onResize,
   children,
 }: {
   width: number | string
   height: number
+  aspect?: number
   onResize: (s: Stored) => void
   children: ReactNode
 }) {
   const ref = useRef<HTMLDivElement>(null)
+  // The area's width as laid out, followed only when the height depends on it.
+  const [room, setRoom] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!aspect || !el) return
+    const ro = new ResizeObserver(() => setRoom(el.offsetWidth))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [aspect])
+  const fitted = aspect && room ? Math.min(height, Math.max(MIN_HEIGHT, Math.round(room / aspect))) : height
   const [drag, setDrag] = useState<{ width: number; height: number } | null>(null)
   const start = useRef<{ x: number; y: number; width: number; height: number; max: number } | null>(null)
 
@@ -414,7 +436,7 @@ function ChartArea({
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
     const max = el.parentElement?.clientWidth ?? Infinity
-    start.current = { x: e.clientX, y: e.clientY, width: el.offsetWidth, height, max }
+    start.current = { x: e.clientX, y: e.clientY, width: el.offsetWidth, height: fitted, max }
   }
   const move = (e: ReactPointerEvent<HTMLDivElement>) => {
     const s = start.current
@@ -429,7 +451,7 @@ function ChartArea({
     if (drag) onResize(drag)
     setDrag(null)
   }
-  const shown = drag ?? { width, height }
+  const shown = drag ?? { width, height: fitted }
 
   return (
     <div

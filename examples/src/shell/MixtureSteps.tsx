@@ -6,10 +6,10 @@ const NAMES = ['a', 'b', 'c', 'd', 'e']
 const BOX = 4.5
 const FRAMES = em()
 
-/** Milliseconds at each frame while the figure plays itself: a look at the start, slow at first, then faster. */
+/** Milliseconds at each frame while the figure plays itself: a look at the start, then ten iterations a second. */
 const wait = (step: number) => {
   const f = FRAMES[step]
-  return f.phase === 'start' ? 800 : f.phase === 'done' ? 2500 : f.iter <= 4 ? 220 : 90
+  return f.phase === 'start' ? 800 : f.phase === 'done' ? 2500 : 100
 }
 /** How long the figure takes to play itself through, plus a moment on the end: its carousel slide's duration. */
 export const MIXTURE_PLAY_MS = playTime(FRAMES.length, wait) + 2500
@@ -41,8 +41,16 @@ export function MixtureSteps() {
         purpose="Five components from one corner, run until the likelihood stops rising."
         hoverReadout={false}
         defaultSize="L"
+        aspect={0.9}
+        controlsCollapsed
         controls={
-          <Player value={step} onChange={set} count={FRAMES.length} format={(s) => `iteration ${FRAMES[s].iter}`} />
+          <Player
+            value={step}
+            onChange={set}
+            count={FRAMES.length}
+            defaultSpeed={10}
+            format={(s) => `iteration ${FRAMES[s].iter}`}
+          />
         }
         readouts={
           <StatusText>{`Iteration ${f.iter}: ${TEXT[f.phase]}. Log-likelihood ${f.logLik.toFixed(1)}.`}</StatusText>

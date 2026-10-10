@@ -185,16 +185,17 @@ export function LeafControl({
 /**
  * The control rows of a figure state (DESIGN.md §4): each `row` and each `variants` field is one labelled row, in
  * declaration order; consecutive plain fields share an unlabelled row; fields placed `onChart` draw no control. Sits
- * in a `Controls` grid (a Figure draws it for `state`).
+ * in a `Controls` grid (a Figure draws it for `state`). `collapsed` starts every row collapsed that does not say
+ * otherwise itself.
  */
 export const FigureControls = memo(
   FigureControlsImpl,
   // A figure re-renders for its readouts and charts too; its rows depend only on the values and the schema (a schema
   // declared once, outside the component, keeps its identity, so the rows are skipped while neither changes).
-  (a, b) => a.state.values === b.state.values && a.state.schema === b.state.schema,
+  (a, b) => a.state.values === b.state.values && a.state.schema === b.state.schema && a.collapsed === b.collapsed,
 )
 
-function FigureControlsImpl({ state }: { state: FigureState<ParamDefs> }) {
+function FigureControlsImpl({ state, collapsed = false }: { state: FigureState<ParamDefs>; collapsed?: boolean }) {
   const defs = state.schema
   const values = state.values as AnyValues
   const seen = flat(values)
@@ -232,7 +233,7 @@ function FigureControlsImpl({ state }: { state: FigureState<ParamDefs> }) {
           title={r.label ?? 'Configuration'}
           description={r.description}
           collapsible={r.collapsible ?? true}
-          defaultCollapsed={r.defaultCollapsed ?? false}
+          defaultCollapsed={r.defaultCollapsed ?? collapsed}
         >
           <ParamControls defs={r.defs} values={values} set={set} />
         </ControlGroup>

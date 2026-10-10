@@ -6,7 +6,7 @@ import { lbfgs } from 'aifn-compute/optim/second-order'
 import { Contours, Curve, Figure, Handle, Plot, Points, Raster, useAxis, type Vec2 } from 'aifn-render'
 import { useRef, useState } from 'react'
 import { grid } from '@examples/data'
-import { useFrames, useOnScreen, useTouched } from './live'
+import { useFrames, useOnScreen, useTouched, useNarrow } from './live'
 
 /** Himmelblau's function: four minima of equal depth, so where an optimiser ends up depends on how it moves. */
 const f = (a: number, b: number) => (a * a + b - 11) ** 2 + (a + b * b - 7) ** 2
@@ -58,6 +58,7 @@ export function OptimiserRace() {
   const [start, setStart] = useState<Vec2>(wander(0))
   const box = useRef<HTMLDivElement>(null)
   const shown = useOnScreen(box)
+  const narrow = useNarrow()
   const { touched, touch } = useTouched(5)
   useFrames(shown && !touched, (t, dt) => {
     const target = wander(t)
@@ -74,10 +75,12 @@ export function OptimiserRace() {
         purpose="Seven first-order methods and L-BFGS from the same start, up to 150 steps each."
         hoverReadout={false}
         defaultSize="L"
+        aspect={1}
+        controlsCollapsed
         caption="The start wanders on its own; drag it to take over. Four minima, and the methods split between them."
       >
         <Plot x={x} y={y}>
-          <Raster x={xs} y={xs} z={z} fillOpacity={0.55} valueLabel="log₁₀(1 + f)" />
+          <Raster x={xs} y={xs} z={z} fillOpacity={0.55} valueLabel="log₁₀(1 + f)" colorBar={!narrow} />
           <Contours x={xs} y={xs} z={z} levels={[0.5, 1, 1.5, 2, 2.5]} />
           {paths.map((p, i) => (
             <Curve key={i} name={METHODS[i].name} x={p.px} y={p.py} slot={i} live />

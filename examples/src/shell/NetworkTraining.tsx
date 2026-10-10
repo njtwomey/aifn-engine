@@ -1,33 +1,82 @@
 import { grad } from 'aifn-compute/foundation/autodiff'
 import { treeLeaves, type Params } from 'aifn-compute/foundation/pytree'
-import { stream } from 'aifn-compute/foundation/random'
-import { add, mean, mul, neg, square, sum, tensor, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
+import { normal, stream, uniform } from 'aifn-compute/foundation/random'
+import { add, mean, mul, neg, square, sum, tensor, toFlat, toRows, type Tensor } from 'aifn-compute/foundation/tensor'
 import { softplus } from 'aifn-compute/numerics/special'
 import { Mlp } from 'aifn-compute/nn'
 import { adamRule, applyUpdates, type RuleState } from 'aifn-compute/optim/first-order'
-import { Button, choice, Figure, Plot, Points, Raster, slider, StatusText, useAxis, useFigureState } from 'aifn-render'
+import {
+  Button,
+  choice,
+  Curve,
+  Figure,
+  Plot,
+  Points,
+  Raster,
+  slider,
+  StatusText,
+  useAxis,
+  useFigureState,
+} from 'aifn-render'
 import { useRef, useState } from 'react'
 import { grid } from '@examples/data'
-import { useFrames, useOnScreen } from './live'
+import { useFrames, useOnScreen, useNarrow } from './live'
 
 type Pt = { x: number; y: number; c: 0 | 1 }
 
-/** Two interleaved spirals, the classic hard case for a small network: a straight line gets half of them wrong. */
+/** Fixed uniform and normal draws that the datasets below place and jitter their points with. */
+const U = toRows(uniform(stream('home/net/data/u'), -3.8, 3.8, { shape: [240, 2] }))
+const Z = toRows(normal(stream('home/net/data/z'), 0, 1, { shape: [260, 2] }))
+
+/**
+ * Two interleaved spirals of nearly two turns each, 130 points an arm with Gaussian noise of sd 0.15: the classic hard
+ * case, where a straight line gets half of them wrong.
+ */
 function spirals(): Pt[] {
   const out: Pt[] = []
-  for (let i = 0; i < 90; i++) {
-    const r = 0.35 + (3.3 * i) / 90
-    const t = 1.9 * r
-    const jitter = 0.12 * Math.sin(i * 12.9898)
+  for (let i = 0; i < 130; i++) {
+    const r = 0.35 + (3.3 * i) / 130
+    const t = 3.2 * r
     for (const c of [0, 1] as const) {
       const a = t + c * Math.PI
-      out.push({ x: (r + jitter) * Math.cos(a), y: (r - jitter) * Math.sin(a), c })
+      const [u, v] = Z[2 * i + c]
+      out.push({ x: r * Math.cos(a) + 0.15 * u, y: r * Math.sin(a) + 0.15 * v, c })
     }
   }
   return out
 }
 
-const net = Mlp([2, 24, 24, 1], { activation: 'tanh' })
+/** A 4 × 4 checkerboard of squares of side 2: sixteen regions, so the network has to carve many corners. */
+const checkerboard = (): Pt[] =>
+  U.map(([x, y]) => ({ x, y, c: ((Math.floor(x / 2) + Math.floor(y / 2)) & 1) as 0 | 1 }))
+
+/** Three noisy rings, the middle one the other class: the boundary is two nested closed curves. */
+const rings = (): Pt[] =>
+  Array.from({ length: 210 }, (_, i) => {
+    const k = i % 3
+    const r = [0.9, 2.1, 3.3][k] + 0.15 * Z[i][0]
+    const a = (2 * Math.PI * i) / 70 + 0.3 * Z[i][1]
+    return { x: r * Math.cos(a), y: r * Math.sin(a), c: (k === 1 ? 1 : 0) as 0 | 1 }
+  })
+
+/** Two interleaved half-moons with noise: one bend, easy for a network and impossible for a line. */
+const moons = (): Pt[] =>
+  Array.from({ length: 200 }, (_, i) => {
+    const c = (i % 2) as 0 | 1
+    const t = (Math.PI * (i >> 1)) / 99
+    const [u, v] = c ? [1 - Math.cos(t), 0.5 - Math.sin(t)] : [Math.cos(t), Math.sin(t)]
+    return { x: 2.2 * (u - 0.5) + 0.2 * Z[i][0], y: 2.2 * (v - 0.25) + 0.2 * Z[i][1], c }
+  })
+
+const DATASETS = { spirals, checkerboard, rings, moons }
+const ORDER = Object.keys(DATASETS) as (keyof typeof DATASETS)[]
+
+/** The network at each width the reader can pick: 2 → w → w → 1, tanh. */
+const WIDTHS = ['8', '16', '32'] as const
+const NETS = Object.fromEntries(WIDTHS.map((w) => [w, Mlp([2, +w, +w, 1], { activation: 'tanh' })])) as Record<
+  (typeof WIDTHS)[number],
+  ReturnType<typeof Mlp>
+>
 const rule = adamRule({ stepSize: 0.01 })
 const gx = grid(-4, 4, 56)
 const GRID = tensor(gx.flatMap((b) => gx.map((a) => [a, b])))
@@ -69,11 +118,18 @@ function surface(logits: ArrayLike<number>): number[][] {
     })
   })
 }
-/** Milliseconds of training per frame: the rest of the frame draws. */
-const BUDGET = 9
+/**
+ * Adam steps per frame (frames come 30 a second): slow enough that a fit of the spirals unfolds over a dozen seconds or
+ * so, the surface finding the arms one fold at a time.
+ */
+const STEPS = 1
+/** Points of the loss curve kept: past this, every other one is dropped, so a long run stays cheap to draw. */
+const CURVE = 1000
+
+type Net = ReturnType<typeof Mlp>
 
 /** The logistic loss of the network's logits against labels ±1, mean over the points. */
-function lossOf(points: Pt[]) {
+function lossOf(net: Net, points: Pt[]) {
   const X = tensor(points.map((p) => [p.x, p.y]))
   const Y = tensor(
     points.map((p) => (p.c ? 1 : -1)),
@@ -85,54 +141,77 @@ function lossOf(points: Pt[]) {
 /** The sum of squares of every weight and bias: the L2 penalty that keeps the surface smooth. */
 const squares = (params: Params) => treeLeaves<Tensor>(params).reduce((a, l) => add(a, sum(square(l.value))), 0)
 
+type View = { step: number; loss: number; accuracy: number; z: number[][]; steps: number[]; losses: number[] }
+const EMPTY: View = { step: 0, loss: NaN, accuracy: NaN, z: [], steps: [], losses: [] }
+
 /**
- * A small network (2 → 24 → 24 → 1, tanh) trained by Adam in the page on two spirals, with an L2 penalty on its weights
- * so the surface stays smooth, its decision surface redrawn as it learns. It trains while on screen; a click adds a point of the chosen class, which it then has to fit. Once it
- * has fitted everything it holds a moment, then starts again from new random weights.
+ * A small network (2 → w → w → 1, tanh) trained by Adam in the page, with an L2 penalty on its weights so the surface
+ * stays smooth: its decision surface redrawn as it learns, and its loss over the steps underneath. It trains while on
+ * screen, a step a frame, and keeps going: once every point is right the loss still falls as the surface sharpens. A
+ * click adds a point of the chosen class, which it then has to fit; new weights, a new dataset or width start over.
  */
 export function NetworkTraining() {
   const s = useFigureState({
-    l2: slider(0, 0.02, 0.003, { label: 'L2 penalty' }),
+    data: choice(ORDER, 'spirals', { label: 'dataset' }),
+    width: choice(WIDTHS, '32', { label: 'units per layer' }),
+    l2: slider(0, 0.003, 0.0001, { step: 0.0001, label: 'L2 penalty' }),
     add: choice(['a', 'b'], 'b', { label: 'a click adds class' }),
   })
-  const [points, setPoints] = useState(spirals)
+  const net = NETS[s.width]
+  const data = s.data
+  const [points, setPoints] = useState(() => DATASETS[data]())
   const box = useRef<HTMLDivElement>(null)
   const shown = useOnScreen(box)
-  const run = useRef({ seed: 0, params: net.init(stream('home/net/0')) as Params, state: null as RuleState | null })
-  const [view, setView] = useState({ step: 0, loss: NaN, accuracy: NaN, z: [] as number[][] })
-  const fitted = useRef(0)
+  const narrow = useNarrow()
+  // The run's weights, optimiser state and seed; `run` is the run they belong to; a new one starts from new weights.
+  const live = useRef({ run: -1, seed: 0, params: null as Params | null, state: null as RuleState | null })
+  const [run, setRun] = useState(0)
+  const [view, setView] = useState<View>(EMPTY)
   const tick = useRef(0)
   const restart = () => {
-    const seed = run.current.seed + 1
-    run.current = { seed, params: net.init(stream(`home/net/${seed}`)) as Params, state: null }
-    fitted.current = 0
-    setView((v) => ({ ...v, step: 0 }))
+    setRun((n) => n + 1)
+    setView(EMPTY)
   }
-  useFrames(shown, (_t, dt) => {
-    const r = run.current
-    const loss = lossOf(points)
+  // A new dataset or width starts a new run.
+  const [seen, setSeen] = useState({ data, width: s.width })
+  if (seen.data !== data || seen.width !== s.width) {
+    if (seen.data !== data) setPoints(DATASETS[data]())
+    setSeen({ data, width: s.width })
+    restart()
+  }
+  useFrames(shown, () => {
+    const r = live.current
+    if (r.run !== run || !r.params) {
+      const seed = r.seed + 1
+      live.current = { run, seed, params: net.init(stream(`home/net/${seed}`)) as Params, state: null }
+      return
+    }
+    const loss = lossOf(net, points)
     const penalised = (p: Params) => add(loss(p), mul(s.l2, squares(p)))
     const g = grad(penalised as never) as unknown as (p: Params) => Params
     r.state ??= rule.init(r.params)
-    let steps = 0
-    const t0 = performance.now()
-    while (performance.now() - t0 < BUDGET) {
+    for (let k = 0; k < STEPS; k++) {
       const u = rule.update(g(r.params), r.state, r.params)
       r.state = u.state
       r.params = applyUpdates(r.params, u.updates)
-      steps++
     }
-    // The surface is redrawn every other frame: it costs about as much as the training.
+    const step = view.step + STEPS
+    // The surface is redrawn every other frame: it costs more than the training.
     const redraw = (tick.current = (tick.current + 1) % 2) === 0 || view.z.length === 0
     const z = redraw ? surface(toFlat(net.apply(r.params as never, GRID) as Tensor)) : view.z
     const own = toFlat(net.apply(r.params as never, tensor(points.map((p) => [p.x, p.y]))) as Tensor)
     const accuracy = points.reduce((a, p, i) => a + ((own[i] > 0 ? 1 : 0) === p.c ? 1 : 0), 0) / points.length
-    fitted.current = accuracy === 1 ? fitted.current + dt : 0
-    if (fitted.current > 3) restart()
-    else setView((v) => ({ step: v.step + steps, loss: Number(loss(r.params)), accuracy, z }))
+    const value = Number(loss(r.params))
+    setView((v) => {
+      const thin = v.steps.length >= CURVE
+      const keep = <T,>(a: T[]) => (thin ? a.filter((_, i) => i % 2 === 0) : a)
+      return { step, loss: value, accuracy, z, steps: [...keep(v.steps), step], losses: [...keep(v.losses), value] }
+    })
   })
   const x = useAxis({ label: 'x₁', range: [-4, 4] })
   const y = useAxis({ label: 'x₂', range: [-4, 4], equal: x })
+  const steps = useAxis({ label: 'step', range: [0, Math.max(300, view.step)] })
+  const losses = useAxis({ label: 'data loss', log: true, range: [0.001, 1] })
   return (
     <div ref={box}>
       <Figure
@@ -141,6 +220,8 @@ export function NetworkTraining() {
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={0.95}
+        controlsCollapsed
         readouts={
           <div className="flex flex-wrap items-center gap-2">
             <StatusText>
@@ -151,12 +232,12 @@ export function NetworkTraining() {
             <Button size="sm" variant="outline" className="ml-auto" onClick={restart}>
               New weights
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setPoints(spirals())}>
+            <Button size="sm" variant="outline" onClick={() => setPoints(DATASETS[data]())}>
               Reset points
             </Button>
           </div>
         }
-        caption="Click the plot to add a point of the chosen class. Raise the L2 penalty for a smoother, less certain fit."
+        caption="Click the plot to add a point of the chosen class. Fewer units and it cannot fold the plane enough; more L2 and the surface is smoother but less sure."
       >
         <Plot
           x={x}
@@ -172,6 +253,7 @@ export function NetworkTraining() {
               range={[-1, 1]}
               fillOpacity={0.45}
               valueLabel="2p − 1"
+              colorBar={!narrow}
               boundary
               live
             />
@@ -184,6 +266,9 @@ export function NetworkTraining() {
             groupNames={['a', 'b']}
             live
           />
+        </Plot>
+        <Plot x={steps} y={losses} scale={0.3}>
+          <Curve name="data loss" x={view.steps} y={view.losses.map((l) => Math.max(l, 0.001))} live />
         </Plot>
       </Figure>
     </div>

@@ -133,6 +133,8 @@ export function TreeGrowth() {
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={1.05}
+        controlsCollapsed
         readouts={
           <StatusText>
             {`${leaves.length} leaves after ${stage} splits: ${((100 * correct) / points.length).toFixed(0)}% of points in a leaf of their class.`}

@@ -24,7 +24,7 @@ import {
 } from 'aifn-render'
 import { useRef, useState } from 'react'
 import { rng } from '@examples/data'
-import { useFrames, useOnScreen } from './live'
+import { useFrames, useOnScreen, useNarrow } from './live'
 
 /** Time steps on screen. */
 const WINDOW = 160
@@ -56,6 +56,7 @@ export function ChangepointStream() {
   const [rows, setRows] = useState<Row[]>([])
   const box = useRef<HTMLDivElement>(null)
   const shown = useOnScreen(box)
+  const narrow = useNarrow()
   useFrames(
     shown,
     () => {
@@ -104,6 +105,8 @@ export function ChangepointStream() {
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={0.9}
+        controlsCollapsed
         readouts={
           <div className="flex flex-wrap items-center gap-2">
             <StatusText>
@@ -147,6 +150,7 @@ export function ChangepointStream() {
                 z={heat}
                 range={[-6, 0]}
                 valueLabel="log₁₀ p(run length)"
+                colorBar={!narrow}
                 live
               />
             )}

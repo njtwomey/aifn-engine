@@ -62,6 +62,7 @@ export function TopBar({ area, onMenu, contained }: { area: Area; onMenu?: () =>
           size="icon-sm"
           className="hidden sm:inline-flex"
           aria-label="Source on GitHub"
+          nativeButton={false}
           render={<a href={REPOSITORY} />}
         >
           <Code />

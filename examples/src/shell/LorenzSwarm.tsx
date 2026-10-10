@@ -6,16 +6,16 @@ import { choice, Curve, Figure, Plot, Points, slider, StatusText, useAxis, useFi
 import { useMemo, useRef, useState } from 'react'
 import { useFrames, useOnScreen } from './live'
 
-const N = 10
-/** One colour per particle, evenly round the hue wheel. */
-const HUES = Array.from({ length: N }, (_, i) => (360 * i) / N)
+const N = 11
+/** One colour per particle, in rainbow order from red to violet. */
+const HUES = Array.from({ length: N }, (_, i) => (280 * i) / (N - 1))
 const RAINBOW = HUES.map((h) => `hsl(${h}, 85%, 58%)`)
 const SIGMA = 10
 const BETA = 8 / 3
 /** Fixed offsets of the swarm from its centre, scaled by the spread. */
 const BALL = toRows(normal(stream('home/lorenz'), 0, 1, { shape: [N, 3] }))
 /** Points of each particle's trail kept on screen. */
-const TAIL = 400
+const TAIL = 150
 /** A trail is drawn as this many pieces, each older one fainter, so it fades out behind the particle. */
 const PIECES = 8
 /** Integration steps per frame, of size H. */
@@ -36,7 +36,7 @@ const lorenz = (rho: number) => (_t: number, v: Tensor) => {
 }
 
 /**
- * Ten particles started almost together in the Lorenz system, integrated by RK4 a few steps a frame and drawn
+ * Eleven particles started almost together in the Lorenz system, integrated by RK4 a few steps a frame and drawn
  * in the x–z plane with short trails. Above ρ ≈ 24.7 nearby particles separate exponentially (chaos) and spread over
  * the butterfly; below it they settle on a fixed point. A click restarts the swarm at that x and z.
  */
@@ -83,7 +83,7 @@ export function LorenzSwarm() {
       return {
         xs: span.map((f) => f[i][0]),
         zs: span.map((f) => f[i][1]),
-        color: `hsla(${HUES[i]}, 85%, 58%, ${((1 - k / PIECES) ** 1.6).toFixed(3)})`,
+        color: `hsla(${HUES[i]}, 85%, 58%, ${((1 - k / PIECES) ** 2.5).toFixed(3)})`,
       }
     }).filter((piece) => piece.xs.length > 1),
   )
@@ -94,10 +94,12 @@ export function LorenzSwarm() {
     <div ref={box}>
       <Figure
         title="Chaos from a single point"
-        purpose="Ten particles started a hair apart in the Lorenz system, integrated by RK4 in the page."
+        purpose="Eleven particles started a hair apart in the Lorenz system, integrated by RK4 in the page."
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={1}
+        controlsCollapsed
         readouts={<StatusText>{`t = ${frames.t.toFixed(1)}`}</StatusText>}
         caption="Click to restart the swarm there. Lower ρ below about 24.7 and the chaos stops: they settle on a point."
       >

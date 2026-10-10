@@ -145,6 +145,8 @@ export function MazeSearch() {
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={1}
+        controlsCollapsed
         readouts={
           <div className="flex flex-wrap items-center gap-2">
             <StatusText>

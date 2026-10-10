@@ -27,9 +27,10 @@ const ring = grid(0, 2 * Math.PI, 60)
 /**
  * The constant-velocity model: the state is position and velocity, (x, y, vₓ, v_y); positions advance by velocity
  * × DT, velocities drift by process noise, and only the position is observed, with noise of standard deviation `r`.
+ * `q` is the process noise: small for a target that turns gently, so the filter leans on its model and its track stays
+ * smooth; larger for one the reader steers by hand, which can turn sharply.
  */
-function model(r: number) {
-  const q = 4
+function model(r: number, q: number) {
   return parseModel(
     {
       A: [
@@ -64,6 +65,9 @@ function model(r: number) {
   )
 }
 
+/** The filter's prior: at rest at the origin, give or take 2 in each coordinate. */
+const START = (({ m0, P0 }) => ({ mean: m0, cov: P0 }))(model(1, 1))
+
 /** The 2σ ellipse of a 2×2 covariance [[a, b], [b, d]] about (x, y). */
 function ellipse(x: number, y: number, a: number, b: number, d: number) {
   const half = (a + d) / 2
@@ -86,14 +90,14 @@ type Track = { truth: number[][]; obs: number[][]; est: number[][]; cov: number[
  */
 export function KalmanTracker() {
   const s = useFigureState({ noise: slider(0.05, 1.2, 0.45, { label: 'reading noise (sd)' }) })
-  const md = useMemo(() => model(s.noise), [s.noise])
   const [target, setTarget] = useState<Vec2>(path(0))
   const [track, setTrack] = useState<Track>({ truth: [], obs: [], est: [], cov: [4, 0, 4] })
-  const filter = useRef<{ mean: Tensor; cov: Tensor }>({ mean: md.m0, cov: md.P0 })
+  const filter = useRef<{ mean: Tensor; cov: Tensor }>(START)
   const noise = useRef(rng(7))
   const box = useRef<HTMLDivElement>(null)
   const shown = useOnScreen(box)
   const { touched, touch } = useTouched(3)
+  const md = useMemo(() => model(s.noise, touched ? 2 : 0.1), [s.noise, touched])
   useFrames(shown, (t, dt) => {
     let truth = target
     if (!touched) {
@@ -127,6 +131,8 @@ export function KalmanTracker() {
         state={s}
         hoverReadout={false}
         defaultSize="L"
+        aspect={1.1}
+        controlsCollapsed
         readouts={
           <StatusText>
             {Number.isFinite(err)

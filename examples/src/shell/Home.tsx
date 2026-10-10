@@ -95,6 +95,7 @@ const STATS = [
   { value: functions, label: 'documented functions' },
   { value: examples, label: 'runnable examples' },
   { value: 0, label: 'servers involved' },
+  { value: 0, label: 'pretrained models' },
 ]
 
 /** An in-app link (`path#hash`): followed in place on a plain click. */
@@ -130,7 +131,7 @@ export function Home() {
 
 function Hero() {
   return (
-    <section className="relative grid items-center gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+    <section className="relative grid grid-cols-1 items-start gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
       <div
         aria-hidden
         className="pointer-events-none absolute -inset-x-16 -top-24 -z-10 h-[520px] bg-[radial-gradient(ellipse_at_top_left,color-mix(in_oklab,#2a78d6_22%,transparent),transparent_60%),radial-gradient(ellipse_at_80%_20%,color-mix(in_oklab,#eb6834_16%,transparent),transparent_55%)]"
@@ -150,10 +151,10 @@ function Hero() {
           Drag a point and the model refits; nothing is computed on a server.
         </p>
         <div className="flex flex-wrap gap-2">
-          <Button size="lg" render={<a {...go('render')} />}>
+          <Button size="lg" nativeButton={false} render={<a {...go('render')} />}>
             Browse the gallery <ArrowRight />
           </Button>
-          <Button size="lg" variant="outline" render={<a {...go('compute')} />}>
+          <Button size="lg" variant="outline" nativeButton={false} render={<a {...go('compute')} />}>
             Read the docs
           </Button>
         </div>
@@ -171,9 +172,9 @@ function Framed({ children }: { children: ReactNode }) {
 
 function Stats() {
   return (
-    <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border md:grid-cols-4">
+    <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border md:grid-cols-5">
       {STATS.map((s) => (
-        <div key={s.label} className="bg-card px-5 py-5">
+        <div key={s.label} className="bg-card px-5 py-5 last:col-span-2 md:last:col-span-1">
           <div className="font-mono text-3xl font-semibold tracking-tight tabular-nums md:text-4xl">
             {s.value.toLocaleString()}
           </div>
@@ -222,13 +223,14 @@ const SLIDES: Slide[] = [
   },
   {
     label: 'Neural network',
-    blurb: 'A small network trained live on two spirals; click to add points and watch it refit.',
+    blurb:
+      'A small network learning two noisy spirals live, its loss underneath. Click to add points and watch it refit.',
     Figure: NetworkTraining,
-    duration: 12000,
+    duration: 22000,
   },
   {
     label: 'Sampling',
-    blurb: 'Hamiltonian Monte Carlo against a random walk on a banana-shaped density. Click to move the chain.',
+    blurb: 'Hamiltonian Monte Carlo against a random walk on a doughnut-shaped density. Click to move the chain.',
     Figure: SamplerRace,
     duration: 10000,
   },
@@ -246,7 +248,7 @@ const SLIDES: Slide[] = [
   },
   {
     label: 'Chaos',
-    blurb: 'A swarm started a hair apart in the Lorenz system, flying apart. Drop ρ and the chaos stops.',
+    blurb: 'Eleven particles started a hair apart in the Lorenz system, flying apart. Drop ρ and the chaos stops.',
     Figure: LorenzSwarm,
     duration: 10000,
   },
@@ -346,7 +348,7 @@ function Mosaic() {
         <SectionHead id="recipes" kicker="Render Gallery" title={`${ENTRIES.length} recipes, one question each`}>
           Every picture is a live figure and the few lines that make it.
         </SectionHead>
-        <Button variant="outline" render={<a {...go('render')} />}>
+        <Button variant="outline" nativeButton={false} render={<a {...go('render')} />}>
           See them all <ArrowRight />
         </Button>
       </div>

@@ -60,3 +60,20 @@ export function useTouched(idle = 5) {
   }
   return { touched, touch }
 }
+
+/**
+ * Whether the screen is narrow (under Tailwind's `sm`, 640px: a phone), where a figure drops what costs it width, such
+ * as a colour bar.
+ */
+export function useNarrow() {
+  const query = '(max-width: 639px)'
+  const [narrow, setNarrow] = useState(() => typeof matchMedia !== 'undefined' && matchMedia(query).matches)
+  useEffect(() => {
+    if (typeof matchMedia === 'undefined') return
+    const m = matchMedia(query)
+    const on = () => setNarrow(m.matches)
+    m.addEventListener('change', on)
+    return () => m.removeEventListener('change', on)
+  }, [])
+  return narrow
+}

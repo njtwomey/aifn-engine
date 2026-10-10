@@ -53,6 +53,8 @@ export function HeroFigure() {
     <Figure
       title="Drag the data"
       purpose="A Gaussian process, refitted in your browser on every move."
+      aspect={1.2}
+      controlsCollapsed
       state={s}
       hoverReadout={false}
       caption="Drag any ink point; the mean, the ±2 sd band and three posterior draws follow."
