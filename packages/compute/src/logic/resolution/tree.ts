@@ -6,14 +6,19 @@
 import type { Clause, Substitution, Term } from 'aifn-compute/logic/terms'
 import type { SldState } from './sld'
 
-/** How a node ended: still `open` at the last step, a `success` (empty resolvent), a `failure`, `pruned` by a cut,
- * cut off at the depth `limit`, or an `error`. Inner nodes that were expanded are `expanded`. */
+/**
+ * How a node ended: still `open` at the last step, a `success` (empty resolvent), a `failure`, `pruned` by a cut, cut
+ * off at the depth `limit`, or an `error`. Inner nodes that were expanded are `expanded`.
+ */
 export type SldNodeStatus = 'open' | 'expanded' | 'success' | 'failure' | 'pruned' | 'limit' | 'error'
 
 /** A node of the SLD tree. */
 export interface SldNode {
+  /** The node's id: its index in the array `sldTree` returns. */
   readonly id: number
+  /** The parent node's id, or null for the root. */
   readonly parent: number | null
+  /** The number of edges from the root. */
   readonly depth: number
   /** The goal resolved at the parent to reach this node (null for the root and resumed alternatives). */
   readonly goal: Term | null
@@ -21,6 +26,7 @@ export interface SldNode {
   readonly clause: number | null
   /** The clause head renamed apart, for clause steps. */
   readonly head: Term | null
+  /** The bindings made on the edge from the parent (empty for alternatives, pruned nodes and the root). */
   readonly unifier: Substitution
   /** A short description: `clause 2`, a built-in's note, an alternative's note, or why it was pruned. */
   readonly note: string
@@ -28,6 +34,7 @@ export interface SldNode {
   readonly goals: readonly Term[]
   /** The query's variables (by id) at this node. */
   readonly answer: readonly Term[]
+  /** How the node ended, as of the last state given. */
   readonly status: SldNodeStatus
   /** The step that created the node, and the step that closed it (success, failure, error), if any. */
   readonly created: number
@@ -39,7 +46,22 @@ export interface SldNode {
 
 /**
  * The SLD tree of a run from its states, in step order (e.g. a trace's `steps` with every state kept). Statuses are as
- * of the last state given; read a node's `created` and `closed` against a step t to draw the tree at step t.
+ * of the last state given; read a node's `created` and `closed` against a step $t$ to draw the tree at step $t$.
+ *
+ * @param states Every state of a run of `sldSteps`, from step 0 on, in order: a state left out loses the nodes its
+ *   step created.
+ * @param clauses The program's clauses (`program.clauses`), used only to add each clause's source line to the notes.
+ * @returns The nodes, each at the index of its id.
+ *
+ * @example The tree of a query that backtracks
+ * const program = prologProgram('p(a). p(b). q(b).')
+ * const tr = trace(sldSteps(program, 'p(X), q(X)'), undefined, 20)
+ * for (const n of sldTree(tr.steps, program.clauses)) print(n.id, n.parent, n.status, n.note)
+ *
+ * @example A branch pruned by a cut
+ * const program = prologProgram('p(a). p(b). first(X) :- p(X), !.')
+ * const tr = trace(sldSteps(program, 'first(X)'), undefined, 20)
+ * for (const n of sldTree(tr.steps, program.clauses)) print(n.id, n.parent, n.status, n.note)
  */
 export function sldTree(states: readonly SldState[], clauses?: readonly Clause[]): SldNode[] {
   const nodes: (SldNode & { status: SldNodeStatus; closed: number | null })[] = []

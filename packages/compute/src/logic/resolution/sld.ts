@@ -1,10 +1,11 @@
 /**
  * A small Prolog: SLD resolution with depth-first search and backtracking, as a step-through `Algorithm`.
  *
- * The state is the textbook one. A resolvent is a list of goals; resolving its first goal G against a clause H :- B
- * (renamed apart) with the most general unifier θ of G and H gives the resolvent (B, rest)θ. The query's variables are
- * kept instantiated in `answer`, so the empty resolvent is a solution with the answer's bindings. When G has several
- * clauses whose heads unify, the remaining ones are kept on a stack of choice points; a goal with none fails, and the
+ * The state is the textbook one. A resolvent is a list of goals; resolving its first goal $G$ against a clause
+ * $H \leftarrow B$ (renamed apart) with the most general unifier $\theta$ of $G$ and $H$ gives the resolvent
+ * $(B, \text{rest})\theta$. The query's variables are kept instantiated in `answer`, so the empty resolvent is a
+ * solution with the answer's bindings. When $G$ has several clauses whose heads unify, the remaining ones are kept on
+ * a stack of choice points; a goal with none fails, and the
  * search backtracks to the most recent choice point (depth first, left to right, clauses in program order: the order
  * of standard Prolog's solutions).
  *
@@ -14,9 +15,10 @@
  * disjunction, `call/1` and `findall/3` are built from choice points and internal goals, so they show in the tree too.
  *
  * Built-ins: `true`, `fail`/`false`, `!`, `,`, `;`, `->`, `\+`/`not`, `call/1`, `findall/3`, `=`, `\=`, `==`, `\==`,
- * `is`, `=:=`, `=\=`, `<`, `>`, `=<`, `>=`, `var`, `nonvar`, `atom`, `number`, `integer`, `atomic`, `write`, `print`,
- * `nl`. The library (`member`, `append`, `select`, `permutation`, `reverse`, `length`, `last`, `sum_list`, `between`)
- * is Prolog source in `library.ts`.
+ * `is`, `=:=`, `=\=`, `<`, `>`, `=<`, `>=`, `var`, `nonvar`, `atom`, `number`, `integer`, `atomic`, `ground`,
+ * `write`, `print`, `nl`. A goal that raises an error (an unknown predicate, unbound arithmetic) ends the run with the
+ * error reported in the state, not thrown. The library (`member`, `append`, `select`, `permutation`, `reverse`,
+ * `length`, `last`, `sum_list`, `between`) is Prolog source in `library.ts`.
  */
 import { DomainError } from 'aifn-compute/foundation/errors'
 import { run, type Algorithm } from 'aifn-compute/foundation/trace'
@@ -45,6 +47,7 @@ import { LIBRARY_SOURCE } from './library'
 
 /** A program ready to run: its clauses (the program's, then the library's it does not replace) indexed by predicate. */
 export interface PrologProgram {
+  /** The clauses: the program's own in source order, then the library's. */
   readonly clauses: readonly Clause[]
   /** Where each clause came from: the program, or the library. */
   readonly sources: readonly ('program' | 'library')[]
@@ -54,7 +57,25 @@ export interface PrologProgram {
 
 const LIBRARY = parseProgram(LIBRARY_SOURCE).clauses
 
-/** A program from Prolog text or clauses, with the library predicates it does not define (`library: false` for none). */
+/**
+ * A program from Prolog text or clauses, with the library predicates it does not define (`library: false` for none).
+ * A predicate the program defines (by `name/arity`) replaces the library's of the same name and arity.
+ *
+ * @param source Prolog text (read with `parseProgram`, which throws `PrologSyntaxError`; queries in it are ignored) or
+ *   clauses already read.
+ * @param options `library`: false to leave the library out; it is added when left out or true.
+ * @returns The clauses, where each came from, and the clause indices of each predicate.
+ *
+ * @example A program and the library predicates it gets
+ * const p = prologProgram('parent(tom, bob). parent(bob, ann).')
+ * print('predicates:', Object.keys(p.predicates).join(', '))
+ * print('clauses from the library:', p.sources.filter((s) => s === 'library').length)
+ * print('without the library:', prologProgram('parent(tom, bob).', { library: false }).clauses.length)
+ *
+ * @example A program's own definition replaces the library's
+ * const p = prologProgram('member(X, [X|_]).')
+ * print(solveQuery(p, 'member(X, [a, b])').answers)
+ */
 export function prologProgram(source: string | readonly Clause[], options: { library?: boolean } = {}): PrologProgram {
   const own = typeof source === 'string' ? parseProgram(source).clauses : [...source]
   const defined = new Set(own.map((c) => indicator(c.head)))
@@ -73,57 +94,83 @@ export function prologProgram(source: string | readonly Clause[], options: { lib
 
 /** A goal of a resolvent and the choice-point height a cut inside it cuts back to. */
 export interface SldGoal {
+  /** The goal. */
   readonly term: Term
+  /** The number of choice points a cut (`!`) in this goal keeps: those made before its clause was called. */
   readonly cut: number
 }
 
 /** A choice point: where the search resumes on backtracking. `node` is the tree node where the choice was made. */
 export type SldChoice =
   | {
+      /** Further clauses for a goal. */
       readonly kind: 'clauses'
+      /** The tree node where the choice was made. */
       readonly node: number
+      /** That node's depth. */
       readonly depth: number
       /** The goal being resolved, its rest of the resolvent, and the answer then. */
       readonly goal: Term
+      /** The goals after the one being resolved. */
       readonly rest: readonly SldGoal[]
+      /** The query's variables at the choice. */
       readonly answer: readonly Term[]
       /** Clauses still to try, all with heads that unify with the goal. */
       readonly clauses: readonly number[]
     }
   | {
+      /** The other branch of `;`, the else branch of if-then-else, or the success of `\+`. */
       readonly kind: 'alternative'
+      /** The tree node where the choice was made. */
       readonly node: number
+      /** That node's depth. */
       readonly depth: number
+      /** The resolvent to resume with. */
       readonly goals: readonly SldGoal[]
+      /** The query's variables to resume with. */
       readonly answer: readonly Term[]
       /** What resuming means, e.g. "\+ G succeeds: G has no proof". */
       readonly note: string
     }
   | {
+      /** A `findall/3` collecting results: resuming it ends the collection. */
       readonly kind: 'findall'
+      /** The tree node where `findall` was called. */
       readonly node: number
+      /** That node's depth. */
       readonly depth: number
+      /** The goals after the `findall`. */
       readonly rest: readonly SldGoal[]
+      /** The query's variables when `findall` was called. */
       readonly answer: readonly Term[]
       /** The list argument, unified with the collected results when the search inside is exhausted. */
       readonly result: Term
+      /** The instances of the template collected so far. */
       readonly results: readonly Term[]
     }
 
 /** A branch removed by a cut before it was tried: a node in the tree, never expanded. */
 export interface PrunedBranch {
+  /** Its tree node. */
   readonly node: number
+  /** The tree node of the choice it belonged to. */
   readonly parent: number
   /** The clause it would have used, or null for an alternative of `;`, `->` or `\+`. */
   readonly clause: number | null
+  /** Why it was removed: `cut`, or the note of the alternative. */
   readonly note: string
 }
 
-/** What one step did. Every kind but `exhausted` names the tree node it created or closed. */
+/**
+ * What one step did. Every kind but `exhausted` names the tree node it created or closed: `start` the root, `resolve`
+ * and `builtin` a child of `parent`, `alternative` a branch resumed on backtracking, `success` and `fail` close the
+ * current node, `error` ends the run, and `exhausted` means no choice point is left.
+ */
 export type SldEvent =
   | { readonly kind: 'start'; readonly node: number }
   | {
       readonly kind: 'resolve'
+      /** The node created, and the node of the goal resolved. */
       readonly node: number
       readonly parent: number
       /** The goal resolved and the clause used (renamed apart), with their most general unifier. */
@@ -138,20 +185,29 @@ export type SldEvent =
     }
   | {
       readonly kind: 'builtin'
+      /** The node created, and the node of the goal run. */
       readonly node: number
       readonly parent: number
+      /** The built-in goal. */
       readonly goal: Term
+      /** The bindings it made (empty for a test). */
       readonly unifier: Substitution
+      /** What it did, in words. */
       readonly note: string
+      /** The branches a cut (or a committed if-then-else) removed. */
       readonly pruned: readonly PrunedBranch[]
     }
   | { readonly kind: 'alternative'; readonly node: number; readonly parent: number; readonly note: string }
   | { readonly kind: 'success'; readonly node: number; readonly solution: number }
   | {
       readonly kind: 'fail'
+      /** The node that failed. */
       readonly node: number
+      /** The goal that failed, or null for an internal goal (negation as failure, `findall`). */
       readonly goal: Term | null
+      /** Why, in words. */
       readonly reason: string
+      /** The branches removed when `\+ G` fails because $G$ was proved. */
       readonly pruned: readonly PrunedBranch[]
     }
   | { readonly kind: 'error'; readonly node: number; readonly goal: Term; readonly message: string }
@@ -159,14 +215,19 @@ export type SldEvent =
 
 /** A solution: the named query variables' values. */
 export interface SldSolution {
+  /** Each named query variable (names starting with `_` left out) and its value. */
   readonly bindings: readonly { readonly name: string; readonly value: Term }[]
+  /** The tree node of the empty resolvent. */
   readonly node: number
+  /** The step that found it. */
   readonly step: number
 }
 
 /** The state of `sldSteps`. */
 export interface SldState {
+  /** The step number. */
   t: number
+  /** True once the run has ended (see `stopped`). */
   terminated?: boolean
   /** The current resolvent, or null after a success or failure (the next step backtracks). */
   readonly goals: readonly SldGoal[] | null
@@ -175,18 +236,22 @@ export interface SldState {
   /** The tree node of the current resolvent, and its depth (the number of steps from the query). */
   readonly node: number
   readonly depth: number
+  /** The choice points, oldest first: backtracking resumes the last. */
   readonly choices: readonly SldChoice[]
   /** The next fresh variable id, and the number of tree nodes so far. */
   readonly fresh: number
   readonly nodes: number
   /** Clause uses so far: renamed variables are suffixed with it (`X_3`). */
   readonly renames: number
+  /** What this step did. */
   readonly event: SldEvent
+  /** The solutions found so far, in order. */
   readonly solutions: readonly SldSolution[]
   /** What `write`, `print` and `nl` produced. */
   readonly output: string
   /** True once a branch was cut off at the depth limit (answers may then be missing). */
   readonly depthLimited: boolean
+  /** The message of the error that ended the run, or null. */
   readonly error: string | null
   /** Why the search ended: every branch explored, enough solutions, or an error. */
   readonly stopped: 'exhausted' | 'solutions' | 'error' | null
@@ -204,8 +269,23 @@ export interface SldOptions {
 
 // ── Arithmetic ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * An error raised by a goal (unbound arithmetic, a type error, division by zero): `sldSteps` catches it and ends the
+ * run with `stopped: 'error'` instead of letting it escape.
+ */
 class PrologError extends Error {}
 
+/**
+ * The value of an arithmetic expression, as `is/2` and the comparisons evaluate it: numbers, the constants `pi`, `e`
+ * and `inf` (or `infinite`); unary `-`, `+`, `abs`, `sign`, `sqrt`, `exp`, `log`, `floor`, `ceiling`, `round`,
+ * `truncate`; binary `+`, `-`, `*`, `/`, `//`, `mod`, `rem`, `min`, `max`, `**` and `^`. `//`, `mod` and `rem` need
+ * integers; `//` truncates towards zero, and `mod` takes the sign of the divisor and `rem` that of the dividend.
+ * Throws `PrologError` for an unbound variable, an atom that is not a constant, a non-integer where an integer is
+ * needed, division by zero with `/`, `//` or `mod`, and an unknown function.
+ *
+ * @param t The expression; every variable in it must be bound.
+ * @returns Its value.
+ */
 function evaluate(t: Term): number {
   switch (t.kind) {
     case 'number':
@@ -284,6 +364,7 @@ function evaluate(t: Term): number {
   }
 }
 
+/** The arithmetic comparisons, by name: both sides are evaluated first. */
 const COMPARE: Record<string, (a: number, b: number) => boolean> = {
   '=:=': (a, b) => a === b,
   '=\\=': (a, b) => a !== b,
@@ -293,6 +374,7 @@ const COMPARE: Record<string, (a: number, b: number) => boolean> = {
   '>=': (a, b) => a >= b,
 }
 
+/** The type tests, by name: each takes one argument and binds nothing. */
 const TYPE_TESTS: Record<string, (t: Term) => boolean> = {
   var: (t) => t.kind === 'var',
   nonvar: (t) => t.kind !== 'var',
@@ -305,12 +387,36 @@ const TYPE_TESTS: Record<string, (t: Term) => boolean> = {
 
 // ── The algorithm ────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A term as Prolog text, for the notes and reasons of events.
+ *
+ * @param t The term.
+ * @returns Its text.
+ */
 const show = (t: Term) => termToString(t)
 
 /**
- * SLD resolution of `query` against `program`, one tree event per step (see the module comment). Step 0 is the query
+ * SLD resolution of `query` against `program`, one tree event per step (see the file comment). Step 0 is the query
  * (node 0); the run ends (`terminated`) when the choice points are exhausted, `maxSolutions` are found, or a goal
- * raises an error (an unknown predicate, unbound arithmetic). Branches deeper than `maxDepth` fail with a note.
+ * raises an error (an unknown predicate, unbound arithmetic). A branch that reaches depth `maxDepth` fails with a note
+ * and sets `depthLimited`. Steps after the end change nothing but `t`.
+ *
+ * @param program The program to run, as `prologProgram` returns it.
+ * @param query The query: as `parseQuery` returns it, or its text (read with `parseQuery`). Its variables whose names
+ *   start with `_` are left out of the solutions.
+ * @param options The depth and solution limits and the occurs check (see `SldOptions`).
+ * @returns The algorithm: `init` takes no argument and gives the state at the query; run it with `run` or `trace`.
+ *
+ * @example Run to the end and read the solutions
+ * const alg = sldSteps(prologProgram('p(a). p(b).'), 'p(X)')
+ * const s = run(alg, undefined, 20)
+ * print('solutions:', s.solutions.map(formatSolution).join('; '))
+ * print('stopped:', s.stopped, 'at step', s.t)
+ *
+ * @example Each step is one event: resolve, fail, backtrack
+ * const tr = trace(sldSteps(prologProgram('p(a). p(b). q(b).'), 'p(X), q(X)'), undefined, 20)
+ * const what = (e) => (e.kind === 'resolve' ? `clause ${e.clause}` : (e.reason ?? ''))
+ * for (const s of tr.steps) print(s.t, s.event.kind, what(s.event))
  */
 export function sldSteps(
   program: PrologProgram,
@@ -754,18 +860,35 @@ export function sldSteps(
 
 /** The outcome of `solveQuery`. */
 export interface SolveResult {
+  /** The solutions found, in order. */
   readonly solutions: readonly SldSolution[]
   /** Solutions as text, e.g. `X = tom, Y = ann` (`true` for a solution without named variables). */
   readonly answers: readonly string[]
+  /** The steps taken. */
   readonly steps: number
+  /**
+   * Why the search ended: every branch explored, `maxSolutions` found, an error, or the step limit reached first.
+   */
   readonly stopped: 'exhausted' | 'solutions' | 'error' | 'steps'
   /** Why the search stopped, for a reader: an error, the step limit, or the depth limit cutting branches off. */
   readonly message: string
+  /** True when some branch was cut off at the depth limit (answers may then be missing). */
   readonly depthLimited: boolean
+  /** What `write`, `print` and `nl` produced. */
   readonly output: string
 }
 
-/** Prints the bindings of a solution as `X = a, Y = [b, c]` (`true` when none is bound). */
+/**
+ * The bindings of a solution as `X = a, Y = [b, c]` (`true` when none is bound). A variable left unbound (its value
+ * is still the query variable of that name) is omitted, as Prolog's top level does.
+ *
+ * @param solution A solution of `sldSteps` or `solveQuery`.
+ * @returns The text.
+ *
+ * @example A solution with bindings, and one without
+ * print(solveQuery('likes(mary, wine).', 'likes(mary, X)').solutions.map(formatSolution))
+ * print(solveQuery('likes(mary, wine).', 'likes(mary, wine)').solutions.map(formatSolution))
+ */
 export function formatSolution(solution: SldSolution): string {
   // Variables left unbound are omitted, as Prolog's top level does.
   const bound = solution.bindings.filter((b) => !(b.value.kind === 'var' && b.value.name === b.name))
@@ -775,7 +898,30 @@ export function formatSolution(solution: SldSolution): string {
 
 /**
  * Run `sldSteps` to the end: every solution in standard Prolog order (or the first `maxSolutions`), stopping after
- * `maxSteps` steps (default 100 000) with a message saying so.
+ * `maxSteps` steps (default 100 000) with a message saying so. A goal's error is reported in the result, not thrown.
+ *
+ * @param program The program, or its Prolog text (read with `prologProgram`, library included).
+ * @param query The query, as in `sldSteps`.
+ * @param options The `SldOptions`, and `maxSteps`, the most steps to take (default 100 000; less than 1 throws
+ *   `DomainError`).
+ * @returns The solutions, as bindings and as text, with the steps taken and why the search stopped.
+ *
+ * @example Every ancestor of tom
+ * const facts = 'parent(tom, bob). parent(bob, ann). parent(bob, pat).'
+ * const rules = 'ancestor(X, Y) :- parent(X, Y). ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).'
+ * const program = `${facts} ${rules}`
+ * const r = solveQuery(program, 'ancestor(tom, W)')
+ * print(r.answers)
+ * print(r.message)
+ *
+ * @example findall, negation as failure and cut
+ * print(solveQuery('', 'findall(X, member(X, [a, b, c]), L), length(L, N)').answers)
+ * print(solveQuery('', '\\+ member(d, [a, b])').answers)
+ * print(solveQuery('max(X, Y, X) :- X >= Y, !. max(_, Y, Y).', 'max(3, 7, M)').answers)
+ *
+ * @example A search that does not end, and an error
+ * print(solveQuery('loop :- loop.', 'loop', { maxSteps: 50 }).message)
+ * print(solveQuery('', 'X is Y + 1').message)
  */
 export function solveQuery(
   program: PrologProgram | string,

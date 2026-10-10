@@ -6,16 +6,19 @@
  * example still uncovered; literals are added until it covers no negative example; the positives it covers are
  * removed, and the loop continues until none are left. The inner loop is greedy: of all literals that can be added,
  * the one with the highest FOIL gain is chosen. Clauses are evaluated on tuples (bindings of the clause's variables):
- * a literal that introduces a new variable extends each tuple by every value that makes the literal true. With p₀, n₀
- * the positive and negative tuples before the literal, p₁, n₁ after, and t the positive tuples before that have at
- * least one extension,
- *
- *     gain = t · (log₂ p₁/(p₁ + n₁) − log₂ p₀/(p₀ + n₀)).
+ * a literal that introduces a new variable extends each tuple by every value that makes the literal true. With $p_0$,
+ * $n_0$ the positive and negative tuples before the literal, $p_1$, $n_1$ after, and $t$ the positive tuples before
+ * that have at least one extension, the gain is
+ * $t \left(\log_2 \frac{p_1}{p_1 + n_1} - \log_2 \frac{p_0}{p_0 + n_0}\right)$.
  *
  * Background relations are extensional (sets of ground facts). The target may appear in a body (recursion); it is then
  * true of the positive examples, as in FOIL, and its arguments must be variables already bound and not the head's
- * own tuple. A finished clause is simplified by dropping literals it does not need. The inner loop is `refinementSearchSteps` of `aifn-compute/optim/search` with beam width 1: the refinements of a
- * clause are the clause with one more literal (`foilRefinements`) and the quality of each is its gain.
+ * own tuple. A finished clause is simplified by dropping literals it does not need. The inner loop is
+ * `refinementSearchSteps` of `aifn-compute/optim/search` with beam width 1: the refinements of a clause are the clause
+ * with one more literal (`foilRefinements`) and the quality of each is its gain.
+ *
+ * Constants are interned: a problem's relations and examples are tuples of constant ids, indices into its
+ * `constants`, and a clause's variables are numbered, the head's $0, \dots, a - 1$ for a target of arity $a$ first.
  */
 import { DomainError } from 'aifn-compute/foundation/errors'
 import type { Algorithm, Status } from 'aifn-compute/foundation/contracts'
@@ -35,27 +38,48 @@ import {
 
 /** A relation: its name, arity and tuples of constant ids. */
 export interface FoilRelation {
+  /** The predicate's name. */
   readonly name: string
+  /** Its number of arguments. */
   readonly arity: number
+  /** Its ground facts, each a tuple of `arity` constant ids, without repeats. */
   readonly tuples: readonly (readonly number[])[]
 }
 
 /** A FOIL problem with constants interned: relation tuples and examples are arrays of constant ids. */
 export interface FoilProblem {
+  /** The relation to learn: its name and arity. */
   readonly target: { readonly name: string; readonly arity: number }
+  /** The constants' names, indexed by id. */
   readonly constants: readonly string[]
+  /** The background relations, in order of first appearance. */
   readonly relations: readonly FoilRelation[]
+  /** The positive examples, each a tuple of constant ids. */
   readonly positives: readonly (readonly number[])[]
+  /** The negative examples, each a tuple of constant ids. */
   readonly negatives: readonly (readonly number[])[]
 }
 
+/**
+ * The name a constant is interned under: an atom's name, or a number's text. Throws `DomainError` for a variable or
+ * compound term.
+ *
+ * @param t An argument of a fact or example.
+ * @returns Its name.
+ */
 const constantName = (t: Term): string => {
   if (t.kind === 'atom') return t.name
   if (t.kind === 'number') return String(t.value)
   throw new DomainError('foilProblem', `foilProblem: ${termToString(t)} is not a constant`)
 }
 
-/** Ground atoms from text (facts separated by full stops) or terms. */
+/**
+ * Ground atoms from text (facts separated by full stops) or terms. Throws `DomainError` when one has a variable.
+ *
+ * @param x Prolog text, of which the head of each clause is taken (a body is ignored), or the terms themselves.
+ * @param what What they are, for the error message.
+ * @returns The atoms.
+ */
 const groundAtoms = (x: string | readonly Term[], what: string): Term[] => {
   const terms = typeof x === 'string' ? parseProgram(x).clauses.map((c) => c.head) : [...x]
   for (const t of terms) if (!isGround(t)) throw new DomainError('foilProblem', `foilProblem: ${what} must be ground`)
@@ -64,8 +88,24 @@ const groundAtoms = (x: string | readonly Term[], what: string): Term[] => {
 
 /**
  * A FOIL problem from ground background facts and examples (Prolog text or terms). Without `negatives`, the closed
- * world assumption gives every tuple of the examples' constants that is not positive. The target is the predicate of
- * the positives.
+ * world assumption gives every tuple of the problem's constants (those of the background facts and of the examples)
+ * that is not positive. The target is the predicate of the positives. Throws `DomainError` when there is no positive,
+ * an example is of another predicate, a background fact is of the target, an argument is not a constant, or the closed
+ * world has more than 200 000 tuples.
+ *
+ * @param background The background facts: ground atoms, as Prolog text (`parent(ann, bob). ...`) or terms.
+ * @param positives The positive examples of the target, ground atoms of one predicate.
+ * @param negatives The negative examples, of the same predicate; when left out, the closed world gives them.
+ * @returns The problem, its constants numbered in order of first appearance (background first).
+ *
+ * @example Grandparents, with closed-world negatives
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * print('constants:', problem.constants.join(', '))
+ * print('positives:', problem.positives)
+ * print('closed-world negatives:', problem.negatives.length)
  */
 export function foilProblem(
   background: string | readonly Term[],
@@ -137,9 +177,13 @@ export function foilProblem(
 
 // ── Clauses being grown ──────────────────────────────────────────────────────────────────────────────────────────────
 
-/** A body literal: a relation (index into `relations`, or −1 for the target itself) applied to variables by index. */
+/**
+ * A body literal: a relation (index into `relations`, or $-1$ for the target itself) applied to variables by index.
+ */
 export interface FoilLiteral {
+  /** The relation's index in `relations`, or $-1$ for the target. */
   readonly relation: number
+  /** The variable of each argument, by index. */
   readonly args: readonly number[]
 }
 
@@ -148,14 +192,20 @@ export interface FoilLiteral {
  * the counts the gain of its last literal was computed from.
  */
 export interface FoilNode {
+  /** The body literals, in order. */
   readonly body: readonly FoilLiteral[]
-  /** Variables 0…arity−1 are the head's. */
+  /** The number of variables; variables $0, \dots, a - 1$ ($a$ the target's arity) are the head's. */
   readonly variables: number
+  /** The positive tuples the clause covers. */
   readonly pos: readonly (readonly number[])[]
+  /** The negative tuples the clause covers. */
   readonly neg: readonly (readonly number[])[]
+  /** The positive and negative tuples before the last literal. */
   readonly p0: number
   readonly n0: number
+  /** The positive tuples before the last literal that it extends. */
   readonly t: number
+  /** The FOIL gain of the last literal (0 for the empty body). */
   readonly gain: number
 }
 
@@ -165,7 +215,10 @@ export interface FoilOptions {
   maxBodyLength?: number
   /** Clauses at most (default 6). */
   maxClauses?: number
-  /** New variables a literal may introduce (default: the relation's arity − 1). */
+  /**
+   * New variables a literal may introduce (default and largest: the relation's arity $-1$, so a literal uses at least
+   * one variable of the clause).
+   */
   maxNewVariables?: number
   /** Allow the target in bodies (default true). */
   recursion?: boolean
@@ -173,20 +226,63 @@ export interface FoilOptions {
 
 const log2 = Math.log2
 
-/** FOIL gain t · (log₂ p₁/(p₁+n₁) − log₂ p₀/(p₀+n₀)); −∞ when no positive tuple survives. */
+/**
+ * FOIL gain $t \left(\log_2 \frac{p_1}{p_1 + n_1} - \log_2 \frac{p_0}{p_0 + n_0}\right)$: the information gained
+ * about the positive tuples, weighted by the positives kept. $-\infty$ when no positive tuple survives (or there was
+ * none before).
+ *
+ * @param p0 The positive tuples $p_0$ before the literal.
+ * @param n0 The negative tuples $n_0$ before the literal.
+ * @param p1 The positive tuples $p_1$ after it.
+ * @param n1 The negative tuples $n_1$ after it.
+ * @param t The positive tuples $t$ before the literal that have at least one extension after it.
+ * @returns The gain in bits.
+ *
+ * @example A literal that keeps the positives and drops every negative
+ * print(foilGain(2, 14, 2, 0, 2))
+ * print(foilGain(2, 14, 2, 4, 2))
+ * print(foilGain(2, 14, 0, 3, 0))
+ */
 export function foilGain(p0: number, n0: number, p1: number, n1: number, t: number): number {
   if (p1 === 0 || p0 === 0) return -Infinity
   return t * (log2(p1 / (p1 + n1)) - log2(p0 / (p0 + n0)))
 }
 
-/** The relation a literal names, its name and arity. */
+/**
+ * The relation a literal names, its name and arity.
+ *
+ * @param problem The problem.
+ * @param r The literal's `relation`: an index into `problem.relations`, or $-1$ for the target.
+ * @returns The relation (the target's name and arity for $-1$).
+ */
 const relationOf = (problem: FoilProblem, r: number) =>
   r < 0 ? { name: problem.target.name, arity: problem.target.arity } : problem.relations[r]
 
-/** Variable names: the head's A, B, …; then C, D, … for new ones. */
+/**
+ * The name of variable `i`: A to Z, then `V26`, `V27`, …. The head's variables come first, so a target of arity 2 has
+ * the head `A, B` and new variables `C, D, …`.
+ *
+ * @param i The variable's index, from 0.
+ * @returns Its name.
+ *
+ * @example Variable names
+ * print([0, 1, 2, 25, 26].map(foilVariableName).join(' '))
+ */
 export const foilVariableName = (i: number): string => (i < 26 ? String.fromCharCode(65 + i) : `V${i}`)
 
-/** A literal (or the head with `relation` −1 and args 0…arity−1) as a term. */
+/**
+ * A literal (or the head, with `relation` $-1$ and args $0, \dots, a - 1$) as a term, its variables named by
+ * `foilVariableName`.
+ *
+ * @param problem The problem the literal belongs to.
+ * @param literal The literal: a relation index ($-1$ for the target) and its argument variables.
+ * @returns The term, such as `parent(A, C)`; variable $i$ has id $i$.
+ *
+ * @example A literal as a term
+ * const problem = foilProblem('parent(ann, bob).', 'grandparent(ann, bob).')
+ * const t = foilLiteralTerm(problem, { relation: 0, args: [0, 2] })
+ * print(t.functor, t.args.map((v) => v.name).join(', '))
+ */
 export function foilLiteralTerm(problem: FoilProblem, literal: FoilLiteral): Term {
   const r = relationOf(problem, literal.relation)
   return compound(
@@ -195,7 +291,19 @@ export function foilLiteralTerm(problem: FoilProblem, literal: FoilLiteral): Ter
   )
 }
 
-/** The clause as `{ head, body }` terms. */
+/**
+ * The clause as `{ head, body }` terms: the head is the target applied to the head's variables.
+ *
+ * @param problem The problem the clause is for.
+ * @param body The body literals, in order (empty for the clause that covers everything).
+ * @returns The head and body goals as terms.
+ *
+ * @example The grandparent clause as terms
+ * const problem = foilProblem('parent(ann, bob). parent(bob, cid).', 'grandparent(ann, cid).')
+ * const { head, body } = foilClause(problem, [{ relation: 0, args: [0, 2] }, { relation: 0, args: [2, 1] }])
+ * print('head:', head.functor, head.args.map((v) => v.name).join(', '))
+ * print('body:', body.map((g) => `${g.functor}(${g.args.map((v) => v.name).join(', ')})`).join(', '))
+ */
 export function foilClause(problem: FoilProblem, body: readonly FoilLiteral[]): { head: Term; body: Term[] } {
   const head = foilLiteralTerm(problem, {
     relation: -1,
@@ -204,7 +312,18 @@ export function foilClause(problem: FoilProblem, body: readonly FoilLiteral[]): 
   return { head, body: body.map((l) => foilLiteralTerm(problem, l)) }
 }
 
-/** The clause as Prolog text. */
+/**
+ * The clause as Prolog text: `head.` for an empty body, `head :- literal, literal.` otherwise.
+ *
+ * @param problem The problem the clause is for.
+ * @param body The body literals, in order.
+ * @returns The text.
+ *
+ * @example A clause and the empty clause
+ * const problem = foilProblem('parent(ann, bob). parent(bob, cid).', 'grandparent(ann, cid).')
+ * print(foilClauseText(problem, [{ relation: 0, args: [0, 2] }, { relation: 0, args: [2, 1] }]))
+ * print(foilClauseText(problem, []))
+ */
 export function foilClauseText(problem: FoilProblem, body: readonly FoilLiteral[]): string {
   const { head, body: goals } = foilClause(problem, body)
   return goals.length === 0
@@ -212,20 +331,45 @@ export function foilClauseText(problem: FoilProblem, body: readonly FoilLiteral[
     : `${termToString(head)} :- ${goals.map((g) => termToString(g)).join(', ')}.`
 }
 
-/** The root node of a clause search: no body, one tuple per example. */
+/**
+ * The root node of a clause search: no body, one tuple per example.
+ *
+ * @param positives The positive examples still uncovered, by index into `problem.positives`.
+ * @param problem The problem; all its negatives are included.
+ * @returns The node, each tuple the example's index followed by its constants.
+ */
 function rootNode(positives: readonly number[], problem: FoilProblem): FoilNode {
   const pos = positives.map((e) => [e, ...problem.positives[e]])
   const neg = problem.negatives.map((x, e) => [e, ...x])
   return { body: [], variables: problem.target.arity, pos, neg, p0: pos.length, n0: neg.length, t: pos.length, gain: 0 }
 }
 
-/** Index of each relation's tuples: a set of keys, for membership tests on bound arguments. */
+/**
+ * Index of each relation's tuples: a set of keys, for membership tests on bound arguments. `arity` and `tuples` are
+ * the relation's (the positives for the target), `keys` each tuple joined with commas.
+ */
 type Indexed = { arity: number; tuples: readonly (readonly number[])[]; keys: Set<string> }
 
 /**
  * The candidate literals for a clause, each with the clause it makes (tuples extended, counts and gain): the
  * refinement operator of FOIL's search. Argument tuples use at least one variable of the clause; new variables are
- * numbered in order of first use, so each literal is generated once.
+ * numbered in order of first use, so each literal is generated once. A literal already in the body is skipped, and so
+ * is the target applied to the head's own variables; the target takes no new variables.
+ *
+ * @param problem The problem.
+ * @param node The clause to refine, with its tuples: a root, or an earlier refinement.
+ * @param options Only `maxNewVariables` and `recursion` are read (see `FoilOptions`).
+ * @returns The refined clauses, by relation (the target last) and then argument tuple.
+ *
+ * @example The first literals FOIL considers for grandparent
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * const root = foilSteps(problem).init().current
+ * const refined = foilRefinements(problem, root)
+ * print(refined.length, 'refinements')
+ * for (const n of refined.slice(0, 4)) print(foilClauseText(problem, n.body), 'gain', n.gain)
  */
 export function foilRefinements(problem: FoilProblem, node: FoilNode, options: FoilOptions = {}): FoilNode[] {
   const recursion = options.recursion ?? true
@@ -273,7 +417,14 @@ export function foilRefinements(problem: FoilProblem, node: FoilNode, options: F
   return out
 }
 
-/** The clause with `literal` added: tuples extended by every binding of its new variables that makes it true. */
+/**
+ * The clause with `literal` added: tuples extended by every binding of its new variables that makes it true.
+ *
+ * @param node The clause before the literal.
+ * @param literal The literal to add; its new variables are numbered from `node.variables` on.
+ * @param rel The literal's relation, with its tuples and their keys.
+ * @returns The extended clause, with $p_0$, $n_0$, $t$ and the gain of the literal.
+ */
 function extend(node: FoilNode, literal: FoilLiteral, rel: Indexed): FoilNode {
   const v = node.variables
   const fresh = literal.args.filter((a) => a >= v)
@@ -324,13 +475,33 @@ function extend(node: FoilNode, literal: FoilLiteral, rel: Indexed): FoilNode {
   }
 }
 
-/** The distinct examples (by index) a node's tuples come from. */
+/**
+ * The distinct examples (by index) a node's tuples come from, in ascending order.
+ *
+ * @param tuples Tuples of a `FoilNode`, each starting with the index of its example.
+ * @returns The example indices.
+ *
+ * @example Two tuples of example 2 and one of example 0
+ * print(coveredExamples([[2, 5, 1], [0, 3, 3], [2, 6, 1]]))
+ */
 export const coveredExamples = (tuples: readonly (readonly number[])[]): number[] =>
   [...new Set(tuples.map((t) => t[0]))].sort((a, b) => a - b)
 
 /**
  * The examples a clause body covers, by backtracking over bindings (not tuples): an example is covered when some
  * binding of the body's other variables makes every literal true. The target in a body is true of the positives.
+ *
+ * @param problem The problem.
+ * @param body The body literals; the head's variables are bound to each example in turn.
+ * @returns The indices of the positives and of the negatives covered.
+ *
+ * @example The grandparent clause covers no negative; its first literal alone does
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * print(foilCoverage(problem, [{ relation: 0, args: [0, 2] }, { relation: 0, args: [2, 1] }]))
+ * print(foilCoverage(problem, [{ relation: 0, args: [0, 2] }]))
  */
 export function foilCoverage(
   problem: FoilProblem,
@@ -373,7 +544,13 @@ export function foilCoverage(
   return { positives: which(problem.positives), negatives: which(problem.negatives) }
 }
 
-/** The body with variables after the head's renumbered in order of first use (after literals were removed). */
+/**
+ * The body with variables after the head's renumbered in order of first use (after literals were removed).
+ *
+ * @param arity The target's arity: variables below it are the head's and keep their numbers.
+ * @param body The body literals.
+ * @returns The body with the other variables numbered from `arity` on.
+ */
 function renumber(arity: number, body: readonly FoilLiteral[]): FoilLiteral[] {
   const map = new Map<number, number>()
   return body.map((l) => ({
@@ -388,7 +565,23 @@ function renumber(arity: number, body: readonly FoilLiteral[]): FoilLiteral[] {
 
 /**
  * FOIL's clause simplification: drop each literal (first to last) whose removal keeps the clause covering no negatives
- * and at least the same positives. Returns the simplified body and the literals removed.
+ * and at least as many positives. The last literal is never dropped. Returns the simplified body and the literals
+ * removed.
+ *
+ * @param problem The problem.
+ * @param body The body of a learned clause.
+ * @returns `body`, the literals kept with their new variables renumbered, and `removed`, the literals dropped.
+ *
+ * @example A literal the clause does not need
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * const body = [{ relation: 0, args: [0, 2] }, { relation: 0, args: [2, 1] }, { relation: 0, args: [2, 3] }]
+ * const simple = foilSimplify(problem, body)
+ * print(foilClauseText(problem, body))
+ * print(foilClauseText(problem, simple.body))
+ * print('removed:', simple.removed)
  */
 export function foilSimplify(
   problem: FoilProblem,
@@ -412,7 +605,9 @@ export function foilSimplify(
 
 /** A clause FOIL has learned, with the examples it covers. */
 export interface FoilLearned {
+  /** The simplified body. */
   readonly body: readonly FoilLiteral[]
+  /** The clause as Prolog text. */
   readonly text: string
   /** Positive examples it covers that were still uncovered when it was learned. */
   readonly newlyCovered: readonly number[]
@@ -423,17 +618,25 @@ export interface FoilLearned {
 
 /** A candidate literal of one step, with its counts and gain. */
 export interface FoilCandidate {
+  /** The literal. */
   readonly literal: FoilLiteral
+  /** The literal as text. */
   readonly text: string
+  /** The positive and negative tuples after it. */
   readonly p: number
   readonly n: number
+  /** The positive tuples before it that it extends. */
   readonly t: number
+  /** Its FOIL gain. */
   readonly gain: number
+  /** The positive and negative examples the clause with it covers. */
   readonly positives: readonly number[]
   readonly negatives: readonly number[]
 }
 
-/** What a step of `foilSteps` did. */
+/**
+ * What a step of `foilSteps` did: `start`, a `literal` added, a `clause` learned, `stuck` (with why), or `done`.
+ */
 export type FoilEvent =
   | { readonly kind: 'start' }
   | { readonly kind: 'literal'; readonly chosen: FoilCandidate }
@@ -449,20 +652,46 @@ export interface FoilState extends Status {
   readonly uncovered: readonly number[]
   /** The clause being grown, and its search's state. */
   readonly current: FoilNode
+  /** The clause being grown, as text. */
   readonly currentText: string
+  /** The state of the refinement search growing it. */
   readonly search: SearchState<FoilNode>
   /** The candidates scored at this step, best first, and the positives and negatives the clause covers now. */
   readonly candidates: readonly FoilCandidate[]
   readonly coveredPositives: readonly number[]
   readonly coveredNegatives: readonly number[]
+  /** What this step did. */
   readonly event: FoilEvent
+  /** True once FOIL has stopped. */
   readonly terminated: boolean
 }
 
 /**
  * FOIL as a step-through algorithm: each step adds the best literal to the clause being grown (showing every
  * candidate's gain), commits a clause that covers no negatives (removing the positives it covers), or stops when the
- * positives are covered, no literal has positive gain, or a limit is reached.
+ * positives are covered, no literal has positive gain, or a limit is reached. Throws `DomainError` when
+ * `maxBodyLength` is less than 1.
+ *
+ * @param problem The problem, as `foilProblem` makes it.
+ * @param options The limits on clauses, literals and new variables, and whether recursion is allowed (see
+ *   `FoilOptions`).
+ * @returns The algorithm: `init` takes no argument; run it with `run` or `trace`.
+ *
+ * @example Step through learning grandparent
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * const tr = trace(foilSteps(problem), undefined, 10)
+ * for (const s of tr.steps) print(s.t, s.event.kind, s.currentText)
+ *
+ * @example The candidates scored at the first step
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * const s = run(foilSteps(problem), undefined, 1)
+ * for (const c of s.candidates.slice(0, 4)) print(c.text, 'gain', c.gain, 'p', c.p, 'n', c.n)
  */
 export function foilSteps(problem: FoilProblem, options: FoilOptions = {}): Algorithm<void, FoilState> {
   const maxBody = options.maxBodyLength ?? 4
@@ -582,14 +811,42 @@ export function foilSteps(problem: FoilProblem, options: FoilOptions = {}): Algo
 
 /** The outcome of `foil`: the learned clauses as Prolog text, and the positives left uncovered. */
 export interface FoilResult {
+  /** Each learned clause as Prolog text. */
   readonly clauses: readonly string[]
+  /** The clauses, one per line. */
   readonly program: string
+  /** The positive examples (indices) left uncovered. */
   readonly uncovered: readonly number[]
+  /** The steps taken. */
   readonly steps: number
+  /** Why FOIL stopped, in words. */
   readonly stopped: string
 }
 
-/** Run FOIL to the end (see `foilSteps`). */
+/**
+ * Run FOIL to the end (see `foilSteps`), with a step limit large enough for every clause to reach the body limit.
+ *
+ * @param problem The problem, as `foilProblem` makes it.
+ * @param options The limits and recursion switch (see `FoilOptions`).
+ * @returns The learned clauses as text, the positives left uncovered, and why it stopped.
+ *
+ * @example Learn grandparent from parent
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'grandparent(ann, cid). grandparent(bob, dan).',
+ * )
+ * const result = foil(problem)
+ * print(result.program)
+ * print(result.stopped, 'in', result.steps, 'steps')
+ *
+ * @example A recursive definition
+ * const problem = foilProblem(
+ *   'parent(ann, bob). parent(bob, cid). parent(cid, dan).',
+ *   'ancestor(ann, bob). ancestor(bob, cid). ancestor(cid, dan). ' +
+ *     'ancestor(ann, cid). ancestor(bob, dan). ancestor(ann, dan).',
+ * )
+ * print(foil(problem).program)
+ */
 export function foil(problem: FoilProblem, options: FoilOptions = {}): FoilResult {
   const limit = ((options.maxBodyLength ?? 4) + 1) * (options.maxClauses ?? 6) + 2
   const s = run(foilSteps(problem, options), undefined, limit)

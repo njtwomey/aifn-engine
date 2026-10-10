@@ -5,7 +5,8 @@
  * and `_`, which is fresh at each occurrence), compound terms, lists `[a, b | T]`, the standard operators (`:-`, `;`,
  * `->`, `,`, `\+`, `=`, `\=`, `==`, `\==`, `is`, the arithmetic comparisons, `+ - * / // mod rem ** ^`, prefix `-`),
  * `%` and `/* … *\/` comments. A program is a sequence of clauses, each ending in a full stop; `?- Goal.` is a query.
- * Errors carry a line and column.
+ * Each clause or query numbers its variables 0, 1, … in order of first occurrence. Errors are `PrologSyntaxError`s,
+ * which carry a line and column.
  */
 import { DomainError } from 'aifn-compute/foundation/errors'
 import {
@@ -21,9 +22,21 @@ import {
   type Term,
 } from './terms'
 
-/** A syntax error, with the 1-based line and column of the token it was found at. */
+/**
+ * A syntax error, with the 1-based line and column of the token it was found at; its message ends with both.
+ *
+ * @example Where a program fails to parse
+ * try {
+ *   parseProgram('p(a).\nq(b :- c.')
+ * } catch (e) {
+ *   print(e.name, e.message)
+ *   print('line', e.line, 'column', e.column)
+ * }
+ */
 export class PrologSyntaxError extends DomainError {
+  /** The 1-based line of the offending token. */
   readonly line: number
+  /** The 1-based column of the offending token. */
   readonly column: number
   constructor(message: string, line: number, column: number) {
     super('parseProgram', `${message} (line ${line}, column ${column})`)
@@ -33,23 +46,45 @@ export class PrologSyntaxError extends DomainError {
   }
 }
 
+/**
+ * What a token is: a `name` (an atom or functor, quoted or not, including symbol runs, `!` and `;`), a `var`, a
+ * `number`, `punct` (brackets, `,` and `|`), the `end` full stop of a clause, or `eof` after the last token.
+ */
 type TokenKind = 'name' | 'var' | 'number' | 'punct' | 'end' | 'eof'
+/** A token of Prolog text, with where it starts. */
 interface Token {
+  /** What the token is. */
   kind: TokenKind
+  /** Its text; for a quoted atom, the name with the quotes and escapes resolved. */
   text: string
+  /** The value of a `number` token. */
   value?: number
   /** True when a `(` follows immediately: a functor, not an operator applied to a bracketed term. */
   functional?: boolean
   /** True when the token was quoted: never an operator. */
   quoted?: boolean
+  /** The 1-based line it starts on. */
   line: number
+  /** The 1-based column it starts at. */
   column: number
+  /** The 0-based offset of its first character in the text. */
   offset: number
 }
 
+/** A symbol character: runs of them make atoms such as `=<` and `:-`. */
 const SYMBOL = /[+\-*/\\^<>=~:.?@#&$]/
+/** A character that continues a name or variable. */
 const ALNUM = /[A-Za-z0-9_]/
 
+/**
+ * Split Prolog text into tokens. White space and comments are skipped; a full stop followed by white space, `%` or
+ * the end of the text is an `end` token; single- and double-quoted text is a quoted atom (`''` and backslash escapes
+ * inside). Throws `PrologSyntaxError` for an unterminated comment or quoted atom and for a character that starts no
+ * token.
+ *
+ * @param src The Prolog text.
+ * @returns The tokens in order, ending with an `eof` token.
+ */
 function tokenize(src: string): Token[] {
   const out: Token[] = []
   let i = 0
@@ -160,7 +195,9 @@ function tokenize(src: string): Token[] {
 
 /** Variables of one clause by name; `_` is fresh at each occurrence. */
 class Scope {
+  /** The name of each variable, indexed by id. */
   readonly names: string[] = []
+  /** The id of each named variable (not `_`). */
   private readonly ids = new Map<string, number>()
   get(name: string): Term {
     if (name === '_') {
@@ -177,13 +214,23 @@ class Scope {
   }
 }
 
-/** Tokens that cannot start a term: after a prefix operator they mean the operator is an atom. */
+/**
+ * Whether a token can start a term: a number, a variable, an opening bracket, or a name that is not an infix-only
+ * operator. After a prefix operator, a token that cannot means the operator is an atom.
+ *
+ * @param t The token after the prefix operator.
+ * @returns True when `t` can start the operator's argument.
+ */
 const startsTerm = (t: Token): boolean =>
   t.kind === 'number' ||
   t.kind === 'var' ||
   (t.kind === 'punct' && (t.text === '(' || t.text === '[' || t.text === '{')) ||
   (t.kind === 'name' && !(t.text in INFIX && !(t.text in PREFIX) && !t.functional))
 
+/**
+ * An operator-precedence parser over the tokens of one text: `parse(max)` reads a term of priority at most `max`,
+ * numbering the variables of the current clause in its `Scope`, which `resetScope` replaces between clauses.
+ */
 class Parser {
   private i = 0
   private readonly tokens: Token[]
@@ -307,6 +354,7 @@ class Parser {
 
 /** A clause `head :- body` with its variables numbered 0, 1, … in order of first occurrence. */
 export interface Clause {
+  /** The head: an atom or compound. */
   readonly head: Term
   /** The body as a list of goals (the top-level conjunction flattened); empty for a fact. */
   readonly body: readonly Term[]
@@ -318,12 +366,23 @@ export interface Clause {
 
 /** A query `?- goals.` with its variables numbered by first occurrence. */
 export interface Query {
+  /** The goals (the top-level conjunction flattened), left to right. */
   readonly goals: readonly Term[]
+  /** Variable names by id. */
   readonly variableNames: readonly string[]
+  /** Where the query starts in the source (1-based); 1 for `parseQuery`. */
   readonly line: number
 }
 
-/** The goals of a conjunction `a, b, c` (left to right). */
+/**
+ * The goals of a conjunction `a, b, c` (left to right), however it is bracketed.
+ *
+ * @param term A goal, usually a conjunction; a term that is not `,` with two arguments is a single goal.
+ * @returns The goals that are not themselves conjunctions, in order.
+ *
+ * @example Flatten a conjunction
+ * print(conjuncts(parseTerm('a, (b, c), d')).map((g) => termToString(g)).join(' | '))
+ */
 export function conjuncts(term: Term): Term[] {
   const out: Term[] = []
   const go = (t: Term) => {
@@ -336,15 +395,43 @@ export function conjuncts(term: Term): Term[] {
   return out
 }
 
-/** The conjunction `g₁, …, gₙ` of goals (`true` when empty). */
+/**
+ * The conjunction $g_1, \dots, g_n$ of goals, nested to the right (`true` when empty).
+ *
+ * @param goals The goals $g_1, \dots, g_n$, in order.
+ * @returns The conjunction, the goal itself when there is one, or the atom `true` when there are none.
+ *
+ * @example Join goals into one term
+ * print(termToString(conjunction([atom('a'), atom('b'), atom('c')])))
+ * print(termToString(conjunction([])))
+ */
 export function conjunction(goals: readonly Term[]): Term {
   if (goals.length === 0) return atom('true')
   return goals.slice(0, -1).reduceRight((acc, g) => compound(',', [g, acc]), goals[goals.length - 1])
 }
 
+/**
+ * True when a term can be a goal or a clause head: an atom or a compound.
+ *
+ * @param t The term.
+ * @returns Whether `t` is callable.
+ */
 const callable = (t: Term) => t.kind === 'atom' || t.kind === 'compound'
 
-/** A program's clauses and queries, read from Prolog text. Throws `PrologSyntaxError` with a line and column. */
+/**
+ * A program's clauses and queries, read from Prolog text. Throws `PrologSyntaxError` with a line and column, also for
+ * a directive (`:- Goal.`) and for a clause head that is not callable or is a conjunction or disjunction.
+ *
+ * @param source The Prolog text: clauses, each ending in a full stop, and queries written `?- Goal.`.
+ * @returns `clauses` and `queries`, each in source order, with its own variables numbered from 0.
+ *
+ * @example Read a program with a query
+ * const source = 'parent(tom, bob). grandparent(X, Z) :- parent(X, Y), parent(Y, Z). ?- grandparent(tom, W).'
+ * const { clauses, queries } = parseProgram(source)
+ * print(clauses.map((c) => clauseToString(c)).join('\n'))
+ * print('variables of clause 2:', clauses[1].variableNames.join(', '))
+ * print('query:', queries[0].goals.map((g) => termToString(g)).join(', '))
+ */
 export function parseProgram(source: string): { clauses: Clause[]; queries: Query[] } {
   const tokens = tokenize(source)
   const parser = new Parser(tokens, new Scope())
@@ -372,7 +459,18 @@ export function parseProgram(source: string): { clauses: Clause[]; queries: Quer
   return { clauses, queries }
 }
 
-/** A query read from text such as `grandparent(X, Y)` or `?- member(X, [a, b]).` (the `?-` and stop optional). */
+/**
+ * A query read from text such as `grandparent(X, Y)` or `?- member(X, [a, b]).` (the `?-` and stop optional). Throws
+ * `PrologSyntaxError` for empty text, a syntax error, or more than one term.
+ *
+ * @param source The query text: one term, a conjunction of goals.
+ * @returns The query, its goals flattened and its variables numbered by first occurrence.
+ *
+ * @example The goals and variables of a query
+ * const q = parseQuery('?- parent(X, Y), parent(Y, Z).')
+ * print('goals:', q.goals.map((g) => termToString(g)).join(' | '))
+ * print('variables:', q.variableNames.join(', '))
+ */
 export function parseQuery(source: string): Query {
   let text = source.trim()
   if (text.startsWith('?-')) text = text.slice(2)
@@ -387,12 +485,33 @@ export function parseQuery(source: string): Query {
   return { goals: conjuncts(term), variableNames: scope.names, line: 1 }
 }
 
-/** One term read from text (no full stop needed); its variables numbered by first occurrence. */
+/**
+ * One term read from text (no full stop needed; a leading `?-` is dropped); its variables numbered by first occurrence.
+ * Throws `PrologSyntaxError` as `parseQuery` does.
+ *
+ * @param source The text of one term.
+ * @returns The term.
+ *
+ * @example Operators and lists
+ * const t = parseTerm('1 + 2 * 3')
+ * print(termToString(t), 'has functor', t.functor)
+ * print(termToString(parseTerm('[H|T]')), termToString(parseTerm("'hello world'")))
+ */
 export function parseTerm(source: string): Term {
   return conjunction(parseQuery(source).goals)
 }
 
-/** A clause as Prolog text: `head.` or `head :- g₁, g₂.` */
+/**
+ * A clause as Prolog text: `head.` for a fact, or `head :- goal, goal.` for a rule.
+ *
+ * @param clause The head and body goals: a `Clause`, or any object with those two fields.
+ * @param options How variables print, as in `termToString`.
+ * @returns The text, ending in a full stop.
+ *
+ * @example A rule and a fact
+ * print(clauseToString(parseProgram('p(X):-q(X,Y),\\+r(Y).').clauses[0]))
+ * print(clauseToString({ head: atom('sunny'), body: [] }))
+ */
 export function clauseToString(clause: { head: Term; body: readonly Term[] }, options: PrintOptions = {}): string {
   if (clause.body.length === 0) return `${termToString(clause.head, options)}.`
   return `${termToString(compound(':-', [clause.head, conjunction(clause.body)]), options)}.`

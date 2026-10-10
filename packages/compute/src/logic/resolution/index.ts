@@ -1,8 +1,18 @@
 /**
- * `aifn-compute/logic/resolution`: a small Prolog. SLD resolution with depth-first search and backtracking as a step-through
- * algorithm (`sldSteps`: each step one node of the SLD tree, with the goal, clause and unifier; cut-pruned branches
- * reported), `solveQuery` to run a query to the end with step and depth limits, programs with a library of list predicates
- * (`prologProgram`), and `sldTree` to read the search tree out of a trace.
+ * `aifn-compute/logic/resolution`: a small Prolog, SLD resolution with depth-first search and backtracking.
+ *
+ * - Programs: `prologProgram` indexes clauses by predicate and adds the library predicates the program does not define
+ *   (`LIBRARY_SOURCE`: `member`, `append`, `length`, `between`, ...).
+ * - Running a query: `sldSteps` is the step-through algorithm, each step one node of the SLD tree (the goal, clause
+ *   and unifier; branches a cut removes reported as pruned); `solveQuery` runs it to the end with step and depth
+ *   limits and says why it stopped; `formatSolution` prints a solution's bindings.
+ * - Reading the search: `sldTree` builds the SLD tree from a trace's states, with when each node was created and
+ *   closed.
+ * - `resolutionAlgorithms` and `resolutionFunctions`: the module's registry entries.
+ *
+ * Built-ins include cut, negation as failure, if-then-else, `call/1`, `findall/3`, unification and identity tests,
+ * arithmetic and type tests. Solutions come in standard Prolog order. A goal that raises an error (an unknown
+ * predicate, unbound arithmetic) ends the run with the error in the state; nothing is thrown.
  */
 
 export {

@@ -1,4 +1,9 @@
 /**
+ * The Prolog library that `prologProgram` adds to every program: list predicates and `between/3`, written in Prolog
+ * so that their resolution steps show in the SLD tree like a program's own.
+ */
+
+/**
  * The library predicates every program can call, written in Prolog. A program's own definition of the same
  * name/arity replaces the library's. Solution orders match SWI-Prolog's `lists` and `between/3`.
  */
