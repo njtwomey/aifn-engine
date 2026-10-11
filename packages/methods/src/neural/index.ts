@@ -12,6 +12,8 @@
  *   `aifn-methods/neural/privacy`, differentially private training by DP-SGD against the privacy spent.
  * - Continuous depth: `aifn-methods/neural/ode`, neural ODEs, a continuous normalising flow and a latent ODE;
  *   `aifn-methods/neural/ode-mixtures`, neural ODEs with stochastic vector field mixtures.
+ * - Physics: `aifn-methods/neural/pinn`, physics-informed networks that solve Burgers' and the heat equation from the
+ *   equation alone, against their exact solutions.
  * - Adapting and aligning a trained model: `aifn-methods/neural/post-training` (SFT, DPO and GRPO on toy policies, with
  *   GRPO's advantages and pass@$k$), `aifn-methods/neural/adaptation` (fitting a weight change with LoRA or PiSSA),
  *   `aifn-methods/neural/reward-models` (Bradley–Terry reward models and best-of-$n$ over-optimisation) and

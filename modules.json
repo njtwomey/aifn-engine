@@ -803,6 +803,9 @@
             "module": "ode-mixtures"
           },
           {
+            "module": "pinn"
+          },
+          {
             "module": "full-batch"
           },
           {
