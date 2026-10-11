@@ -47,11 +47,6 @@ const TARGET: LogDensity = {
 const BOX = 4.5
 const gx = grid(-BOX, BOX, 240)
 const density = gx.map((b) => gx.map((a) => Math.exp(doughnut(a, b))))
-/**
- * The log density shifted and clipped to [−4, 4], for a diverging scale: red on the ring, pale where log π = −4
- * and blue in the middle and outside.
- */
-const shade = gx.map((b) => gx.map((a) => Math.max(-4, Math.min(4, doughnut(a, b) + 4))))
 /** Draws kept on the plot: the oldest fall away. */
 const KEEP = 600
 
@@ -143,14 +138,22 @@ export function SamplerRace() {
           <Raster
             x={gx}
             y={gx}
-            z={shade}
-            scale="diverging"
-            range={[-4, 4]}
-            fillOpacity={0.7}
-            valueLabel="log π + 4"
+            z={density}
+            range={[0, 1]}
+            fillOpacity={0.5}
+            valueLabel="π (unnormalised)"
             colorBar={!narrow}
           />
-          <Contours x={gx} y={gx} z={density} levels={[0.02, 0.1, 0.3, 0.6, 0.9]} labels={false} />
+          <Contours
+            x={gx}
+            y={gx}
+            z={density}
+            levels={[0.1, 0.5, 0.9]}
+            labels={false}
+            width={0.75}
+            dashed
+            opacity={0.45}
+          />
           <Points name="draws" x={draws.xs} y={draws.ys} slot={2} size={7} live />
           {now && now.trajectory.length > 1 && (
             <Curve

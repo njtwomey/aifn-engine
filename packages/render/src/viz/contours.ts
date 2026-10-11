@@ -18,7 +18,9 @@ export function contourSeries(
     color,
     labels = true,
     width = 1,
-  }: { id?: string; color?: string; labels?: boolean; width?: number } = {},
+    dashed = false,
+    opacity = 1,
+  }: { id?: string; color?: string; labels?: boolean; width?: number; dashed?: boolean; opacity?: number } = {},
 ): Record<string, unknown>[] {
   const { ink, surface } = chrome(mode)
   const stroke = color ?? ink
@@ -49,7 +51,7 @@ export function contourSeries(
       showSymbol: false,
       silent: true,
       clip: true,
-      lineStyle: { color: stroke, width },
+      lineStyle: { color: stroke, width, opacity, type: dashed ? [4, 3] : 'solid' },
       tooltip: { show: false },
       animation: false,
       z: 2,

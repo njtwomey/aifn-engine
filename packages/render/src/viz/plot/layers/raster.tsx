@@ -355,6 +355,12 @@ export type ContoursProps = CommonProps & {
   levels: readonly number[]
   /** A label per level (default true). */
   labels?: boolean
+  /** Line width in pixels (default 1). */
+  width?: number
+  /** Dashed lines, for contours that should sit back behind the data (default false). */
+  dashed?: boolean
+  /** Line opacity, 0 to 1 (default 1). */
+  opacity?: number
 }
 
 /** Contour lines of a field at the given levels (marching squares), ink unless given a slot or colour. */
@@ -367,6 +373,9 @@ export const Contours = defineLayer<ContoursProps>({
       id: ctx.id,
       color: p.slot !== undefined || p.color ? ctx.color : undefined,
       labels: p.labels,
+      width: p.width,
+      dashed: p.dashed,
+      opacity: p.opacity,
     }),
   }),
 })

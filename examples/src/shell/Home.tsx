@@ -12,6 +12,7 @@ import { LorenzSwarm } from './LorenzSwarm'
 import { MazeSearch } from './MazeSearch'
 import { MIXTURE_PLAY_MS, MixtureSteps } from './MixtureSteps'
 import { NetworkTraining } from './NetworkTraining'
+import { PinnSolve } from './PinnSolve'
 import { OptimiserRace } from './OptimiserRace'
 import { SamplerRace } from './SamplerRace'
 import { TreeGrowth } from './TreeGrowth'
@@ -226,6 +227,13 @@ const SLIDES: Slide[] = [
     blurb:
       'A small network learning two noisy spirals live, its loss underneath. Click to add points and watch it refit.',
     Figure: NetworkTraining,
+    duration: 22000,
+  },
+  {
+    label: 'Physics-informed',
+    blurb:
+      'Two networks fit a few points of a damped oscillator; the one told the equation carries on through swings it never saw.',
+    Figure: PinnSolve,
     duration: 22000,
   },
   {
