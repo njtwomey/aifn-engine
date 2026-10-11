@@ -7,6 +7,7 @@ import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/fo
 import * as calculus from './calculus'
 import * as fixed from './fixed'
 import * as flow from './flow'
+import * as pointwise from './partials'
 
 const fn = definer<FunctionInfo>('function', 'dynamics/fields')
 const FLOWS = ['vector-fields-and-flows', 'ordinary-differential-equations']
@@ -119,8 +120,21 @@ fn(
   fixed.lyapunovDerivative,
 )
 
+fn(
+  {
+    key: 'partials',
+    name: 'Partial derivatives of a pointwise field',
+    summary: 'u_x, u_xx, u_t, ... of a field applied row by row, at a batch of points, by nested forward mode.',
+    tex: '\\partial^{|\\alpha|} u / \\partial x^\\alpha',
+    role: 'property',
+    notes: ['physics-informed-neural-networks', 'automatic-differentiation'],
+    cite: ['raissi2019'],
+  },
+  pointwise.partials,
+)
+
 /** The functions of the module, keyed by name. */
 export const fieldsFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', calculus, flow, fixed) as Readonly<
+  entries<FunctionInfo>('function', calculus, flow, fixed, pointwise) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

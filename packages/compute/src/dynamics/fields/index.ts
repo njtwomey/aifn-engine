@@ -15,6 +15,9 @@
  *   name and judge them from the Jacobian's eigenvalues (node, spiral, saddle, centre, ...); `invariantManifolds`
  *   traces the stable and unstable manifolds; `lyapunovDerivative` gives $\dot{V} = \nabla V \cdot \fvec$.
  * - Grids: `gridAxes` and `sampleScalar` sample a scalar field on a rectangular grid of the plane.
+ * - Pointwise fields on a batch: `partials` takes $u_x$, $u_{xx}$, $u_t$, ... of a field evaluated row by row (a
+ *   network on a batch of points) at every point at once by nested forward mode, and stays differentiable in the
+ *   field's parameters, as a physics-informed loss needs.
  *
  * Fields are functions of a rank-1 tensor written with the tensor primitives, so that every derivative is taken by
  * `aifn-compute/foundation/autodiff`; closed forms can be given where they save time (the divergence of the transport
@@ -60,4 +63,5 @@ export {
   type Manifolds,
 } from './fixed'
 export { gridAxes, sampleScalar, type Grid2 } from './grid'
+export { partials, type PointwiseField } from './partials'
 export { fieldsFunctions } from './registry'
