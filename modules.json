@@ -938,7 +938,7 @@
           },
           {
             "group": "real",
-            "shared": ["embedded", "real", "titanic"],
+            "shared": ["embedded", "real", "titanic", "diabetes", "diabetes-source"],
             "children": [
               {
                 "module": "fonts"

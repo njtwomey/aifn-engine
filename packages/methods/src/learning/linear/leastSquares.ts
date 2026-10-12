@@ -1,13 +1,15 @@
 /**
  * Linear regression by least squares (ridge when `l2 > 0`) with a Gaussian predictive: a reference estimator that
- * exercises the capability design end to end.
+ * exercises the capability design end to end, and the ridge path through one SVD.
  *
  * The data are centred before the solve, so the intercept is never penalised, as in scikit-learn's `LinearRegression`
  * and `Ridge`; least squares goes through the SVD (`lstsq`), so a rank-deficient design gives the minimum-norm
- * solution, and ridge through the Cholesky factor of the regularised normal equations.
+ * solution, and ridge through the Cholesky factor of the regularised normal equations. With $d_i$ the singular values
+ * of the centred design, the effective degrees of freedom of ridge are $\sum_i d_i^2 / (d_i^2 + \lambda)$ (Hastie,
+ * Tibshirani and Friedman, 2009, §3.4.1), from the rank at $\lambda = 0$ down to 0 as $\lambda$ grows.
  */
 
-import { cholesky, choleskySolve, lstsq } from 'aifn-compute/numerics/linalg'
+import { cholesky, choleskySolve, lstsq, svd } from 'aifn-compute/numerics/linalg'
 import { dense, fromData, type Tensor } from 'aifn-compute/foundation/tensor'
 import type { Decides, Expects, Fitted, Predicts, Samples } from 'aifn-compute/learning/estimators'
 import type { Estimator, Supervised } from 'aifn-compute/learning/estimators'
@@ -58,8 +60,13 @@ export interface LinearRegressionModel
   readonly residualDof: number
   /** Numerical rank of the centred design ($d$ when `l2 > 0`). */
   readonly rank: number
-  /** Singular values of the centred design (least squares only; null for ridge). */
-  readonly singularValues: Tensor | null
+  /** Singular values of the centred design, $\min(n, d)$ values, largest first. */
+  readonly singularValues: Tensor
+  /**
+   * The effective degrees of freedom $\sum_i d_i^2 / (d_i^2 + \lambda)$, $d_i$ the singular values and $\lambda$
+   * the penalty `l2`: the rank for least squares, falling towards 0 as the penalty grows.
+   */
+  readonly dof: number
   /** The ridge penalty it was fitted with. */
   readonly l2: number
 }
@@ -121,13 +128,17 @@ export function linearRegression(
       const yc = Float64Array.from(target, (v) => v - yMean)
       let w: Float64Array
       let rank = d
-      let singularValues: Tensor | null = null
+      let singularValues: Tensor
+      let dof: number
       if (l2 === 0) {
         const ls = lstsq(fromData(Xc, [n, d]), fromData(yc, [n]))
         w = values(ls.x).slice()
         rank = ls.rank
         singularValues = ls.singularValues
+        dof = rank
       } else {
+        singularValues = svd(fromData(Xc, [n, d])).S
+        dof = effectiveDof(values(singularValues), l2)
         // Normal equations (XcᵀXc + αI) w = Xcᵀyc: positive definite for α > 0.
         const A = new Float64Array(d * d)
         const b = new Float64Array(d)
@@ -175,6 +186,7 @@ export function linearRegression(
         residualDof,
         rank,
         singularValues,
+        dof,
         l2,
         forward,
         decide: forward,
@@ -186,6 +198,110 @@ export function linearRegression(
       return withSampling(withExpectation(base))
     },
   }
+}
+
+/**
+ * The effective degrees of freedom of ridge, $\sum_i d_i^2 / (d_i^2 + \lambda)$.
+ *
+ * @param s The singular values $d_i$ of the centred design.
+ * @param lambda The penalty $\lambda \ge 0$; at 0 the count of nonzero singular values.
+ * @returns The degrees of freedom, between 0 and the number of singular values.
+ *
+ * @example Two directions, one strong and one weak: the weak one is penalised away first
+ * for (const lambda of [0, 0.1, 1, 10, 100]) print('lambda =', lambda, ' dof =', effectiveDof([10, 0.5], lambda))
+ */
+export function effectiveDof(s: ArrayLike<number>, lambda: number): number {
+  let dof = 0
+  for (let i = 0; i < s.length; i++) if (s[i] > 0) dof += (s[i] * s[i]) / (s[i] * s[i] + lambda)
+  return dof
+}
+
+/** The ridge path: one fit per penalty, from one SVD. */
+export interface RidgePath {
+  /** The penalties $\lambda$, in the order given. */
+  readonly lambdas: number[]
+  /** The weights, $d \times k$: column $t$ is the fit at `lambdas[t]`. */
+  readonly coef: Tensor
+  /** The intercept of each fit (0 without an intercept). */
+  readonly intercept: number[]
+  /** The effective degrees of freedom of each fit. */
+  readonly dof: number[]
+  /** The singular values of the centred design, largest first. */
+  readonly singularValues: Tensor
+}
+
+/**
+ * Ridge regression at many penalties through one SVD of the centred design,
+ * $\Xmat_c = \Umat\operatorname{diag}(\dvec)\Vmat^\top$:
+ * $\wvec(\lambda) = \Vmat \operatorname{diag}(d_i / (d_i^2 + \lambda)) \Umat^\top\yvec_c$, with the effective
+ * degrees of freedom $\sum_i d_i^2 / (d_i^2 + \lambda)$. Each column equals `linearRegression({ l2: lambda })`
+ * (scikit-learn's `Ridge(alpha)`), and $\lambda = 0$ gives the minimum-norm least-squares fit. Throws `DomainError`
+ * for a negative or NaN penalty and `ShapeError` for mismatched shapes.
+ *
+ * @param x The design, $n \times d$.
+ * @param y The target, $n$ values.
+ * @param lambdas The penalties $\lambda \ge 0$, in any order (kept).
+ * @param options Whether to fit an unpenalised intercept by centring (default true).
+ * @param options.intercept Centre the data first, so the intercept is not penalised.
+ * @returns The path: the penalties, the weights ($d \times k$), the intercepts, the degrees of freedom, and the
+ *   singular values.
+ *
+ * @example Degrees of freedom fall from the rank towards zero as the penalty grows
+ * const x = normals(stream(0), [40, 3])
+ * const y = tensor(toArray(x).map((r) => r[0] - 2 * r[1] + 0.5 * r[2]))
+ * const path = ridgePath(x, y, [0, 1, 10, 100, 1000])
+ * print('dof:', path.dof)
+ * print('first weight:', toArray(path.coef)[0])
+ */
+export function ridgePath(
+  x: Tensor,
+  y: Tensor,
+  lambdas: readonly number[],
+  { intercept = true }: { intercept?: boolean } = {},
+): RidgePath {
+  for (const l of lambdas)
+    if (!(l >= 0)) throw new DomainError('ridgePath', 'ridgePath: every lambda must be non-negative')
+  const [n, d] = matrixShape(x, 'ridgePath')
+  const target = targetValues(y, 'ridgePath')
+  if (target.length !== n) throw new ShapeError('ridgePath', `ridgePath: ${n} rows of x but ${target.length} targets`)
+  const X = values(x)
+  const xMean = new Float64Array(d)
+  let yMean = 0
+  if (intercept) {
+    for (let i = 0; i < n; i++) {
+      yMean += target[i] / n
+      for (let j = 0; j < d; j++) xMean[j] += X[i * d + j] / n
+    }
+  }
+  const Xc = Float64Array.from(X, (v, k) => v - xMean[k % d])
+  const { U, S, V } = svd(fromData(Xc, [n, d]))
+  const r = S.shape[0]
+  const u = values(U)
+  const s = values(S)
+  const v = values(V)
+  // Uᵀ y_c, the target's coordinates along the left singular vectors.
+  const uy = new Float64Array(r)
+  for (let i = 0; i < n; i++) for (let a = 0; a < r; a++) uy[a] += u[i * r + a] * (target[i] - yMean)
+  // Singular values below this are treated as zero, as lstsq does, so λ = 0 gives the minimum-norm fit.
+  const cutoff = Math.max(n, d) * Number.EPSILON * (s[0] ?? 0)
+  const k = lambdas.length
+  const coef = new Float64Array(d * k)
+  const intercepts: number[] = []
+  const dof: number[] = []
+  lambdas.forEach((lambda, t) => {
+    let df = 0
+    for (let a = 0; a < r; a++) {
+      if (s[a] <= cutoff) continue
+      const shrink = s[a] / (s[a] * s[a] + lambda)
+      df += (s[a] * s[a]) / (s[a] * s[a] + lambda)
+      for (let j = 0; j < d; j++) coef[j * k + t] += v[j * r + a] * shrink * uy[a]
+    }
+    let b = yMean
+    for (let j = 0; j < d; j++) b -= xMean[j] * coef[j * k + t]
+    intercepts.push(b)
+    dof.push(df)
+  })
+  return { lambdas: [...lambdas], coef: fromData(coef, [d, k]), intercept: intercepts, dof, singularValues: S }
 }
 
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────

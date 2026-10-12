@@ -54,7 +54,7 @@ export {
   ordinalRegression,
   thresholdOrdinalRegression,
 } from './generalised/ordinal'
-export { linearRegression, perceptron } from './linear'
+export { elasticNet, linearRegression, perceptron } from './linear'
 export { gaussianNaiveBayes, linearDiscriminant, quadraticDiscriminant } from './generative-classifiers'
 export { supportVectorMachine } from './kernel-methods'
 export { gaussianProcessRegressor, gpClassifier, gpOrdinalRegression } from './gaussian-processes'
