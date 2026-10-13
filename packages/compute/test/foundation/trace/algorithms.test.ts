@@ -209,6 +209,7 @@ import {
 import { stateSpace, simulate, predictionErrorMethod } from 'aifn-compute/systems'
 import { lqg, lqgSimulation, mpcController, recedingHorizon } from 'aifn-compute/dynamics/control'
 import { ransac } from 'aifn-compute/numerics/robust'
+import { landweberSteps } from 'aifn-compute/numerics/regularisation'
 import { costMatrix, gromovWassersteinSteps, sinkhornSteps, uniformWeights } from 'aifn-compute/transport'
 import { fixture } from '../../fixtures'
 import { randomGraph } from '../../graph/helpers'
@@ -829,6 +830,7 @@ const CASES: Record<string, () => Case> = {
       10,
     ),
   'numerics/roots/continuation': () => at(continuation(newtonHomotopy(F, [3, 0.5])), { x0: [3, 0.5] }, 10),
+  'numerics/regularisation/landweberSteps': () => at(landweberSteps({ A: diagonallyDominant, b: [1, 2, 3] }), {}, 8),
   'probability/tests/sprt': () =>
     at(
       sprt([0.3, 1.2, 0.8, -0.1, 0.9, 1.4], { h0: Normal(0, 1), h1: Normal(1, 1), alpha: 0.1, beta: 0.1 }),

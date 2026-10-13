@@ -7,6 +7,8 @@
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as alternating from './alternating'
 import * as proximal from './proximal'
+import * as thresholding from './thresholding'
+import * as totalVariation from './totalVariation'
 
 const algorithm = definer<AlgorithmInfo>('algorithm', 'optim/proximal')
 
@@ -162,8 +164,60 @@ fn(
   proximal.proxNonnegative,
 )
 
+fn(
+  {
+    key: 'thresholding',
+    name: 'Thresholding rules (soft, hard, SCAD, MCP)',
+    tex: '\\hat\\theta(z) = \\arg\\min_\\theta \\tfrac12 (z - \\theta)^2 + p_\\lambda(\\theta)',
+    summary: 'The univariate penalised least-squares solutions of the lasso, l0, SCAD and MCP penalties, elementwise.',
+    role: 'transform',
+    cite: ['donoho1994', 'fan2001', 'zhang2010'],
+  },
+  thresholding.thresholding,
+)
+fn(
+  {
+    key: 'thresholdingPenalty',
+    name: 'Thresholding penalties (lasso, l0, SCAD, MCP)',
+    summary: 'The penalty whose univariate problem each thresholding rule solves, elementwise.',
+    role: 'property',
+    cite: ['fan2001', 'zhang2010'],
+  },
+  thresholding.thresholdingPenalty,
+)
+fn(
+  {
+    key: 'totalVariationDenoise1d',
+    name: '1-D total variation denoising',
+    tex: '\\arg\\min_x \\tfrac12 \\|y - x\\|^2 + \\lambda \\sum_i |x_{i+1} - x_i|',
+    summary: 'Exact total variation denoising of a signal by Condat’s direct algorithm: a piecewise-constant fit.',
+    role: 'transform',
+    cite: ['condat2013'],
+  },
+  totalVariation.totalVariationDenoise1d,
+)
+fn(
+  {
+    key: 'fusedLassoSignal',
+    name: 'Fused lasso signal approximator',
+    summary: 'Total variation denoising followed by soft thresholding: piecewise constant and sparse.',
+    role: 'transform',
+    cite: ['tibshirani2005', 'friedman2007'],
+  },
+  totalVariation.fusedLassoSignal,
+)
+fn(
+  {
+    key: 'proxTotalVariation1d',
+    name: 'Prox of the 1-D total variation',
+    role: 'transform',
+    cite: ['condat2013'],
+  },
+  totalVariation.proxTotalVariation1d,
+)
+
 /** The functions of the module, keyed by name. */
 export const proximalFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', proximal, alternating) as Readonly<
+  entries<FunctionInfo>('function', proximal, alternating, thresholding, totalVariation) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

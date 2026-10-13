@@ -157,7 +157,10 @@ export function leastAngleRegression(x: Tensor, y: Tensor, options: LeastAngleOp
           // The feature that has just left still ties at this knot: not that tie, but a later crossing, re-enters it.
           if (j === barred && Math.abs(num) <= 1e-9 * C) continue
           const g = num / den
-          if (g > 1e-12 * gamma && g < gamma) ((gamma = g), (next = j))
+          if (g > 1e-12 * gamma && g < gamma) {
+            gamma = g
+            next = j
+          }
         }
       }
     }
@@ -167,7 +170,11 @@ export function leastAngleRegression(x: Tensor, y: Tensor, options: LeastAngleOp
         const wj = w[active[a]]
         if (wj === 0) continue
         const z = -wj / delta[a]
-        if (z > 0 && z < gamma) ((gamma = z), (drop = a), (next = -1))
+        if (z > 0 && z < gamma) {
+          gamma = z
+          drop = a
+          next = -1
+        }
       }
     }
     for (let a = 0; a < m; a++) w[active[a]] += gamma * delta[a]

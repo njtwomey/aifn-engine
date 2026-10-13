@@ -793,6 +793,146 @@ def references() -> dict[str, Any]:
     return out
 
 
+def comparison() -> dict[str, Any]:
+    """The tests for comparing learning algorithms: McNemar's test against statsmodels' `mcnemar` (one-sided exact
+    p-values from scipy's binomtest), Friedman's statistic against scipy's `friedmanchisquare` (the average ranks and
+    the Iman–Davenport F from their formulas), the studentized range and the Nemenyi critical difference against
+    scipy's `studentized_range`, and the corrected resampled t, 5×2cv t, combined F and Bayesian correlated t from
+    their papers' formulas with scipy's t and F laws (baycomp's closed form for the last)."""
+    from statsmodels.stats.contingency_tables import mcnemar
+
+    rng = np.random.default_rng(20261013)
+    out: dict[str, Any] = {}
+
+    # McNemar: tables (statsmodels' layout), one with b + c = 0 and one with b = c, and a set of predictions.
+    y = rng.integers(0, 3, 60)
+    a = np.where(rng.random(60) < 0.8, y, (y + 1) % 3)
+    b = np.where(rng.random(60) < 0.65, y, (y + 2) % 3)
+    ra, rb = a == y, b == y
+    pred_table = [[int(np.sum(ra & rb)), int(np.sum(ra & ~rb))], [int(np.sum(~ra & rb)), int(np.sum(~ra & ~rb))]]
+    tables = [[[101, 59], [121, 33]], [[10, 7], [1, 4]], [[5, 0], [0, 3]], [[8, 4], [4, 2]], [[2, 13], [3, 1]]]
+    mc = []
+    for t in [*tables, pred_table]:
+        n01, n10 = t[0][1], t[1][0]
+        row: dict[str, Any] = {"table": t}
+        r = mcnemar(np.array(t), exact=True)
+        row["exact"] = {"p": r.pvalue}
+        for alt in ["less", "greater"]:
+            row["exact"][alt] = stats.binomtest(n01, n01 + n10, 0.5, alternative=alt).pvalue if n01 + n10 else 1.0
+        for corr in [True, False]:
+            if n01 + n10 == 0:
+                row["chi2" if corr else "chi2Uncorrected"] = {"statistic": float("nan"), "p": float("nan")}
+                continue
+            r = mcnemar(np.array(t), exact=False, correction=corr)
+            row["chi2" if corr else "chi2Uncorrected"] = {"statistic": r.statistic, "p": r.pvalue}
+        mc.append(row)
+    out["mcnemarTest"] = {"cases": mc, "predictions": {"a": a, "b": b, "y": y, "table": pred_table}}
+
+    # Corrected resampled t (Nadeau and Bengio, 2003): 10 × 10-fold CV differences, and 15 hold-out splits.
+    crt = []
+    for J, n1, n2, mean, sd in [(100, 900, 100, 0.004, 0.03), (15, 200, 100, -0.01, 0.02), (5, 80, 20, 0.02, 0.01)]:
+        d = np.round(rng.normal(mean, sd, J), 4)
+        se = np.sqrt((1 / J + n2 / n1) * d.var(ddof=1))
+        t = d.mean() / se
+        law = stats.t(J - 1)
+        for alt in ALTS:
+            p = {"two-sided": 2 * law.sf(abs(t)), "less": law.cdf(t), "greater": law.sf(t)}[alt]
+            for level in [0.95, 0.9]:
+                if alt == "two-sided":
+                    q = law.isf((1 - level) / 2)
+                    c = [d.mean() - q * se, d.mean() + q * se]
+                elif alt == "less":
+                    c = [float("-inf"), d.mean() + law.isf(1 - level) * se]
+                else:
+                    c = [d.mean() - law.isf(1 - level) * se, float("inf")]
+                crt.append(
+                    {"d": d, "trainSize": n1, "testSize": n2, "alternative": alt, "level": level}
+                    | {"statistic": t, "df": J - 1, "p": p, "ci": c, "mean": d.mean()}
+                )
+    out["correctedResampledTTest"] = crt
+
+    # 5×2cv t (Dietterich, 1998) and combined F (Alpaydin, 1999).
+    five = []
+    for mean in [0.02, 0.0, -0.015]:
+        d = np.round(rng.normal(mean, 0.015, (5, 2)), 4)
+        s2 = ((d - d.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
+        t = d[0, 0] / np.sqrt(s2.sum() / 5)
+        f = (d**2).sum() / (2 * s2.sum())
+        law = stats.t(5)
+        five.append(
+            {
+                "d": d,
+                "t": t,
+                "p": {"two-sided": 2 * law.sf(abs(t)), "less": law.cdf(t), "greater": law.sf(t)},
+                "F": f,
+                "pF": stats.f(10, 5).sf(f),
+            }
+        )
+    out["fiveByTwoCvTest"] = five
+
+    # Friedman with ties (scipy's tie-corrected statistic), and the Iman–Davenport F.
+    fr = []
+    for N, k, ties in [(6, 3, False), (12, 5, True), (20, 4, True), (4, 2, False)]:
+        scores = np.round(rng.normal(0.8, 0.05, (N, k)) + np.linspace(0, 0.03, k), 2 if ties else 4)
+        avg_best = stats.rankdata(-scores, axis=1).mean(axis=0)
+        avg_low = stats.rankdata(scores, axis=1).mean(axis=0)
+        if k > 2:
+            q = stats.friedmanchisquare(*scores.T).statistic
+        else:
+            # scipy needs three samples; the formula without ties, as the scores of this case are distinct.
+            q = 12 * N / (k * (k + 1)) * ((avg_low**2).sum() - k * (k + 1) ** 2 / 4)
+        ff = (N - 1) * q / (N * (k - 1) - q)
+        fr.append(
+            {
+                "scores": scores,
+                "statistic": q,
+                "p": stats.chi2(k - 1).sf(q),
+                "averageRanks": avg_best,
+                "averageRanksAscending": avg_low,
+                "F": ff,
+                "pF": stats.f(k - 1, (k - 1) * (N - 1)).sf(ff),
+            }
+        )
+    out["friedmanTest"] = fr
+
+    # The studentized range: upper 5% and 10% points with ν = ∞ (Demšar's q is these over √2), and cdf and sf.
+    sr = stats.studentized_range
+    out["studentizedRange"] = {
+        "isf": [{"k": k, "alpha": alpha, "q": sr.isf(alpha, k, np.inf)} for k in range(2, 11) for alpha in [0.05, 0.1]],
+        "isfFinite": [{"k": k, "df": df, "alpha": 0.05, "q": sr.isf(0.05, k, df)} for k, df in [(3, 10), (5, 20)]],
+        "values": [
+            {"k": k, "df": df, "q": q, "cdf": sr.cdf(q, k, df), "sf": sr.sf(q, k, df)}
+            for k in [2, 3, 6, 10]
+            for df in [1, 2, 5, 10, 30, 1000, np.inf]
+            for q in [0.5, 2.0, 4.5]
+        ],
+    }
+    out["nemenyiCriticalDifference"] = [
+        {"k": k, "N": N, "alpha": alpha, "cd": sr.isf(alpha, k, np.inf) / np.sqrt(2) * np.sqrt(k * (k + 1) / (6 * N))}
+        for k, N in [(3, 6), (5, 20), (10, 14)]
+        for alpha in [0.05, 0.1]
+    ]
+
+    # Bayesian correlated t (Corani and Benavoli, 2015): baycomp's closed form.
+    bc = []
+    for n, rho, rope, mean, sd in [
+        (10, 0.1, 0.01, 0.015, 0.012),
+        (30, 0.2, 0.005, -0.002, 0.01),
+        (5, 0.0, 0.0, 0.01, 0.02),
+    ]:
+        d = np.round(rng.normal(mean, sd, n), 4)
+        scale = np.sqrt((1 / n + rho / (1 - rho)) * d.var(ddof=1))
+        law = stats.t(n - 1, d.mean(), scale)
+        left = law.cdf(-rope)
+        right = law.sf(rope)
+        bc.append(
+            {"d": d, "rho": rho, "rope": rope, "mean": d.mean(), "scale": scale, "df": n - 1}
+            | {"pLeft": left, "pRope": law.cdf(rope) - left, "pRight": right}
+        )
+    out["bayesianCorrelatedTTest"] = bc
+    return out
+
+
 def cases() -> dict[str, Any]:
     return {
         "t": t_tests(),
@@ -809,4 +949,5 @@ def cases() -> dict[str, Any]:
         "boundaries": boundaries(),
         "f": f_distribution(),
         "references": references(),
+        "comparison": comparison(),
     }

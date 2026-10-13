@@ -8,6 +8,10 @@
  * - Proximal operators, as a `Prox` (the value of $g$ and its prox): `proxL1` (soft thresholding), `proxL2` (block soft
  *   thresholding, as in the group lasso), `proxSquaredL2` (ridge), `proxBox` and `proxNonnegative` (indicators), and
  *   `proxZero` (plain gradient descent).
+ * - Thresholding and total variation: `thresholding`, the elementwise soft, hard, SCAD and MCP rules (the univariate
+ *   penalised least-squares solutions), with `thresholdingPenalty` for their penalties; `totalVariationDenoise1d`,
+ *   exact 1-D total variation denoising (Condat's direct algorithm), `fusedLassoSignal` (it, then soft thresholding)
+ *   and `proxTotalVariation1d`, its `Prox`.
  * - Projections, as functions from a point to its projection: `projectBox`, `projectBall`, `projectNonnegative`,
  *   `projectSimplex`, `projectSimplexRows` (each row of a matrix onto a simplex) and `projectGroupSums` (fixed sums
  *   over disjoint groups).
@@ -51,4 +55,11 @@ export {
   type AlternatingProjectionsState,
   type Projection,
 } from './alternating'
+export { thresholding, thresholdingPenalty, type ThresholdOptions, type ThresholdRule } from './thresholding'
+export {
+  fusedLassoSignal,
+  proxTotalVariation1d,
+  totalVariationDenoise1d,
+  type FusedLassoSignalOptions,
+} from './totalVariation'
 export { proximalAlgorithms, proximalFunctions } from './registry'

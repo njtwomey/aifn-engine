@@ -13,6 +13,7 @@ import {
   type FunctionInfo,
   type TestInfo,
 } from 'aifn-compute/foundation/registry'
+import * as comparison from './comparison'
 import * as contingency from './contingency'
 import * as effect from './effect'
 import * as goodness from './goodness'
@@ -337,6 +338,74 @@ test(
   survival.logRankTest,
 )
 
+// ── Comparing learning algorithms ────────────────────────────────────────────────────────────────────────────────────
+
+test(
+  {
+    key: 'mcnemarTest',
+    name: "McNemar's test",
+    data: 'paired',
+    statistic: 'b',
+    null: 'Binomial',
+    alternatives: ALL,
+    parametric: false,
+    cite: ['mcnemar1947', 'dietterich1998'],
+  },
+  comparison.mcnemarTest,
+)
+test(
+  {
+    key: 'correctedResampledTTest',
+    name: 'Corrected resampled t-test',
+    data: 'paired',
+    statistic: 't',
+    null: 'StudentT',
+    alternatives: ALL,
+    parametric: true,
+    cite: ['nadeau2003'],
+  },
+  comparison.correctedResampledTTest,
+)
+test(
+  {
+    key: 'fiveByTwoCvTest',
+    name: '5×2cv paired t-test',
+    data: 'paired',
+    statistic: 't',
+    null: 'StudentT',
+    alternatives: ALL,
+    parametric: true,
+    cite: ['dietterich1998'],
+  },
+  comparison.fiveByTwoCvTest,
+)
+test(
+  {
+    key: 'combinedFTest',
+    name: 'Combined 5×2cv F-test',
+    data: 'paired',
+    statistic: 'F',
+    null: 'FisherSnedecor',
+    alternatives: TWO,
+    parametric: true,
+    cite: ['alpaydin1999'],
+  },
+  comparison.combinedFTest,
+)
+test(
+  {
+    key: 'friedmanTest',
+    name: "Friedman's test",
+    data: 'k-sample',
+    statistic: '\\chi^2_F',
+    null: 'ChiSquare',
+    alternatives: TWO,
+    parametric: false,
+    cite: ['friedman1937', 'iman1980', 'demsar2006'],
+  },
+  comparison.friedmanTest,
+)
+
 // ── Multiple testing ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 const MT = ['multiple-testing', 'many-metrics-and-variants']
@@ -543,6 +612,33 @@ fn(
 fn({ key: 'signedRankNull', name: 'Exact signed-rank distribution', role: 'construction' }, ranks.signedRankNull)
 fn(
   {
+    key: 'studentizedRangeNull',
+    name: 'Studentized range distribution',
+    role: 'construction',
+    cite: ['demsar2006'],
+  },
+  comparison.studentizedRangeNull,
+)
+fn(
+  {
+    key: 'nemenyiCriticalDifference',
+    name: 'Nemenyi critical difference',
+    role: 'property',
+    cite: ['nemenyi1963', 'demsar2006'],
+  },
+  comparison.nemenyiCriticalDifference,
+)
+fn(
+  {
+    key: 'bayesianCorrelatedTTest',
+    name: 'Bayesian correlated t-test',
+    role: 'inference',
+    cite: ['corani2015', 'benavoli2017'],
+  },
+  comparison.bayesianCorrelatedTTest,
+)
+fn(
+  {
     key: 'pValueOf',
     name: 'p-value from a null distribution',
     role: 'property',
@@ -679,6 +775,7 @@ export const testRegistry: Readonly<Record<string, Entry<(...args: never[]) => u
   'test',
   t,
   proportions,
+  comparison,
   contingency,
   ranks,
   goodness,
@@ -699,6 +796,7 @@ export const testsFunctions: Readonly<Record<string, Entry<(...args: never[]) =>
     'function',
     t,
     proportions,
+    comparison,
     contingency,
     effect,
     goodness,

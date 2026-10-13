@@ -16,6 +16,12 @@
  *   `chiSquareGoodnessOfFit`, `chiSquareIndependence`, `gTestGoodnessOfFit`, `gTestIndependence` (on
  *   `powerDivergence` and `expectedCounts`), `fisherExact`; `mannWhitneyU`, `wilcoxonSignedRank`; `ksTest` (one and
  *   two samples, one- and two-sided, with `ksStatistic`), `shapiroWilk`; `ljungBox`; `grubbs`; `logRankTest`.
+ * - **Comparing learning algorithms.** `mcnemarTest` (two classifiers on one test set: exact binomial or $\chi^2$,
+ *   from predictions or a $2 \times 2$ table), `correctedResampledTTest` (Nadeau and Bengio's variance
+ *   $(1/J + n_2/n_1)\hat\sigma^2$ for resampled splits), `fiveByTwoCvTest` (Dietterich's $5 \times 2$cv $t$, with
+ *   Alpaydin's `combinedFTest`), `friedmanTest` ($k$ algorithms over $N$ data sets, with average ranks and the
+ *   Iman–Davenport $F$) with `nemenyiCriticalDifference` on the studentized range law `studentizedRangeNull`, and
+ *   `bayesianCorrelatedTTest` (the posterior of the mean difference and its probabilities around a rope).
  * - **Null laws.** The exact laws behind the rank and goodness-of-fit tests, for critical values and tail
  *   probabilities: `mannWhitneyNull`, `signedRankNull`; `kolmogorovNull` (on `kolmogorovSf`, `smirnovSf` and
  *   `kolmogorovLimitSf`), `twoSampleKsNull` (on `twoSampleKsSf`); `shapiroWilkNull` with `shapiroWilkCoefficients`.
@@ -87,6 +93,22 @@ export {
   powerDivergence,
   type Table,
 } from './contingency'
+export {
+  bayesianCorrelatedTTest,
+  combinedFTest,
+  correctedResampledTTest,
+  fiveByTwoCvTest,
+  friedmanTest,
+  mcnemarTest,
+  nemenyiCriticalDifference,
+  studentizedRangeNull,
+  type BayesianCorrelatedTTest,
+  type FiveByTwoCvTest,
+  type FriedmanTest,
+  type McnemarOptions,
+  type McnemarTest,
+  type Predictions,
+} from './comparison'
 export { mannWhitneyNull, mannWhitneyU, signedRankNull, wilcoxonSignedRank, type RankMethod } from './ranks'
 export {
   kolmogorovLimitSf,

@@ -9,6 +9,8 @@
  *   empirical Rademacher complexity against Massart's bound.
  * - `aifn-methods/theory/concentration`: Chebyshev, Hoeffding, Bernstein, Chernoff and McDiarmid bounds against
  *   simulated tails, and the law of large numbers and central limit theorem.
+ * - `aifn-methods/theory/shrinkage`: the James–Stein estimator and Stein's paradox, its risk against the
+ *   maximum-likelihood estimate's, simulated and exact.
  *
  * The family exports its shared layer, one-dimensional regression problems and least-squares fits: `targetFunction`
  * (a `TargetName` to its function), `drawTrainingSet`, `unitGrid`, `leastSquaresWeights` (minimum-norm or ridge) and

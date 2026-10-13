@@ -100,6 +100,7 @@ export const MODEL_FIXTURES: Record<string, Fixture> = {
   // learning/linear
   linearRegression: f(() => linear.linearRegression(), dataset(reg.x, reg.y)),
   elasticNet: f(() => linear.elasticNet({ alpha: 0.1, l1Ratio: 0.5 }), dataset(reg.x, reg.y)),
+  groupLasso: f(() => linear.groupLasso({ alpha: 0.05, groups: [0, 0] }), dataset(reg.x, reg.y)),
   perceptron: f(() => linear.perceptron(), dataset(bin.x, bin.y)),
   // learning/generalised
   logisticRegression: f(() => glm.logisticRegression(), dataset(bin.x, bin.y)),

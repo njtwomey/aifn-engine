@@ -13,7 +13,7 @@ import type { ObjectiveFn } from 'aifn-compute/optim'
 import { dense, type Matrix, type Vector } from 'aifn-compute/foundation/tensor'
 import type { ObjectiveInfo } from 'aifn-compute/foundation/contracts'
 import { definer } from 'aifn-compute/foundation/registry'
-import { int, real, space } from 'aifn-compute/foundation/space'
+import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
 /** A float64 working array. */
@@ -335,6 +335,133 @@ export function rastrigin({ A = 10, n = 2 }: { A?: number; n?: number } = {}): T
   })
 }
 
+/**
+ * The minimiser of a one-dimensional function on $[\mathrm{lo}, \mathrm{hi}]$: the best of 2001 equally spaced points,
+ * polished by Newton's method on $f'$ when it is interior (the step is kept inside the neighbouring grid cells).
+ *
+ * @param kernel The function's closed forms; the gradient and Hessian are read as one value each.
+ * @param lo The left end of the interval.
+ * @param hi The right end.
+ * @returns The minimiser.
+ */
+function minimise1d(kernel: Kernel, lo: number, hi: number): number {
+  const n = 2001
+  const h = (hi - lo) / (n - 1)
+  let best = lo
+  for (let i = 1; i < n; i++) {
+    const x = lo + i * h
+    if (kernel.value(Float64Array.of(x)) < kernel.value(Float64Array.of(best))) best = x
+  }
+  if (best === lo || best === hi) return best
+  let x = best
+  for (let it = 0; it < 50; it++) {
+    const g = kernel.grad(Float64Array.of(x))[0]
+    const H = kernel.hessian(Float64Array.of(x))[0]
+    if (!(H > 0)) break
+    const next = Math.min(Math.max(x - g / H, best - h), best + h)
+    if (Math.abs(next - x) <= 1e-15 * Math.max(1, Math.abs(x))) break
+    x = next
+  }
+  return x
+}
+
+/**
+ * The one-dimensional test function of Forrester, Sóbester and Keane (2008), $f(x) = (6x - 2)^2 \sin(12x - 4)$ on
+ * $[0, 1]$: a local minimum of $-0.986$ at $x = 0.1426$, a gentle hump, and the global minimum $-6.0207$ at
+ * $x = 0.7572$ in a narrow well, a standard first example of Bayesian optimisation. The low-fidelity version
+ * (`fidelity: 'low'`) is their cheap approximation $a f(x) + b(x - 0.5) - c$, with $a = 0.5$, $b = 10$ and $c = -5$
+ * by default: correlated with $f$ but tilted, so its minimum ($0.665$ at $x = 0.0924$) is in the wrong place, the
+ * trap of multi-fidelity optimisation. The minimiser is computed (on a fine grid, then by Newton's method), so it
+ * holds for any $a$, $b$, $c$. The start is $0.5$ and the plotting box $[0, 1]$.
+ *
+ * @param options The fidelity and the coefficients of the low-fidelity version.
+ * @param options.fidelity `'high'` (default) for $f$ itself, `'low'` for $a f(x) + b(x - 0.5) - c$.
+ * @param options.a The scale $a$ of $f$ in the low-fidelity version.
+ * @param options.b The slope $b$ of the low-fidelity version's linear tilt.
+ * @param options.c The offset $c$ subtracted in the low-fidelity version.
+ * @returns The one-dimensional test function.
+ *
+ * @example Both fidelities at a few points, and their minima
+ * const hi = forrester()
+ * const lo = forrester({ fidelity: 'low' })
+ * for (const x of [0, 0.5, 0.75, 1])
+ *   print('x =', x, ' f =', hi.value([x]).toFixed(4), ' low =', lo.value([x]).toFixed(4))
+ * print('minimum', hi.minimumValue, 'at', hi.minima[0], '; low fidelity', lo.minimumValue, 'at', lo.minima[0])
+ */
+export function forrester({
+  fidelity = 'high',
+  a = 0.5,
+  b = 10,
+  c = -5,
+}: { fidelity?: 'high' | 'low'; a?: number; b?: number; c?: number } = {}): TestFunction {
+  const low = fidelity === 'low'
+  const f = (x: number) => (6 * x - 2) ** 2 * Math.sin(12 * x - 4)
+  const df = (x: number) => {
+    const u = 6 * x - 2
+    return 12 * u * Math.sin(12 * x - 4) + 12 * u * u * Math.cos(12 * x - 4)
+  }
+  const d2f = (x: number) => {
+    const u = 6 * x - 2
+    const [s, co] = [Math.sin(12 * x - 4), Math.cos(12 * x - 4)]
+    return 72 * s + 288 * u * co - 144 * u * u * s
+  }
+  const kernel: Kernel = {
+    value: ([x]) => (low ? a * f(x) + b * (x - 0.5) - c : f(x)),
+    grad: ([x]) => Float64Array.of(low ? a * df(x) + b : df(x)),
+    hessian: ([x]) => Float64Array.of(low ? a * d2f(x) : d2f(x)),
+  }
+  const xStar = minimise1d(kernel, 0, 1)
+  return build(low ? 'forrester-low' : 'forrester', 1, kernel, {
+    minima: [[xStar]],
+    minimumValue: kernel.value(Float64Array.of(xStar)),
+    start: [0.5],
+    lo: [0],
+    hi: [1],
+  })
+}
+
+/** The constants of the Branin function: $b = 5.1 / 4\pi^2$, $c = 5 / \pi$, $r = 6$, $s = 10$, $t = 1 / 8\pi$. */
+const BRANIN = { b: 5.1 / (4 * Math.PI ** 2), c: 5 / Math.PI, r: 6, s: 10, t: 1 / (8 * Math.PI) }
+
+/**
+ * The Branin (Branin–Hoo) function (Branin, 1972; in the form of Dixon and Szegő, 1978),
+ * $f(\xvec) = (x_2 - b x_1^2 + c x_1 - r)^2 + s(1 - t)\cos x_1 + s$ with $b = 5.1 / 4\pi^2$, $c = 5 / \pi$, $r = 6$,
+ * $s = 10$ and $t = 1 / 8\pi$, on $[-5, 10] \times [0, 15]$: three global minima of value $s t = 10 / 8\pi
+ * \approx 0.397887$, at $(-\pi, 12.275)$, $(\pi, 2.275)$ and $(3\pi, 2.475)$, along a curved valley. A standard
+ * two-dimensional benchmark of Bayesian optimisation. The start is the box's centre $(2.5, 7.5)$.
+ *
+ * @returns The two-dimensional test function.
+ *
+ * @example The three minima, and the value at the start
+ * const f = branin()
+ * print('minima:', f.minima)
+ * print('f there:', f.minima.map((m) => f.value(m)), ' 10 / 8 pi =', 10 / (8 * Math.PI))
+ * print('f at the start', f.start, ':', f.value(f.start))
+ */
+export function branin(): TestFunction {
+  const { b, c, r, s, t } = BRANIN
+  const kernel: Kernel = {
+    value: ([x, y]) => (y - b * x * x + c * x - r) ** 2 + s * (1 - t) * Math.cos(x) + s,
+    grad: ([x, y]) => {
+      const g = y - b * x * x + c * x - r
+      return Float64Array.of(2 * g * (c - 2 * b * x) - s * (1 - t) * Math.sin(x), 2 * g)
+    },
+    hessian: ([x, y]) => {
+      const g = y - b * x * x + c * x - r
+      const gx = c - 2 * b * x
+      return Float64Array.of(2 * gx * gx - 4 * b * g - s * (1 - t) * Math.cos(x), 2 * gx, 2 * gx, 2)
+    },
+  }
+  const at = (x: number) => [x, b * x * x - c * x + r]
+  return build('branin', 2, kernel, {
+    minima: [at(-Math.PI), at(Math.PI), at(3 * Math.PI)],
+    minimumValue: s * t,
+    start: [2.5, 7.5],
+    lo: [-5, 0],
+    hi: [10, 15],
+  })
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Registers a surface of this file (kind `objective`, area `data/objectives`). */
@@ -411,4 +538,35 @@ objective(
     notes: ['gradient-descent'],
   },
   rastrigin,
+)
+
+objective(
+  {
+    key: 'forrester',
+    name: 'Forrester',
+    summary: 'A one-dimensional function with a deceptive local minimum, and a tilted low-fidelity version.',
+    params: space({
+      fidelity: oneOf(['high', 'low'], { default: 'high' }),
+      a: real(0, 2, { default: 0.5 }),
+      b: real(-20, 20, { default: 10 }),
+      c: real(-10, 10, { default: -5 }),
+    }),
+    dim: 1,
+    truth: true,
+    cite: ['forrester2008'],
+  },
+  forrester,
+)
+
+objective(
+  {
+    key: 'branin',
+    name: 'Branin',
+    summary: 'A two-dimensional function with three global minima of value 0.397887 along a curved valley.',
+    params: space({}),
+    dim: 2,
+    truth: true,
+    cite: ['branin1972'],
+  },
+  branin,
 )

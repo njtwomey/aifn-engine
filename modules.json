@@ -102,6 +102,10 @@
           {
             "module": "factorisation",
             "tier": 2
+          },
+          {
+            "module": "regularisation",
+            "tier": 2
           }
         ]
       },
@@ -485,6 +489,10 @@
           {
             "module": "subgroups",
             "tier": 0
+          },
+          {
+            "module": "selection",
+            "tier": 2
           }
         ]
       },
@@ -911,6 +919,9 @@
           },
           {
             "module": "concentration"
+          },
+          {
+            "module": "shrinkage"
           }
         ]
       },
@@ -959,6 +970,28 @@
           },
           {
             "module": "signals"
+          }
+        ]
+      },
+      {
+        "area": "optimisation",
+        "dependsOn": ["learning", "data"],
+        "shared": [],
+        "children": [
+          {
+            "module": "bayesian"
+          },
+          {
+            "module": "tree-parzen"
+          },
+          {
+            "module": "multi-fidelity"
+          },
+          {
+            "module": "population"
+          },
+          {
+            "module": "importance"
           }
         ]
       },

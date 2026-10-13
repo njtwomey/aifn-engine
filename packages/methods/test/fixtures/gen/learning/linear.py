@@ -8,11 +8,22 @@ same values as the pinned source vendored by `scripts/diabetes.py`. As in the fi
 standardised with the population standard deviation (`StandardScaler`) and, for the paths, the target is centred.
 Coordinate descent runs to a duality gap of 1e-12 of the target's sum of squares, tighter than the engine's default,
 so the fixture is the optimum and not one solver's stopping point.
+
+Under `evidence`, `subsets` and `group_lasso`, on the same standardised diabetes data: `BayesianRidge` with its gamma
+hyperpriors switched off (MacKay's updates, with the log evidence at each step in `scores_`), and the log evidence at
+fixed precisions as the log density of the marginal N(0, I / beta + X X^T / alpha); best-subset selection by brute
+force over all 1024 subsets with `lstsq`, stepwise selection and incremental forward stagewise regression written out
+in numpy; and the group lasso by proximal gradient (FISTA with restarts) polished by Newton's method on the active
+groups.
 """
 
+import itertools
+
 import numpy as np
+from scipy.stats import multivariate_normal
 from sklearn.datasets import load_diabetes
 from sklearn.linear_model import (
+    BayesianRidge,
     ElasticNet,
     LinearRegression,
     LogisticRegression,
@@ -121,6 +132,222 @@ def diabetes() -> dict[str, object]:
     }
 
 
+def standardised_diabetes() -> tuple[np.ndarray, np.ndarray]:
+    """The diabetes design standardised with the population standard deviation, and the raw target."""
+    raw, target = load_diabetes(scaled=False, return_X_y=True)
+    return StandardScaler().fit_transform(raw), target
+
+
+def log_evidence(x: np.ndarray, y: np.ndarray, alpha: float, beta: float) -> float:
+    """The log density of y under its marginal N(0, I / beta + X X^T / alpha), the evidence by its definition."""
+    cov = np.eye(len(y)) / beta + x @ x.T / alpha
+    return float(multivariate_normal(mean=np.zeros(len(y)), cov=cov).logpdf(y))
+
+
+def evidence() -> dict[str, object]:
+    """MacKay's updates as BayesianRidge (hyperpriors off), and the evidence at fixed precisions by its definition."""
+    x, y = standardised_diabetes()
+    runs = []
+    for name, rows, cols in [("diabetes", slice(None), slice(None)), ("wide", slice(0, 8), slice(None))]:
+        xs, ys = x[rows, cols], y[rows]
+        m = BayesianRidge(max_iter=1000, tol=1e-8, alpha_1=0, alpha_2=0, lambda_1=0, lambda_2=0, compute_score=True)
+        m.fit(xs, ys)
+        runs.append({"name": name, "rows": len(ys), "scores": m.scores_, "n_iter": m.n_iter_, "alpha": m.lambda_,
+                     "beta": m.alpha_, "coef": m.coef_, "intercept": m.intercept_, "sigma": m.sigma_})  # fmt: skip
+    fixed = []
+    xc, yc = x - x.mean(axis=0), y - y.mean()
+    # Bishop's polynomial basis on ten points, uncentred, and the centred diabetes data.
+    t = np.linspace(0, 1, 10)
+    target = np.sin(2 * np.pi * t) + 0.3 * np.cos(17 * t)
+    for degree, alpha, beta in [(0, 5e-3, 11.1), (3, 5e-3, 11.1), (9, 5e-3, 11.1), (3, 0.5, 2.0)]:
+        design = np.vander(t, degree + 1, increasing=True)
+        fixed.append({"case": "polynomial", "degree": degree, "alpha": alpha, "beta": beta,
+                      "log_evidence": log_evidence(design, target, alpha, beta)})  # fmt: skip
+    for alpha, beta in [(1e-3, 3e-4), (1.0, 1e-3)]:
+        fixed.append({"case": "diabetes", "degree": -1, "alpha": alpha, "beta": beta,
+                      "log_evidence": log_evidence(xc, yc, alpha, beta)})  # fmt: skip
+    return {"runs": runs, "polynomial": {"t": t, "y": target}, "fixed": fixed}
+
+
+def rss_of(x: np.ndarray, y: np.ndarray, subset: tuple[int, ...] | list[int]) -> float:
+    """The residual sum of squares of least squares on the columns of a subset (x and y centred)."""
+    if len(subset) == 0:
+        return float(y @ y)
+    cols = x[:, list(subset)]
+    w = np.linalg.lstsq(cols, y, rcond=None)[0]
+    r = y - cols @ w
+    return float(r @ r)
+
+
+def stepwise_reference(x: np.ndarray, y: np.ndarray, direction: str, criterion: str) -> list[dict[str, object]]:
+    """Greedy stepwise selection, ties to the lowest column, R's AIC and BIC for a linear model with an intercept."""
+    n, d = x.shape
+
+    def score(subset: list[int]) -> tuple[float, float]:
+        rss = rss_of(x, y, subset)
+        if criterion == "rss":
+            return rss, rss
+        k = len(subset) + 1
+        return rss, n * np.log(rss / n) + (2 if criterion == "aic" else np.log(n)) * k
+
+    active: list[int] = [] if direction in ("forward", "both") else list(range(d))
+    rss, value = score(active)
+    steps: list[dict[str, object]] = [{"action": "start", "feature": -1, "active": list(active), "rss": rss,
+                                       "criterion": value}]  # fmt: skip
+    while True:
+        moves = []
+        if direction != "backward":
+            moves += [("add", j, sorted([*active, j])) for j in range(d) if j not in active]
+        if direction != "forward":
+            moves += [("remove", j, [k for k in active if k != j]) for j in active]
+        if not moves:
+            break
+        best = None
+        for action, j, subset in moves:
+            r, v = score(subset)
+            if best is None or v < best[4]:
+                best = (action, j, subset, r, v)
+        assert best is not None
+        if criterion != "rss" and not best[4] < value:
+            break
+        active, value = best[2], best[4]
+        steps.append({"action": best[0], "feature": best[1], "active": best[2], "rss": best[3], "criterion": best[4]})
+    return steps
+
+
+def stagewise_reference(x: np.ndarray, y: np.ndarray, epsilon: float, steps: int) -> dict[str, object]:
+    """Incremental forward stagewise regression on centred data, stopping when no epsilon step lowers the RSS."""
+    d = x.shape[1]
+    w = np.zeros(d)
+    r = y.copy()
+    path = [w.copy()]
+    features = []
+    for _ in range(steps):
+        c = x.T @ r
+        j = int(np.argmax(np.abs(c)))
+        if np.abs(c[j]) < epsilon * (x[:, j] @ x[:, j]) / 2:
+            break
+        delta = epsilon * np.sign(c[j])
+        w[j] += delta
+        r -= delta * x[:, j]
+        path.append(w.copy())
+        features.append(j)
+    coef = np.array(path).T
+    return {"epsilon": epsilon, "steps": steps, "coef": coef, "features": features,
+            "rss": [float(np.sum((y - x @ col) ** 2)) for col in coef.T]}  # fmt: skip
+
+
+def subsets() -> dict[str, object]:
+    """Best subsets by brute force, stepwise selection and forward stagewise on the standardised diabetes data."""
+    x, y = standardised_diabetes()
+    xc, yc = x - x.mean(axis=0), y - y.mean()
+    d = x.shape[1]
+    sizes, rss, sets = [], [], []
+    for k in range(d + 1):
+        for subset in itertools.combinations(range(d), k):
+            sizes.append(k)
+            sets.append(list(subset))
+            rss.append(rss_of(xc, yc, subset))
+    rss_arr = np.array(rss)
+    best = []
+    for k in range(d + 1):
+        idx = [i for i, s in enumerate(sizes) if s == k]
+        i = idx[int(np.argmin(rss_arr[idx]))]
+        cols = sets[i]
+        w = np.zeros(d)
+        if cols:
+            w[cols] = np.linalg.lstsq(xc[:, cols], yc, rcond=None)[0]
+        best.append({"size": k, "subset": cols, "rss": rss[i], "coef": w, "intercept": y.mean() - x.mean(axis=0) @ w})
+    runs = [("forward", "rss"), ("backward", "rss"), ("forward", "bic"), ("backward", "aic"), ("both", "aic")]
+    stepwise = [
+        {"direction": direction, "criterion": criterion, "steps": stepwise_reference(xc, yc, direction, criterion)}
+        for direction, criterion in runs
+    ]
+    return {
+        "all": {"sizes": sizes, "subsets": sets, "rss": rss},
+        "best": best,
+        "stepwise": stepwise,
+        "stagewise": stagewise_reference(xc, yc, 0.5, 2000),
+    }
+
+
+def group_lasso_reference(x: np.ndarray, y: np.ndarray, groups: list[int], alpha: float) -> np.ndarray:
+    """The group lasso (1/(2n) loss, penalty alpha sum sqrt(p_g) |w_g|) by FISTA with restarts, run to convergence."""
+    n, d = x.shape
+    labels = sorted(set(groups))
+    members = [np.array([j for j in range(d) if groups[j] == g]) for g in labels]
+    lipschitz = np.linalg.eigvalsh(x.T @ x / n).max()
+    step = 1 / lipschitz
+
+    def prox(v: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(v)
+        for cols in members:
+            norm = np.linalg.norm(v[cols])
+            threshold = step * alpha * np.sqrt(len(cols))
+            if norm > threshold:
+                out[cols] = (1 - threshold / norm) * v[cols]
+        return out
+
+    def objective(w: np.ndarray) -> float:
+        r = y - x @ w
+        return r @ r / (2 * n) + alpha * sum(np.sqrt(len(c)) * np.linalg.norm(w[c]) for c in members)
+
+    w = np.zeros(d)
+    z = w.copy()
+    t = 1.0
+    for _ in range(20_000):
+        grad = x.T @ (x @ z - y) / n
+        nxt = prox(z - step * grad)
+        if objective(nxt) > objective(w):
+            # Restart the momentum when the objective rises.
+            z, t = w.copy(), 1.0
+            continue
+        t_next = (1 + np.sqrt(1 + 4 * t * t)) / 2
+        z = nxt + (t - 1) / t_next * (nxt - w)
+        done = np.max(np.abs(nxt - w)) <= 1e-15 * max(1.0, np.max(np.abs(nxt)))
+        w, t = nxt, t_next
+        if done:
+            break
+    # Polish by Newton's method on the active groups, where the objective is smooth: FISTA leaves errors of order
+    # 1e-7 along the poorly conditioned directions of these data, Newton removes them.
+    active = [cols for cols in members if np.linalg.norm(w[cols]) > 0]
+    idx = np.concatenate(active)
+    for _ in range(50):
+        grad = x.T @ (x @ w - y) / n
+        hess = x.T @ x / n
+        for cols in active:
+            norm = np.linalg.norm(w[cols])
+            scale = alpha * np.sqrt(len(cols))
+            grad[cols] += scale * w[cols] / norm
+            hess[np.ix_(cols, cols)] += scale * (np.eye(len(cols)) / norm - np.outer(w[cols], w[cols]) / norm**3)
+        delta = np.linalg.solve(hess[np.ix_(idx, idx)], grad[idx])
+        w[idx] -= delta
+        if np.max(np.abs(delta)) <= 1e-15 * np.max(np.abs(w)):
+            break
+    return w
+
+
+def group_lasso() -> dict[str, object]:
+    """The group lasso on the standardised diabetes data, against proximal gradient."""
+    x, y = standardised_diabetes()
+    n = x.shape[0]
+    xc, yc = x - x.mean(axis=0), y - y.mean()
+    out = []
+    for groups in [[0, 0, 1, 1, 2, 2, 2, 2, 2, 2], [0, 1, 1, 2, 2, 2, 3, 3, 3, 3]]:
+        members = [[j for j in range(10) if groups[j] == g] for g in sorted(set(groups))]
+        top = max(np.linalg.norm(xc[:, c].T @ yc) / (n * np.sqrt(len(c))) for c in members)
+        fits = []
+        for fraction in [0.5, 0.1, 0.01]:
+            alpha = top * fraction
+            w = group_lasso_reference(xc, yc, groups, alpha)
+            r = yc - xc @ w
+            penalty = sum(np.sqrt(len(c)) * np.linalg.norm(w[c]) for c in members)
+            fits.append({"alpha": alpha, "coef": w, "intercept": y.mean() - x.mean(axis=0) @ w,
+                         "objective": r @ r / (2 * n) + alpha * penalty})  # fmt: skip
+        out.append({"groups": groups, "alpha_max": top, "fits": fits})
+    return {"cases": out}
+
+
 def cases() -> dict[str, object]:
     rng = np.random.default_rng(20260930)
     n, d = 40, 3
@@ -174,4 +401,7 @@ def cases() -> dict[str, object]:
             "predict": multi.predict(x_test),
         },
         "diabetes": diabetes(),
+        "evidence": evidence(),
+        "subsets": subsets(),
+        "group_lasso": group_lasso(),
     }

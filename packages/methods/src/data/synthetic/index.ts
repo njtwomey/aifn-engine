@@ -39,6 +39,8 @@
  * - Algorithmic tasks for small transformers and grokking: `sequenceTasks` (`SEQUENCE_TASKS`, `SEQUENCE_VOCABULARY`,
  *   `encodeSequence`, `decodeSequence`, `sequenceTaskTruth`) and $a \circ b \bmod p$ tables (`modularArithmetic`,
  *   `MODULAR_OPERATIONS`, `modularValue`, `modularTruth`).
+ * - Learning curves for multi-fidelity search and extrapolation: `learningCurves`, power-law or exponential loss
+ *   curves with known forms and final values and a dial for how much they cross, and `learningCurveAt`.
  * - Modifiers, from one `Dataset` to another: label noise (`withLabelNoise`, `symmetricNoise`, `flippedMask`), class
  *   balance (`withPrevalence`, `withLabelShift`), `withOutliers`, `withNuisanceFeatures`, linear maps (`withTransform`,
  *   `rotation2d`, `shear2d`), `withMissing`, `withCovariateShift`, and `split` into train and test parts.
@@ -372,3 +374,10 @@ export {
   type PlantedModelFlipOptions,
   type PlantedSubgroupsOptions,
 } from './subgroups'
+export {
+  learningCurveAt,
+  learningCurves,
+  type LearningCurveForm,
+  type LearningCurves,
+  type LearningCurvesOptions,
+} from './learning-curves'

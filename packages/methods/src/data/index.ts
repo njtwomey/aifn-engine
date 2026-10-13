@@ -8,8 +8,9 @@
  *   ones (an annotated electrocardiogram, fonts, hyphenation) are modules of their own under it.
  * - `signals`: deterministic test signals (chirps, tones, the Donoho–Johnstone functions, a voiced sound), series with
  *   a known power spectrum, and a synthetic electrocardiogram.
- * - `objectives`: test surfaces for optimisers (Rosenbrock, Himmelblau, Beale, a quadratic bowl, Rastrigin), with
- *   gradients, Hessians and known minima.
+ * - `objectives`: test surfaces for optimisers (Rosenbrock, Himmelblau, Beale, a quadratic bowl, Rastrigin, and for
+ *   Bayesian optimisation Forrester, Branin and a tabulated SVM tuning surface), with gradients, Hessians and known
+ *   minima.
  * - `targets`: target log-densities for samplers and variational inference (a banana, a Gaussian, a Gaussian mixture,
  *   Neal's funnel), with closed-form gradients and known moments.
  *

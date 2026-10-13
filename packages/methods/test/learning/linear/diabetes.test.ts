@@ -255,7 +255,18 @@ describe('linearSgdSteps', () => {
 })
 
 describe('registry', () => {
-  it('lists the paths as functions', () => {
-    expect(Object.keys(linearFunctions).sort()).toEqual(['elasticNetPath', 'leastAngleRegression', 'ridgePath'])
+  it('lists the paths, selections, evidence and hypergradient as functions', () => {
+    expect(Object.keys(linearFunctions).sort()).toEqual([
+      'bayesianLinearEvidence',
+      'bestSubset',
+      'elasticNetPath',
+      'evidenceMaximisation',
+      'forwardStagewise',
+      'groupLassoPath',
+      'leastAngleRegression',
+      'ridgeHypergradient',
+      'ridgePath',
+      'stepwise',
+    ])
   })
 })

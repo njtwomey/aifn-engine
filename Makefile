@@ -6,7 +6,7 @@ PY_SRC := packages/compute/test/fixtures packages/methods/test/fixtures scripts
 VERSION ?= 0.0.0-dev
 PRETTIER_FILES := git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f; do [ -f "$$f" ] && printf "%s\0" "$$f"; done' _
 
-.PHONY: help install map check lint layers names format typecheck test bench fixtures fixtures-check packages packages-smoke release examples examples-check examples-build shots thumbs clean
+.PHONY: help install map check lint layers names format typecheck test bench fixtures fixtures-check packages packages-smoke release dev examples examples-check examples-build shots thumbs clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -68,6 +68,8 @@ release: ## Tag v$(VERSION) on main and push the tag; CI then checks, packs and 
 	@git fetch -q origin main && test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || (echo "release: main is not in step with origin/main; push first" && exit 1)
 	git tag -a v$(VERSION) -m "v$(VERSION)"
 	git push origin v$(VERSION)
+
+dev: examples ## Alias of make examples: the AIFN Engine site on http://localhost:5192/
 
 examples: ## Run the AIFN Engine site (front page and examples gallery) → http://localhost:5192/
 	@echo "AIFN Engine examples → http://localhost:5192/  (recipes at /<section>/<slug>)"
