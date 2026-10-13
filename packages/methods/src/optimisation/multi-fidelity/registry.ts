@@ -1,9 +1,10 @@
 /**
- * Registry entries of `aifn-methods/optimisation/multi-fidelity`: the run of a schedule over learning curves as a
- * step-through algorithm, and the schedules and the power-law extrapolation as functions.
+ * Registry entries of `aifn-methods/optimisation/multi-fidelity`: the run of a schedule over learning curves and BOHB
+ * as step-through algorithms, and the schedules and the power-law extrapolation as functions.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
+import * as bohb from './bohb'
 import * as extrapolate from './extrapolate'
 import * as run from './run'
 import * as schedules from './schedules'
@@ -22,6 +23,20 @@ algorithm(
     cite: ['jamieson2016', 'li2018hyperband', 'li2020asha'],
   },
   run.multiFidelitySteps,
+)
+
+algorithm(
+  {
+    key: 'bohbSteps',
+    name: 'BOHB',
+    summary:
+      'Hyperband whose configurations are drawn from good and bad kernel densities of the results at the largest well-sampled budget, a fraction at random.',
+    problem: 'search-space',
+    state: { flags: ['terminated'] },
+    random: true,
+    cite: ['falkner2018bohb', 'li2018hyperband'],
+  },
+  bohb.bohbSteps,
 )
 
 fn(
@@ -59,7 +74,7 @@ fn(
 
 /** The algorithms of the module, keyed by factory name. */
 export const multiFidelityAlgorithms: Readonly<Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>> =
-  entries<AlgorithmInfo>('algorithm', run) as Readonly<
+  entries<AlgorithmInfo>('algorithm', run, bohb) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>
   >
 

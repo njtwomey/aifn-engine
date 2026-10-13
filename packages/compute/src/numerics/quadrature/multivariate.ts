@@ -257,7 +257,8 @@ export function integrateMonteCarlo(
 // ---------------------------------------------------------------------------------------------------------------------
 // Low-discrepancy sequences.
 
-const PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+/** The first 25 primes: the bases of the Halton sequence's coordinates. */
+export const PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
 
 /**
  * The radical inverse of integer $i$ in base $b$.
@@ -332,13 +333,16 @@ const SOBOL_M = [
 ]
 const SOBOL_BITS = 32
 
+/** The most dimensions the Sobol direction numbers here cover. */
+export const SOBOL_DIMENSIONS = SOBOL_POLY.length + 1
+
 /**
  * Direction numbers $V[1 \dots 32]$ for dimension `dim` (0-based).
  *
  * @param dim Zero-based dimension index ($0 \le \text{dim} \le 20$).
  * @returns Array of length 33 with direction numbers left-aligned in 32 bits.
  */
-function directions(dim: number): Uint32Array {
+export function directions(dim: number): Uint32Array {
   const V = new Uint32Array(SOBOL_BITS + 1)
   if (dim === 0) {
     for (let i = 1; i <= SOBOL_BITS; i++) V[i] = 2 ** (SOBOL_BITS - i)

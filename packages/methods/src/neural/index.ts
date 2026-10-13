@@ -18,6 +18,8 @@
  *   GRPO's advantages and pass@$k$), `aifn-methods/neural/adaptation` (fitting a weight change with LoRA or PiSSA),
  *   `aifn-methods/neural/reward-models` (Bradley–Terry reward models and best-of-$n$ over-optimisation) and
  *   `aifn-methods/neural/quantisation` (the memory and compute of serving and of fine-tuning, with LoRA and QLoRA).
+ * - Tuning: `aifn-methods/neural/tuning`, a learning-rate sweep of a small network over rates and seeds, run in a
+ *   worker.
  */
 
 import { entries } from 'aifn-compute/foundation/registry'

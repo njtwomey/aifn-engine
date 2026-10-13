@@ -34,6 +34,12 @@ import { definer } from 'aifn-compute/foundation/registry'
 import { int, oneOf, real, space, when } from 'aifn-compute/foundation/space'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
 
+/**
+ * A dataset whose labels are always there: what the labelled point generators return, so that it passes to an
+ * estimator's `fit` or to `crossValidate` (which take `Supervised` data) as it is.
+ */
+export type LabelledDataset = Dataset & { readonly y: Tensor }
+
 const TAU = 2 * Math.PI
 
 type Sizes = ClassSizes
@@ -259,7 +265,7 @@ export interface BlobsOptions extends ClassSizeOptions {
  * print('centres on x1:', d.meta.recipe.knobs.centers.map((c) => c[0]))
  * print('Bayes error:', d.meta.truth.bayesError, ' Phi(-1) = 0.158655')
  */
-export function blobs(s: Stream, options: BlobsOptions = {}): Dataset {
+export function blobs(s: Stream, options: BlobsOptions = {}): LabelledDataset {
   const { centers = 3, dim = 2, box = [-10, 10] } = options
   const layout = options.layout ?? (options.separation !== undefined ? 'polygon' : 'random')
   const separation = options.separation ?? 4
@@ -407,7 +413,7 @@ export interface MoonsOptions extends ClassSizeOptions {
  * const y = toArray(moons(stream(0), { n: 100, prevalence: 0.2 }).y)
  * print('inner moon points:', y.filter((v) => v === 1).length, 'of', y.length)
  */
-export function moons(s: Stream, options: MoonsOptions = {}): Dataset {
+export function moons(s: Stream, options: MoonsOptions = {}): LabelledDataset {
   const { noise = 0.1, spacing = 'even' } = options
   const { sizes, priors } = resolveClassSizes(options, 2, 200, 'moons')
   const [nOut, nIn] = sizes
@@ -488,7 +494,7 @@ export interface CirclesOptions extends ClassSizeOptions {
  * const inner = toArray(d.x).filter((_, i) => y[i] === 1)
  * print('inner mean radius:', inner.reduce((a, [u, v]) => a + Math.hypot(u, v), 0) / inner.length)
  */
-export function circles(s: Stream, options: CirclesOptions = {}): Dataset {
+export function circles(s: Stream, options: CirclesOptions = {}): LabelledDataset {
   const { factor = 0.5, noise = 0.05 } = options
   if (!(factor >= 0 && factor < 1)) throw new DomainError('circles', `circles: factor must be in [0, 1), got ${factor}`)
   const { sizes, priors } = resolveClassSizes(options, 2, 200, 'circles')
@@ -574,7 +580,7 @@ export interface RingsOptions extends ClassSizeOptions {
  * const ring = (k) => r.filter((_, i) => y[i] === k)
  * print('mean radius per ring:', [0, 1, 2].map((k) => ring(k).reduce((a, v) => a + v, 0) / ring(k).length))
  */
-export function rings(s: Stream, options: RingsOptions = {}): Dataset {
+export function rings(s: Stream, options: RingsOptions = {}): LabelledDataset {
   const { radii = [1, 2, 3], noise = 0.1 } = options
   const { sizes, priors } = resolveClassSizes(options, radii.length, 300, 'rings')
   const total = sizes.reduce((a, b) => a + b, 0)
@@ -656,7 +662,7 @@ export interface SpiralsOptions extends ClassSizeOptions {
  * const t = toArray(d.t)
  * print('largest |radius - t|:', Math.max(...toArray(d.x).map(([u, v], i) => Math.abs(Math.hypot(u, v) - t[i]))))
  */
-export function spirals(s: Stream, options: SpiralsOptions = {}): Dataset {
+export function spirals(s: Stream, options: SpiralsOptions = {}): LabelledDataset {
   const { arms = 2, turns = 1.5, noise = 0.05 } = options
   const { sizes, priors } = resolveClassSizes(options, arms, 300, 'spirals')
   const total = sizes.reduce((a, b) => a + b, 0)
@@ -758,7 +764,7 @@ const CORNERS = [
  * print('class counts:', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
  * print('Bayes error:', d.meta.truth.bayesError, '(' + d.meta.truth.bayesErrorMethod + ')')
  */
-export function xor(s: Stream, options: XorOptions = {}): Dataset {
+export function xor(s: Stream, options: XorOptions = {}): LabelledDataset {
   const { kind = 'uniform', sd = 0.4 } = options
   const { sizes, priors, controlled } = resolveClassSizes(options, 2, 200, 'xor')
   const n = sizes[0] + sizes[1]
@@ -870,7 +876,7 @@ export interface CheckerboardOptions extends ClassSizeOptions {
  * print('class counts (random):', [y.filter((v) => v === 0).length, y.filter((v) => v === 1).length])
  * print('labels match the tiles:', toArray(d.x).every(([u, v], i) => (Math.floor(u) + Math.floor(v)) % 2 === y[i]))
  */
-export function checkerboard(s: Stream, options: CheckerboardOptions = {}): Dataset {
+export function checkerboard(s: Stream, options: CheckerboardOptions = {}): LabelledDataset {
   const { tiles = 4 } = options
   if (!(Number.isInteger(tiles) && tiles >= 2))
     throw new DomainError('checkerboard', `checkerboard: tiles must be an integer of at least 2, got ${tiles}`)
@@ -998,7 +1004,7 @@ export interface GaussiansOptions extends ClassSizeOptions {
  * print('means:', d.meta.recipe.knobs.means)
  * print('Bayes error:', d.meta.truth.bayesError, ' Phi(-1) = 0.158655')
  */
-export function gaussians(s: Stream, options: GaussiansOptions = {}): Dataset {
+export function gaussians(s: Stream, options: GaussiansOptions = {}): LabelledDataset {
   let means = (
     options.means ?? [
       [-1, 0],
@@ -1111,7 +1117,7 @@ export interface AnisotropicOptions extends BlobsOptions {
  * const cov = (a, b) => x.reduce((t, r) => t + r[a] * r[b], 0) / x.length
  * print('sample covariance:', [[cov(0, 0), cov(0, 1)], [cov(1, 0), cov(1, 1)]])
  */
-export function anisotropicBlobs(s: Stream, options: AnisotropicOptions = {}): Dataset {
+export function anisotropicBlobs(s: Stream, options: AnisotropicOptions = {}): LabelledDataset {
   const base = blobs(s, { n: 300, centers: 3, ...options, dim: 2 })
   const [[a, b], [c, d]] = options.transform ?? [
     [0.6, -0.6],
@@ -1291,6 +1297,8 @@ export function sCurve(s: Stream, options: ManifoldOptions = {}): Dataset {
  * print('labels after: ', toArray(shuffled.y))
  * print('recipe modifiers:', shuffled.meta.recipe.modifiers.map((m) => m.op))
  */
+export function shuffleDataset(s: Stream, data: LabelledDataset): LabelledDataset
+export function shuffleDataset(s: Stream, data: Dataset): Dataset
 export function shuffleDataset(s: Stream, data: Dataset): Dataset {
   const n = data.x.shape[0]
   const out = selectRows(data, Array.from(permutation(s, n).data))

@@ -57,7 +57,7 @@ export const UNUSED = -1
  * @param data A `SplitInput` (recognised by a numeric `n`) or a dataset.
  * @returns The `SplitInput` of `data`.
  */
-function inputOf(data: SplitInput | Dataset<Features, Column>): SplitInput {
+export function inputOf(data: SplitInput | Dataset<Features, Column>): SplitInput {
   if ('n' in data && typeof data.n === 'number') return data as SplitInput
   const d = data as Dataset<Features, Column>
   return { n: rowCount(d.x), y: d.y, groups: d.groups }
@@ -83,7 +83,7 @@ function labelsOf(c: Column, n: number, what: string): (string | number)[] {
  * @param indices The indices, in any order; not modified.
  * @returns A new int32 tensor of the indices in increasing order.
  */
-function sorted(indices: number[]): Tensor {
+export function sorted(indices: number[]): Tensor {
   return fromData(Int32Array.from(indices).sort(), [indices.length])
 }
 
@@ -94,7 +94,7 @@ function sorted(indices: number[]): Tensor {
  * @param k The number of folds.
  * @returns $k$ splits, in fold order.
  */
-function fromTestFolds(testFold: Int32Array, k: number): Split[] {
+export function fromTestFolds(testFold: Int32Array, k: number): Split[] {
   const n = testFold.length
   return Array.from({ length: k }, (_, f) => {
     const test: number[] = []
@@ -135,7 +135,7 @@ function checkK(k: number, n: number, name: string) {
  * @param name The caller's name, for error messages.
  * @returns `s`.
  */
-function needStream(s: Stream | undefined, name: string): Stream {
+export function needStream(s: Stream | undefined, name: string): Stream {
   if (!s) throw new DomainError(name, `${name}: a shuffled split needs a stream`)
   return s
 }

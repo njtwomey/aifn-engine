@@ -10,7 +10,8 @@
  *   `decisionPath`, `nodeRegion` (a node's box), `nodePrediction`, `nodeLabel`, `treeSize` and `featureImportances`.
  * - Pruning: `costComplexityPath` (the weakest-link $\alpha$ sequence), `pruneTree` (prune at an $\alpha$) and
  *   `keptNodes` (read a pruned tree in the full tree's ids).
- * - Ensembles, in the child modules: `bagging` (`randomForest`) and `boosting` (`adaBoost`, `gradientBoosting`).
+ * - Ensembles, in the child modules: `bagging` (`randomForest`, `randomForestRegressor`) and `boosting` (`adaBoost`,
+ *   `gradientBoosting`).
  *
  * A tree is plain data, an `aifn-compute/graph` binary tree whose nodes record their split, rows, statistics and the
  * search made there. Splits are $x_f \le t$ with $t$ halfway between consecutive distinct values, and nodes are
@@ -57,6 +58,6 @@ export {
   type TreeProblem,
   type WeightedData,
 } from './tree'
-export { randomForest } from './bagging'
+export { randomForest, randomForestRegressor } from './bagging'
 export { adaBoost, gradientBoosting } from './boosting'
 export { treesAlgorithms, treesFunctions } from './registry'

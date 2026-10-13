@@ -40,14 +40,17 @@
  *   `encodeSequence`, `decodeSequence`, `sequenceTaskTruth`) and $a \circ b \bmod p$ tables (`modularArithmetic`,
  *   `MODULAR_OPERATIONS`, `modularValue`, `modularTruth`).
  * - Learning curves for multi-fidelity search and extrapolation: `learningCurves`, power-law or exponential loss
- *   curves with known forms and final values and a dial for how much they cross, and `learningCurveAt`.
+ *   curves with known forms and final values and a dial for how much they cross, and `learningCurveAt`;
+ *   `learningCurveSurface`, curves indexed by the points of a search space, whose final loss is a smooth function of
+ *   the configuration with a known optimum.
  * - Modifiers, from one `Dataset` to another: label noise (`withLabelNoise`, `symmetricNoise`, `flippedMask`), class
  *   balance (`withPrevalence`, `withLabelShift`), `withOutliers`, `withNuisanceFeatures`, linear maps (`withTransform`,
  *   `rotation2d`, `shear2d`), `withMissing`, `withCovariateShift`, and `split` into train and test parts.
  *
  * Every random generator takes a `Stream` first and is a pure function of it, drawing its parts from named child
  * streams. Labelled point generators take class sizes alike (a total with `prevalence` or `classWeights`, or per-class
- * counts) and give exact counts. Where the generating process is known in closed form, the truth is attached in
+ * counts) and give exact counts; they return a `LabelledDataset`, whose `y` is always there, so it passes to `fit` and
+ * `crossValidate` as it is. Where the generating process is known in closed form, the truth is attached in
  * `meta.truth` (the Bayes posterior and error, the regression function, the segments) or returned beside the data, and
  * the modifiers keep it consistent. Generators and modifiers are registered by key and record themselves in
  * `meta.recipe`; recipes, which replay them, are in `aifn-methods/data`.
@@ -71,6 +74,7 @@ export {
   type CheckerboardOptions,
   type CirclesOptions,
   type GaussiansOptions,
+  type LabelledDataset,
   type ManifoldOptions,
   type MoonsOptions,
   type RingsOptions,
@@ -381,3 +385,8 @@ export {
   type LearningCurves,
   type LearningCurvesOptions,
 } from './learning-curves'
+export {
+  learningCurveSurface,
+  type LearningCurveSurface,
+  type LearningCurveSurfaceOptions,
+} from './learning-curve-surface'

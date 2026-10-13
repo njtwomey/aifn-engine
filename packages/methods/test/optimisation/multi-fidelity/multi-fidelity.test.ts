@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { stream } from 'aifn-compute/foundation/random'
+import { child, stream } from 'aifn-compute/foundation/random'
+import { encode, int, oneOf, real, sample, space } from 'aifn-compute/foundation/space'
 import { toArray, toFlat } from 'aifn-compute/foundation/tensor'
 import { run, trace } from 'aifn-compute/foundation/trace'
-import { learningCurves } from 'aifn-methods/data/synthetic'
+import { learningCurveSurface, learningCurves } from 'aifn-methods/data/synthetic'
 import {
+  bohbSteps,
   fitPowerLaw,
   hyperbandSchedule,
   multiFidelityAlgorithms,
@@ -11,6 +13,7 @@ import {
   multiFidelitySteps,
   successiveHalvingSchedule,
   type CurveFunction,
+  type BohbState,
   type MultiFidelityState,
 } from 'aifn-methods/optimisation/multi-fidelity'
 import { fixture } from '../../fixtures'
@@ -19,7 +22,11 @@ import { expectInfo } from '../../registry'
 
 type Brackets = { s: number; n: number[]; r: number[] }[]
 type Fit = { t: number[]; y: number[]; a: number; b: number; c: number; rss: number }
-const F = fixture<{ hyperband: Record<string, Brackets>; powerLaw: Fit[] }>('optimisation/multi-fidelity')
+const F = fixture<{
+  hyperband: Record<string, Brackets>
+  powerLaw: Fit[]
+  bohbModelBudgets: Record<string, (number | null)[]>
+}>('optimisation/multi-fidelity')
 
 // Configuration i ends at 0.1 (n - 1 - i) / n: the last is best; 0.02 i / r makes the good ones look bad early.
 const crossing = (n: number): CurveFunction => ({ count: n, at: (i, r) => (0.1 * (n - 1 - i)) / n + (0.02 * i) / r })
@@ -27,7 +34,7 @@ const crossing = (n: number): CurveFunction => ({ count: n, at: (i, r) => (0.1 *
 const parallel = (n: number): CurveFunction => ({ count: n, at: (i, r) => 0.01 * ((i * 7) % n) + 1 / r })
 
 describe('schedules', () => {
-  it('Hyperband matches Li et al. (2018), Algorithm 1 and its table for R = 81, eta = 3', () => {
+  it('Hyperband follows Li et al. (2018), Algorithm 1: 81, 34, 15, 8, 5 for R = 81, not the printed table', () => {
     const cases: Record<string, [number, number]> = {
       R81eta3: [81, 3],
       R27eta3: [27, 3],
@@ -229,7 +236,48 @@ describe('with learningCurves', () => {
     const wild = learningCurves(stream(0), { n: 81, crossing: 1, noise: 0 })
     const w = run(multiFidelitySteps(wild, sh), undefined, 10)
     expect(w.trueBest).toBe(wild.best)
+    expect(w.observedBest).toBe(wild.best)
     expect(w.survived).toBe(false)
+  })
+
+  it('noisy curves: trueBest is by the clean final loss (as learningCurves().best), observedBest by the noisy one', () => {
+    const sh = successiveHalvingSchedule({ n: 81, maxBudget: 81, eta: 3 })
+    let differ = 0
+    for (let seed = 0; seed < 10; seed++) {
+      const c = learningCurves(stream(seed), { n: 81, noise: 0.03 })
+      const s = run(multiFidelitySteps(c, sh), undefined, 10)
+      expect(s.trueBest).toBe(c.best)
+      const observed = (toArray(c.values) as number[][]).map((row) => row[80])
+      expect(s.observedBest).toBe(observed.indexOf(Math.min(...observed)))
+      if (s.observedBest !== s.trueBest) differ++
+      // The incumbent's final loss is its clean one.
+      expect(s.incumbent!.final).toBe((toFlat(c.final) as ArrayLike<number>)[s.incumbent!.config])
+      // survived follows the true best.
+      const reached = Math.max(...s.evaluations.filter((e) => e.config === c.best).map((e) => e.rung))
+      expect(s.survived).toBe(reached === sh.rungs.length - 1)
+    }
+    expect(differ).toBeGreaterThan(0)
+    // Without the clean table the two coincide.
+    const c = learningCurves(stream(0), { n: 81, noise: 0.03 })
+    const s = run(multiFidelitySteps({ budgets: c.budgets, values: c.values }, sh), undefined, 10)
+    expect(s.trueBest).toBe(s.observedBest)
+    expect(() => multiFidelitySteps({ budgets: [1, 2], values: [[1, 2]], clean: [[1]] }, sh)).toThrow(/clean/)
+  })
+
+  it('a learningCurveSurface over random configurations runs as curves, with the true best known', () => {
+    const sp = space({ x: real(0, 1), y: real(0, 1) })
+    const surface = learningCurveSurface(stream(3), { space: sp, noise: 0.01, crossing: 0.2 })
+    const hb = hyperbandSchedule({ maxBudget: 27, eta: 3 })
+    const points = Array.from({ length: hb.configurations }, (_, i) => sample(child(stream(4), i), sp))
+    const s = run(multiFidelitySteps(surface.curves(points, stream(5)), hb), undefined, 20)
+    expect(s.terminated).toBe(true)
+    const last = hb.brackets.length - 1
+    const configs = Array.from(
+      { length: hb.brackets[last].rungs[0].configurations },
+      (_, i) => hb.configurations - i - 1,
+    )
+    const best = configs.reduce((a, c) => (surface.clean(points[c], 27) < surface.clean(points[a], 27) ? c : a))
+    expect(s.trueBest).toBe(best)
   })
 
   it('fitPowerLaw extrapolates a noise-free power-law curve from its first budgets', () => {
@@ -242,6 +290,107 @@ describe('with learningCurves', () => {
       expect(fit.c).toBeCloseTo(f.c, 6)
       expect(fit.at(81)).toBeCloseTo(rows[i][80], 6)
     })
+  })
+})
+
+describe('bohbSteps', () => {
+  const sp = space({ x: real(0, 1), y: real(0, 1) })
+  const surface = learningCurveSurface(stream(0), { space: sp, noise: 0.005, crossing: 0.2 })
+
+  it('the model budget before each bracket is the largest with N_min + 2 results (fixture)', () => {
+    const sp4 = space({ a: real(0, 1), b: real(0, 1), c: int(1, 5), d: oneOf(['p', 'q', 'r']) })
+    const s4 = learningCurveSurface(stream(1), { space: sp4, noise: 0 })
+    const cases: [string, number, typeof sp | typeof sp4, typeof surface | typeof s4][] = [
+      ['R27eta3d2', 27, sp, surface],
+      ['R81eta3d2', 81, sp, surface],
+      ['R81eta3d4', 81, sp4, s4],
+    ]
+    for (const [name, R, space_, curve] of cases) {
+      const hb = hyperbandSchedule({ maxBudget: R, eta: 3 })
+      const tr = trace(bohbSteps(curve as never, space_, hb), undefined, 40, { stream: stream(2), keep: 'all' })
+      const steps = tr.steps as BohbState[]
+      // The states that drew a bracket: the initial one, and each one that ended a bracket but the last.
+      const drawing = [steps[0], ...steps.slice(1).filter((s) => s.sampled.length > 0)]
+      expect(
+        drawing.map((s) => s.modelBudget),
+        name,
+      ).toEqual(F.bohbModelBudgets[name])
+      expect(tr.final.points.length).toBe(hb.configurations)
+      expect(tr.final.spent).toBeCloseTo(hb.budget, 8)
+    }
+  })
+
+  it("the model's groups: the best max(N_min, floor(q N)) results at its budget, and the worst max(N_min, N - N_l)", () => {
+    const hb = hyperbandSchedule({ maxBudget: 27, eta: 3 })
+    const tr = trace(bohbSteps(surface, sp, hb), undefined, 20, { stream: stream(3), keep: 'all' })
+    for (const s of (tr.steps as BohbState[]).filter((x) => x.sampled.length > 0 && x.modelBudget !== null)) {
+      const at = s.evaluations.filter((e) => e.budget === s.modelBudget).sort((a, b) => a.loss - b.loss)
+      const N = at.length
+      const nGood = Math.max(3, Math.floor(0.15 * N))
+      expect(s.good).toEqual(at.slice(0, nGood).map((e) => e.config))
+      expect(s.bad).toEqual(at.slice(N - Math.max(3, N - nGood)).map((e) => e.config))
+    }
+  })
+
+  it('rho = 1 draws everything at random; rho = 0 draws from the model once there is one', () => {
+    const hb = hyperbandSchedule({ maxBudget: 27, eta: 3 })
+    const all = run(bohbSteps(surface, sp, hb, { rho: 1 }), undefined, 20, { stream: stream(4) })
+    expect(all.random.every((r) => r)).toBe(true)
+    const none = run(bohbSteps(surface, sp, hb, { rho: 0 }), undefined, 20, { stream: stream(4) })
+    const first = hb.brackets[0].rungs[0].configurations
+    expect(none.random.slice(0, first).every((r) => r)).toBe(true)
+    expect(none.random.slice(first).every((r) => !r)).toBe(true)
+    // The default mixes the two: about a third at random after the first bracket.
+    const mixed = run(bohbSteps(surface, sp, hb), undefined, 20, { stream: stream(4) })
+    const share = mixed.random.slice(first).filter((r) => r).length / (hb.configurations - first)
+    expect(share).toBeGreaterThan(0.1)
+    expect(share).toBeLessThan(0.6)
+  })
+
+  it('model-based configurations are better than random ones on a learning-curve surface', () => {
+    const hb = hyperbandSchedule({ maxBudget: 27, eta: 3 })
+    const s = run(bohbSteps(surface, sp, hb, { rho: 0 }), undefined, 20, { stream: stream(5) })
+    const median = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)]
+    const finals = s.points.map((p) => surface.final(p as never))
+    const first = hb.brackets[0].rungs[0].configurations
+    expect(median(finals.slice(first))).toBeLessThan(median(finals.slice(0, first)))
+    // Model-based draws lie near the good results: closer to the optimum than random draws, on average.
+    const dist = (p: unknown) => {
+      const u = encode(sp, p as never)
+      const c = toFlat(surface.centre) as ArrayLike<number>
+      return Math.hypot(u[0] - c[0], u[1] - c[1])
+    }
+    const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length
+    expect(mean(s.points.slice(first).map(dist))).toBeLessThan(mean(s.points.slice(0, first).map(dist)))
+  })
+
+  it('tracks the true best of each bracket by the clean loss at R, and the observed best by the noisy one', () => {
+    const hb = hyperbandSchedule({ maxBudget: 9, eta: 3 })
+    const noisy = learningCurveSurface(stream(6), { space: sp, noise: 0.05 })
+    const tr = trace(bohbSteps(noisy, sp, hb), undefined, 10, { stream: stream(7), keep: 'all' })
+    for (const s of (tr.steps as BohbState[]).slice(1)) {
+      const b = s.bracket
+      const offset = hb.brackets.slice(0, b).reduce((a, x) => a + x.rungs[0].configurations, 0)
+      const configs = Array.from({ length: hb.brackets[b].rungs[0].configurations }, (_, i) => offset + i)
+      const clean = (c: number) => noisy.clean(s.points[c] as never, 9)
+      const best = configs.reduce((a, c) => (clean(c) < clean(a) ? c : a))
+      expect(s.trueBest).toBe(best)
+      const seen = (c: number) => noisy.at(s.points[c] as never, 9, child(s.noise, c, 9))
+      expect(s.observedBest).toBe(configs.reduce((a, c) => (seen(c) < seen(a) ? c : a)))
+    }
+    // A plain function works too, the true best then being by the observed final loss.
+    const plain = (p: { x: number; y: number }, t: number) => (p.x - 0.3) ** 2 + p.y / t
+    const s = run(bohbSteps(plain, sp, hb), undefined, 10, { stream: stream(8) })
+    expect(s.trueBest).toBe(s.observedBest)
+  })
+
+  it('follows the trace protocol, and reports bad options', () => {
+    const hb = hyperbandSchedule({ maxBudget: 9, eta: 3 })
+    expectProtocol(bohbSteps(surface, sp, hb), undefined, { n: 6 })
+    expectProtocol(bohbSteps(surface, sp, hb, { resume: true, workers: 2 }), undefined, { n: 6 })
+    expect(() => bohbSteps(surface, sp, hb, { rho: 2 })).toThrow(/rho/)
+    expect(() => bohbSteps(surface, sp, hb, { q: 0 })).toThrow(/q must/)
+    expect(() => bohbSteps(surface, sp, hb, { samples: 0 })).toThrow(/samples/)
   })
 })
 

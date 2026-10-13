@@ -46,9 +46,9 @@ fn(
   {
     key: 'tikhonovPath',
     name: 'Tikhonov path',
-    summary: 'Standard-form Tikhonov solutions, norms and filter factors for many weights from one SVD.',
+    summary: 'Tikhonov solutions, norms and filter factors for many weights from one SVD (a general L made standard).',
     role: 'solver',
-    cite: ['hansen1998'],
+    cite: ['hansen1998', 'elden1982'],
   },
   tikhonov.tikhonovPath,
 )
@@ -72,6 +72,16 @@ fn(
     cite: ['hansen1998'],
   },
   tikhonov.differenceOperator,
+)
+fn(
+  {
+    key: 'convolutionMatrix',
+    name: 'Convolution matrix',
+    summary: 'The n × n matrix of a one-dimensional blur, with zero, periodic or reflected ends.',
+    role: 'construction',
+    cite: ['hansen1998'],
+  },
+  tikhonov.convolutionMatrix,
 )
 fn(
   {

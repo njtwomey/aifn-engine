@@ -29,15 +29,18 @@ import { defineModel } from 'aifn-compute/learning/estimators'
 import { bool, int, space } from 'aifn-compute/foundation/space'
 
 /**
- * The problem a forest grows on: inputs ($n \times d$), labels $0, \dots, K - 1$, and the tree and bagging settings.
+ * The problem a forest grows on: inputs ($n \times d$), labels $0, \dots, K - 1$ (or real targets for regression),
+ * and the tree and bagging settings.
  */
 export interface ForestProblem {
   /** The inputs, $n \times d$. */
   x: Tensor
-  /** The class labels, $n$ integers from 0. */
+  /** The class labels, $n$ integers from 0, or for regression the $n$ real targets. */
   y: Tensor
-  /** The number of classes $K$. */
+  /** The number of classes $K$ (ignored for regression). */
   classes: number
+  /** Grow classification trees (the default) or regression trees on squared error. */
+  task?: 'classification' | 'regression'
   /** The growth hyperparameters of every tree (`maxFeatures` sets the features searched at each node). */
   params: TreeParams
   /** Grow each tree on a bootstrap sample (default true); otherwise on every row. */
@@ -56,9 +59,10 @@ export interface ForestState extends Status {
 
 /**
  * Random-forest growth as a traceable algorithm (Breiman, 2001, Machine Learning 45): each step grows one CART tree
- * on a bootstrap sample ($n$ rows drawn uniformly with replacement, as integer sample weights) drawn from
- * `child(ctx.stream, 'bootstrap')`, its feature subsets from the step's child stream `'features'`, so tree $t$ depends
- * only on the root key and $t$, and adding trees keeps the existing ones. No start.
+ * (a classification tree, or with `task: 'regression'` a regression tree on squared error) on a bootstrap sample ($n$
+ * rows drawn uniformly with replacement, as integer sample weights) drawn from `child(ctx.stream, 'bootstrap')`, its
+ * feature subsets from the step's child stream `'features'`, so tree $t$ depends only on the root key and $t$, and
+ * adding trees keeps the existing ones. No start.
  *
  * @param problem The data, the number of classes, the tree parameters and whether to bootstrap.
  * @returns The algorithm, whose state holds the trees grown so far and their bootstrap counts.
@@ -73,8 +77,9 @@ export interface ForestState extends Status {
  * print('root splits:', state.trees.map((tree) => tree.nodes[0].label))
  */
 export function forestGrowth(problem: ForestProblem): Algorithm<void, ForestState> {
-  const { x, y, classes: K, params, bootstrap = true } = problem
+  const { x, y, classes: K, params, bootstrap = true, task = 'classification' } = problem
   const n = x.shape[0]
+  const treeParams: TreeParams = task === 'regression' ? { ...params, criterion: 'squared' } : params
   return {
     name: 'random-forest-growth',
     init: () => ({ t: 0, trees: [], inBag: fromData(new Float64Array(0), [0, n]) }),
@@ -88,9 +93,9 @@ export function forestGrowth(problem: ForestProblem): Algorithm<void, ForestStat
         x,
         y,
         weights: fromData(Float64Array.from(counts), [n]),
-        task: 'classification',
-        classes: K,
-        params,
+        task,
+        classes: task === 'regression' ? 1 : K,
+        params: treeParams,
       })
       const inBag = new Float64Array((s.t + 1) * n)
       inBag.set(values(s.inBag))

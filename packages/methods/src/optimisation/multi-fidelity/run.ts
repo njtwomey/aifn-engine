@@ -18,21 +18,29 @@ import type { MultiFidelitySchedule } from './schedules'
 
 /**
  * Learning curves as a table: the loss of each configuration at each of a list of budgets, read between the budgets
- * by linear interpolation. The output of `learningCurves` (`aifn-methods/data/synthetic`) is one.
+ * by linear interpolation. The output of `learningCurves` (`aifn-methods/data/synthetic`) is one, with its noise-free
+ * `clean` table.
  */
 export interface CurveTable {
   /** The budgets $t_1 < \dots < t_B$ the table holds. */
   budgets: Tensor | ArrayLike<number>
-  /** The losses, $n \times B$: row $i$ is configuration $i$'s curve. */
+  /** The losses the search observes, $n \times B$: row $i$ is configuration $i$'s curve. */
   values: Tensor | NestedArray
+  /**
+   * The noise-free losses, $n \times B$ like `values`, when they are known: the true best configuration and the
+   * incumbent's final loss are then read from them rather than from the observed `values`.
+   */
+  clean?: Tensor | NestedArray
 }
 
 /** Learning curves as a function: the loss of configuration `config` (from 0 to `count - 1`) after `budget`. */
 export interface CurveFunction {
   /** The number of configurations. */
   count: number
-  /** The loss of a configuration after a budget. */
+  /** The loss of a configuration after a budget, as the search observes it. */
   at: (config: number, budget: number) => number
+  /** The noise-free loss, when it is known; the true best and the incumbent's final loss are then read from it. */
+  clean?: (config: number, budget: number) => number
 }
 
 /** One evaluation of a configuration at a budget. */
@@ -79,7 +87,7 @@ export interface MultiFidelityIncumbent {
   loss: number
   /** The budget it reached that loss at. */
   budget: number
-  /** Its loss at the schedule's maximum budget, from the curves. */
+  /** Its true loss at the schedule's maximum budget: from the noise-free curves when given, else the observed ones. */
   final: number
 }
 
@@ -125,8 +133,17 @@ export interface MultiFidelityState extends Status {
   time: number
   /** The best evaluation so far (`null` at the start). */
   incumbent: MultiFidelityIncumbent | null
-  /** The configuration of this step's bracket with the lowest loss at the maximum budget. */
+  /**
+   * The configuration of this step's bracket with the lowest true loss at the maximum budget $R$: by the noise-free
+   * curves when they are given (`clean`, as `learningCurves` provides, whose `best` it then agrees with), else by the
+   * observed ones.
+   */
   trueBest: number
+  /**
+   * The configuration of this step's bracket with the lowest observed loss at $R$ (the noisy value a full-budget
+   * evaluation would see). It equals `trueBest` for noise-free curves and can differ when there is noise.
+   */
+  observedBest: number
   /** The highest rung `trueBest` has been evaluated at or promoted to ($-1$ before it starts). */
   bestRung: number
   /**
@@ -161,14 +178,18 @@ export interface MultiFidelityOptions {
  *
  * @param curves The curves.
  * @param schedule The schedule, whose budgets are checked.
- * @returns The configuration count and the loss function.
+ * @returns The configuration count, the observed loss function, and the noise-free one (`null` when not given).
  */
 function readCurves(
   curves: CurveTable | CurveFunction,
   schedule: MultiFidelitySchedule,
-): { count: number; at: (config: number, budget: number) => number } {
+): {
+  count: number
+  at: (config: number, budget: number) => number
+  clean: ((config: number, budget: number) => number) | null
+} {
   const where = 'multiFidelitySteps'
-  if ('at' in curves) return { count: curves.count, at: curves.at }
+  if ('at' in curves) return { count: curves.count, at: curves.at, clean: curves.clean ?? null }
   const budgets = Float64Array.from(
     (isTensor(curves.budgets) ? toFlat(curves.budgets) : curves.budgets) as ArrayLike<number>,
   )
@@ -177,8 +198,13 @@ function readCurves(
     throw new ShapeError(where, `${where}: the values must be n × ${budgets.length}, one column per budget`)
   for (let j = 1; j < budgets.length; j++)
     if (!(budgets[j] > budgets[j - 1])) throw new DomainError(where, `${where}: the budgets must increase`)
-  const values = toFlat(table) as ArrayLike<number>
   const [count, B] = table.shape
+  const cleanTable = curves.clean === undefined ? null : isTensor(curves.clean) ? curves.clean : tensor(curves.clean)
+  if (
+    cleanTable !== null &&
+    (cleanTable.shape.length !== 2 || cleanTable.shape[0] !== count || cleanTable.shape[1] !== B)
+  )
+    throw new ShapeError(where, `${where}: the clean values must be ${count} × ${B}, as the values are`)
   for (const b of schedule.brackets)
     for (const g of b.rungs)
       if (!(g.budget >= budgets[0] * (1 - 1e-12) && g.budget <= budgets[B - 1] * (1 + 1e-12)))
@@ -186,7 +212,7 @@ function readCurves(
           where,
           `${where}: budget ${g.budget} lies outside the curves' [${budgets[0]}, ${budgets[B - 1]}]`,
         )
-  const at = (config: number, budget: number): number => {
+  const reader = (values: ArrayLike<number>) => (config: number, budget: number) => {
     let j = 0
     while (j < B - 2 && budgets[j + 1] < budget) j++
     if (B === 1) return values[config]
@@ -194,7 +220,11 @@ function readCurves(
     const w = Math.min(1, Math.max(0, (budget - t0) / (t1 - t0)))
     return (1 - w) * values[config * B + j] + w * values[config * B + j + 1]
   }
-  return { count, at }
+  return {
+    count,
+    at: reader(toFlat(table) as ArrayLike<number>),
+    clean: cleanTable === null ? null : reader(toFlat(cleanTable) as ArrayLike<number>),
+  }
 }
 
 /**
@@ -204,10 +234,11 @@ function readCurves(
  * $\lfloor n_k / \eta \rfloor$; brackets run one after another. Asynchronously (ASHA) each step finishes one
  * evaluation and hands the free workers their next jobs; a bracket ends when no job is left in it, and the next starts.
  * The state tracks the budget spent, the simulated time, the incumbent (the lowest loss seen, as Hyperband returns),
- * and whether the bracket's true best configuration, by its loss at the maximum budget, is still in the race. The run
- * is deterministic: ties go to the lower configuration index. Throws `DomainError` for too few curves, a schedule
- * budget outside a table's budgets or a worker count that is not a positive integer, and `ShapeError` for a table of
- * the wrong shape.
+ * and whether the bracket's true best configuration, by its noise-free loss at the maximum budget when the curves give
+ * it (`clean`) and by its observed loss otherwise, is still in the race; `observedBest` is the best by the observed
+ * loss at the maximum budget, which noise can make differ. The run is deterministic: ties go to the lower
+ * configuration index. Throws `DomainError` for too few curves, a schedule budget outside a table's budgets or a
+ * worker count that is not a positive integer, and `ShapeError` for a table (or its clean table) of the wrong shape.
  *
  * @param curves The learning curves: a `CurveTable` (as `learningCurves` returns) or a `CurveFunction`.
  * @param schedule The schedule, from `successiveHalvingSchedule` or `hyperbandSchedule`.
@@ -238,7 +269,7 @@ export function multiFidelitySteps(
   const { asynchronous = false, workers = 1, resume = false } = options
   if (!(Number.isInteger(workers) && workers >= 1))
     throw new DomainError(where, `${where}: workers must be a positive integer`)
-  const { count, at } = readCurves(curves, schedule)
+  const { count, at, clean } = readCurves(curves, schedule)
   if (count < schedule.configurations)
     throw new DomainError(
       where,
@@ -248,13 +279,16 @@ export function multiFidelitySteps(
   // The configurations of each bracket: consecutive rows of the curves.
   const offsets = brackets.map((_, b) => brackets.slice(0, b).reduce((a, x) => a + x.rungs[0].configurations, 0))
   const configsOf = (b: number) => Array.from({ length: brackets[b].rungs[0].configurations }, (_, i) => offsets[b] + i)
+  // The true final loss (noise-free when known) and the observed one, at R.
   const finals = new Map<number, number>()
   const final = (config: number) => {
-    if (!finals.has(config)) finals.set(config, at(config, maxBudget))
+    if (!finals.has(config)) finals.set(config, (clean ?? at)(config, maxBudget))
     return finals.get(config) as number
   }
-  const trueBestOf = (b: number) =>
-    configsOf(b).reduce((best, c) => (final(c) < final(best) || (final(c) === final(best) && c < best) ? c : best))
+  const observed = (config: number) => at(config, maxBudget)
+  const argmin = (configs: number[], loss: (c: number) => number) =>
+    configs.reduce((best, c) => (loss(c) < loss(best) || (loss(c) === loss(best) && c < best) ? c : best))
+  const trueBestOf = (b: number) => argmin(configsOf(b), final)
   const byLoss = (a: { config: number; loss: number }, b: { config: number; loss: number }) =>
     a.loss - b.loss || a.config - b.config
 
@@ -293,7 +327,12 @@ export function multiFidelitySteps(
       if (offsets[b] <= j.config && j.config < offsets[b] + configsOf(b).length) reach(j.config, j.rung)
     const top = Math.max(-1, ...reached.values())
     const bestRung = reached.get(best) ?? -1
-    return { trueBest: best, bestRung, survived: bestRung === -1 || bestRung === top }
+    return {
+      trueBest: best,
+      observedBest: argmin(configsOf(b), observed),
+      bestRung,
+      survived: bestRung === -1 || bestRung === top,
+    }
   }
 
   const start = (): MultiFidelityState => ({
@@ -310,6 +349,7 @@ export function multiFidelitySteps(
     time: 0,
     incumbent: null,
     trueBest: trueBestOf(0),
+    observedBest: argmin(configsOf(0), observed),
     bestRung: -1,
     survived: true,
     queue: null,

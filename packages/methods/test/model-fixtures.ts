@@ -156,6 +156,7 @@ export const MODEL_FIXTURES: Record<string, Fixture> = {
   decisionTree: f(() => trees.decisionTree(), dataset(tri.x, tri.y)),
   regressionTree: f(() => trees.regressionTree(), dataset(reg.x, reg.y)),
   randomForest: f(() => trees.randomForest({ trees: 3 }), dataset(tri.x, tri.y)),
+  randomForestRegressor: f(() => trees.randomForestRegressor({ trees: 3 }), dataset(reg.x, reg.y)),
   adaBoost: f(() => trees.adaBoost({ rounds: 5 }), dataset(bin.x, bin.y)),
   gradientBoosting: f(() => trees.gradientBoosting({ stages: 5 }), dataset(reg.x, reg.y)),
   // learning/neighbours

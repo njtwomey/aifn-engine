@@ -12,6 +12,9 @@
  * - `aifn-methods/optimisation/population`: population-based training, which exploits and explores hyperparameters
  *   while the population trains.
  * - `aifn-methods/optimisation/importance`: hyperparameter importance by the functional ANOVA of a tabulated surface.
+ * - `aifn-methods/optimisation/multi-objective`: Pareto fronts, the exact hypervolume, expected hypervolume
+ *   improvement and ParEGO's Chebyshev scalarisation.
+ * - `aifn-methods/optimisation/portfolio`: greedy portfolios of configurations over earlier tasks, for warm-starting.
  *
  * Objectives to search come from `aifn-methods/data`: the test surfaces of `aifn-methods/data/objectives` (Forrester,
  * Branin and a tabulated SVM tuning surface among them) and the learning curves of `aifn-methods/data/synthetic`. The

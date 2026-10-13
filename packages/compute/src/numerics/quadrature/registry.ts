@@ -6,6 +6,7 @@
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as adaptive from './adaptive'
+import * as designs from './designs'
 import * as gauss from './gauss'
 import * as multivariate from './multivariate'
 import * as rules from './rules'
@@ -136,8 +137,54 @@ fn(
   multivariate.quasiMonteCarlo,
 )
 
+fn(
+  {
+    key: 'latinHypercube',
+    name: 'Latin hypercube sample',
+    role: 'construction',
+    random: true,
+    cite: ['mckay1979'],
+  },
+  designs.latinHypercube,
+)
+fn(
+  { key: 'randomShift', name: 'Random shift modulo 1', role: 'transform', random: true, cite: ['cranley1976'] },
+  designs.randomShift,
+)
+fn(
+  {
+    key: 'scrambledSobol',
+    name: 'Scrambled Sobol points',
+    role: 'construction',
+    random: true,
+    cite: ['sobol1967', 'joe2008', 'matousek1998', 'owen1995', 'owen1998'],
+  },
+  designs.scrambledSobol,
+)
+fn(
+  {
+    key: 'scrambledHalton',
+    name: 'Scrambled Halton points',
+    role: 'construction',
+    random: true,
+    cite: ['halton1960', 'owen2017'],
+  },
+  designs.scrambledHalton,
+)
+fn(
+  {
+    key: 'starDiscrepancy',
+    name: 'Star discrepancy',
+    tex: 'D^*_n',
+    role: 'property',
+    cite: ['niederreiter1992'],
+  },
+  designs.starDiscrepancy,
+)
+fn({ key: 'maxGap', name: 'Largest gap on an interval', role: 'property' }, designs.maxGap)
+
 /** The functions of the module, keyed by name. */
 export const quadratureFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', rules, adaptive, gauss, multivariate) as Readonly<
+  entries<FunctionInfo>('function', rules, adaptive, gauss, multivariate, designs) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

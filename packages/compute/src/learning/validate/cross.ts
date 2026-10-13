@@ -5,15 +5,32 @@
  * `aifn-compute/learning/metrics`, or any function carrying a `MetricInfo`), read by their `info.capability` and keyed
  * by `info.key`. Randomness comes from one stream, split into a child for the splitter and one per fold's fit, so a
  * cross-validation is reproducible from its seed.
+ *
+ * Classification metrics are told the classes of the whole data set, not those of the fold: a metric that reads
+ * labels, scores or probabilities (by its `info.inputs`) gets `{ labels, positive }` as its options, with `labels`
+ * the sorted classes of all of `y` and, for two classes, `positive` the positive class chosen as the metrics module
+ * chooses it (`1`, else `true`, else the last class). A test fold that holds only negatives then scores recall for the
+ * positive class (NaN, as nothing is positive) instead of silently for the negative one. Option `classes: 'fold'`
+ * restores the per-fold behaviour.
+ *
+ * With `pointwise`, each metric is also evaluated on every test row by itself, which gives the held-out loss of each
+ * row (the input of Bates, Hastie and Tibshirani's nested cross-validation, and of a standard error over rows). That
+ * is meaningful only for a metric whose value on a set is the mean of its values on the rows, $m(\mathcal{T}) =
+ * \frac{1}{\abs{\mathcal{T}}} \sum_{i \in \mathcal{T}} m(\{i\})$: accuracy and the error rate, mean squared and
+ * absolute errors and the other mean losses, log loss, the Brier score. Such a metric is detected by checking that
+ * equation on every fold; one that fails it (root mean squared error, $R^2$, recall, AUROC) is left out.
  */
 
 import type { MetricCapability } from 'aifn-compute/foundation/contracts'
 import {
   hasTraining,
+  metricInput,
+  outputFor,
   outputs,
   rowCount,
   score,
   takeData,
+  takeRows,
   type CapabilityOf,
   type Column,
   type Features,
@@ -24,7 +41,7 @@ import {
   type Supervised,
 } from 'aifn-compute/learning/estimators'
 import { child, type Stream } from 'aifn-compute/foundation/random'
-import { fromData, isTensor, type Tensor } from 'aifn-compute/foundation/tensor'
+import { fromData, isTensor, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { now, type Trace } from 'aifn-compute/foundation/trace'
 import { assignment, type Split, type Splitter } from './splitters'
 
@@ -59,6 +76,11 @@ export interface Fold<M> {
   training?: Trace<unknown>
   /** Wall time of the fit, in milliseconds. */
   fitMs: number
+  /**
+   * With `pointwise`: each pointwise metric on each test row by itself, by `info.key`, in the order of `test` (their
+   * mean is the fold's value).
+   */
+  pointwise?: Record<string, Tensor>
 }
 
 /** The result of `crossValidate`. */
@@ -86,7 +108,21 @@ export interface CrossValidation<M> {
    * test row is left out.
    */
   outOfFold: Partial<Record<MetricCapability, Tensor>>
+  /**
+   * The classes the classification metrics were given (`labels`), sorted, and the positive class of a two-class
+   * problem; absent with `classes: 'fold'` or when no metric reads labels, scores or probabilities.
+   */
+  classes?: { labels: ClassLabel[]; positive?: ClassLabel }
+  /**
+   * With `pointwise`: each pointwise metric's held-out value on each row, $n$ values by `info.key` (NaN for rows never
+   * tested; with repeated splits the last wins). Per fold, see `Fold.pointwise`. Metrics whose fold values are not the
+   * means of their row values are left out.
+   */
+  pointwise?: Record<string, Tensor>
 }
+
+/** A class label, as the metrics take them. */
+export type ClassLabel = string | number | boolean
 
 /** Options of `crossValidate`. */
 export interface CrossValidateOptions {
@@ -94,6 +130,95 @@ export interface CrossValidateOptions {
   stream?: Stream
   /** Also evaluate each fold's metrics on its training rows (default false). */
   trainMetrics?: boolean
+  /**
+   * Where classification metrics take their classes from: `'data'` (default), the classes of the whole `y`, passed to
+   * every metric that reads labels, scores or probabilities as `{ labels, positive }`; or `'fold'`, the classes of
+   * each fold, as the metric finds them (which changes the positive class of a fold with one class).
+   */
+  classes?: 'data' | 'fold'
+  /** The positive class of a two-class problem; default `1`, else `true`, else the last class. */
+  positive?: ClassLabel
+  /** Also evaluate each metric on every test row by itself, giving `pointwise` values (default false). */
+  pointwise?: boolean
+}
+
+/** The options a classification metric is given: the classes, in order, and the positive class. */
+type ClassOptions = { labels: ClassLabel[]; positive?: ClassLabel }
+
+/**
+ * Order of labels as the metrics order them: booleans (false first), then numbers ascending, then strings by code
+ * point.
+ *
+ * @param a The first label.
+ * @param b The second label.
+ * @returns A negative number when `a` comes first, a positive one when `b` does, 0 when they are equal.
+ */
+function compareLabels(a: ClassLabel, b: ClassLabel): number {
+  const rank = (v: ClassLabel) => (typeof v === 'boolean' ? 0 : typeof v === 'number' ? 1 : 2)
+  const d = rank(a) - rank(b)
+  if (d !== 0) return d
+  if (typeof a === 'string') return a < (b as string) ? -1 : a > (b as string) ? 1 : 0
+  return Number(a) - Number(b)
+}
+
+/**
+ * The classes of the whole data set for the classification metrics, or undefined when none of the metrics reads
+ * labels, scores or probabilities.
+ *
+ * @param y The targets of every row.
+ * @param metrics The metrics.
+ * @param positive The positive class asked for, if any.
+ * @returns The sorted class list and, for two classes or when asked, the positive class.
+ */
+function classOptions(y: unknown, metrics: readonly ServedMetric[], positive?: ClassLabel): ClassOptions | undefined {
+  if (!metrics.some(readsClasses)) return undefined
+  const list: ClassLabel[] = isTensor(y) ? Array.from(toFlat(y)) : Array.from(y as ArrayLike<ClassLabel>)
+  const labels = [...new Set(list)].filter((v) => v === v).sort(compareLabels)
+  if (positive !== undefined) return { labels, positive }
+  if (labels.length !== 2) return { labels }
+  // As the metrics' `positiveOf`: 1, else true, else the last class.
+  return { labels, positive: labels.includes(1) ? 1 : labels.includes(true) ? true : labels[1] }
+}
+
+/**
+ * Whether a metric reads classes: its `info.inputs` is labels, scores or probabilities.
+ *
+ * @param metric The metric.
+ * @returns True for a classification metric that takes `labels` and `positive` options.
+ */
+function readsClasses(metric: ServedMetric): boolean {
+  const inputs = (metric.info as { inputs?: string }).inputs
+  return inputs === 'labels' || inputs === 'scores' || inputs === 'probabilities'
+}
+
+/**
+ * Each metric's value on targets `y` given the outputs, with the class options passed to the classification metrics.
+ *
+ * @param metrics The metrics.
+ * @param y The targets of the rows.
+ * @param out The model's outputs on the rows, by capability.
+ * @param classes The class options, or undefined to call every metric with two arguments.
+ * @returns Each metric's value, by `info.key`.
+ */
+function scoreWith(
+  metrics: readonly ServedMetric[],
+  y: Tensor,
+  out: Outputs,
+  classes: ClassOptions | undefined,
+): Record<string, number> {
+  if (!classes) return score(metrics, y, out)
+  const result: Record<string, number> = {}
+  for (const m of metrics) {
+    if (!readsClasses(m)) {
+      Object.assign(result, score([m], y, out))
+      continue
+    }
+    const output = out[m.info.capability]
+    if (output === undefined) return score(metrics, y, out) // throws the missing-output error
+    const f = m as unknown as (y: unknown, p: unknown, o: ClassOptions) => number
+    result[m.info.key] = f(y, metricInput(m, output), classes)
+  }
+  return result
 }
 
 /**
@@ -103,6 +228,8 @@ export interface CrossValidateOptions {
  * @param x The inputs of the rows.
  * @param y The targets of the rows.
  * @param metrics The metrics to compute.
+ * @param classes The class options for the classification metrics; left out, every metric is called with two
+ *   arguments.
  * @returns The outputs by capability (`predictions`), and each metric's value by `info.key` (`values`).
  */
 function evaluateOn(
@@ -110,9 +237,68 @@ function evaluateOn(
   x: unknown,
   y: Tensor,
   metrics: readonly ServedMetric[],
+  classes?: ClassOptions,
 ): { predictions: Outputs; values: Record<string, number> } {
   const predictions = outputs(model, metrics, x)
-  return { predictions, values: score(metrics, y, predictions) }
+  return { predictions, values: scoreWith(metrics, y, predictions, classes) }
+}
+
+/**
+ * Each metric on every test row by itself: tensor outputs are cut to the row, and a predictive distribution is asked
+ * of the model again on the row's inputs. A metric that throws on one row gets NaN there.
+ *
+ * @param model The fitted model.
+ * @param x The inputs of the test rows.
+ * @param y The targets of the test rows.
+ * @param predictions The model's outputs on the test rows, by capability.
+ * @param metrics The metrics.
+ * @param classes The class options for the classification metrics, if any.
+ * @returns Each metric's value on each row, by `info.key`, in row order.
+ */
+function perRow(
+  model: unknown,
+  x: unknown,
+  y: Tensor,
+  predictions: Outputs,
+  metrics: readonly ServedMetric[],
+  classes: ClassOptions | undefined,
+): Record<string, Float64Array> {
+  const m = y.shape[0] ?? 1
+  const values: Record<string, Float64Array> = {}
+  for (const { info } of metrics) values[info.key] = new Float64Array(m)
+  for (let r = 0; r < m; r++) {
+    const row: Outputs = {}
+    for (const [capability, output] of Object.entries(predictions) as [MetricCapability, Outputs[MetricCapability]][]) {
+      if (output === undefined) continue
+      row[capability] = isTensor(output)
+        ? takeRows(output, [r])
+        : outputFor(model, capability, takeRows(x as Tensor, [r]))
+    }
+    const yr = takeRows(y, [r])
+    for (const metric of metrics) {
+      let v: number
+      try {
+        v = scoreWith([metric], yr, row, classes)[metric.info.key]
+      } catch {
+        v = NaN
+      }
+      values[metric.info.key][r] = v
+    }
+  }
+  return values
+}
+
+/**
+ * Whether row values average to the fold's value: $\abs{\bar v - m} \le 10^{-9}(1 + \abs m)$, or both NaN.
+ *
+ * @param rows The metric on each test row.
+ * @param value The metric on the whole test fold.
+ * @returns True when the metric is pointwise on this fold.
+ */
+function averagesTo(rows: Float64Array, value: number): boolean {
+  const mean = rows.reduce((a, b) => a + b, 0) / rows.length
+  if (Number.isNaN(value)) return Number.isNaN(mean)
+  return Math.abs(mean - value) <= 1e-9 * (1 + Math.abs(value))
 }
 
 /**
@@ -128,9 +314,10 @@ function evaluateOn(
  * @param splitter How to split the rows into training and test sets; it is given the row count, `y` and `groups`.
  * @param metrics The metrics to compute on every test set, each a function of the targets and one model output
  *   carrying a `MetricInfo` (`key`, `capability`, `direction`).
- * @param options The stream, and whether to score the training rows too.
+ * @param options The stream, whether to score the training rows too, where the classes come from (and the positive
+ *   class), and whether to keep each row's held-out value of the pointwise metrics.
  * @returns Every fold, the splits and assignment, each metric's scores per fold with their mean, standard deviation
- *   and direction, and the out-of-fold predictions.
+ *   and direction, the out-of-fold predictions, the classes given to the metrics, and the pointwise values.
  *
  * @example A mean predictor, checked by hand
  * // The model predicts the training mean; each fold's mean squared error can be checked by eye.
@@ -150,6 +337,36 @@ function evaluateOn(
  * print('mse per fold:', cv.scores.mse)
  * print('mean, std:', cv.mean.mse, cv.std.mse)
  * print('out-of-fold predictions:', cv.outOfFold.decide)
+ *
+ * @example A fold with no positives scores recall for class 1, not class 0
+ * // Recall of the positive class the metric is given, or of the largest label it sees when it is given none.
+ * const recall = Object.assign(
+ *   (y, d, o = {}) => {
+ *     const [t, p] = [toFlat(y), toFlat(d)]
+ *     const pos = o.positive ?? Math.max(...t, ...p)
+ *     return t.filter((v, i) => v === pos && p[i] === pos).length / t.filter((v) => v === pos).length
+ *   },
+ *   { info: { key: 'recall', capability: 'decide', inputs: 'labels', direction: 'higher' } },
+ * )
+ * // A model that always predicts 0; the second fold's rows are all of class 0.
+ * const zeros = { name: 'zeros', fit: () => ({ decide: (x) => full([x.shape[0]], 0) }) }
+ * const data = { x: tensor([[0], [1], [2], [3]]), y: tensor([1, 1, 0, 0]) }
+ * const cv = crossValidate(zeros, data, kFold({ k: 2 }), [recall])
+ * print('classes from all of y:', cv.classes, cv.scores.recall)
+ * print('classes per fold:', crossValidate(zeros, data, kFold({ k: 2 }), [recall], { classes: 'fold' }).scores.recall)
+ *
+ * @example Held-out squared errors per row; the root mean squared error is not a mean over rows
+ * const meanModel = { name: 'mean', fit: (d) => ({ decide: (x) => full([x.shape[0]], mean(d.y)) }) }
+ * const mse = Object.assign((y, p) => mean(square(sub(y, p))), {
+ *   info: { key: 'mse', capability: 'decide', direction: 'lower' },
+ * })
+ * const rmse = Object.assign((y, p) => Math.sqrt(mean(square(sub(y, p)))), {
+ *   info: { key: 'rmse', capability: 'decide', direction: 'lower' },
+ * })
+ * const data = { x: tensor([[0], [1], [2], [3], [4], [5]]), y: tensor([1, 2, 3, 4, 5, 7]) }
+ * const cv = crossValidate(meanModel, data, kFold({ k: 3 }), [mse, rmse], { pointwise: true })
+ * print('squared error of each row:', cv.pointwise.mse)
+ * print('pointwise metrics:', Object.keys(cv.pointwise))
  */
 export function crossValidate<
   X extends Features,
@@ -162,19 +379,22 @@ export function crossValidate<
   metrics: Ms,
   options: CrossValidateOptions = {},
 ): CrossValidation<M> {
-  const { stream, trainMetrics = false } = options
+  const { stream, trainMetrics = false, pointwise = false } = options
   const n = rowCount(data.x)
+  const classes = options.classes === 'fold' ? undefined : classOptions(data.y, metrics, options.positive)
   const splits = splitter.split({ n, y: data.y, groups: data.groups }, stream && child(stream, 'split'))
+  const rowValues: Record<string, Float64Array>[] = []
   const folds: Fold<M>[] = splits.map((split, f) => {
     const train = takeData(data, split.train.data)
     const test = takeData(data, split.test.data)
     const start = now()
     const model = estimator.fit(train, { stream: stream && child(stream, 'fold', f) })
     const fitMs = now() - start
-    const { predictions, values } = evaluateOn(model, test.x, test.y, metrics)
+    const { predictions, values } = evaluateOn(model, test.x, test.y, metrics, classes)
     const fold: Fold<M> = { index: f, train: split.train, test: split.test, model, predictions, metrics: values, fitMs }
-    if (trainMetrics) fold.trainMetrics = evaluateOn(model, train.x, train.y, metrics).values
+    if (trainMetrics) fold.trainMetrics = evaluateOn(model, train.x, train.y, metrics, classes).values
     if (hasTraining(model)) fold.training = model.training
+    if (pointwise) rowValues.push(perRow(model, test.x, test.y, predictions, metrics, classes))
     return fold
   })
   const scores: Record<string, Tensor> = {}
@@ -204,7 +424,7 @@ export function crossValidate<
     }
     if (ok) outOfFold[need] = fromData(out, [n])
   }
-  return {
+  const result: CrossValidation<M> = {
     splitter: splitter.name,
     splits,
     assignment: assignment(splits, n),
@@ -215,4 +435,22 @@ export function crossValidate<
     directions,
     outOfFold,
   }
+  if (classes) result.classes = classes
+  if (pointwise) {
+    const kept = metrics
+      .map((m) => m.info.key)
+      .filter((key) => folds.every((fold, f) => averagesTo(rowValues[f][key], fold.metrics[key])))
+    result.pointwise = {}
+    for (const fold of folds) fold.pointwise = {}
+    for (const key of kept) {
+      const out = new Float64Array(n).fill(NaN)
+      folds.forEach((fold, f) => {
+        const v = rowValues[f][key]
+        fold.pointwise![key] = fromData(v, [v.length])
+        fold.test.data.forEach((i, r) => (out[i] = v[r]))
+      })
+      result.pointwise[key] = fromData(out, [n])
+    }
+  }
+  return result
 }

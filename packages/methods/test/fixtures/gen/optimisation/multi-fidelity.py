@@ -5,6 +5,9 @@
   r_i = r eta^i. R in units of the minimum budget.
 - Power-law fits a + b t^-c by scipy.optimize.curve_fit (Levenberg-Marquardt), from several starts, keeping the
   smallest residual.
+- BOHB's model budget before each bracket (Falkner et al. 2018, Algorithm 2): the largest budget with at least
+  N_min + 2 results from the brackets already run, every rung's configurations counted at its budget (None when no
+  budget has enough).
 """
 
 import math
@@ -34,6 +37,17 @@ def hyperband(R: float, eta: int) -> list[dict]:
                 "r": [r * eta**i for i in range(s + 1)],
             }
         )
+    return out
+
+
+def bohb_model_budgets(R: float, eta: int, n_min: int) -> list[float | None]:
+    results: dict[float, int] = {}
+    out: list[float | None] = []
+    for b in hyperband(R, eta):
+        enough = [r for r, k in results.items() if k >= n_min + 2]
+        out.append(max(enough) if enough else None)
+        for n, r in zip(b["n"], b["r"], strict=True):
+            results[r] = results.get(r, 0) + n
     return out
 
 
@@ -70,4 +84,9 @@ def cases() -> dict:
             "R100eta3": hyperband(100, 3),
         },
         "powerLaw": [fit(t, noisy), fit(t2, slow)],
+        "bohbModelBudgets": {
+            "R27eta3d2": bohb_model_budgets(27, 3, 3),
+            "R81eta3d2": bohb_model_budgets(81, 3, 3),
+            "R81eta3d4": bohb_model_budgets(81, 3, 5),
+        },
     }

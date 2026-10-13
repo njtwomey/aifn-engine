@@ -10,6 +10,10 @@
  *   Romberg).
  * - Several dimensions: `productRule`, `integrate2d`; `monteCarlo` (traceable, with standard errors) and
  *   `integrateMonteCarlo(s, …)`; `halton`, `sobol` sequences and randomised `quasiMonteCarlo(s, …)` (stream first).
+ * - Space-filling designs on $[0, 1)^d$, stream first: `latinHypercube`, `randomShift` (Cranley–Patterson),
+ *   `scrambledSobol` (Matoušek's linear scramble with a digital shift, as scipy, or Owen's nested scrambling; nets
+ *   kept) and `scrambledHalton` (random digit permutations, as scipy); their uniformity by `starDiscrepancy` (the
+ *   exact $L^\infty$ star discrepancy $D^*_n$) and `maxGap` (the largest gap of one coordinate).
  */
 
 export { romberg, simpson, trapezoid, trapezoidSamples, type Integrand, type RombergState } from './rules'
@@ -45,4 +49,13 @@ export {
   type MonteCarloState,
   type MultivariateIntegrand,
 } from './multivariate'
+export {
+  latinHypercube,
+  maxGap,
+  randomShift,
+  scrambledHalton,
+  scrambledSobol,
+  starDiscrepancy,
+  type ScrambledSobolOptions,
+} from './designs'
 export { quadratureAlgorithms, quadratureFunctions } from './registry'

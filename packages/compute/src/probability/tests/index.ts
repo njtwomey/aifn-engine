@@ -21,7 +21,9 @@
  *   $(1/J + n_2/n_1)\hat\sigma^2$ for resampled splits), `fiveByTwoCvTest` (Dietterich's $5 \times 2$cv $t$, with
  *   Alpaydin's `combinedFTest`), `friedmanTest` ($k$ algorithms over $N$ data sets, with average ranks and the
  *   Iman–Davenport $F$) with `nemenyiCriticalDifference` on the studentized range law `studentizedRangeNull`, and
- *   `bayesianCorrelatedTTest` (the posterior of the mean difference and its probabilities around a rope).
+ *   `bayesianCorrelatedTTest` (the posterior of the mean difference and its probabilities around a rope),
+ *   `bayesianSignedRankTest` (over several data sets: Dirichlet-process draws on the simplex of left, rope and right)
+ *   and `expectedMaxOfDraws` (the expected best of $b$ random tuning draws, Dodge et al.'s curve).
  * - **Null laws.** The exact laws behind the rank and goodness-of-fit tests, for critical values and tail
  *   probabilities: `mannWhitneyNull`, `signedRankNull`; `kolmogorovNull` (on `kolmogorovSf`, `smirnovSf` and
  *   `kolmogorovLimitSf`), `twoSampleKsNull` (on `twoSampleKsSf`); `shapiroWilkNull` with `shapiroWilkCoefficients`.
@@ -95,14 +97,18 @@ export {
 } from './contingency'
 export {
   bayesianCorrelatedTTest,
+  bayesianSignedRankTest,
   combinedFTest,
   correctedResampledTTest,
+  expectedMaxOfDraws,
   fiveByTwoCvTest,
   friedmanTest,
   mcnemarTest,
   nemenyiCriticalDifference,
   studentizedRangeNull,
   type BayesianCorrelatedTTest,
+  type BayesianSignedRankOptions,
+  type BayesianSignedRankTest,
   type FiveByTwoCvTest,
   type FriedmanTest,
   type McnemarOptions,

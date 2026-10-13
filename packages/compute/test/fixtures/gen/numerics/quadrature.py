@@ -2,8 +2,9 @@
 and
 infinite limits, smooth, peaked, oscillatory, kinked and endpoint-singular integrands), Gauss rules from numpy and
 scipy.special, composite rules from scipy.integrate.{trapezoid,simpson}, unscrambled Halton and Sobol points from
-scipy.stats.qmc, and box integrals for Monte Carlo from scipy.integrate.nquad. The integrands are named; the test holds
-the same expressions under the same names."""
+scipy.stats.qmc, box integrals for Monte Carlo from scipy.integrate.nquad, and exact L-infinity star discrepancies by
+brute force over the grid of box corners (scipy's qmc.discrepancy is the L2 kind). The integrands are named; the test
+holds the same expressions under the same names."""
 
 import warnings
 
@@ -43,6 +44,33 @@ def quad(f, a, b) -> float:
     warnings.simplefilter("ignore", integrate.IntegrationWarning)
     value, _ = integrate.quad(f, a, b, epsabs=0, epsrel=1e-13, limit=1000)
     return float(value)
+
+
+def star_discrepancy(x: np.ndarray) -> float:
+    """max over corners t (coordinates from the points and 1) of vol - #open/n and #closed/n - vol."""
+    n, d = x.shape
+    axes = [np.union1d(x[:, j], [1.0]) for j in range(d)]
+    grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, d)
+    vol = np.prod(grid, axis=1)
+    inside_open = np.all(x[None, :, :] < grid[:, None, :], axis=2).sum(axis=1)
+    inside_closed = np.all(x[None, :, :] <= grid[:, None, :], axis=2).sum(axis=1)
+    return float(max(np.max(vol - inside_open / n), np.max(inside_closed / n - vol)))
+
+
+def designs() -> dict[str, object]:
+    rng = np.random.default_rng(20261013)
+    sets = {
+        "midpoints1d": (np.arange(8)[:, None] + 0.5) / 8,
+        "uniform1d": rng.uniform(size=(25, 1)),
+        "halton2d": stats.qmc.Halton(2, scramble=False).random(30),
+        "sobol2d": stats.qmc.Sobol(2, scramble=False).random(32),
+        "ties2d": np.round(rng.uniform(size=(40, 2)), 1),
+        "uniform2d": rng.uniform(size=(50, 2)),
+        "edges2d": np.array([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5], [1.0, 1.0], [0.0, 0.0]]),
+        "uniform3d": rng.uniform(size=(12, 3)),
+        "halton4d": stats.qmc.Halton(4, scramble=False).random(9),
+    }
+    return {"starDiscrepancy": {k: {"points": v, "value": star_discrepancy(v)} for k, v in sets.items()}}
 
 
 def cases() -> dict[str, object]:
@@ -137,4 +165,5 @@ def cases() -> dict[str, object]:
             0
         ],
     }
+    out["designs"] = designs()
     return out

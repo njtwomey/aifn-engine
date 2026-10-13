@@ -7,6 +7,7 @@ import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } f
 import * as classification from './classification'
 import * as classificationEp from './classification-ep'
 import * as gplvm from './gplvm'
+import * as multiFidelity from './multi-fidelity'
 import * as ordinal from './ordinal'
 import * as regression from './regression'
 import * as rvm from './rvm'
@@ -213,6 +214,18 @@ fn(
 )
 fn({ key: 'rvmModel', name: 'RVM model', role: 'construction', notes: ['relevance-vector-machine'] }, rvm.rvmModel)
 
+fn(
+  {
+    key: 'fitMultiFidelityGp',
+    name: 'Multi-fidelity GP (autoregressive co-kriging)',
+    summary:
+      "Fit Kennedy and O'Hagan's model f_t = ρ f_(t−1) + δ_t level by level: each discrepancy a GP, each scale by generalised least squares.",
+    role: 'fit',
+    cite: ['kennedy2000', 'forrester2007', 'legratiet2014'],
+  },
+  multiFidelity.fitMultiFidelityGp,
+)
+
 /** The algorithms registered here, keyed by factory name. */
 export const gaussianProcessAlgorithms: Table<AlgorithmInfo> = entries<AlgorithmInfo>(
   'algorithm',
@@ -228,4 +241,5 @@ export const gaussianProcessFunctions: Table<FunctionInfo> = entries<FunctionInf
   sparse,
   rvm,
   gplvm,
+  multiFidelity,
 ) as Table<FunctionInfo>

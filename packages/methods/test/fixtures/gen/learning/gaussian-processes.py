@@ -119,6 +119,109 @@ def probit_ep(K, y01, Ks, kss, sweeps=500):
     return {"mode": mu, "lml": lml, "mean": mean, "var": var, "proba": stats.norm.cdf(mean / np.sqrt(1 + var))}
 
 
+def rbf_gram(a, b, lengthscale, variance):
+    """A squared-exponential Gram matrix between 1-d inputs a and b."""
+    return variance * np.exp(-0.5 * (a[:, None] - b[None, :]) ** 2 / lengthscale**2)
+
+
+def recursive_cokriging(levels, kernels, noise, rho, xs):
+    """Recursive co-kriging (Kennedy & O'Hagan's autoregressive model, fitted level by level as Le Gratiet & Garnier
+    2014) with fixed hyperparameters. levels: [(x_t, y_t)] lowest first; kernels: [(lengthscale, variance)];
+    rho: fixed scales or None for the generalised least-squares estimate. Returns the scales, the summed log
+    marginal likelihood, and the posterior mean and standard deviation of every level at xs."""
+    fitted = []  # (x, alpha, L, kernel) per level
+    rhos = []
+    lml = 0.0
+
+    def moments(s, t):
+        mean = np.zeros(len(s))
+        var = np.zeros(len(s))
+        for k in range(t + 1):
+            x, alpha, L, (ell, v) = fitted[k]
+            ks = rbf_gram(x, s, ell, v)
+            mu = ks.T @ alpha
+            w = linalg.solve_triangular(L, ks, lower=True)
+            sv = v - np.sum(w**2, axis=0)
+            if k == 0:
+                mean, var = mu, sv
+            else:
+                mean = rhos[k - 1] * mean + mu
+                var = rhos[k - 1] ** 2 * var + sv
+        return mean, var
+
+    for t, (x, y) in enumerate(levels):
+        ell, v = kernels[t]
+        K = rbf_gram(x, x, ell, v) + noise * np.eye(len(x))
+        L = np.linalg.cholesky(K)
+        if t == 0:
+            r = y
+        else:
+            m, _ = moments(x, t - 1)
+            if rho is None:
+                ky = linalg.cho_solve((L, True), y)
+                km = linalg.cho_solve((L, True), m)
+                rhos.append(float(m @ ky / (m @ km)))
+            else:
+                rhos.append(rho[t - 1])
+            r = y - rhos[-1] * m
+        alpha = linalg.cho_solve((L, True), r)
+        lml += -0.5 * r @ alpha - np.sum(np.log(np.diag(L))) - 0.5 * len(x) * np.log(2 * np.pi)
+        fitted.append((x, alpha, L, (ell, v)))
+    out = [moments(xs, t) for t in range(len(levels))]
+    return {
+        "rho": rhos,
+        "lml": lml,
+        "mean": [m for m, _ in out],
+        "sd": [np.sqrt(np.maximum(v, 0)) for _, v in out],
+    }
+
+
+def multi_fidelity() -> dict[str, object]:
+    """Recursive co-kriging references: Forrester's two fidelities (nested design, fixed and estimated scale), and
+    three fidelities on a random, non-nested design."""
+
+    def high(x):
+        return (6 * x - 2) ** 2 * np.sin(12 * x - 4)
+
+    def low(x):
+        return 0.5 * high(x) + 10 * (x - 0.5) + 5
+
+    xl = np.linspace(0, 1, 11)
+    xh = np.array([0.0, 0.4, 0.6, 1.0])
+    xs = np.linspace(0, 1, 7)
+    kernels = [(0.15, 20.0), (0.5, 5.0)]
+    noise = 1e-6
+    levels = [(xl, low(xl)), (xh, high(xh))]
+    rng = np.random.default_rng(2000)
+    x3 = [np.sort(rng.uniform(0, 1, size=k)) for k in (9, 6, 4)]
+    f0 = np.sin(6 * x3[0])
+    f1 = 1.5 * np.sin(6 * x3[1]) + 0.3 * x3[1]
+    f2 = -0.8 * (1.5 * np.sin(6 * x3[2]) + 0.3 * x3[2]) + 0.2 * np.cos(3 * x3[2])
+    three = list(zip(x3, (f0, f1, f2), strict=True))
+    k3 = [(0.3, 1.0), (0.6, 0.5), (0.4, 0.2)]
+    return {
+        "forrester": {
+            "xl": xl,
+            "xh": xh,
+            "yl": low(xl),
+            "yh": high(xh),
+            "xs": xs,
+            "kernels": kernels,
+            "noise": noise,
+            "fixed": recursive_cokriging(levels, kernels, noise, [2.0], xs),
+            "gls": recursive_cokriging(levels, kernels, noise, None, xs),
+        },
+        "three": {
+            "x": list(x3),
+            "y": [f0, f1, f2],
+            "xs": xs,
+            "kernels": k3,
+            "noise": 1e-4,
+            "gls": recursive_cokriging(three, k3, 1e-4, None, xs),
+        },
+    }
+
+
 def cases() -> dict[str, object]:
     rng = np.random.default_rng(20260930)
     x = rng.uniform(-2, 2, size=(7, 2))
@@ -181,6 +284,7 @@ def cases() -> dict[str, object]:
         "x": x,
         "y": y2,
         "grams": grams,
+        "multiFidelity": multi_fidelity(),
         "regression": {
             "x": xr[:, 0],
             "y": yr,

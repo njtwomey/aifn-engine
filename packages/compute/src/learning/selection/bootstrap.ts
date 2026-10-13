@@ -92,7 +92,7 @@ export interface BootstrapPredictionError {
  * @param loss `'squared'`, `'zeroOne'` or a function.
  * @returns A function of targets and predictions giving one loss per pair, as a working array.
  */
-function lossOf(loss: 'squared' | 'zeroOne' | PointwiseLoss): (y: Tensor, p: Tensor) => Float64Array {
+export function lossOf(loss: 'squared' | 'zeroOne' | PointwiseLoss): (y: Tensor, p: Tensor) => Float64Array {
   if (loss === 'squared' || loss === 'zeroOne') {
     return (y, p) => {
       const a = dense.data(y)

@@ -639,6 +639,26 @@ fn(
 )
 fn(
   {
+    key: 'bayesianSignedRankTest',
+    name: 'Bayesian signed-rank test',
+    role: 'inference',
+    random: true,
+    cite: ['benavoli2017'],
+  },
+  comparison.bayesianSignedRankTest,
+)
+fn(
+  {
+    key: 'expectedMaxOfDraws',
+    name: 'Expected maximum of b draws',
+    tex: '\\mathbb{E}[\\max_{k \\le b} V_k]',
+    role: 'estimator',
+    cite: ['dodge2019'],
+  },
+  comparison.expectedMaxOfDraws,
+)
+fn(
+  {
     key: 'pValueOf',
     name: 'p-value from a null distribution',
     role: 'property',

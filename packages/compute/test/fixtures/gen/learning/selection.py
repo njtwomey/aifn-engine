@@ -5,7 +5,12 @@ with leave-one-out by refitting; the one-standard-error rule on scikit-learn's G
 ridge); statsmodels' OLS log-likelihood, AIC and BIC and its `aicc` over a polynomial-degree sweep, with Mallows' Cp;
 soft-thresholding SURE in closed form; the .632 and .632+ bootstrap estimates of Efron and Tibshirani (1997) for least
 squares and one-nearest-neighbour (scikit-learn) on fixed bootstrap samples; arviz-stats' PSIS-LOO (`loo` with
-`reff=1`, and `psislw`) and WAIC as in Vehtari, Gelman and Gabry (2017) on fixed log-likelihood draws."""
+`reff=1`, and `psislw`) and WAIC as in Vehtari, Gelman and Gabry (2017) on fixed log-likelihood draws; nested
+cross-validation (Bates, Hastie and Tibshirani, 2024, Algorithm 1, with the rescaling, clamping and the bias of their
+equation 15) for least squares by a direct numpy implementation on fixed fold assignments; stacking weights (Yao et al.,
+2018) checked against a one-dimensional root of the gradient for two models and against scipy's SLSQP and arviz-stats'
+`compare` for three, with pseudo-BMA and the Bayesian-bootstrap pseudo-BMA+ (checked against `compare` on its own
+Dirichlet draws)."""
 
 from typing import Any
 
@@ -14,7 +19,9 @@ import numpy as np
 import statsmodels.api as sm
 from arviz_base import from_dict
 from arviz_stats.base import array_stats
-from scipy.special import logsumexp
+from scipy.optimize import brentq, minimize
+from scipy.special import logsumexp, softmax
+from scipy.stats import dirichlet, norm
 from sklearn.datasets import load_diabetes
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.model_selection import GridSearchCV, KFold
@@ -281,6 +288,114 @@ def predictive(rng: np.random.Generator) -> list[dict[str, Any]]:
     return out
 
 
+def nested_cv(rng: np.random.Generator) -> dict[str, Any]:
+    """Algorithm 1 of Bates, Hastie and Tibshirani (2024) for least squares with an intercept, squared loss."""
+    n, k, reps = 23, 4, 3
+    x = rng.standard_normal((n, 2))
+    y = 1 + x @ np.array([1.5, -0.5]) + 0.8 * rng.standard_normal(n)
+    fold_ids = np.array([rng.permutation(np.arange(n) % k) for _ in range(reps)])
+
+    def losses(train: np.ndarray, test: np.ndarray) -> np.ndarray:
+        a = np.column_stack([np.ones(train.sum()), x[train]])
+        coef, *_ = np.linalg.lstsq(a, y[train], rcond=None)
+        return (y[test] - np.column_stack([np.ones(test.sum()), x[test]]) @ coef) ** 2
+
+    a_list, b_list, es, outs = [], [], [], []
+    for fold in fold_ids:
+        for kk in range(k):
+            e_in = np.concatenate([losses((fold != j) & (fold != kk), fold == j) for j in range(k) if j != kk])
+            e_out = losses(fold != kk, fold == kk)
+            a_list.append((e_in.mean() - e_out.mean()) ** 2)
+            b_list.append(e_out.var(ddof=1) / len(e_out))
+            es.append(e_in)
+            outs.append(e_out)
+    es_all, out_all = np.concatenate(es), np.concatenate(outs)
+    ncv, cv = es_all.mean(), out_all.mean()
+    mse_hat = np.mean(a_list) - np.mean(b_list)
+    se_in = es_all.std(ddof=1) / np.sqrt(n)
+    se = np.clip(np.sqrt(max(0.0, (k - 1) / k * mse_hat)), se_in, np.sqrt(k) * se_in)
+    bias = (1 + (k - 2) / k) * (ncv - cv)
+    z = norm.ppf(0.95)
+    naive_se = out_all.std(ddof=1) / np.sqrt(n)
+    return {
+        "x": x,
+        "y": y,
+        "foldIds": fold_ids,
+        "level": 0.9,
+        "a": a_list,
+        "b": b_list,
+        "ncv": ncv,
+        "cv": cv,
+        "mseNested": mse_hat,
+        "se": se,
+        "bias": bias,
+        "estimate": ncv - bias,
+        "interval": [ncv - bias - z * se, ncv - bias + z * se],
+        "naiveSe": naive_se,
+        "naiveInterval": [cv - z * naive_se, cv + z * naive_se],
+    }
+
+
+def stacking_objective(lpd: np.ndarray, w: np.ndarray) -> float:
+    return float(np.sum(logsumexp(lpd, axis=1, b=w[None, :])))
+
+
+def stacking(rng: np.random.Generator) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    # Two models, each better on part of the data: the optimum is interior, a root of the derivative in w.
+    lpd2 = np.column_stack([rng.normal(-1, 0.6, 30), rng.normal(-1.2, 0.8, 30)])
+    shift = lpd2.max(1, keepdims=True)
+    p = np.exp(lpd2 - shift)
+    w1 = brentq(lambda w: np.sum((p[:, 0] - p[:, 1]) / (w * p[:, 0] + (1 - w) * p[:, 1])), 1e-12, 1 - 1e-12, xtol=1e-16)
+    w2 = np.array([w1, 1 - w1])
+    out["two"] = {"lpd": lpd2, "weights": w2, "objective": stacking_objective(lpd2, w2)}
+    # Three models from posterior draws of normal models; PSIS-LOO pointwise elpd, as arviz-stats' compare sees it.
+    n, s = 25, 400
+    yobs = np.concatenate([rng.normal(0, 1, 20), rng.normal(3, 0.5, 5)])
+    trees, lpd = {}, []
+    for name, mu, sigma in [("wide", 0.6, 1.6), ("centred", 0.0, 1.0), ("shifted", 2.5, 0.8)]:
+        mus = mu + 0.1 * rng.standard_normal(s)
+        ll = norm.logpdf(yobs[None, :], mus[:, None], sigma)
+        tree = from_dict({"posterior": {"mu": mus[None]}, "log_likelihood": {"y": ll[None]}})
+        trees[name] = tree
+        lpd.append(arviz_stats.loo(tree, pointwise=True, reff=1.0).elpd_i.values)
+    lpd3 = np.column_stack(lpd)
+    names = list(trees)
+    weights = {}
+    for method in ("stacking", "pseudo-bma", "bb-pseudo-bma"):
+        table = arviz_stats.compare(trees, method=method, round_to="none")
+        weights[method] = np.array([table.loc[m, "weight"] for m in names])
+    # The arviz-stats Bayesian bootstrap, reproduced from its own draws.
+    draws = dirichlet.rvs(alpha=[1] * n, size=1000, random_state=124)
+    bb = np.mean([softmax(draws[b] @ (lpd3 * n)) for b in range(1000)], axis=0)
+    np.testing.assert_allclose(bb, weights["bb-pseudo-bma"], rtol=1e-12)
+    pseudo = softmax(lpd3.sum(0))
+    np.testing.assert_allclose(pseudo, weights["pseudo-bma"], rtol=1e-12)
+    # A tight optimum by SLSQP on the simplex, checked by the optimality conditions.
+    fit = minimize(
+        lambda w: -stacking_objective(lpd3, np.maximum(w, 0)),
+        np.full(3, 1 / 3),
+        method="SLSQP",
+        bounds=[(0, 1)] * 3,
+        constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}],
+        options={"ftol": 1e-16, "maxiter": 1000},
+    )
+    w3 = np.maximum(fit.x, 0) / np.maximum(fit.x, 0).sum()
+    small = rng.dirichlet(np.ones(n), size=40)
+    out["three"] = {
+        "lpd": lpd3,
+        "weights": w3,
+        "objective": stacking_objective(lpd3, w3),
+        "arviz": weights,
+        "pseudoBma": pseudo,
+        "elpd": lpd3.sum(0),
+        "draws": small,
+        "pseudoBmaPlus": np.mean([softmax(small[b] @ (lpd3 * n)) for b in range(40)], axis=0),
+        "pseudoBmaPlusSe": np.array([small[b] @ (lpd3 * n) for b in range(40)]).std(0),
+    }
+    return out
+
+
 def cases() -> dict[str, Any]:
     rng = np.random.default_rng(20261013)
     return {
@@ -292,4 +407,6 @@ def cases() -> dict[str, Any]:
         "softThresholdSure": soft_threshold_sure(rng),
         "bootstrap": bootstrap_cases(rng),
         "predictive": predictive(rng),
+        "nestedCv": nested_cv(np.random.default_rng(2024)),
+        "stacking": stacking(np.random.default_rng(2018)),
     }

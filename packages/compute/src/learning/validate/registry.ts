@@ -3,6 +3,7 @@
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as cross from './cross'
 import * as search from './search'
+import * as spatial from './spatial'
 import * as splitters from './splitters'
 
 const fn = definer<FunctionInfo>('function', 'learning/validate')
@@ -69,8 +70,50 @@ fn(
   search.nested,
 )
 
+fn(
+  {
+    key: 'spatialBlocks',
+    name: 'Spatial blocks',
+    summary: 'Group labels of grid cells over the coordinates, for block cross-validation with groupKFold.',
+    role: 'construction',
+    cite: ['roberts2017cv'],
+  },
+  spatial.spatialBlocks,
+)
+fn(
+  {
+    key: 'buffered',
+    name: 'Buffered split',
+    summary: 'A splitter whose training sets drop every row within a radius of a test row (buffered leave-one-out).',
+    role: 'construction',
+    cite: ['roberts2017cv'],
+  },
+  spatial.buffered,
+)
+fn(
+  {
+    key: 'nndmLeaveOneOut',
+    name: 'NNDM leave-one-out',
+    summary: 'Leave-one-out whose training sets match test-to-training distances to prediction-to-sample distances.',
+    role: 'construction',
+    cite: ['mila2022'],
+  },
+  spatial.nndmLeaveOneOut,
+)
+fn(
+  {
+    key: 'knndm',
+    name: 'kNNDM cross-validation',
+    summary: 'k folds from merged Ward clusters, chosen to match prediction-to-sample nearest-neighbour distances.',
+    role: 'construction',
+    random: true,
+    cite: ['linnenbrink2024'],
+  },
+  spatial.knndm,
+)
+
 /** The functions of the module, keyed by name. */
 export const validateFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', splitters, cross, search) as Readonly<
+  entries<FunctionInfo>('function', splitters, spatial, cross, search) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

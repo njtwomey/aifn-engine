@@ -3,10 +3,12 @@ problem) with deterministic noise. Standard-form Tikhonov from numpy's SVD, chec
 (alpha = lambda, no intercept); general-form Tikhonov from numpy.linalg.lstsq on the stacked system; the L-curve's
 curvature from the parametric formula with analytic derivatives in lambda (independent of the closed form the engine
 uses); the discrepancy principle by scipy.optimize.brentq on log lambda; Landweber iterates by the plain recursion,
-checked against their spectral filter factors."""
+checked against their spectral filter factors. General-form paths (second differences, a square and a tall L) from
+numpy.linalg.lstsq on the stacked system, the generalised singular values of a square L as the singular values of
+A L^-1, and convolution matrices column by column from scipy.ndimage.convolve of unit vectors."""
 
 import numpy as np
-from scipy import optimize
+from scipy import ndimage, optimize
 from sklearn.linear_model import Ridge
 
 
@@ -108,6 +110,39 @@ def landweber(a: np.ndarray, b: np.ndarray, steps: list[int]) -> dict[str, objec
     return out
 
 
+def stacked_path(a: np.ndarray, b: np.ndarray, ell: np.ndarray, lambdas: list[float]) -> dict[str, object]:
+    rows = []
+    for lam in lambdas:
+        stacked = np.vstack([a, np.sqrt(lam) * ell])
+        x = np.linalg.lstsq(stacked, np.r_[b, np.zeros(ell.shape[0])], rcond=None)[0]
+        rows.append(x)
+    x = np.array(rows)
+    return {
+        "L": ell,
+        "lambdas": lambdas,
+        "x": x,
+        "residualNorm": np.linalg.norm(x @ a.T - b, axis=1),
+        "solutionNorm": np.linalg.norm(x @ ell.T, axis=1),
+    }
+
+
+def convolution_cases() -> list[dict[str, object]]:
+    modes = {"zero": "constant", "periodic": "wrap", "reflect": "reflect"}
+    out = []
+    for kernel, n in [
+        ([0.1, 0.2, 0.4, 0.2, 0.1], 7),
+        ([0.5, 0.3, 0.2], 6),
+        ([1.0, 2.0, 3.0, 4.0], 7),
+        ([0.2, 0.3, 0.5, 0.7, 1.1, 1.3, 1.7], 3),
+        ([2.0], 4),
+    ]:
+        for boundary, mode in modes.items():
+            k = np.array(kernel)
+            matrix = np.column_stack([ndimage.convolve(np.eye(n)[j], k, mode=mode) for j in range(n)])
+            out.append({"kernel": kernel, "n": n, "boundary": boundary, "matrix": matrix})
+    return out
+
+
 def cases() -> dict[str, object]:
     a, b, x_true, noise = problem()
     lambdas = [0.0, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2]
@@ -135,6 +170,17 @@ def cases() -> dict[str, object]:
     lo = max(s[-1], 16 * np.finfo(float).eps * s[0])
     default_grid = (s[0] * (lo / s[0]) ** (np.arange(100) / 99)) ** 2
 
+    path_lambdas = [0.0, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2, 1.0]
+    second = np.diff(np.eye(n), 2, axis=0)
+    square = np.eye(n) - 0.5 * np.eye(n, k=1)
+    tall = np.vstack([np.eye(n), np.diff(np.eye(n), axis=0)])
+    general_path = {
+        "second": stacked_path(a, b, second, path_lambdas[1:]),
+        "square": stacked_path(a, b, square, path_lambdas[1:])
+        | {"gammas": np.linalg.svd(a @ np.linalg.inv(square), compute_uv=False)},
+        "tall": stacked_path(a, b, tall, path_lambdas[1:]),
+    }
+
     delta = float(np.linalg.norm(noise))
     return {
         "A": a,
@@ -152,4 +198,6 @@ def cases() -> dict[str, object]:
             "sigma": discrepancy(a, b, 1e-3 * np.sqrt(a.shape[0])),
         },
         "landweber": landweber(a, b, [1, 5, 50, 500]),
+        "generalPath": general_path,
+        "convolution": convolution_cases(),
     }

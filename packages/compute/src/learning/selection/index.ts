@@ -15,6 +15,11 @@
  * - Bayesian predictive criteria from an $S \times n$ matrix of pointwise log-likelihood draws: `waic` and `psisLoo`
  *   (with each observation's Pareto $\hat k$, as arviz-stats), the smoothing itself as `psisWeights`, and `dic` from
  *   the deviance at the draws and at the posterior mean.
+ * - Averaging models from an $n \times J$ matrix of leave-one-out log densities (Yao et al., 2018):
+ *   `stackingWeights` (the simplex weights that maximise the mixture's log score), `pseudoBmaWeights` and
+ *   `pseudoBmaPlusWeights` (Bayesian-bootstrapped), as arviz-stats' `compare`.
+ * - `nestedCvInterval`: a confidence interval for prediction error by nested cross-validation (Bates, Hastie and
+ *   Tibshirani, 2024), with its bias correction and the naive interval beside it.
  *
  * Every estimate of error is lower-is-better except the elpd of `waic` and `psisLoo`, which is a log density (higher is
  * better; `waic` and `looic` give it on the deviance scale). Failures are reported where they arise: a leverage of 1
@@ -52,4 +57,13 @@ export {
   type PsisWeights,
   type Waic,
 } from './predictive'
+export { nestedCvInterval, type NestedCvInterval, type NestedCvIntervalOptions } from './nested'
+export {
+  pseudoBmaPlusWeights,
+  pseudoBmaWeights,
+  stackingWeights,
+  type PseudoBmaPlusWeights,
+  type PseudoBmaWeights,
+  type StackingWeights,
+} from './stacking'
 export { selectionFunctions } from './registry'

@@ -4,7 +4,8 @@
  * cross-validated paired $t$-test (Dietterich, 1998) with the combined $F$-test (Alpaydin, 1999), Friedman's test of
  * $k$ algorithms over $N$ data sets (Friedman, 1937) with the Iman–Davenport $F$ correction (Iman and Davenport,
  * 1980) and the Nemenyi critical difference (Nemenyi, 1963; Demšar, 2006), and the Bayesian correlated $t$-test
- * (Corani and Benavoli, 2015; Benavoli et al., 2017).
+ * (Corani and Benavoli, 2015; Benavoli et al., 2017) with its signed-rank counterpart over several data sets (Benavoli
+ * et al., 2017, §4.2), and the expected maximum of $b$ random tuning draws (Dodge et al., 2019).
  *
  * Differences of scores measured on resampled splits of one data set are correlated, since the training sets (and
  * test sets) overlap, so the naive variance $\hat\sigma^2/J$ of their mean is too small and a plain paired $t$-test
@@ -19,8 +20,11 @@
  */
 
 import { DomainError } from 'aifn-compute/foundation/errors'
+import type { Size } from 'aifn-compute/foundation/contracts'
+import { exponential, type Stream } from 'aifn-compute/foundation/random'
 import {
   dense,
+  fromData,
   isTensor,
   tensor,
   toFlat,
@@ -31,6 +35,7 @@ import {
 import { gaussLegendre } from 'aifn-compute/numerics/quadrature'
 import { logGamma, normalCdf } from 'aifn-compute/numerics/special'
 import { Binomial, ChiSquare, FisherSnedecor, StudentT, type Univariate } from 'aifn-compute/probability/distributions'
+import { logGammaVariate } from 'aifn-compute/probability/samplers'
 import { ranks } from 'aifn-compute/probability/stats'
 import {
   checkLevel,
@@ -754,4 +759,223 @@ export function bayesianCorrelatedTTest(
   const pLeft = posterior.cdf(lower) as number
   const pRight = posterior.survival(upper) as number
   return { ...common, posterior, pLeft, pRope: Math.max(0, 1 - pLeft - pRight), pRight }
+}
+
+// ── The Bayesian signed-rank test ────────────────────────────────────────────────────────────────────────────────────
+
+/** The result of `bayesianSignedRankTest`: posterior draws on the simplex, and how often each region wins. */
+export type BayesianSignedRankTest = {
+  /** The posterior probability that B is practically better: the fraction of draws in which $\theta_l$ is largest. */
+  readonly pLeft: number
+  /** The posterior probability that the two are practically equivalent: the fraction in which $\theta_e$ is largest. */
+  readonly pRope: number
+  /** The posterior probability that A is practically better: the fraction in which $\theta_r$ is largest. */
+  readonly pRight: number
+  /**
+   * The posterior draws of $(\theta_l, \theta_e, \theta_r)$, one per row ($S \times 3$), each a point of the simplex:
+   * the probabilities that the mean of two differences falls left of, inside or right of the rope.
+   */
+  readonly samples: Tensor
+  /** The rope $[l, u]$. */
+  readonly rope: readonly [number, number]
+  /** The number of differences $n$. */
+  readonly n: number
+}
+
+/**
+ * The simplex points of the Bayesian signed-rank test for given Dirichlet weights: for each row $\wvec$ of weights
+ * over the atoms $z_0, \dots, z_n$, $\theta_l = \sum_{i,j} w_i w_j H(2l - z_i - z_j)$, $\theta_r = \sum_{i,j} w_i w_j
+ * H(z_i + z_j - 2u)$ and $\theta_e = \max(0, 1 - \theta_l - \theta_r)$, $H$ the step with $H(0) = \tfrac12$ (baycomp's
+ * `SignedRankTest.sample`).
+ *
+ * @param z The atoms: the prior pseudo-observation $z_0$, then the $n$ differences.
+ * @param weights The Dirichlet weights, $S \times (n + 1)$ row-major, each row summing to 1.
+ * @param lower The rope's lower end $l$.
+ * @param upper The rope's upper end $u$.
+ * @returns The draws of $(\theta_l, \theta_e, \theta_r)$, $S \times 3$ row-major.
+ */
+function signedRankSimplex(
+  z: ArrayLike<number>,
+  weights: ArrayLike<number>,
+  lower: number,
+  upper: number,
+): Float64Array {
+  const k = z.length
+  const S = weights.length / k
+  const left = new Float64Array(k * k)
+  const right = new Float64Array(k * k)
+  for (let i = 0; i < k; i++)
+    for (let j = 0; j < k; j++) {
+      const sum = z[i] + z[j]
+      left[i * k + j] = sum < 2 * lower ? 1 : sum === 2 * lower ? 0.5 : 0
+      right[i * k + j] = sum > 2 * upper ? 1 : sum === 2 * upper ? 0.5 : 0
+    }
+  const out = new Float64Array(S * 3)
+  for (let s = 0; s < S; s++) {
+    let thetaLeft = 0
+    let thetaRight = 0
+    for (let i = 0; i < k; i++) {
+      const wi = weights[s * k + i]
+      if (wi === 0) continue
+      let l = 0
+      let r = 0
+      for (let j = 0; j < k; j++) {
+        const wj = weights[s * k + j]
+        l += left[i * k + j] * wj
+        r += right[i * k + j] * wj
+      }
+      thetaLeft += wi * l
+      thetaRight += wi * r
+    }
+    out[3 * s] = thetaLeft
+    // Clamped at 0: with no rope the remainder is rounding.
+    out[3 * s + 1] = Math.max(0, 1 - thetaLeft - thetaRight)
+    out[3 * s + 2] = thetaRight
+  }
+  return out
+}
+
+/**
+ * The fractions of simplex draws in which each of $\theta_l$, $\theta_e$, $\theta_r$ is the largest, ties going to
+ * the first (as numpy's `argmax`).
+ *
+ * @param theta The draws, $S \times 3$ row-major.
+ * @returns The three fractions.
+ */
+function winnerFractions(theta: ArrayLike<number>): [number, number, number] {
+  const S = theta.length / 3
+  const counts = [0, 0, 0]
+  for (let s = 0; s < S; s++) {
+    const [a, b, c] = [theta[3 * s], theta[3 * s + 1], theta[3 * s + 2]]
+    counts[a >= b && a >= c ? 0 : b >= c ? 1 : 2]++
+  }
+  return [counts[0] / S, counts[1] / S, counts[2] / S]
+}
+
+/** Options of `bayesianSignedRankTest`. */
+export type BayesianSignedRankOptions = {
+  /** The stream the Dirichlet weights are drawn from; advanced by the draws. Needed unless `weights` is given. */
+  stream?: Stream
+  /** The rope: a half-width $r \ge 0$ for $[-r, r]$, or its two ends $[l, u]$ (default 0). */
+  rope?: number | readonly [number, number]
+  /** The prior strength $s \ge 0$, the weight of the pseudo-observation (default 0.5, as baycomp). */
+  s?: number
+  /** The prior pseudo-observation $z_0$ (default 0, no difference). */
+  z0?: number
+  /** The number of posterior draws $S$ (default 50000, as baycomp). */
+  samples?: Size
+  /**
+   * Dirichlet weights to use instead of drawing them, $S \times (n + 1)$, row $k$ the weights of $z_0, z_1, \dots, z_n$
+   * in draw $k$ (for common random numbers across comparisons, or to reproduce another implementation's draws). The
+   * prior strength `s` and `samples` are then not used.
+   */
+  weights?: MatrixLike
+}
+
+/**
+ * The Bayesian signed-rank test (Benavoli et al., 2017, §4.2) of two algorithms from the differences of their scores
+ * on $n$ data sets, as the `baycomp` package's `SignedRankTest`. The differences $z_1, \dots, z_n$ get a Dirichlet
+ * process posterior whose base measure is a point mass at a pseudo-observation $z_0$ of weight $s$: a draw puts
+ * weights $\wvec \sim \Dir(s, 1, \dots, 1)$ on $z_0, z_1, \dots, z_n$. Each draw gives a point of the simplex,
+ *
+ * $$\theta_l = \sum_{i,j} w_i w_j \mathbb{1}\left[\tfrac{z_i + z_j}{2} < l\right], \quad
+ *   \theta_r = \sum_{i,j} w_i w_j \mathbb{1}\left[\tfrac{z_i + z_j}{2} > u\right], \quad
+ *   \theta_e = 1 - \theta_l - \theta_r,$$
+ *
+ * the probabilities that the mean of two differences (a Walsh average, as in Wilcoxon's test) falls left of, inside
+ * or right of the rope $[l, u]$, a mean landing on an end counting half. `pLeft`, `pRope` and `pRight` are the
+ * fractions of draws in which each is the largest, as baycomp reports them; `samples` holds the draws, to plot on the
+ * triangle. With no rope $\theta_e = 0$. Throws `DomainError` for $s < 0$, an empty rope, no differences, no stream
+ * and no `weights`, or `weights` without $n + 1$ columns.
+ *
+ * @param diffs The score differences (A minus B), one per data set.
+ * @param options The stream, the rope, the prior and the number of draws, as `BayesianSignedRankOptions`.
+ * @returns The three posterior probabilities and the draws, as `BayesianSignedRankTest`.
+ *
+ * @example Accuracy differences on ten data sets, with a rope of one point
+ * const d = [0.012, 0.031, -0.004, 0.022, 0.009, 0.017, 0.026, -0.011, 0.014, 0.02]
+ * const r = bayesianSignedRankTest(d, { rope: 0.01, stream: stream(0), samples: 5000 })
+ * print('P(B better) =', r.pLeft, ' P(equivalent) =', r.pRope, ' P(A better) =', r.pRight)
+ * print('first draws (left, rope, right) =', r.samples.data.slice(0, 6))
+ */
+export function bayesianSignedRankTest(diffs: VectorLike, options: BayesianSignedRankOptions): BayesianSignedRankTest {
+  const where = 'bayesianSignedRankTest'
+  const { stream, rope = 0, s = 0.5, z0 = 0, samples: count = 50000 } = options
+  const d = sample(diffs, where, 1)
+  const [lower, upper] = typeof rope === 'number' ? [-rope, rope] : rope
+  if (!(lower <= upper)) throw new DomainError(where, `${where}: the rope must be an interval [l, u] with l ≤ u`)
+  const n = d.length
+  const k = n + 1
+  let weights: Float64Array
+  let samples = count
+  if (options.weights !== undefined) {
+    const given = dense.toMatrixF64(options.weights, where)
+    if (given.n !== k) throw new DomainError(where, `${where}: weights need ${k} columns, one per atom, got ${given.n}`)
+    weights = given.data
+    samples = given.m
+  } else {
+    if (stream === undefined) throw new DomainError(where, `${where}: a stream is needed to draw the weights`)
+    if (!(s >= 0 && Number.isFinite(s))) throw new DomainError(where, `${where}: the prior strength s must be ≥ 0`)
+    if (!(Number.isInteger(samples) && samples >= 1))
+      throw new DomainError(where, `${where}: samples must be a positive integer`)
+    const units = exponential(stream, 1, { shape: [samples, n] }).data
+    const prior = s > 0 ? logGammaVariate(stream, s, { shape: [samples] }).data : null
+    weights = new Float64Array(samples * k)
+    for (let r = 0; r < samples; r++) {
+      const w0 = prior === null ? 0 : Math.exp(prior[r])
+      let total = w0
+      for (let i = 0; i < n; i++) total += units[r * n + i]
+      weights[r * k] = w0 / total
+      for (let i = 0; i < n; i++) weights[r * k + 1 + i] = units[r * n + i] / total
+    }
+  }
+  const theta = signedRankSimplex([z0, ...d], weights, lower, upper)
+  const [pLeft, pRope, pRight] = winnerFractions(theta)
+  return { pLeft, pRope, pRight, samples: fromData(theta, [samples, 3]), rope: [lower, upper], n }
+}
+
+// ── The expected maximum of b draws ──────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The expected best validation score of $b$ hyperparameter settings drawn at random, from $N$ observed scores (Dodge
+ * et al., 2019, "Show your work", Eq. 8): the expected maximum of $b$ draws with replacement from the empirical
+ * distribution of the scores. With the scores sorted, $v_{(1)} \le \dots \le v_{(N)}$,
+ *
+ * $$\mathbb{E}\left[\max_{k \le b} V_k\right] = \sum_{i=1}^{N} v_{(i)}\left[\left(\frac{i}{N}\right)^b
+ *   - \left(\frac{i - 1}{N}\right)^b\right].$$
+ *
+ * The curve over $b$ rises from the mean score at $b = 1$ to the best score; comparing two models' curves shows
+ * which is better at each tuning budget. For a loss, where lower is better, negate the scores and the result. Throws
+ * `DomainError` for no scores or a budget that is not a positive integer.
+ *
+ * @param scores The $N$ validation scores, one per setting tried, in any order.
+ * @param b The budget: a number of draws $b \ge 1$, or several.
+ * @returns The expected maximum: a number for one budget, a tensor of one value per budget for several.
+ *
+ * @example The expected best of b settings, as the budget grows
+ * const scores = [0.71, 0.74, 0.78, 0.8, 0.83]
+ * print('b = 1 (the mean) =', expectedMaxOfDraws(scores, 1))
+ * print('b = 1..8 =', expectedMaxOfDraws(scores, [1, 2, 3, 4, 5, 6, 7, 8]))
+ */
+export function expectedMaxOfDraws(scores: VectorLike, b: number): number
+export function expectedMaxOfDraws(scores: VectorLike, b: VectorLike): Tensor
+export function expectedMaxOfDraws(scores: VectorLike, b: number | VectorLike): number | Tensor
+export function expectedMaxOfDraws(scores: VectorLike, b: number | VectorLike): number | Tensor {
+  const where = 'expectedMaxOfDraws'
+  const v = sample(scores, where, 1).sort()
+  const N = v.length
+  const budgets = typeof b === 'number' ? [b] : Array.from(dense.toF64(b, where))
+  const out = budgets.map((k) => {
+    if (!(Number.isInteger(k) && k >= 1))
+      throw new DomainError(where, `${where}: the budget must be a positive integer, got ${k}`)
+    let total = 0
+    let below = 0
+    for (let i = 1; i <= N; i++) {
+      const at = (i / N) ** k
+      total += v[i - 1] * (at - below)
+      below = at
+    }
+    return total
+  })
+  return typeof b === 'number' ? out[0] : tensor(out)
 }

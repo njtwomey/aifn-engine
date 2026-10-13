@@ -147,8 +147,12 @@ describe('registry', () => {
     expectInfo(bayesianFunctions, 'function')
     expect(Object.keys(bayesianFunctions).sort()).toEqual(
       [
+        'bayesianOptimisationStudy',
         'expectedImprovement',
+        'expectedImprovementLogNormal',
+        'localPenalisation',
         'maxValueEntropySearch',
+        'multiPointExpectedImprovement',
         'maxValueSamples',
         'probabilityOfImprovement',
         'ucbBeta',

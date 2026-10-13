@@ -184,8 +184,10 @@ export function successiveHalvingSchedule({
 /**
  * The brackets of Hyperband (Li et al., 2018, Algorithm 1): for $s = s_{\max}, \dots, 0$, successive halving from
  * $\lceil (s_{\max} + 1)\eta^s / (s + 1) \rceil$ configurations at budget $R\eta^{-s}$, with
- * $s_{\max} = \lfloor \log_\eta (R / r) \rfloor$. With $R = 81$, $r = 1$ and $\eta = 3$ it is the table of Li et al.
- * (2018), Section 3.3. Throws `DomainError` unless $\eta > 1$ and $0 < r \le R$.
+ * $s_{\max} = \lfloor \log_\eta (R / r) \rfloor$, the formula of Algorithm 1 (which BOHB uses too). With $R = 81$,
+ * $r = 1$ and $\eta = 3$ the brackets start 81, 34, 15, 8 and 5 configurations; the table Li et al. (2018) print in
+ * Section 3.3 lists 81, 27, 9, 6 and 5, which Algorithm 1 does not give, and this function follows Algorithm 1.
+ * Throws `DomainError` unless $\eta > 1$ and $0 < r \le R$.
  *
  * @param options The run.
  * @param options.maxBudget The maximum budget $R$ any configuration gets.
@@ -193,7 +195,7 @@ export function successiveHalvingSchedule({
  * @param options.eta The reduction factor $\eta$ (default 3).
  * @returns The schedule, most aggressive bracket first.
  *
- * @example The brackets of Li et al.'s table, R = 81 and eta = 3
+ * @example The brackets for R = 81 and eta = 3, by Algorithm 1: 81, 34, 15, 8 and 5 configurations
  * const hb = hyperbandSchedule({ maxBudget: 81, eta: 3 })
  * for (const b of hb.brackets)
  *   print('s =', b.s, ' n_i =', b.rungs.map((g) => g.configurations), ' r_i =', b.rungs.map((g) => g.budget))

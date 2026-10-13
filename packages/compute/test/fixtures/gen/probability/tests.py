@@ -798,7 +798,10 @@ def comparison() -> dict[str, Any]:
     p-values from scipy's binomtest), Friedman's statistic against scipy's `friedmanchisquare` (the average ranks and
     the Iman–Davenport F from their formulas), the studentized range and the Nemenyi critical difference against
     scipy's `studentized_range`, and the corrected resampled t, 5×2cv t, combined F and Bayesian correlated t from
-    their papers' formulas with scipy's t and F laws (baycomp's closed form for the last)."""
+    their papers' formulas with scipy's t and F laws (baycomp's closed form for the last). The Bayesian signed-rank
+    test is baycomp's `SignedRankTest.sample` rewritten in numpy (baycomp is not installed), on fixed Dirichlet
+    weights, with the exact posterior mean of its simplex point; the expected maximum of b draws is Dodge et al.'s
+    (2019) Eq. 8, checked against Monte Carlo."""
     from statsmodels.stats.contingency_tables import mcnemar
 
     rng = np.random.default_rng(20261013)
@@ -930,6 +933,70 @@ def comparison() -> dict[str, Any]:
             | {"pLeft": left, "pRope": law.cdf(rope) - left, "pRight": right}
         )
     out["bayesianCorrelatedTTest"] = bc
+    out["bayesianSignedRankTest"] = signed_rank_cases(rng)
+    out["expectedMaxOfDraws"] = expected_max_cases(rng)
+    return out
+
+
+def signed_rank_simplex(d, weights, lower: float, upper: float, z0: float) -> np.ndarray:
+    """baycomp's SignedRankTest.sample on given Dirichlet weights over the atoms (z0, d): for each draw w, theta_left =
+    sum_ij w_i w_j H(2l - z_i - z_j), theta_right = sum_ij w_i w_j H(z_i + z_j - 2u), H the Heaviside step with
+    H(0) = 1/2, and theta_rope the rest."""
+    z = np.r_[z0, d]
+    sums = z[:, None] + z[None, :]
+    right = (sums > 2 * upper) + 0.5 * (sums == 2 * upper)
+    left = (sums < 2 * lower) + 0.5 * (sums == 2 * lower)
+    theta_right = np.einsum("si,ij,sj->s", weights, right, weights)
+    theta_left = np.einsum("si,ij,sj->s", weights, left, weights)
+    return np.column_stack((theta_left, 1 - theta_left - theta_right, theta_right))
+
+
+def signed_rank_mean(d, s: float, lower: float, upper: float, z0: float) -> np.ndarray:
+    """The posterior mean of (theta_left, theta_rope, theta_right) in closed form, from the Dirichlet moments
+    E[w_i w_j] = (a_i a_j + [i = j] a_i) / (A (A + 1))."""
+    alpha = np.r_[s, np.ones(len(d))]
+    total = alpha.sum()
+    moments = (np.outer(alpha, alpha) + np.diag(alpha)) / (total * (total + 1))
+    z = np.r_[z0, d]
+    sums = z[:, None] + z[None, :]
+    right = np.sum(moments * ((sums > 2 * upper) + 0.5 * (sums == 2 * upper)))
+    left = np.sum(moments * ((sums < 2 * lower) + 0.5 * (sums == 2 * lower)))
+    return np.array([left, 1 - left - right, right])
+
+
+def signed_rank_cases(rng) -> list[dict[str, Any]]:
+    out = []
+    for n, s, z0, rope, mean, sd in [
+        (10, 0.5, 0.0, 0.01, 0.012, 0.015),
+        (15, 1.0, 0.0, 0.0, -0.004, 0.01),
+        (8, 0.5, 0.01, 0.005, 0.003, 0.008),
+    ]:
+        # Rounded so that some pairwise sums land exactly on the rope's ends (the Heaviside ties).
+        d = np.round(rng.normal(mean, sd, n), 3)
+        weights = rng.dirichlet(np.r_[s, np.ones(n)], 100)
+        theta = signed_rank_simplex(d, weights, -rope, rope, z0)
+        winners = np.bincount(np.argmax(theta, axis=1), minlength=3) / len(theta)
+        out.append(
+            {"d": d, "s": s, "z0": z0, "rope": rope, "weights": weights, "theta": theta}
+            | {"pLeft": winners[0], "pRope": winners[1], "pRight": winners[2]}
+            | {"mean": signed_rank_mean(d, s, -rope, rope, z0)}
+        )
+    return out
+
+
+def expected_max_cases(rng) -> list[dict[str, Any]]:
+    out = []
+    for scores in [rng.uniform(0.6, 0.9, 20), np.round(rng.normal(0.8, 0.05, 30), 2), np.array([0.7])]:
+        n = len(scores)
+        v = np.sort(scores)
+        b = np.arange(1, n + 6)
+        cdf = np.arange(1, n + 1) / n
+        # Dodge et al. (2019), Eq. 8: sum_i v_(i) [(i/N)^b - ((i - 1)/N)^b].
+        expected = np.array([np.sum(v * (cdf**k - (cdf - 1 / n) ** k)) for k in b])
+        draws = rng.choice(scores, size=(200000, int(b[-1])))
+        running = np.maximum.accumulate(draws, axis=1)
+        assert np.allclose(running.mean(axis=0), expected, atol=5 * scores.std() / np.sqrt(200000) + 1e-12)
+        out.append({"scores": scores, "b": b, "expected": expected})
     return out
 
 

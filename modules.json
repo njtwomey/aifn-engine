@@ -833,6 +833,9 @@
           },
           {
             "module": "reward-models"
+          },
+          {
+            "module": "tuning"
           }
         ]
       },
@@ -905,7 +908,7 @@
       },
       {
         "area": "theory",
-        "dependsOn": [],
+        "dependsOn": ["learning", "data"],
         "shared": ["regression"],
         "children": [
           {
@@ -922,6 +925,18 @@
           },
           {
             "module": "shrinkage"
+          },
+          {
+            "module": "optimism"
+          },
+          {
+            "module": "adaptive-holdout"
+          },
+          {
+            "module": "model-selection"
+          },
+          {
+            "module": "algorithm-comparison"
           }
         ]
       },
@@ -992,6 +1007,12 @@
           },
           {
             "module": "importance"
+          },
+          {
+            "module": "multi-objective"
+          },
+          {
+            "module": "portfolio"
           }
         ]
       },

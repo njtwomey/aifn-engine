@@ -22,6 +22,9 @@
  *   cumulative probit likelihood of `ordinalLaplaceTerms`.
  * - The GP latent variable model: `gplvmProblem` and `gplvmFitSteps` (MAP by L-BFGS from PCA), `fitGplvm`, and
  *   `gplvmModel`, whose `project` maps latent points to data space.
+ * - Multi-fidelity regression: `fitMultiFidelityGp`, the autoregressive model of Kennedy and O'Hagan (2000) for $M$
+ *   ordered fidelities, $f_t = \rho_{t-1} f_{t-1} + \delta_t$, fitted level by level as recursive co-kriging, with
+ *   predictions at any fidelity (`MultiFidelityGp`, `MultiFidelityGpLevel`, `MultiFidelityGpOptions`).
  * - The registry tables `gaussianProcessAlgorithms` and `gaussianProcessFunctions`.
  *
  * Every function takes the kernel as an argument; hyperparameters are fitted in log space, and the fits and
@@ -126,4 +129,10 @@ export {
   type RvmState,
 } from './rvm'
 export { gpEp, gpEpEvidence, type GpEpOptions, type GpEpProblem } from './classification-ep'
+export {
+  fitMultiFidelityGp,
+  type MultiFidelityGp,
+  type MultiFidelityGpLevel,
+  type MultiFidelityGpOptions,
+} from './multi-fidelity'
 export { gaussianProcessAlgorithms, gaussianProcessFunctions } from './registry'

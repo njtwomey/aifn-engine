@@ -3,9 +3,11 @@
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as bootstrap from './bootstrap'
 import * as criteria from './criteria'
+import * as nested from './nested'
 import * as predictive from './predictive'
 import * as rules from './rules'
 import * as smoothers from './smoothers'
+import * as stacking from './stacking'
 
 const fn = definer<FunctionInfo>('function', 'learning/selection')
 
@@ -153,8 +155,51 @@ fn(
   predictive.dic,
 )
 
+fn(
+  {
+    key: 'nestedCvInterval',
+    name: 'Nested cross-validation interval',
+    summary: 'A confidence interval for prediction error whose width comes from nested CV, with a bias correction.',
+    role: 'estimator',
+    random: true,
+    cite: ['bates2024'],
+  },
+  nested.nestedCvInterval,
+)
+fn(
+  {
+    key: 'stackingWeights',
+    name: 'Stacking weights',
+    summary: 'Simplex weights maximising the leave-one-out log score of a mixture of predictive distributions.',
+    role: 'solver',
+    cite: ['yao2018'],
+  },
+  stacking.stackingWeights,
+)
+fn(
+  {
+    key: 'pseudoBmaWeights',
+    name: 'Pseudo-BMA weights',
+    summary: 'Model weights proportional to exp(elpd), from leave-one-out log predictive densities.',
+    role: 'estimator',
+    cite: ['yao2018'],
+  },
+  stacking.pseudoBmaWeights,
+)
+fn(
+  {
+    key: 'pseudoBmaPlusWeights',
+    name: 'Pseudo-BMA+ weights',
+    summary: 'Pseudo-BMA weights averaged over Bayesian-bootstrap replicates of the elpd.',
+    role: 'estimator',
+    random: true,
+    cite: ['yao2018'],
+  },
+  stacking.pseudoBmaPlusWeights,
+)
+
 /** The functions of the module, keyed by name. */
 export const selectionFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', smoothers, rules, bootstrap, criteria, predictive) as Readonly<
+  entries<FunctionInfo>('function', smoothers, rules, bootstrap, criteria, predictive, nested, stacking) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

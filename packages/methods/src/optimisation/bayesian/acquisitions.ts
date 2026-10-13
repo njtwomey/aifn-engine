@@ -1,7 +1,8 @@
 /**
  * Improvement-based and optimistic acquisition functions of Bayesian optimisation: the probability of improvement
- * (Kushner, 1964), the expected improvement (Mockus, Tiesis and Zilinskas, 1978; Jones, Schonlau and Welch, 1998) and
- * the upper confidence bound with the GP-UCB schedule of Srinivas, Krause, Kakade and Seeger (2010).
+ * (Kushner, 1964), the expected improvement (Mockus, Tiesis and Zilinskas, 1978; Jones, Schonlau and Welch, 1998), its
+ * log-normal form for a surrogate of the log cost (Hutter, Hoos and Leyton-Brown, 2011) and the upper confidence bound
+ * with the GP-UCB schedule of Srinivas, Krause, Kakade and Seeger (2010).
  *
  * Each reads the surrogate's posterior mean $\mu(\xvec)$ and standard deviation $\sigma(\xvec)$ at candidate points,
  * elementwise, and returns a score that is **maximised**: the next point is where the acquisition is largest. The
@@ -168,6 +169,44 @@ export function expectedImprovement(
     if (s === 0) return Math.max(delta, 0)
     const z = delta / s
     return Math.max(delta * normalCdf(z) + s * normalPdf(z), 0)
+  })
+}
+
+/**
+ * The expected improvement of a log-normal cost (Hutter, Hoos and Leyton-Brown, 2011, section 5.2): when the surrogate
+ * models $\ln f$ with mean $\mu$ and standard deviation $\sigma$, the cost $f = e^{\ln f}$ is log-normal and the
+ * expected improvement over the incumbent cost $f^+ > 0$ (minimised) is
+ *
+ * $$ \expect[\max(f^+ - f, 0)] = f^+\,\Phi(v) - e^{\mu + \sigma^2/2}\,\Phi(v - \sigma), \qquad
+ * v = \frac{\ln f^+ - \mu}{\sigma}. $$
+ *
+ * It is the improvement in the cost itself, not in its logarithm, as SMAC uses for runtimes. Where $\sigma = 0$ it is
+ * $\max(f^+ - e^{\mu}, 0)$. The value is never negative (rounding below 0 is set to 0). Throws `DomainError` for a
+ * negative standard deviation or an incumbent that is not positive, and `ShapeError` when `mu` and `sd` differ in size.
+ *
+ * @param mu The posterior means $\mu(\xvec)$ of the log cost at the candidates: a number or a tensor of any shape.
+ * @param sd The posterior standard deviations $\sigma(\xvec) \ge 0$ of the log cost, as many as `mu` (or one number).
+ * @param best The incumbent cost $f^+ > 0$, in the cost's own units (not its logarithm).
+ * @returns The expected improvements in the cost's units, with the kind and shape of `mu`.
+ *
+ * @example Against the expected improvement of the log cost: the log-normal one is in the cost's units
+ * const mu = tensor([Math.log(0.5), Math.log(1), Math.log(2)])
+ * const sd = tensor([0.5, 0.5, 0.5])
+ * print('log-normal EI, best = 1:', expectedImprovementLogNormal(mu, sd, 1))
+ * print('EI of ln f, best = ln 1:', expectedImprovement(mu, sd, 0))
+ * print('sd = 0:', expectedImprovementLogNormal(tensor([Math.log(0.5), 1]), 0, 1))
+ */
+export function expectedImprovementLogNormal(mu: number, sd: number, best: number): number
+export function expectedImprovementLogNormal(mu: Tensor, sd: number | Tensor, best: number): Tensor
+export function expectedImprovementLogNormal(mu: number | Tensor, sd: number | Tensor, best: number): number | Tensor
+export function expectedImprovementLogNormal(mu: number | Tensor, sd: number | Tensor, best: number): number | Tensor {
+  const where = 'expectedImprovementLogNormal'
+  if (!(best > 0)) throw new DomainError(where, `${where}: the incumbent cost must be positive`)
+  const lb = Math.log(best)
+  return mapMoments(mu, sd, where, (m, s) => {
+    if (s === 0) return Math.max(best - Math.exp(m), 0)
+    const v = (lb - m) / s
+    return Math.max(best * normalCdf(v) - Math.exp(m + (s * s) / 2) * normalCdf(v - s), 0)
   })
 }
 

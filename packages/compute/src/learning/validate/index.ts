@@ -6,8 +6,15 @@
  *   `repeated`, `shuffleSplit`, `expandingWindow` (scikit-learn's `TimeSeriesSplit`) and `rollingOrigin` (a fixed
  *   window for forecasting); `assignment` turns splits into a $k \times n$ matrix of `TEST` (1), `TRAIN` (0) and
  *   `UNUSED` ($-1$).
+ * - Spatial splitters for rows with coordinates: `spatialBlocks` (grid-cell group labels for `groupKFold`), `buffered`
+ *   (drops training rows within a radius of the test rows; buffered leave-one-out around `leaveOneOut`), and the
+ *   distance-matching `nndmLeaveOneOut` and `knndm`, whose test-to-training distances match those from the
+ *   prediction area to the samples (as the R package CAST).
  * - `crossValidate(estimator, data, splitter, metrics)`: every fold's fitted model, predictions, metrics (registered
- *   metrics, keyed by `info.key`) and training trace, with scores over folds and out-of-fold predictions.
+ *   metrics, keyed by `info.key`) and training trace, with scores over folds and out-of-fold predictions. Metrics
+ *   that read labels, scores or probabilities are given the classes of the whole `y` (`{ labels, positive }`), so a
+ *   fold with one class never scores another class as positive; `pointwise` keeps each row's held-out value of the
+ *   metrics that are means over rows (log loss, squared error, accuracy).
  * - `gridSearch` and `randomSearch` over a `Space` of `aifn-compute/foundation/space` (grid values, or uniform draws
  *   with log scales), with the full results table; `nested(outer, inner, search, data)` for nested cross-validation
  *   and the optimism of the unnested estimate.
@@ -35,7 +42,17 @@ export {
   type Splitter,
 } from './splitters'
 export {
+  buffered,
+  knndm,
+  nndmLeaveOneOut,
+  spatialBlocks,
+  type KnndmSplitter,
+  type NearestDistances,
+  type NndmSplitter,
+} from './spatial'
+export {
   crossValidate,
+  type ClassLabel,
   type CrossValidateOptions,
   type CrossValidation,
   type CrossValidationData,
