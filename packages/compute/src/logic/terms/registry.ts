@@ -3,6 +3,7 @@
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as syntax from './syntax'
 import * as terms from './terms'
+import * as unification from './unification'
 
 const fn = definer<FunctionInfo>('function', 'logic/terms')
 
@@ -43,8 +44,20 @@ fn(
 fn({ key: 'parseQuery', name: 'Read a Prolog query', role: 'transform' }, syntax.parseQuery)
 fn({ key: 'parseTerm', name: 'Read a Prolog term', role: 'transform' }, syntax.parseTerm)
 fn({ key: 'clauseToString', name: 'Print a clause', role: 'transform' }, syntax.clauseToString)
+fn(
+  {
+    key: 'unificationTrace',
+    name: 'Unification step by step',
+    role: 'solver',
+    summary:
+      "Martelli and Montanari's transformation rules (delete, decompose, conflict, swap, eliminate, occurs check) applied one per state, from a = b to the mgu or a failure.",
+    notes: ['unification-and-resolution'],
+    cite: ['martelli1982', 'robinson1965'],
+  },
+  unification.unificationTrace,
+)
 
 /** The functions of the module, keyed by name. */
-export const termsFunctions = entries<FunctionInfo>('function', terms, syntax) as Readonly<
+export const termsFunctions = entries<FunctionInfo>('function', terms, syntax, unification) as Readonly<
   Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
 >

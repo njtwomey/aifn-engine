@@ -8,6 +8,10 @@
  *   token; the head plumbing `splitHeads`, `mergeHeads` and `repeatKvHeads`.
  * - Masks of ones and zeros over `[Tq, Tk]`, from absolute positions: `causalMask`, `slidingWindowMask`,
  *   `paddingMask`, and the general `positionMask`; `positionRange` and `continuePositions` give the positions.
+ * - Sparse patterns: `sparseAttentionMask` (sliding window of half-width $w$, dilated, strided, global tokens and
+ *   BigBird, causal or not), with `maskDensity` and `attentionReach` (what a stack of masked layers lets each output
+ *   see); query-dependent block selection (MoBA, NSA) by `blockScores`, `selectBlocks`, `blockSparseMask` and
+ *   `capturedWeight`.
  * - Positions: absolute ones added to the embeddings (`sinusoidalPositions`, `LearnedPositions` and
  *   `learnedPositions`), and relative ones inside attention: RoPE (`applyRope`, `ropeFrequencies` with position
  *   interpolation, NTK-aware scaling and YaRN, `ropeTables`), ALiBi (`alibiBias`, `alibiSlopes`) and T5 buckets
@@ -16,6 +20,8 @@
  *   `transformerBlock` and `TransformerBlock`, pre-norm, post-norm or parallel.
  * - Caches: `appendKvCache`, `appendLatentCache`, `trimKvCache` (a rolling window) and `cacheLength`; `kvCacheMemory`
  *   counts the bytes of a decoder's cache under each layout.
+ * - Costs: `attentionCost`, the multiply–adds and score memory of one head under full, Flash, windowed, block-sparse,
+ *   linear, Linformer and LSH attention, against `layerLinearCost`, the rest of the layer.
  * - FlashAttention: `flashAttentionSteps`, the tiled online-softmax forward pass of one head as a step-through
  *   algorithm, and `flashAttention`, run to the end.
  *
@@ -110,4 +116,20 @@ export {
   type FlashAttentionOptions,
   type FlashAttentionState,
 } from './flash'
+export { attentionReach, maskDensity, sparseAttentionMask, type SparseMaskOptions, type SparsePattern } from './sparse'
+export {
+  blockScores,
+  blockSparseMask,
+  capturedWeight,
+  selectBlocks,
+  type BlockScoreOptions,
+  type BlockSelectOptions,
+} from './block-sparse'
+export {
+  attentionCost,
+  layerLinearCost,
+  type AttentionCost,
+  type AttentionCostOptions,
+  type AttentionMethod,
+} from './cost'
 export { attentionAlgorithms, attentionFunctions } from './registry'

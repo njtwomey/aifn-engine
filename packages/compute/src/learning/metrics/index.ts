@@ -24,9 +24,10 @@
  *   `classwiseCalibrationError`, drawn by `reliabilityDiagram` with `consistencyBars`.
  * - Regression errors and deviances: `meanSquaredError`, `rootMeanSquaredError`, `meanAbsoluteError`,
  *   `medianAbsoluteError`, `maxError`, `r2Score`, `adjustedR2Score`, `explainedVariance`,
- *   `normalisedRootMeanSquaredError`, `huberLoss`, `logCoshError`, `meanSquaredLogError`, `pinballLoss`,
- *   `tweedieDeviance`, `tweedieUnitDeviance`, `poissonDeviance`, `gammaDeviance`; percentage and scaled errors for
- *   forecasts, `meanAbsolutePercentageError`, `symmetricMeanAbsolutePercentageError`,
+ *   `normalisedRootMeanSquaredError`, `relativeL2Error` (operator learning's score), `huberLoss`, `logCoshError`,
+ *   `meanSquaredLogError`, `pinballLoss`, `tweedieDeviance`, `tweedieUnitDeviance`, `poissonDeviance`,
+ *   `gammaDeviance`; percentage and scaled errors for forecasts, `meanAbsolutePercentageError`,
+ *   `symmetricMeanAbsolutePercentageError`,
  *   `weightedMeanAbsolutePercentageError`, `meanAbsoluteScaledError`, `rootMeanSquaredScaledError`.
  * - Ranking: `precisionAtK`, `recallAtK`, `rPrecision`, `hitRate`, `meanAveragePrecision`, `meanReciprocalRank`,
  *   `dcg` and `ndcg` (with `gainFunction` and `positionDiscount`), `expectedReciprocalRank`.
@@ -198,6 +199,7 @@ export {
   pinballLoss,
   poissonDeviance,
   r2Score,
+  relativeL2Error,
   rootMeanSquaredError,
   rootMeanSquaredScaledError,
   symmetricMeanAbsolutePercentageError,

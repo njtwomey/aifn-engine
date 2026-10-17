@@ -12,6 +12,8 @@
  * - Interpolants: `linearInterpolant`, `cubicSpline` (not-a-knot, natural, clamped, periodic, given end slopes or
  *   curvatures), `naturalCubicSpline`, `hermiteSpline`, `pchip`, `akima` (and `makima`); polynomial interpolation
  *   `interpolatingPolynomial` (Newton and barycentric forms), `chebyshevNodes`, `lebesgueFunction`.
+ * - Chebyshev series on an interval: `chebyshevInterpolation` (coefficients from values at the Chebyshev nodes, as
+ *   numpy's `chebinterpolate`) and `chebyshevSeries` (evaluation by the recurrence, as `chebval`).
  * - Smoothing: `smoothingSpline` (Reinsch), `pspline` ($\lambda$ given or by GCV) and `psplineGcvPath`,
  *   `leastSquaresSpline`, `thinPlateSpline`, `thinPlateRegressionBasis` (Wood, 2003).
  * - B-splines: `bsplineBasis` (Cox–de Boor, derivatives, extrapolation), `bsplineCount`, `bspline`, `uniformKnots`,
@@ -36,6 +38,7 @@ export {
   type SmoothingSpline,
 } from './piecewise'
 export { chebyshevNodes, interpolatingPolynomial, lebesgueFunction, type InterpolatingPolynomial } from './polynomial'
+export { chebyshevInterpolation, chebyshevSeries } from './chebyshev'
 export {
   bspline,
   bsplineBasis,

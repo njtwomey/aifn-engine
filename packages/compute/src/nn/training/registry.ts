@@ -4,8 +4,10 @@
  * view picks default series and a worker can address an algorithm by key (design S §2.3).
  */
 
-import { definer, entries, type AlgorithmInfo, type Entry } from 'aifn-compute/foundation/registry'
+import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as adversarial from './adversarial'
+import * as cam from './cam'
+import * as ema from './ema'
 import * as energy from './energy'
 import * as fullBatch from './fullBatch'
 import * as method from './method'
@@ -104,4 +106,37 @@ algorithm(
 export const trainingAlgorithms: Readonly<Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>> =
   entries<AlgorithmInfo>('algorithm', train, adversarial, energy, fullBatch, method, privacy) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>
+  >
+
+const fn = definer<FunctionInfo>('function', 'nn/training')
+
+fn(
+  {
+    key: 'parameterEma',
+    name: 'Exponential moving average of parameters',
+    tex: "\\theta'_t = \\alpha\\,\\theta'_{t-1} + (1 - \\alpha)\\,\\theta_t",
+    summary: 'A teacher network whose weights follow the student’s by an exponential moving average.',
+    role: 'transform',
+    notes: ['mean-teacher', 'self-distillation-and-dino'],
+    cite: ['tarvainen2017meanteacher', 'caron2021'],
+  },
+  ema.parameterEma,
+)
+fn(
+  {
+    key: 'gradCam',
+    name: 'Grad-CAM',
+    summary: 'A class’s map from one layer: its feature maps weighted by the mean gradient of the score, then ReLU.',
+    tex: 'M_c = \\operatorname{ReLU}\\Big(\\sum_k \\alpha_{kc} A_k\\Big)',
+    role: 'transform',
+    notes: ['class-activation-mapping'],
+    cite: ['selvaraju2017', 'chattopadhyay2018'],
+  },
+  cam.gradCam,
+)
+
+/** Every function of the module, keyed by name. */
+export const trainingFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
+  entries<FunctionInfo>('function', ema, cam) as Readonly<
+    Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

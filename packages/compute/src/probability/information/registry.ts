@@ -3,6 +3,7 @@
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
+import * as bounds from './bounds'
 import * as continuous from './continuous'
 import * as measures from './measures'
 
@@ -111,8 +112,58 @@ fn(
   continuous.ksgMutualInformation,
 )
 
+// Variational bounds on mutual information from critic scores (Poole et al. 2019).
+const MI_BOUNDS = ['mutual-information-maximisation']
+
+fn(
+  {
+    key: 'infoNceBound',
+    name: 'InfoNCE bound',
+    tex: '\\tfrac1n \\textstyle\\sum_i \\big[T_{ii} - \\log \\tfrac1n \\sum_j e^{T_{ij}}\\big] \\le \\log n',
+    summary: 'A lower bound on mutual information from a batch of critic scores; it never exceeds log n.',
+    role: 'estimator',
+    notes: MI_BOUNDS,
+    cite: ['oord2018', 'poole2019'],
+  },
+  bounds.infoNceBound,
+)
+fn(
+  {
+    key: 'nwjBound',
+    name: 'NWJ bound',
+    tex: '\\tfrac1n \\textstyle\\sum_i T_{ii} - e^{-1} \\operatorname{mean}_{i \\ne j} e^{T_{ij}}',
+    summary: 'The Nguyen–Wainwright–Jordan lower bound on mutual information: unbiased, variance growing as e^I.',
+    role: 'estimator',
+    notes: MI_BOUNDS,
+    cite: ['nguyen2010', 'poole2019'],
+  },
+  bounds.nwjBound,
+)
+fn(
+  {
+    key: 'donskerVaradhanBound',
+    name: 'Donsker–Varadhan bound',
+    tex: '\\tfrac1n \\textstyle\\sum_i T_{ii} - \\log \\operatorname{mean}_{i \\ne j} e^{T_{ij}}',
+    summary: 'The Donsker–Varadhan lower bound on mutual information that MINE maximises.',
+    role: 'estimator',
+    notes: MI_BOUNDS,
+    cite: ['poole2019'],
+  },
+  bounds.donskerVaradhanBound,
+)
+fn(
+  {
+    key: 'correlationForMutualInformation',
+    name: 'Gaussian correlation for a mutual information',
+    tex: '\\rho = \\sqrt{1 - e^{-2I/d}}',
+    role: 'property',
+    notes: MI_BOUNDS,
+  },
+  bounds.correlationForMutualInformation,
+)
+
 /** The functions of the module, keyed by name. */
 export const informationFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', measures, continuous) as Readonly<
+  entries<FunctionInfo>('function', measures, continuous, bounds) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

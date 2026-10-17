@@ -9,15 +9,21 @@
  *   `contrastiveDivergence` (energy-based models with persistent Langevin negatives, and JEM) and `privateTraining`
  *   (DP-SGD, reporting the $\varepsilon$ spent).
  * - Inspection: `recordActivations` and `activations` record every tapped activation of a forward pass; `inspect` adds
- *   the gradients of a loss with respect to each activation and parameter.
+ *   the gradients of a loss with respect to each activation and parameter, and `gradCam` turns one layer's into a
+ *   class activation map (Grad-CAM or Grad-CAM++).
+ * - Teachers: `parameterEma`, the exponential moving average of parameter trees that mean teacher and DINO use as
+ *   their teacher network.
  *
  * Every algorithm runs with `run` and `trace` from its initial parameters and draws its randomness from the step's
- * stream, so a step is a pure function of its state and context. `trainingAlgorithms` holds their registry entries.
+ * stream, so a step is a pure function of its state and context. `trainingAlgorithms` holds their registry entries, and
+ * `trainingFunctions` those of the functions.
  */
 
 export { trainingLoop, type Batch, type TrainingOptions, type TrainingState } from './train'
 export { activations, inspect, recordActivations, type Activations, type Inspection } from './inspect'
-export { trainingAlgorithms } from './registry'
+export { gradCam, type GradCamOptions, type GradCamResult } from './cam'
+export { trainingAlgorithms, trainingFunctions } from './registry'
+export { parameterEma } from './ema'
 export { adversarialTraining, type AdversarialTrainingOptions, type AdversarialTrainingState } from './adversarial'
 export {
   contrastiveDivergence,

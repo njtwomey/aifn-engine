@@ -5,8 +5,8 @@
  * - Centres: `kmeans` (Lloyd's algorithm, best of several k-means++ restarts), `miniBatchKMeans` (for large $n$) and
  *   `kMedoids` (PAM, centres that are rows of the data, on all $n^2$ distances). Each predicts the nearest centre of
  *   new rows.
- * - Soft assignments: `gaussianMixture`, EM with full, diagonal or spherical covariances, whose `predictive` is the
- *   law of the component.
+ * - Soft assignments: `gaussianMixture`, EM with full, tied, diagonal or spherical covariances, whose `predictive` is
+ *   the law of the component.
  * - A hierarchy: `agglomerative` and `linkage` (single, complete, average or Ward linkage, in SciPy's linkage format),
  *   with `cutTree` for flat clusters, `mergeTree` for the tree and `dendrogram` for its layout.
  * - Density: `dbscan` (core, border and noise points, with the roles `CORE`, `BORDER`, `NOISE`), `optics` (the
@@ -17,6 +17,13 @@
  * - Step by step: `kmeansSteps`, `miniBatchKMeansSteps`, `kMedoidsSteps`, `gaussianMixtureSteps`, `meanShiftSteps`
  *   and `agglomerativeSteps` are traceable algorithms that the estimators trace into `training`; the registries
  *   `clusteringAlgorithms` and `clusteringFunctions` list them.
+ * - With side information: `constrainedKMeansSteps` (COP-k-means with hard must-link and cannot-link constraints, or
+ *   PCK-means with a cost per broken one, and labelled seeds), `constraintClosure` (the transitive closure of the
+ *   constraints), `seededCentroids` (seeded k-means' start) and `relevantComponentMetric` (a metric learned from
+ *   must-link groups, for plain k-means after it).
+ * - With a few labels: `semiSupervisedMixtureSteps`, EM for one Gaussian per class with the labelled responsibilities
+ *   clamped and the unlabelled points weighted by $\lambda$, from `labelledOnlyFit`; `classPosterior` and
+ *   `classLogJoint` read its parameters.
  * - `canonicalLabels` renumbers labels in order of first appearance, to compare clusterings.
  *
  * Every estimator works on Euclidean distances between the rows of an $n \times d$ matrix, and labels clusters
@@ -75,5 +82,27 @@ export {
   type OpticsModel,
 } from './density'
 export { affinityMatrix, spectralClustering, type Affinity, type SpectralClusteringModel } from './spectral'
+export {
+  constrainedKMeansSteps,
+  constraintClosure,
+  relevantComponentMetric,
+  seededCentroids,
+  type ConstrainedKMeansOptions,
+  type ConstrainedKMeansStart,
+  type ConstrainedKMeansState,
+  type ConstraintClosure,
+  type ConstraintPair,
+  type RelevantComponentMetric,
+} from './constrained'
+export {
+  classLogJoint,
+  classPosterior,
+  labelledOnlyFit,
+  semiSupervisedMixtureSteps,
+  type ClassGaussians,
+  type SemiSupervisedMixtureOptions,
+  type SemiSupervisedMixtureProblem,
+  type SemiSupervisedMixtureState,
+} from './semi-supervised-mixture'
 export { canonical as canonicalLabels } from './util'
 export { clusteringAlgorithms, clusteringFunctions } from './registry'

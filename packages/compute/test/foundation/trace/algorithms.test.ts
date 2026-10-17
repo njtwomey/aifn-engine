@@ -40,6 +40,7 @@ import {
 import { eulerMaruyama, geometricBrownianMotion, milstein, stochasticRungeKutta } from 'aifn-compute/dynamics/sde'
 import { fromEdges } from 'aifn-compute/graph'
 import { edmondsKarpSteps, minCostFlowSteps } from 'aifn-compute/graph/flows'
+import { weisfeilerLemanSteps } from 'aifn-compute/graph/isomorphism'
 import { labelPropagationSteps, labelSpreadingSteps } from 'aifn-compute/graph/propagation'
 import { aStarSteps, bellmanFordSteps, dijkstraSteps, floydWarshallSteps } from 'aifn-compute/graph/shortest-paths'
 import { kruskalSteps, primSteps } from 'aifn-compute/graph/spanning-trees'
@@ -100,6 +101,7 @@ import {
 import { normal, normals, uniform } from 'aifn-compute/foundation/random'
 import { binaryCrossEntropyWithLogits, discriminatorLoss, generatorLoss } from 'aifn-compute/learning/losses'
 import { poolAdjacentViolatorsSteps } from 'aifn-compute/learning/calibration'
+import { activationMaximisation } from 'aifn-compute/learning/explain'
 import { markovChainSteps } from 'aifn-compute/probability/markov'
 import {
   fixedShare,
@@ -219,7 +221,7 @@ import { bowl, rosenbrock } from '../../optim/problems'
 import { bpeSteps, unigramLmSteps, wordPieceSteps } from 'aifn-compute/text/subword'
 import { trainingSteps, whitespacePreTokeniser } from 'aifn-compute/text/pipeline'
 import { hyphenationPatterns, liangSteps, parseHyphenated, patgenSteps } from 'aifn-compute/text/hyphenation'
-import { foilProblem, foilSteps } from 'aifn-compute/logic/induction'
+import { candidateElimination, foilProblem, foilSteps } from 'aifn-compute/logic/induction'
 import { prologProgram, sldSteps } from 'aifn-compute/logic/resolution'
 import { checkProtocol, plainOf } from '../../protocol'
 import { address, entriesOf } from '../../registries'
@@ -512,6 +514,7 @@ const CASES: Record<string, () => Case> = {
   'graph/traversal/kahnSteps': () => at(kahnSteps(dag), undefined, 10),
   'graph/traversal/tarjanSteps': () => at(tarjanSteps(graph), undefined, 20),
   'graph/traversal/kosarajuSteps': () => at(kosarajuSteps(graph), undefined, 20),
+  'graph/isomorphism/weisfeilerLemanSteps': () => at(weisfeilerLemanSteps([undirected, undirected]), undefined, 4),
   'inference/exact/enumerationSteps': () => at(enumerationSteps(ising, { chunk: 3 }), undefined, 6),
   'inference/exact/variableEliminationSteps': () => at(variableEliminationSteps(ising), undefined, 6),
   'inference/exact/forwardBackwardSteps': () => at(forwardBackwardSteps(chain), undefined, 20),
@@ -775,6 +778,12 @@ const CASES: Record<string, () => Case> = {
   'numerics/linalg/jacobiSteps': () => at(jacobiSteps(diagonallyDominant, [1, 2, 3]), undefined, 8),
   'numerics/linalg/gaussSeidelSteps': () =>
     at(gaussSeidelSteps(diagonallyDominant, [1, 2, 3], { omega: 1.1 }), undefined, 8),
+  'learning/explain/activationMaximisation': () =>
+    at(
+      activationMaximisation((x: Tensor) => sub(sum(x), mul(0.5, sum(square(x)))), [3, 3], { jitter: 1, l2: 0.1 }),
+      undefined,
+      6,
+    ),
   'learning/calibration/poolAdjacentViolatorsSteps': () =>
     at(poolAdjacentViolatorsSteps([3, 1, 4, 1, 5, 9, 2, 6]), undefined, 20),
   'numerics/linalg/powerIterationSteps': () => at(powerIterationSteps(diagonallyDominant), undefined, 10),
@@ -1102,6 +1111,24 @@ const CASES: Record<string, () => Case> = {
       sldSteps(prologProgram('t(a). t(b). t(c). f(X) :- t(X), !. g(X) :- \\+ t(X).'), 'f(X), g(d), member(Y, [1, 2])'),
       undefined,
       30,
+    ),
+  'logic/induction/candidateElimination': () =>
+    at(
+      candidateElimination(
+        {
+          names: ['sky', 'wind'],
+          values: [
+            ['sunny', 'rainy'],
+            ['strong', 'weak'],
+          ],
+        },
+        [
+          { x: [0, 0], positive: true },
+          { x: [1, 1], positive: false },
+        ],
+      ),
+      undefined,
+      2,
     ),
   'logic/induction/foilSteps': () =>
     at(

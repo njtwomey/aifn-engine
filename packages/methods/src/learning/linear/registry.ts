@@ -1,8 +1,8 @@
 /**
  * Registry entries of `aifn-methods/learning/linear`: the perceptron, stochastic gradient descent, MacKay's evidence
  * updates and hypergradient descent on the ridge penalty as step-through algorithms; the regularisation paths
- * (elastic net, group lasso, ridge, least-angle regression, forward stagewise), subset selection, the evidence and the
- * ridge hypergradient as functions.
+ * (elastic net, group lasso, ridge, least-angle regression, forward stagewise, RuleFit), subset selection, the
+ * evidence and the ridge hypergradient as functions.
  */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
@@ -13,6 +13,7 @@ import * as hypergradient from './hypergradient'
 import * as lars from './lars'
 import * as leastSquares from './leastSquares'
 import * as perceptron from './perceptron'
+import * as ruleFit from './ruleFit'
 import * as sgd from './sgd'
 import * as subsets from './subsets'
 
@@ -184,6 +185,19 @@ fn(
   hypergradient.ridgeHypergradient,
 )
 
+fn(
+  {
+    key: 'ruleFitPath',
+    name: 'RuleFit path',
+    summary:
+      'The lasso path over the rules of a tree ensemble and the winsorised linear terms of the inputs, as RuleFit fits it.',
+    role: 'fit',
+    notes: ['rule-ensembles-and-rulefit'],
+    cite: ['friedman2008rulefit'],
+  },
+  ruleFit.ruleFitPath,
+)
+
 /** The algorithms of the module, keyed by factory name. */
 export const linearAlgorithms: Readonly<Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>> =
   entries<AlgorithmInfo>('algorithm', perceptron, sgd, evidence, hypergradient) as Readonly<
@@ -201,4 +215,5 @@ export const linearFunctions: Readonly<Record<string, Entry<(...args: never[]) =
     groupLasso,
     subsets,
     hypergradient,
+    ruleFit,
   ) as Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>>

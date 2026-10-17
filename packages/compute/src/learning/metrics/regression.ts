@@ -1,7 +1,7 @@
 /**
- * Metrics of real-valued point predictions: squared and absolute errors, $R^2$ and explained variance, robust and
- * distributional losses (Huber, log-cosh, squared log error, pinball, Tweedie deviances), percentage errors and scaled
- * errors for forecasting (MAPE, sMAPE, WMAPE, MASE, RMSSE).
+ * Metrics of real-valued point predictions: squared and absolute errors, $R^2$ and explained variance, the relative
+ * $L^2$ error of operator learning, robust and distributional losses (Huber, log-cosh, squared log error, pinball,
+ * Tweedie deviances), percentage errors and scaled errors for forecasting (MAPE, sMAPE, WMAPE, MASE, RMSSE).
  *
  * Every metric takes the true values $y_i$ and the predictions $\hat y_i$ as arrays or tensors of the same length
  * (flattened row-major), throws on a length mismatch or an empty input, and returns a number. They follow
@@ -200,6 +200,39 @@ export const normalisedRootMeanSquaredError = defineMetric(
     if (by === 'range')
       return divide(rmse, y.reduce((a, v) => Math.max(a, v), -Infinity) - y.reduce((a, v) => Math.min(a, v), Infinity))
     return divide(rmse, Math.sqrt(weightedMeanOf(Float64Array.from(y, (v) => (v - m) ** 2))))
+  },
+)
+
+/**
+ * The relative $L^2$ error $\lVert \hat{\yvec} - \yvec \rVert / \lVert \yvec \rVert$ over all values together
+ * (every row of a batch of functions at once), the usual score of operator learning (Li et al., 2021, "Fourier
+ * Neural Operator"; Lu et al., 2021, DeepONet). Unweighted; NaN when every true value is 0.
+ *
+ * @param yTrue The true values $y_i$ (a tensor of any shape is read flattened, so a batch of functions on a grid is
+ *   one input).
+ * @param yPred The predictions $\hat y_i$, one per true value.
+ * @returns The relative error, 0 for exact predictions and 1 for predicting 0.
+ *
+ * @example A 10% error, and the error of predicting zero
+ * print('relative L2', relativeL2Error([3, 4], [3.3, 4.4]))
+ * print('zero prediction', relativeL2Error([3, 4], [0, 0]))
+ */
+export const relativeL2Error = defineMetric(
+  {
+    ...errorInfo('relativeL2Error', 'Relative L2 error', 'operator-learning'),
+    stability: 'experimental',
+    notes: ['operator-learning', 'deeponet', 'fourier-neural-operator', 'physics-informed-neural-operator'],
+    cite: ['li2021fno', 'lu2021deeponet'],
+  },
+  (yTrue: Data, yPred: Data): number => {
+    const { y, p } = pair(yTrue, yPred, 'relativeL2Error')
+    let err = 0
+    let norm = 0
+    for (let i = 0; i < y.length; i++) {
+      err += (p[i] - y[i]) ** 2
+      norm += y[i] ** 2
+    }
+    return Math.sqrt(divide(err, norm))
   },
 )
 

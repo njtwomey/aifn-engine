@@ -59,4 +59,10 @@ export {
   type Clause,
   type Query,
 } from './syntax'
+export {
+  unificationTrace,
+  type UnificationRule,
+  type UnificationStep,
+  type UnificationTraceOptions,
+} from './unification'
 export { termsFunctions } from './registry'

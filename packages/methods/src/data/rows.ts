@@ -6,6 +6,13 @@
 import { takeRows as take } from 'aifn-compute/learning/estimators'
 import type { Dataset } from './types'
 
+/**
+ * The rows `index` of a dataset's extra item: a signal's samples, or the rows of a tensor.
+ *
+ * @param item The item: a signal (`kind: 'signal'`), a tensor, or nothing.
+ * @param index The rows to keep, in order.
+ * @returns The item cut to those rows; `undefined` for no item.
+ */
 function takeItem(item: unknown, index: readonly number[]): any {
   if (!item) return undefined
   if (typeof item === 'object' && 'kind' in item && (item as any).kind === 'signal') {

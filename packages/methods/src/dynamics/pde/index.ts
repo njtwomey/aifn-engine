@@ -13,7 +13,10 @@
  *   $dX = a(X) \, dt + \sigma(X) \, dW$ by its Fokker–Planck equation.
  * - Grids and profiles: a `Grid1` of $n$ points on $[a, b]$, `gridPoints` for its coordinates, and a `Profile` (values
  *   or a function of $x$) for the initial condition.
- * - `pdeAlgorithms`: the registry entries of the five solvers.
+ * - Periodic spectral solutions on $[0, 1)$, the references of operator learning: a `FourierSeries1d` evaluated by
+ *   `evaluateSeries` on `periodicGrid`, the exact periodic heat equation `heatSolution`, and `solveBurgersPeriodic`
+ *   (pseudo-spectral, 2/3 dealiasing, integrating-factor RK4) for a batch of profiles.
+ * - `pdeAlgorithms`: the registry entries of the five solvers; `pdeFunctions`: those of the spectral solutions.
  *
  * Every state is a `PdeState`, whose `Stability` reports the stability number (rather than refusing an unstable step)
  * and whose `diverged` flags a non-finite solution. Invalid settings throw `DomainError`.
@@ -38,4 +41,5 @@ export {
   type WaveOptions,
   type WaveState,
 } from './solvers'
-export { pdeAlgorithms } from './registry'
+export { evaluateSeries, heatSolution, periodicGrid, solveBurgersPeriodic, type FourierSeries1d } from './spectral'
+export { pdeAlgorithms, pdeFunctions } from './registry'

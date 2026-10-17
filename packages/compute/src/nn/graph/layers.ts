@@ -67,7 +67,7 @@ type Edges = ReturnType<typeof messageEdges>
  * @param where The caller's name, for the error message.
  * @returns The feature width $F$.
  */
-function checkFeatures(g: Graph, h: Value, where: string): Size {
+export function checkFeatures(g: Graph, h: Value, where: string): Size {
   const s = shapeOfValue(h)
   if (s.length !== 2 || s[0] !== g.nodes)
     throw new ShapeError(where, `${where}: features must be ${g.nodes} × F, got [${s.join(', ')}]`)

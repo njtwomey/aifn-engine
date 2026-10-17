@@ -13,6 +13,8 @@
  *   `closing`, `morphologicalGradient`, `topHat`.
  * - Pyramids: `pyramidReduce` and `pyramidExpand`, `gaussianPyramid`, `laplacianPyramid` and its exact inverse
  *   `reconstructLaplacian`.
+ * - Resampling: `bilinearSample` reads an image at a fractional position (zero outside), with its four neighbours
+ *   and gradient; `upsampleBilinear` resizes with half-pixel centres, as torch's `interpolate`.
  * - `imageFunctions`: the module's functions with the notes and citations that define them.
  *
  * An image is an $h \times w$ tensor or an array of rows, row 0 at the top; positions are (row, column), and $x$
@@ -72,4 +74,5 @@ export {
   reconstructLaplacian,
   type PyramidOptions,
 } from './pyramids'
+export { bilinearSample, upsampleBilinear, type BilinearSample, type SampleTap } from './resample'
 export { imageFunctions } from './registry'

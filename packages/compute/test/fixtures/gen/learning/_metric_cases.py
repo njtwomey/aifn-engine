@@ -209,6 +209,7 @@ def regression(rng, cases):
         {"args": [y, q], "value": np.mean(2 * np.abs(e) / (np.abs(y) + np.abs(q)))}
     ]
     cases["weightedMeanAbsolutePercentageError"] = [{"args": [y, q], "value": np.sum(np.abs(e)) / np.sum(np.abs(y))}]
+    cases["relativeL2Error"] = [{"args": [y, q], "value": np.sqrt(np.sum(e**2) / np.sum(y**2))}]
     train = np.sin(np.arange(30) * 2 * np.pi / 7) * 3 + rng.normal(0, 0.3, 30) + 5
     for m in (1, 7):
         scale_abs = np.mean(np.abs(train[m:] - train[:-m]))

@@ -12,6 +12,11 @@
  *   generated points, and `optimalDiscriminator` gives $D^*$ with a KDE of $p_g$.
  * - A streamed run for a worker: `ganRun` yields snapshots of the losses and of checkpoints (generated points, the
  *   discriminator on a grid, $D^*$, the mode coverage).
+ * - Semi-supervised GANs (Salimans et al., 2016): `semiSupervisedGan` builds a generator and a $K$-logit
+ *   discriminator whose implicit $(K + 1)$-th class is "generated"; `semiSupervisedGanTraining` trains them with a
+ *   feature-matching or non-saturating generator, a fixed sampler such as Dai et al.'s `complementSampler`, or none;
+ *   `classAndFakeProbabilities`, `generatedPoints` and `initSemiSupervisedGan` read and start them, and
+ *   `semiSupervisedGanRun` streams a run from plain data.
  * - The registry: `ganAlgorithms` and `ganFunctions`.
  *
  * Points are rows, $[n, d]$; the networks' parameters are `Params[]`, as their `init` returns them. Every draw comes
@@ -40,4 +45,23 @@ export {
   type GanRunOptions,
   type OptimizerSpec,
 } from './run'
+export {
+  classAndFakeProbabilities,
+  complementSampler,
+  generatedPoints,
+  initSemiSupervisedGan,
+  semiSupervisedGan,
+  semiSupervisedGanRun,
+  semiSupervisedGanTraining,
+  type CriticParams,
+  type FakeSource,
+  type FixedSampler,
+  type SemiSupervisedGan,
+  type SemiSupervisedGanCheckpoint,
+  type SemiSupervisedGanOptions,
+  type SemiSupervisedGanProblem,
+  type SemiSupervisedGanRunOptions,
+  type SemiSupervisedGanState,
+  type SemiSupervisedGanTrainingOptions,
+} from './semi-supervised'
 export { ganAlgorithms, ganFunctions } from './registry'

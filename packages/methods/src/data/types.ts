@@ -2,12 +2,14 @@
  * The dataset shape every generator returns, and small private helpers for building it. A dataset is the contract's
  * `Dataset` (`kind: 'dataset'`, tensors plus metadata) with float64 features `x` ($n \times d$); its metadata adds the
  * per-row records that modifiers keep (clean labels, outlier and missingness masks) and the recipe knobs a generator
- * could not use. The table that pattern-mining generators return instead, `TableData`, is here too.
+ * could not use. `GraphDataset` adds a graph on the rows. The table that pattern-mining generators return instead,
+ * `TableData`, is here too.
  */
 
 import type {
   Dataset as DatasetContract,
   DatasetMeta as DatasetMetaContract,
+  Graph,
   Key,
   Recipe,
   RecipeStep,
@@ -57,6 +59,12 @@ export interface DatasetMeta extends DatasetMetaContract {
 export interface Dataset extends DatasetContract<Tensor, Tensor> {
   /** What the dataset is, where it came from and what modifiers recorded. */
   readonly meta: DatasetMeta
+}
+
+/** A dataset whose rows are the nodes of a graph. */
+export interface GraphDataset extends Dataset {
+  /** The graph on the rows: node $i$ is row $i$ of `x` and entry $i$ of `y`. */
+  readonly graph: Graph
 }
 
 /**

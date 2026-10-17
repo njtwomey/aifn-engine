@@ -7,18 +7,27 @@
  * in parallel as attention. A decay $\gamma$,
  * $\Smat_t = \gamma \Smat_{t-1} + \phi(\kvec_t) \vvec_t^\top$, gives retention (Sun et al., 2023), whose parallel
  * form weights score $(t, s)$ by $\gamma^{t-s}$.
+ *
+ * The Performer's positive random features (Choromanski et al., 2021, FAVOR+),
+ * $\phi(\xvec) = m^{-1/2} \exp(\Omegamat\xvec - \lVert \xvec \rVert^2/2)$, give a feature map whose inner products
+ * estimate the softmax kernel without bias, $\expect[\phi(\qvec)^\top\phi(\kvec)] = \exp(\qvec^\top\kvec)$, and
+ * `linearAttentionWeights` returns the $T \times T$ weight matrix itself, to draw beside softmax attention's.
  */
 
 import type { Size } from 'aifn-compute/foundation/contracts'
+import { normals, type Stream } from 'aifn-compute/foundation/random'
 import {
   add,
   div,
+  exp,
   expandDims,
   fromData,
   matmul,
   mul,
   shapeOfValue,
+  square,
   squeeze,
+  sub,
   sum,
   transpose,
   type Tensor,
@@ -95,16 +104,94 @@ function decayMask(T: Size, decay: number, causal: boolean): Tensor {
  */
 export function linearAttention(q: Value, k: Value, v: Value, options: LinearAttentionOptions = {}): Value {
   const { featureMap = eluFeatureMap, causal = true, decay = 1, normalise = true } = options
+  const scores = maskedScores(q, k, featureMap, causal, decay)
+  const out = matmul(scores, v)
+  return normalise ? div(out, sum(scores, -1, true)) : out
+}
+
+/**
+ * The unnormalised scores $\phi(\Qmat)\phi(\Kmat)^\top$, masked causally and decayed by `decayMask`, shared by
+ * `linearAttention` and `linearAttentionWeights`.
+ *
+ * @param q The queries, $[\dots, T, d_k]$.
+ * @param k The keys, $[\dots, T, d_k]$.
+ * @param featureMap The feature map $\phi$.
+ * @param causal Whether keys after the query get weight 0.
+ * @param decay The decay $\gamma$ (1 for none).
+ * @returns The scores, $[\dots, T, T]$.
+ */
+function maskedScores(q: Value, k: Value, featureMap: (x: Value) => Value, causal: boolean, decay: number): Value {
   const fq = featureMap(q)
   const fk = featureMap(k)
   const r = shapeOfValue(fk).length
   const axes = Array.from({ length: r }, (_, i) => i)
   ;[axes[r - 2], axes[r - 1]] = [axes[r - 1], axes[r - 2]]
-  let scores: Value = matmul(fq, transpose(fk, axes))
+  const scores: Value = matmul(fq, transpose(fk, axes))
   const T = shapeOfValue(q).at(-2)!
-  if (causal || decay !== 1) scores = mul(scores, decayMask(T, decay, causal))
-  const out = matmul(scores, v)
-  return normalise ? div(out, sum(scores, -1, true)) : out
+  return causal || decay !== 1 ? mul(scores, decayMask(T, decay, causal)) : scores
+}
+
+/**
+ * The weights of linear attention,
+ * $W_{ij} = \phi(\qvec_i)^\top\phi(\kvec_j) / \sum_l \phi(\qvec_i)^\top\phi(\kvec_l)$ with the sums over the
+ * keys query $i$ may see (and $\gamma^{i-j}$ on each score with a decay), so a figure can draw linear attention's
+ * matrix beside softmax's; `linearAttention` is these weights times $\Vmat$. Differentiable.
+ *
+ * @param q The queries, $[\dots, T, d_k]$.
+ * @param k The keys, $[\dots, T, d_k]$.
+ * @param featureMap The feature map $\phi$ (non-negative outputs, such as `eluFeatureMap` or a
+ *   `positiveRandomFeatures` map).
+ * @param causal Hide keys after the query.
+ * @param decay The decay $\gamma$ per step on older keys (1, the default, for none).
+ * @returns The $T \times T$ weights (with the batch axes of `q`), rows summing to 1.
+ *
+ * @example Causal weights of three tokens under the ELU feature map
+ * const x = tensor([[1, 0], [0, 1], [1, 1]])
+ * print('W =', linearAttentionWeights(x, x, eluFeatureMap))
+ */
+export function linearAttentionWeights(
+  q: Value,
+  k: Value,
+  featureMap: (x: Value) => Value,
+  causal = true,
+  decay = 1,
+): Value {
+  const scores = maskedScores(q, k, featureMap, causal, decay)
+  return div(scores, sum(scores, -1, true))
+}
+
+/**
+ * The Performer's positive random feature map for the softmax kernel $\exp(\qvec^\top\kvec)$ (Choromanski et
+ * al., 2021, §2.3 and Lemma 1): $\phi(\xvec) = m^{-1/2}\exp(\Omegamat\xvec - \lVert\xvec\rVert^2/2)$ for an
+ * $m \times d$ matrix $\Omegamat$ of independent standard normal rows, so that
+ * $\expect[\phi(\qvec)^\top\phi(\kvec)] = \exp(\qvec^\top\kvec)$. The map fits `featureMap` of
+ * `linearAttention` and `linearAttentionRecurrent`. Apply the $1/\sqrt{d}$ temperature by scaling queries and keys by
+ * $d^{-1/4}$. (The paper's orthogonal features, Gram–Schmidt over blocks of $d$ rows, lower the variance further.)
+ *
+ * @param s The stream $\Omegamat$ is drawn from ($m \times d$ normals, in one block).
+ * @param d The input width $d$.
+ * @param m The number of features $m$.
+ * @returns `featureMap`, mapping $[\dots, d]$ to $[\dots, m]$ (differentiable in its input), and the matrix `omega`.
+ *
+ * @example Many features estimate the softmax kernel
+ * const { featureMap } = positiveRandomFeatures(stream(3), 4, 20000)
+ * const q = tensor([[0.3, -0.2, 0.5, 0.1]])
+ * const k = tensor([[0.4, 0.1, -0.3, 0.2]])
+ * print('estimate =', sum(mul(featureMap(q), featureMap(k))))
+ * print('exp(q.k) =', Math.exp(0.3 * 0.4 - 0.2 * 0.1 - 0.5 * 0.3 + 0.1 * 0.2))
+ */
+export function positiveRandomFeatures(
+  s: Stream,
+  d: Size,
+  m: Size,
+): { featureMap: (x: Value) => Value; omega: Tensor } {
+  const omega = normals(s, [m, d])
+  const featureMap = (x: Value): Value => {
+    const projected = matmul(x, transpose(omega))
+    const half = mul(0.5, sum(square(x), -1, true))
+    return div(exp(sub(projected, half)), Math.sqrt(m))
+  }
+  return { featureMap, omega }
 }
 
 /**

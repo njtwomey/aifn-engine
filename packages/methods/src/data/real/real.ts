@@ -9,12 +9,15 @@
  */
 
 import { dense, fromData } from 'aifn-compute/foundation/tensor'
-import { fromEdges, type Graph } from 'aifn-compute/graph'
+import { fromEdges } from 'aifn-compute/graph'
 import { ANSCOMBE_DATA, COAL_MINING_DATA, FAITHFUL_DATA, IRIS_DATA, KARATE_CLUBS, KARATE_EDGES } from './embedded'
-import { labels, matrix, vector, type Dataset } from '../types'
+import { labels, matrix, vector, type Dataset, type GraphDataset } from '../types'
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
 import { definer } from 'aifn-compute/foundation/registry'
 import { space } from 'aifn-compute/foundation/space'
+
+// `GraphDataset` is defined once, in the area's shared `types.ts`, so that `data/synthetic` can build one too.
+export type { GraphDataset } from '../types'
 
 /**
  * Fisher's Iris data: 150 flowers (50 each of setosa, versicolor and virginica) with four measurements in cm: sepal
@@ -173,12 +176,6 @@ export function coalMining(): Dataset {
       url: 'https://doi.org/10.1093/biomet/66.1.191',
     },
   }
-}
-
-/** A dataset whose rows are the nodes of a graph. */
-export interface GraphDataset extends Dataset {
-  /** The graph on the rows: node $i$ is row $i$ of `x` and entry $i$ of `y`. */
-  readonly graph: Graph
 }
 
 /**

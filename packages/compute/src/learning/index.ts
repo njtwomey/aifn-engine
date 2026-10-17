@@ -18,6 +18,8 @@
  * - `explain`: explanations of predictions (Shapley values, LIME, gradient attributions and others).
  * - `off-policy`: off-policy evaluation of a target policy from logged bandit feedback, slates and propensities.
  * - `subgroups`: subgroup discovery and exceptional model mining over a table.
+ * - `rules`: rule learning: sequential covering, RIPPER, C4.5rules, Bayesian rule lists, CBA and CMAR, CORELS, Boolean
+ *   rules by column generation, rule quality measures and RuleFit's rule terms.
  *
  * The family re-exports the most used names: `evaluate`, `rbf`, `matern`, `getLoss`, `listLosses`, `getMetric`,
  * `listMetrics`, `accuracy`, `auroc`, `pipeline`, `crossValidate`, `kFold`, `isotonicRegression` and

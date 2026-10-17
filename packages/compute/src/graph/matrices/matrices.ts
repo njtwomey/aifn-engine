@@ -2,16 +2,18 @@
  * The matrices of a graph as dense float64 Tensors: adjacency, degree, the Laplacian $\Lmat = \Dmat - \Amat$ with its
  * symmetric normalisation $\Imat - \Dmat^{-1/2}\Amat\Dmat^{-1/2}$ and its random-walk normalisation
  * $\Imat - \Dmat^{-1}\Amat$ (Chung 1997, "Spectral Graph Theory", ch. 1; von Luxburg 2007, "A tutorial on spectral
- * clustering", §3), and the incidence matrix.
+ * clustering", §3), the rescaled Laplacian of Chebyshev filters, and the incidence matrices of graphs and
+ * hypergraphs.
  *
  * Node $i$ is row $i$; the degrees $\Dmat$ are the row sums of $\Amat$, so out-degrees for a directed graph. Edge
  * weights are used by default (`weighted: false` counts edges instead), except by `incidenceMatrix`, which is
  * unweighted unless asked. Every function checks the graph first and throws on an endpoint out of range.
  */
 
-import type { Size } from 'aifn-compute/foundation/contracts'
-import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
-import { adjacency, isDirected, weightOf, type Graph } from '../graph'
+import type { MatrixLike, Size } from 'aifn-compute/foundation/contracts'
+import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
+import { dense, fromData, isTensor, type Tensor } from 'aifn-compute/foundation/tensor'
+import { adjacency, checkHyperedges, isDirected, weightOf, type Graph, type Hyperedges } from '../graph'
 
 /** Whether to use edge weights (default) or count edges. */
 export interface WeightOptions {
@@ -101,9 +103,14 @@ export function degreeMatrix(g: Graph, options: WeightOptions = {}): Tensor {
  * graph with non-negative weights, $\Lmat$ and $\Lmat_{\text{sym}}$ are symmetric positive semidefinite, with one
  * zero eigenvalue per connected component.
  *
- * @param g The graph, with $V$ nodes.
- * @param options Whether to sum edge weights (the default) or count edges, and `normalisation`, the form to return
- *   (`'unnormalised'` when left out).
+ * The graph may also be given as its affinity (weight) matrix $\Wmat$, which is then used as $\Amat$ as it is (a
+ * tensor or rows; `weighted` is ignored), as in graph-based semi-supervised learning, where $\Wmat$ comes from a
+ * kernel. The diagonal of $\Amat$ (self-loops) counts in the degrees but cancels in the unnormalised $\Lmat$, whose
+ * diagonal is $\sum_{j \ne i} A_{ij}$. Throws `ShapeError` for a matrix that is not square.
+ *
+ * @param g The graph, with $V$ nodes, or its $V \times V$ affinity matrix $\Wmat$.
+ * @param options Whether to sum edge weights (the default) or count edges (for a graph only), and `normalisation`, the
+ *   form to return (`'unnormalised'` when left out).
  * @returns A float64 $V \times V$ tensor.
  *
  * @example The path 0 - 1 - 2, whose Laplacian rows sum to zero
@@ -115,14 +122,28 @@ export function degreeMatrix(g: Graph, options: WeightOptions = {}): Tensor {
  * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
  * print('L_sym =', laplacian(g, { normalisation: 'symmetric' }))
  * print('L_rw =', laplacian(g, { normalisation: 'random-walk' }))
+ *
+ * @example From an affinity matrix: a weighted path
+ * print('L =', laplacian([[0, 1, 0], [1, 0, 2], [0, 2, 0]]))
  */
 export function laplacian(
-  g: Graph,
+  g: Graph | MatrixLike,
   options: WeightOptions & { normalisation?: 'unnormalised' | 'symmetric' | 'random-walk' } = {},
 ): Tensor {
-  const A = adjacencyMatrix(g, options).data
-  const d = degrees(g, options).data
-  const V: Size = g.nodes
+  let A: ArrayLike<number>
+  let V: Size
+  if (isGraph(g)) {
+    A = adjacencyMatrix(g, options).data
+    V = g.nodes
+  } else {
+    const m = dense.toMatrixF64(g, 'laplacian')
+    if (m.m !== m.n)
+      throw new ShapeError('laplacian', `laplacian: the affinity matrix must be square, got ${m.m} × ${m.n}`)
+    A = m.data
+    V = m.m
+  }
+  const d = new Float64Array(V)
+  for (let i = 0; i < V; i++) for (let j = 0; j < V; j++) d[i] += A[i * V + j]
   const out = new Float64Array(V * V)
   const mode = options.normalisation ?? 'unnormalised'
   const inv = (x: number) => (x > 0 ? 1 / x : 0)
@@ -135,6 +156,16 @@ export function laplacian(
       out[i * V + j] = diag - scaled
     }
   return fromData(out, [V, V])
+}
+
+/**
+ * True when the argument is a `Graph` (an object with a node count and an edge list) rather than a matrix.
+ *
+ * @param g A graph, or a matrix as a tensor or rows.
+ * @returns Whether it is a graph.
+ */
+function isGraph(g: Graph | MatrixLike): g is Graph {
+  return !isTensor(g) && 'edges' in g && 'nodes' in g
 }
 
 /**
@@ -173,4 +204,78 @@ export function incidenceMatrix(g: Graph, options: { oriented?: boolean; weighte
     out[e.to * E + k] += w
   })
   return fromData(out, [V, E])
+}
+
+/** Options of `rescaledLaplacian`. */
+export interface RescaleOptions {
+  /** The Laplacian: `'symmetric'` (default, as in ChebNet) or `'unnormalised'`. */
+  normalisation?: 'symmetric' | 'unnormalised'
+  /**
+   * The upper end $\lambda_{\max}$ of the spectrum. Default 2 for the symmetric Laplacian (its exact bound) and
+   * $2 d_{\max}$ for the unnormalised one; any bound at least the largest eigenvalue keeps the rescaled spectrum in
+   * $[-1, 1]$.
+   */
+  lambdaMax?: number
+}
+
+/**
+ * The rescaled Laplacian $\tilde\Lmat = 2\Lmat/\lambda_{\max} - \Imat$ of an undirected graph, edge weights ignored,
+ * whose eigenvalues lie in $[-1, 1]$ when $\lambda_{\max}$ bounds those of $\Lmat$: the argument of the Chebyshev
+ * polynomials of a ChebNet filter (Hammond, Vandergheynst and Gribonval 2011, "Wavelets on graphs via spectral graph
+ * theory", ACHA 30(2), §6; Defferrard, Bresson and Vandergheynst 2016, §2.1). Throws `DomainError` for a
+ * $\lambda_{\max}$ that is not positive.
+ *
+ * @param g The undirected graph, with $V$ nodes.
+ * @param options The Laplacian to rescale and the bound $\lambda_{\max}$.
+ * @returns `lTilde`, the float64 $V \times V$ matrix $\tilde\Lmat$, and the `lambdaMax` used.
+ *
+ * @example The path 0 - 1 - 2, symmetric and unnormalised
+ * const g = { kind: 'graph', nodes: 3, edges: [{ from: 0, to: 1 }, { from: 1, to: 2 }], directed: false }
+ * print('symmetric:', rescaledLaplacian(g).lTilde)
+ * const u = rescaledLaplacian(g, { normalisation: 'unnormalised' })
+ * print('unnormalised, lambda max', u.lambdaMax, ':', u.lTilde)
+ */
+export function rescaledLaplacian(g: Graph, options: RescaleOptions = {}): { lTilde: Tensor; lambdaMax: number } {
+  const normalisation = options.normalisation ?? 'symmetric'
+  const L = laplacian(g, { weighted: false, normalisation }).data
+  let lambdaMax = options.lambdaMax
+  if (lambdaMax === undefined) {
+    if (normalisation === 'symmetric') lambdaMax = 2
+    else {
+      const degree = new Float64Array(g.nodes)
+      for (const e of g.edges)
+        if (e.from !== e.to) {
+          degree[e.from]++
+          degree[e.to]++
+        }
+      lambdaMax = 2 * Math.max(1, ...degree)
+    }
+  }
+  if (!(lambdaMax > 0))
+    throw new DomainError('rescaledLaplacian', `rescaledLaplacian: lambdaMax = ${lambdaMax} must be positive`)
+  const V = g.nodes
+  const out = new Float64Array(V * V)
+  for (let i = 0; i < V * V; i++) out[i] = (2 / lambdaMax) * L[i]
+  for (let i = 0; i < V; i++) out[i * V + i] -= 1
+  return { lTilde: fromData(out, [V, V]), lambdaMax }
+}
+
+/**
+ * The incidence matrix $\Hmat$ of a hypergraph, $n \times m$, with $H_{ve} = 1$ when node $v$ is in hyperedge $e$
+ * (Zhou, Huang and Schölkopf 2006, "Learning with hypergraphs", NeurIPS). Unlike `incidenceMatrix`, a column may hold
+ * any number of ones. Throws `DomainError` for an empty hyperedge, a repeated member or one outside the nodes.
+ *
+ * @param nodes The number of nodes $n$.
+ * @param hyperedges The $m$ hyperedges, each a list of member nodes.
+ * @returns A float64 $n \times m$ tensor of zeros and ones.
+ *
+ * @example Three papers by six authors
+ * print('H =', hypergraphIncidence(6, [[0, 1, 2], [2, 3], [3, 4, 5]]))
+ */
+export function hypergraphIncidence(nodes: Size, hyperedges: Hyperedges): Tensor {
+  checkHyperedges(nodes, hyperedges, 'hypergraphIncidence')
+  const m = hyperedges.length
+  const out = new Float64Array(nodes * m)
+  hyperedges.forEach((e, k) => e.forEach((v) => (out[v * m + k] = 1)))
+  return fromData(out, [nodes, m])
 }

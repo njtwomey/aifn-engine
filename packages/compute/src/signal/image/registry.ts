@@ -8,6 +8,7 @@ import * as filters from './filters'
 import * as hough from './hough'
 import * as morphology from './morphology'
 import * as pyramids from './pyramids'
+import * as resample from './resample'
 
 const fn = definer<FunctionInfo>('function', 'signal/image')
 const FILTER = ['image-filtering']
@@ -219,8 +220,33 @@ fn(
   pyramids.reconstructLaplacian,
 )
 
+// ── Resampling ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+fn(
+  {
+    key: 'bilinearSample',
+    name: 'Bilinear sample',
+    summary: 'An image read at a fractional position from its four neighbours, with their weights and the gradient.',
+    tex: 'x(p) = \\sum_q g(q_r, p_r)\\, g(q_c, p_c)\\, x_q,\\ g(a, b) = \\max(0, 1 - |a - b|)',
+    role: 'transform',
+    notes: ['deformable-convolution'],
+    cite: ['dai2017deformable'],
+  },
+  resample.bilinearSample,
+)
+fn(
+  {
+    key: 'upsampleBilinear',
+    name: 'Bilinear resize',
+    summary: 'An image resized bilinearly with half-pixel centres, as torch’s interpolate with align_corners=False.',
+    role: 'transform',
+    notes: ['class-activation-mapping'],
+  },
+  resample.upsampleBilinear,
+)
+
 /** The functions of the module, keyed by name. */
 export const imageFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', filters, edges, corners, blobs, hough, morphology, pyramids) as Readonly<
+  entries<FunctionInfo>('function', filters, edges, corners, blobs, hough, morphology, pyramids, resample) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

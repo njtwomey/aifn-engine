@@ -1,7 +1,9 @@
 /** The functions of `aifn-compute/graph/propagation`, registered with the notes they serve. */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
+import * as extension from './extension'
 import * as labels from './labels'
+import * as neighbourhood from './neighbourhood'
 import * as propagation from './propagation'
 
 const fn = definer<FunctionInfo>('function', 'graph/propagation')
@@ -157,6 +159,37 @@ algorithm(
   labels.labelSpreadingSteps,
 )
 
+fn(
+  {
+    key: 'harmonicExtension',
+    name: 'Harmonic extension to new points',
+    tex: '\\tilde f(x) = \\frac{\\sum_j w_j f_j}{\\sum_j w_j},\\; w_j = e^{-\\gamma \\lVert x - x_j \\rVert^2}',
+    summary:
+      'Scores for new points as the kernel-weighted average of the propagated node scores, without solving again.',
+    role: 'transform',
+    notes: ['semi-supervised-assumptions', 'transductive-and-inductive-learning'],
+    cite: ['delalleau2005induction'],
+  },
+  extension.harmonicExtension,
+)
+fn(
+  {
+    key: 'neighbourhoodGraph',
+    name: 'Neighbourhood graph of points',
+    summary:
+      'Join points by a full, k-NN, mutual k-NN, ε-ball or b-matching rule and weight the edges by 1 or a heat kernel.',
+    role: 'construction',
+    notes: [
+      'graph-construction-for-semi-supervised-learning',
+      'manifold-regularisation',
+      'semi-supervised-regression',
+      'evaluating-semi-supervised-learning',
+    ],
+    cite: ['vonluxburg2007', 'jebara2009bmatching'],
+  },
+  neighbourhood.neighbourhoodGraph,
+)
+
 /** The label-propagation algorithms, keyed by factory name. */
 export const propagationAlgorithms: Readonly<Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>> =
   entries<AlgorithmInfo>('algorithm', labels) as Readonly<
@@ -165,6 +198,6 @@ export const propagationAlgorithms: Readonly<Record<string, Entry<(...args: neve
 
 /** The functions of the module, keyed by name. */
 export const propagationFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', propagation, labels) as Readonly<
+  entries<FunctionInfo>('function', propagation, labels, extension, neighbourhood) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

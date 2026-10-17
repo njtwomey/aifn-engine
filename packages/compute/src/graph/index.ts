@@ -6,15 +6,21 @@
  * (rooted, ordered trees with their constructors, queries and traversals, and `spanningTreeOf` for a search's tree),
  * a binary min-heap and union-find. The modules:
  *
- * - `traversal`: breadth- and depth-first search, topological order, cycles and connected components.
+ * - `traversal`: breadth- and depth-first search, topological order, cycles, connected components, and hop distances
+ *   and neighbourhoods.
  * - `shortest-paths`: Dijkstra, A*, Bellman-Ford and Floyd-Warshall.
  * - `spanning-trees`: minimum spanning trees by Kruskal or Prim, with their steps.
  * - `flows`: maximum flow with a minimum cut (Edmonds-Karp), and minimum-cost flow.
  * - `structured`: intentional graphs for graphical models, with node roles, plates and templates, `unroll` and
  *   `shape`.
- * - `structures`: standard, random and point-cloud graphs.
- * - `matrices`: the adjacency, degree, Laplacian and incidence matrices.
+ * - `structures`: standard, random (including stochastic block models) and point-cloud graphs, and hypergraph
+ *   expansions.
+ * - `matrices`: the adjacency, degree, Laplacian and incidence matrices, and positional and structural node
+ *   encodings.
  * - `propagation`: differentiable message passing and label propagation.
+ * - `isomorphism`: the Weisfeiler-Leman tests and subgraph policies.
+ * - `measures`: homophily, the Cheeger constant and link-prediction heuristics.
+ * - `rewiring`: virtual nodes and spectral rewiring against oversquashing.
  */
 
 export {
@@ -33,6 +39,7 @@ export {
   type EdgeInput,
   type Graph,
   type GraphOptions,
+  type Hyperedges,
 } from './graph'
 export {
   ancestors,

@@ -1,6 +1,7 @@
 /** The algorithms and functions of `aifn-compute/logic/resolution`. */
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
+import * as forward from './forward'
 import * as sld from './sld'
 import * as tree from './tree'
 
@@ -50,6 +51,30 @@ fn(
   },
   tree.sldTree,
 )
+fn(
+  {
+    key: 'leastHerbrandModel',
+    name: 'Least Herbrand model (forward chaining)',
+    tex: 'T_P \\uparrow \\omega',
+    role: 'solver',
+    summary:
+      'The least model of a function-free definite program by naive iteration of the immediate-consequence operator T_P from the empty set, each fact with its round and derivation.',
+    notes: ['horn-clauses-and-logic-programs'],
+    cite: ['vanemden1976', 'lloyd1987'],
+  },
+  forward.leastHerbrandModel,
+)
+fn(
+  {
+    key: 'herbrandBaseSize',
+    name: 'Size of the Herbrand base',
+    role: 'property',
+    summary: 'The constants and predicates of a function-free program and the number of ground atoms over them.',
+    notes: ['horn-clauses-and-logic-programs'],
+    cite: ['lloyd1987'],
+  },
+  forward.herbrandBaseSize,
+)
 
 /** The step-through algorithms of the module, keyed by factory name. */
 export const resolutionAlgorithms = entries<AlgorithmInfo>('algorithm', sld) as Readonly<
@@ -57,6 +82,6 @@ export const resolutionAlgorithms = entries<AlgorithmInfo>('algorithm', sld) as 
 >
 
 /** The functions of the module, keyed by name. */
-export const resolutionFunctions = entries<FunctionInfo>('function', sld, tree) as Readonly<
+export const resolutionFunctions = entries<FunctionInfo>('function', sld, tree, forward) as Readonly<
   Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
 >

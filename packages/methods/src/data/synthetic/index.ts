@@ -35,17 +35,39 @@
  * - Images, latent factors and paired views: test images (`checkerboardImage`, `gradientImage`, `shapesImage`,
  *   `geometricScene`, `digits`, `digitGlyphs`, `barsAndStripes`), sources and factors (`cocktailParty`,
  *   `strokeGlyphs`, `glyphStrokes`, `latentFactors`, `latentFactorModel`), and image and caption pairs
- *   (`pairedShapes`, `PAIRED_COLOURS`, `PAIRED_RGB`, `PAIRED_SHAPES`, `PAIRED_SIZES`).
+ *   (`pairedShapes`, `PAIRED_COLOURS`, `PAIRED_RGB`, `PAIRED_SHAPES`, `PAIRED_SIZES`); textured shapes whose shape and
+ *   texture cues agree, are independent or conflict (`shapeTextureDataset`, drawn by `renderShapes` from
+ *   `insideShape` and `textureValue` over `SHAPE_NAMES` and `TEXTURE_NAMES`).
  * - Algorithmic tasks for small transformers and grokking: `sequenceTasks` (`SEQUENCE_TASKS`, `SEQUENCE_VOCABULARY`,
  *   `encodeSequence`, `decodeSequence`, `sequenceTaskTruth`) and $a \circ b \bmod p$ tables (`modularArithmetic`,
  *   `MODULAR_OPERATIONS`, `modularValue`, `modularTruth`).
+ * - Recall and state-tracking tasks for comparing sequence layers: `multiQueryAssociativeRecall` (re-exported from
+ *   `aifn-methods/neural/sequence`), `selectiveCopy` and `parityStrings`.
+ * - Operator learning pairs: `periodicGaussianField` (with `priorVariance`, the `PeriodicPrior`), `heatOperatorData`,
+ *   `burgersOperatorData` and `antiderivativeData`, each a batch of input functions with the operator's outputs.
  * - Learning curves for multi-fidelity search and extrapolation: `learningCurves`, power-law or exponential loss
  *   curves with known forms and final values and a dial for how much they cross, and `learningCurveAt`;
  *   `learningCurveSurface`, curves indexed by the points of a search space, whose final loss is a smooth function of
  *   the configuration with a known optimum.
+ * - Semi-supervised learning: two views of one class for co-training (`twoViewDataset`, `classCoordinate`), classes on
+ *   parallel sine waves for a class-plus-style generative model (`parallelWaves`), and threshold problems on a line
+ *   with their learning curves (`clustersProblem`, `uniformProblem`, `lineProblem`, `drawLine`, `firstLabelled`,
+ *   `fitBoth`, `thresholdLearningCurve`).
+ * - Graphs: `contextualBlockModel`, a stochastic block model whose nodes carry features and classes (a
+ *   `BlockModelDataset`, with its edge homophily), and `blockModelProbabilities`, its edge probabilities for a target
+ *   degree and homophily; `graphFamilies` (`GRAPH_FAMILIES`), small cycles, stars and random trees for graph
+ *   classification; synthetic molecules with an atom-additive property (`smallMolecules`, `moleculeGraph`,
+ *   `atomContribution`, `POLAR_PAIR`, `ATOM_FEATURES`, `SCAFFOLDS`, `MOLECULE_GROUPS`) and their count fingerprints
+ *   (`atomIdentifiers`, `countFingerprints`).
+ * - Sets: `numberSets` (sum, maximum and variance targets) and `shapeClouds` (`CLOUD_SHAPES`), for Deep Sets and
+ *   PointNet.
+ * - Representation learning: small fixed knowledge graphs for embedding figures (`familyKnowledgeGraph`,
+ *   `relationPatternGraph`, as `KnowledgeGraph`s of `IndexTriple`s) and batches of Gaussian pairs scored by the
+ *   optimal critic with their true mutual information (`gaussianPairLogRatios`).
  * - Modifiers, from one `Dataset` to another: label noise (`withLabelNoise`, `symmetricNoise`, `flippedMask`), class
  *   balance (`withPrevalence`, `withLabelShift`), `withOutliers`, `withNuisanceFeatures`, linear maps (`withTransform`,
- *   `rotation2d`, `shear2d`), `withMissing`, `withCovariateShift`, and `split` into train and test parts.
+ *   `rotation2d`, `shear2d`), `withMissing`, `withCovariateShift`, `split` into train and test parts, and
+ *   `semiSupervisedSplit`, which keeps a few labels per class and hides the rest.
  *
  * Every random generator takes a `Stream` first and is a pure function of it, drawing its parts from named child
  * streams. Labelled point generators take class sizes alike (a total with `prevalence` or `classWeights`, or per-class
@@ -205,6 +227,20 @@ export {
   shapesImage,
   type GeometricScene,
 } from './images'
+export {
+  insideShape,
+  renderShapes,
+  SHAPE_NAMES,
+  shapeTextureDataset,
+  TEXTURE_NAMES,
+  textureValue,
+  type ShapeItem,
+  type ShapeName,
+  type ShapeTextureData,
+  type ShapeTextureOptions,
+  type ShapeTexturePairing,
+  type TextureName,
+} from './shape-texture'
 export { attributionScore, attributionTask } from './attribution'
 export {
   CONCEPTS,
@@ -246,6 +282,7 @@ export {
 export {
   flippedMask,
   rotation2d,
+  semiSupervisedSplit,
   shear2d,
   split,
   symmetricNoise,
@@ -264,9 +301,26 @@ export {
   type NuisanceOptions,
   type OutlierOptions,
   type PrevalenceOptions,
+  type SemiSupervisedSplit,
+  type SemiSupervisedSplitOptions,
+  type SemiSupervisedSplitWithX,
   type SplitOptions,
   type TransformOptions,
 } from './modifiers'
+export { parityStrings, selectiveCopy, type SelectiveCopyExample } from './recall'
+export {
+  antiderivativeData,
+  burgersOperatorData,
+  heatOperatorData,
+  periodicGaussianField,
+  priorVariance,
+  type AntiderivativeOptions,
+  type BurgersOperatorOptions,
+  type HeatOperatorOptions,
+  type OperatorPairs,
+  type PeriodicPrior,
+} from './operators'
+export { multiQueryAssociativeRecall, type MqarExample, type MqarOptions } from 'aifn-methods/neural/sequence'
 export {
   decodeSequence,
   encodeSequence,
@@ -390,3 +444,63 @@ export {
   type LearningCurveSurface,
   type LearningCurveSurfaceOptions,
 } from './learning-curve-surface'
+export {
+  blockModelProbabilities,
+  contextualBlockModel,
+  GRAPH_FAMILIES,
+  graphFamilies,
+  type BlockModelDataset,
+  type BlockModelOptions,
+  type GraphFamily,
+  type GraphFamilyDataset,
+  type GraphFamilyOptions,
+} from './graphs'
+export {
+  ATOM_FEATURES,
+  atomContribution,
+  atomIdentifiers,
+  countFingerprints,
+  MOLECULE_GROUPS,
+  moleculeGraph,
+  POLAR_PAIR,
+  SCAFFOLDS,
+  smallMolecules,
+  type AtomElement,
+  type Molecule,
+  type MoleculeBond,
+  type MoleculeScaffold,
+  type SmallMoleculeOptions,
+} from './molecules'
+export {
+  CLOUD_SHAPES,
+  numberSets,
+  shapeClouds,
+  type CloudShape,
+  type NumberSetsOptions,
+  type SetTarget,
+  type ShapeCloudsOptions,
+} from './sets'
+export { classCoordinate, twoViewDataset, type TwoViewDataset, type TwoViewDatasetOptions } from './two-view'
+export { parallelWaves, type ParallelWaves, type ParallelWavesOptions } from './parallel-waves'
+export {
+  clustersProblem,
+  drawLine,
+  firstLabelled,
+  fitBoth,
+  lineProblem,
+  thresholdLearningCurve,
+  uniformProblem,
+  type CurvePoint,
+  type LineDraw,
+  type LineProblem,
+  type LineProblemSpec,
+  type ThresholdCurves,
+} from './thresholds'
+export {
+  familyKnowledgeGraph,
+  relationPatternGraph,
+  type IndexTriple,
+  type KnowledgeGraph,
+  type RelationPattern,
+} from './knowledge-graphs'
+export { gaussianPairLogRatios, type GaussianPairBatch } from './mutual-information'

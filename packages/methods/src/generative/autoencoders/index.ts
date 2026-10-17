@@ -9,6 +9,11 @@
  *   codebooks from $k$-means of the encoder's outputs.
  * - Training: `autoencoderRun` streams a run's losses and checkpoints; for an RQ-VAE they include each stage's error,
  *   every row's code and the tree of code prefixes.
+ * - Semi-supervised learning with M2 (Kingma et al., 2014, `m2.ts`): `m2Model` and `initM2` build a conditional VAE
+ *   and a classifier, `semiSupervisedVaeTraining` trains them on the labelled bound `labelledBound` and the unlabelled
+ *   bound (`unlabelledBound` for one input), `m2ClassProbabilities` and `m2Decode` read them out, and
+ *   `semiSupervisedVaeRun` streams a run from plain data.
+ * - `autoencoderFunctions` and `autoencoderAlgorithms`: the module's registry entries.
  */
 
 export {
@@ -27,4 +32,22 @@ export {
   type AutoencoderSpec,
 } from './models'
 export { autoencoderRun, type AutoencoderCheckpoint, type AutoencoderRun, type AutoencoderRunOptions } from './run'
-export { autoencoderFunctions } from './registry'
+export {
+  initM2,
+  labelledBound,
+  m2ClassProbabilities,
+  m2Decode,
+  m2Model,
+  semiSupervisedVaeRun,
+  semiSupervisedVaeTraining,
+  unlabelledBound,
+  type M2Model,
+  type M2ModelOptions,
+  type M2Params,
+  type M2Problem,
+  type M2State,
+  type M2TrainingOptions,
+  type SemiSupervisedVaeCheckpoint,
+  type SemiSupervisedVaeRunOptions,
+} from './m2'
+export { autoencoderAlgorithms, autoencoderFunctions } from './registry'

@@ -3,6 +3,7 @@
  */
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
+import * as legendre from './legendre'
 import * as polynomial from './polynomial'
 
 const fn = definer<FunctionInfo>('function', 'numerics/polynomial')
@@ -58,8 +59,21 @@ fn(
   polynomial.residuez,
 )
 
+fn(
+  {
+    key: 'legendre',
+    name: 'Legendre polynomials',
+    tex: '(n + 1) P_{n+1}(z) = (2n + 1) z P_n(z) - n P_{n-1}(z)',
+    role: 'transform',
+    summary: 'P_0, …, P_{N−1} at points by Bonnet’s recurrence; the basis of HiPPO’s memories.',
+    notes: ['hippo'],
+    cite: ['gu2020hippo'],
+  },
+  legendre.legendre,
+)
+
 /** The functions of the module, keyed by name. */
 export const polynomialFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', polynomial) as Readonly<
+  entries<FunctionInfo>('function', legendre, polynomial) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

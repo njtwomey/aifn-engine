@@ -77,6 +77,7 @@ export { classCounts, type ClassSizeOptions, type ClassSizes } from './sizes'
 export {
   type Dataset,
   type DatasetMeta,
+  type GraphDataset,
   type PlantedPattern,
   type Recipe,
   type RecipeStep,

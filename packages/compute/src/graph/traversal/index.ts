@@ -4,6 +4,9 @@
  * - Searches: `breadthFirstSearch` (visit order, depths, layers and the breadth-first forest), `depthFirstSearch`
  *   (discovery and finish times, edge classes and the depth-first forest), `iterativeDeepening` (a shortest path by
  *   depth-limited passes) and `unweightedShortestPaths` (hop counts and predecessors).
+ * - Hops: `hopDistances` (all-pairs hop counts, Infinity where unreachable) and `kHopNeighbourhood` (the nodes within
+ *   $k$ hops of a set of sources, following edges forwards or backwards: a message-passing network's computation
+ *   graph, or a node's ego network).
  * - Order and cycles: `topologicalSort` (Kahn's algorithm or reverse depth-first postorder), `isDag` and `findCycle`,
  *   which returns a witness cycle.
  * - Components: `connectedComponents` (by union–find, directions ignored), `stronglyConnectedComponents` (Tarjan or
@@ -39,6 +42,7 @@ export {
   type IterativeDeepeningState,
   type TraversalOptions,
 } from './traversal'
+export { hopDistances, kHopNeighbourhood, type HopNeighbourhood, type HopOptions } from './neighbourhoods'
 export { findCycle, isDag, kahnSteps, topologicalSort, type KahnState, type TopologicalOrder } from './order'
 export {
   bipartite,

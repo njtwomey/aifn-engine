@@ -145,6 +145,18 @@
           {
             "module": "propagation",
             "tier": 1
+          },
+          {
+            "module": "isomorphism",
+            "tier": 1
+          },
+          {
+            "module": "measures",
+            "tier": 1
+          },
+          {
+            "module": "rewiring",
+            "tier": 1
           }
         ]
       },
@@ -437,7 +449,11 @@
           },
           {
             "module": "induction",
-            "tier": 1
+            "tier": 2
+          },
+          {
+            "module": "propositional",
+            "tier": 0
           }
         ]
       },
@@ -493,6 +509,10 @@
           {
             "module": "selection",
             "tier": 2
+          },
+          {
+            "module": "rules",
+            "tier": 3
           }
         ]
       },
@@ -539,7 +559,15 @@
           },
           {
             "module": "graph",
-            "tier": 2
+            "tier": 3
+          },
+          {
+            "module": "equivariant",
+            "tier": 1
+          },
+          {
+            "module": "sets",
+            "tier": 1
           }
         ]
       },
@@ -624,6 +652,9 @@
           },
           {
             "module": "transfer"
+          },
+          {
+            "module": "semi-supervised"
           }
         ]
       },
@@ -650,6 +681,9 @@
               },
               {
                 "module": "neighbour"
+              },
+              {
+                "module": "graph"
               }
             ]
           }
@@ -710,11 +744,14 @@
       },
       {
         "area": "vision",
-        "dependsOn": [],
+        "dependsOn": ["evaluation"],
         "shared": [],
         "children": [
           {
             "module": "two-view"
+          },
+          {
+            "module": "detection"
           }
         ]
       },
@@ -792,7 +829,7 @@
       },
       {
         "area": "neural",
-        "dependsOn": ["learning"],
+        "dependsOn": ["learning", "dynamics"],
         "shared": [],
         "children": [
           {
@@ -836,6 +873,21 @@
           },
           {
             "module": "tuning"
+          },
+          {
+            "module": "semi-supervised"
+          },
+          {
+            "module": "self-supervised"
+          },
+          {
+            "module": "operator"
+          },
+          {
+            "module": "sequence"
+          },
+          {
+            "module": "convolutional"
           }
         ]
       },
@@ -903,6 +955,9 @@
         "children": [
           {
             "module": "dynamic-programming"
+          },
+          {
+            "module": "program-synthesis"
           }
         ]
       },

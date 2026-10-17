@@ -6,6 +6,8 @@
  * - `manifold`: neighbour-graph and diffusion embeddings, `isomap` (exported here), Laplacian eigenmaps, locally linear
  *   embedding and diffusion maps, and self-organising maps.
  * - `neighbour`: neighbour embeddings for visualisation, `tsne` (exported here), UMAP and PaCMAP.
+ * - `graph`: node embeddings of a graph, by matrix factorisation (NetMF, dot-product embeddings) and by random walks
+ *   (node2vec walks and skip-gram with negative sampling).
  *
  * The shared layer at this level holds the internal helpers of the children: squared distances and $k$-nearest
  * neighbour lists, the classical-MDS core $-\tfrac{1}{2}\Jmat\Dmat^{(2)}\Jmat$ that classical MDS and Isomap embed

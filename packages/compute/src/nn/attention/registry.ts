@@ -8,11 +8,14 @@
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as attention from './attention'
 import * as block from './block'
+import * as blockSparse from './block-sparse'
 import * as cache from './cache'
+import * as cost from './cost'
 import * as feedforward from './feedforward'
 import * as flash from './flash'
 import * as masks from './masks'
 import * as positions from './positions'
+import * as sparse from './sparse'
 
 /** Registers a function or layer constructor of the module with its description. */
 const fn = definer<FunctionInfo>('function', 'nn/attention')
@@ -237,6 +240,97 @@ fn(
 )
 fn(
   {
+    key: 'sparseAttentionMask',
+    name: 'Sparse attention mask',
+    role: 'construction',
+    summary: 'Sliding, dilated, strided, global and BigBird patterns as a query-by-key mask of ones and zeros.',
+    notes: ['sliding-window-and-sparse-attention', 'efficient-attention'],
+    cite: ['child2019', 'beltagy2020', 'zaheer2020'],
+  },
+  sparse.sparseAttentionMask,
+)
+fn(
+  { key: 'maskDensity', name: 'Mask density', role: 'property', notes: ['sliding-window-and-sparse-attention'] },
+  sparse.maskDensity,
+)
+fn(
+  {
+    key: 'attentionReach',
+    name: 'Reach of stacked masked layers',
+    tex: 'R_L = R_{L-1} M, \\; R_1 = M \\lor I',
+    role: 'property',
+    summary: 'Which inputs can influence which outputs through L layers that share one mask, with residual paths.',
+    notes: ['sliding-window-and-sparse-attention'],
+    cite: ['child2019'],
+  },
+  sparse.attentionReach,
+)
+fn(
+  {
+    key: 'blockScores',
+    name: 'Block scores',
+    tex: 's_{ib} = q_i^\\top \\bar k_b',
+    role: 'transform',
+    summary: 'Each query scored against the mean key of every block (MoBA’s gate), future blocks excluded.',
+    notes: ['trainable-sparse-attention'],
+    cite: ['lu2025moba', 'yuan2025nsa'],
+  },
+  blockSparse.blockScores,
+)
+fn(
+  {
+    key: 'selectBlocks',
+    name: 'Top-k block selection',
+    role: 'transform',
+    notes: ['trainable-sparse-attention'],
+    cite: ['lu2025moba', 'yuan2025nsa'],
+  },
+  blockSparse.selectBlocks,
+)
+fn(
+  {
+    key: 'blockSparseMask',
+    name: 'Block-sparse mask',
+    role: 'construction',
+    notes: ['trainable-sparse-attention'],
+    cite: ['lu2025moba'],
+  },
+  blockSparse.blockSparseMask,
+)
+fn(
+  {
+    key: 'capturedWeight',
+    name: 'Attention weight captured by a mask',
+    tex: '\\sum_j W_{ij} M_{ij}',
+    role: 'property',
+    notes: ['trainable-sparse-attention'],
+  },
+  blockSparse.capturedWeight,
+)
+fn(
+  {
+    key: 'attentionCost',
+    name: 'Attention cost',
+    role: 'property',
+    summary: 'Multiply–adds and score memory of one head under full, Flash, window, block, linear, Linformer and LSH.',
+    notes: ['efficient-attention', 'trainable-sparse-attention'],
+    cite: ['vaswani2017', 'dao2022', 'wang2020linformer', 'katharopoulos2020', 'kitaev2020reformer', 'lu2025moba'],
+  },
+  cost.attentionCost,
+)
+fn(
+  {
+    key: 'layerLinearCost',
+    name: 'Per-token cost of a transformer layer',
+    tex: '(4 + 2\\rho) n d^2',
+    role: 'property',
+    notes: ['efficient-attention'],
+    cite: ['vaswani2017'],
+  },
+  cost.layerLinearCost,
+)
+fn(
+  {
     key: 'flashAttention',
     name: 'Tiled attention with the online softmax',
     role: 'transform',
@@ -267,11 +361,14 @@ export const attentionFunctions = entries<FunctionInfo>(
   'function',
   attention,
   block,
+  blockSparse,
   cache,
+  cost,
   feedforward,
   flash,
   masks,
   positions,
+  sparse,
 ) as Table<FunctionInfo>
 
 /** The step-through algorithms of the module. */

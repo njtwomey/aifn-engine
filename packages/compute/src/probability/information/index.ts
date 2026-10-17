@@ -10,6 +10,9 @@
  * - Mutual information: `mutualInformation` and `pointwiseMutualInformation` (with its normalised form) of a joint
  *   table; `gaussianMutualInformation` of blocks of a Gaussian from its covariance; `ksgMutualInformation`, the
  *   Kraskov–Stögbauer–Grassberger $k$-nearest-neighbour estimate from samples.
+ * - Variational lower bounds from a batch of critic scores: `infoNceBound` (at most $\log n$), `nwjBound` (unbiased,
+ *   high variance) and `donskerVaradhanBound` (MINE's objective), with `correlationForMutualInformation`, the
+ *   correlation of a Gaussian pair with a given $I$.
  * - Helpers: `asValue` (arrays to tensors) and `flatProbabilities` (normalised plain numbers, for coding algorithms);
  *   `informationFunctions` lists the functions with their metadata.
  *
@@ -40,4 +43,5 @@ export {
   type Probabilities,
 } from './measures'
 export { gaussianMutualInformation, ksgMutualInformation } from './continuous'
+export { correlationForMutualInformation, donskerVaradhanBound, infoNceBound, nwjBound } from './bounds'
 export { informationFunctions } from './registry'

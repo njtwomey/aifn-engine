@@ -1,8 +1,9 @@
 /**
  * Gaussian mixture models $p(\xvec) = \sum_k \pi_k \Gauss(\xvec \mid \muvec_k, \Sigmamat_k)$ fitted by
  * expectation-maximisation (Dempster, Laird and Rubin, 1977; Bishop, 2006, "Pattern Recognition and Machine
- * Learning", §9.2), with full, diagonal or spherical covariances, as scikit-learn's `GaussianMixture` (including its
- * `reg_covar` added to every variance and its mean log-likelihood stopping rule).
+ * Learning", §9.2), with full, tied, diagonal or spherical covariances, as scikit-learn's `GaussianMixture` (including
+ * its `reg_covar` added to every variance and its mean log-likelihood stopping rule). The M-step takes row weights and
+ * a variance floor too, for the semi-supervised EM of `semi-supervised-mixture.ts`.
  */
 
 import type { Status } from 'aifn-compute/foundation/contracts'
@@ -32,10 +33,11 @@ import { int, oneOf, real, space } from 'aifn-compute/foundation/space'
 import { ShapeError } from 'aifn-compute/foundation/errors'
 
 /**
- * The shape of each component's covariance: `'full'` any positive-definite matrix, `'diagonal'` independent variances
- * per feature, `'spherical'` one variance shared by every feature ($\sigma_k^2 \Imat$).
+ * The shape of each component's covariance: `'full'` any positive-definite matrix, `'tied'` one full matrix shared by
+ * every component, `'diagonal'` independent variances per feature, `'spherical'` one variance shared by every feature
+ * ($\sigma_k^2 \Imat$).
  */
-export type CovarianceType = 'full' | 'diagonal' | 'spherical'
+export type CovarianceType = 'full' | 'tied' | 'diagonal' | 'spherical'
 
 /** Mixture parameters, with the covariances always stored full. */
 export interface MixtureParameters {
@@ -140,21 +142,34 @@ function expectation(
   return { resp, logLikelihood: total / n, jitter }
 }
 
+/** Options of `maximisation` beyond scikit-learn's estimators. */
+export interface MaximisationOptions {
+  /** A weight per row multiplying its responsibilities (default 1 for every row). */
+  rowWeights?: Float64Array
+  /** Added to each component's total responsibility $n_k$ (default $10\varepsilon$, so an empty one is not 0/0). */
+  pad?: number
+  /** Every variance (diagonal entry) is raised to at least this, after the regularisation (default 0: none). */
+  floor?: number
+}
+
 /**
- * M-step from responsibilities (scikit-learn's estimators, with `reg` added to the variances). Each component's total
- * responsibility $n_k$ is raised by $10\varepsilon$ so that an empty component does not divide by zero.
+ * M-step from responsibilities (scikit-learn's estimators, with `reg` added to the variances), optionally weighted by
+ * row. With row weights $w_i$, each component's total is $n_k = \sum_i w_i r_{ik}$ (raised by `pad`), its mean and
+ * scatter are weighted alike, and the weights are $\pi_k = n_k / \sum_i w_i$. A `'tied'` covariance is the scatter of
+ * every component summed and divided by $\sum_i w_i$.
  *
  * @param v The points, $n \times d$, row-major.
  * @param n The number of points.
  * @param d The number of features.
  * @param k The number of components.
  * @param resp The responsibilities, $n \times k$, row-major (rows summing to 1, or one-hot for a hard assignment).
- * @param type The covariance shape: off-diagonal entries are zeroed unless `'full'`, and `'spherical'` sets every
- *   variance to their mean.
+ * @param type The covariance shape: off-diagonal entries are zeroed for `'diagonal'` and `'spherical'`, and
+ *   `'spherical'` sets every variance to their mean; `'tied'` shares one matrix.
  * @param reg The value added to every variance.
+ * @param options Row weights, the padding of $n_k$ and a variance floor; see `MaximisationOptions`.
  * @returns `weights` ($k$), `means` ($k \times d$) and `covs` ($k \times d \times d$, full storage), row-major.
  */
-function maximisation(
+export function maximisation(
   v: Float64Array,
   n: number,
   d: number,
@@ -162,34 +177,53 @@ function maximisation(
   resp: Float64Array,
   type: CovarianceType,
   reg: number,
+  options: MaximisationOptions = {},
 ) {
+  const { rowWeights: w, pad = 10 * Number.EPSILON, floor = 0 } = options
+  let total = n
+  if (w) {
+    total = 0
+    for (let i = 0; i < n; i++) total += w[i]
+  }
   const nk = new Float64Array(k)
-  for (let i = 0; i < n; i++) for (let c = 0; c < k; c++) nk[c] += resp[i * k + c]
-  for (let c = 0; c < k; c++) nk[c] += 10 * Number.EPSILON
+  for (let i = 0; i < n; i++) for (let c = 0; c < k; c++) nk[c] += w ? w[i] * resp[i * k + c] : resp[i * k + c]
+  for (let c = 0; c < k; c++) nk[c] += pad
   const means = new Float64Array(k * d)
   for (let i = 0; i < n; i++)
-    for (let c = 0; c < k; c++) for (let j = 0; j < d; j++) means[c * d + j] += resp[i * k + c] * v[i * d + j]
-  for (let c = 0; c < k; c++) for (let j = 0; j < d; j++) means[c * d + j] /= nk[c]
+    for (let c = 0; c < k; c++) {
+      const r = w ? w[i] * resp[i * k + c] : resp[i * k + c]
+      for (let j = 0; j < d; j++) means[c * d + j] += r * v[i * d + j]
+    }
+  for (let c = 0; c < k; c++) for (let j = 0; j < d; j++) means[c * d + j] /= nk[c] || 1
   const covs = new Float64Array(k * d * d)
   for (let c = 0; c < k; c++) {
     const C = covs.subarray(c * d * d, (c + 1) * d * d)
     for (let i = 0; i < n; i++) {
-      const r = resp[i * k + c]
+      const r = w ? w[i] * resp[i * k + c] : resp[i * k + c]
+      if (r === 0) continue
       for (let a = 0; a < d; a++) {
         const da = v[i * d + a] - means[c * d + a]
         for (let b = 0; b < d; b++) C[a * d + b] += r * da * (v[i * d + b] - means[c * d + b])
       }
     }
-    for (let a = 0; a < d * d; a++) C[a] /= nk[c]
-    if (type !== 'full') {
+    if (type !== 'tied') for (let a = 0; a < d * d; a++) C[a] /= nk[c] || 1
+  }
+  if (type === 'tied') {
+    const shared = new Float64Array(d * d)
+    for (let c = 0; c < k; c++) for (let e = 0; e < d * d; e++) shared[e] += covs[c * d * d + e] / total
+    for (let c = 0; c < k; c++) covs.set(shared, c * d * d)
+  }
+  for (let c = 0; c < k; c++) {
+    const C = covs.subarray(c * d * d, (c + 1) * d * d)
+    if (type === 'diagonal' || type === 'spherical') {
       let avg = 0
       for (let a = 0; a < d; a++) avg += C[a * d + a] / d
       for (let a = 0; a < d; a++) for (let b = 0; b < d; b++) if (a !== b) C[a * d + b] = 0
       if (type === 'spherical') for (let a = 0; a < d; a++) C[a * d + a] = avg
     }
-    for (let a = 0; a < d; a++) C[a * d + a] += reg
+    for (let a = 0; a < d; a++) C[a * d + a] = Math.max(floor, C[a * d + a] + reg)
   }
-  const weights = Float64Array.from(nk, (m) => m / n)
+  const weights = Float64Array.from(nk, (m) => m / total)
   return { weights, means, covs }
 }
 
@@ -438,7 +472,7 @@ defineModel(
     capabilities: ['forward', 'decide', 'predictive', 'score'],
     hyper: space({
       k: int(1, 20, { default: 3 }),
-      covariance: oneOf(['full', 'diagonal', 'spherical']),
+      covariance: oneOf(['full', 'tied', 'diagonal', 'spherical']),
       regularisation: real(0, 1, { default: 1e-6 }),
       tolerance: real(1e-10, 1, { default: 1e-3, scale: 'log' }),
       maxSteps: int(1, 1000, { default: 100 }),

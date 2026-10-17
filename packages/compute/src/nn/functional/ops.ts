@@ -8,7 +8,8 @@
  * $y_{n,o,i,j} = \sum_{c,a,b} x_{n,\,c,\,i s_h - p_h + a d_h,\,j s_w - p_w + b d_w}\, w_{o,c,a,b}$, with zeros
  * outside the image and $s$, $p$, $d$ the stride, padding and dilation (Dumoulin & Visin, 2016, "A guide to
  * convolution arithmetic for deep learning", §2–5, for the sizes). Average pooling is a depthwise convolution with a
- * uniform kernel; max pooling gathers the windows at fixed positions and reduces them by `max`.
+ * uniform kernel; max pooling gathers the windows at fixed positions and reduces them by `max`. `im2col` lays the
+ * windows of a convolution out as columns, by a depthwise convolution with one-hot kernels.
  */
 
 import { conv, convOutputSize } from 'aifn-compute/foundation/convolution'
@@ -105,6 +106,42 @@ export function conv1d(x: Value, w: Value, options: ConvOptions<number> = {}): V
     groups: options.groups ?? 1,
     method: 'direct',
   })
+}
+
+/**
+ * im2col: the matrix whose column $q = iW' + j$ holds the $K_H \times K_W \times C$ window that output $(i, j)$ of a
+ * 2-D convolution reads, so the layer becomes one matrix product with the `[O, C K_H K_W]` weight matrix (Chellapilla,
+ * Puri and Simard, 2006, "High Performance Convolutional Neural Networks for Document Processing", §3). Row
+ * $(cK_H + u)K_W + v$ holds input channel $c$ at kernel row $u$ and column $v$, the order of `w.reshape(O, -1)`, and
+ * zero padding reads 0. A depthwise `conv2d` with one-hot kernels, so differentiable in $x$ to any order. Throws
+ * `ShapeError` when `x` is not rank 3 or 4.
+ *
+ * @param x The images, `[N, C, H, W]`, or one image `[C, H, W]`.
+ * @param kernel The kernel size, a number or `[KH, KW]`.
+ * @param options The stride, padding and dilation, as `conv2d` takes them (no groups).
+ * @returns The columns, `[N, C K_H K_W, H'W']`, or `[C K_H K_W, H'W']` for one image.
+ *
+ * @example A 4 x 4 image and a 3 x 3 kernel give a 9 x 4 matrix
+ * const x = tensor([[[1, 2, 0, 1], [0, 1, 3, 1], [2, 1, 0, 0], [1, 0, 1, 2]]])
+ * const cols = im2col(x, 3)
+ * print('columns =', cols)
+ * const w = tensor([[1, 0, -1, 1, 0, -1, 1, 0, -1]])
+ * print('w x columns =', matmul(w, cols))
+ * print('conv2d      =', conv2d(x, reshape(w, [1, 1, 3, 3])))
+ */
+export function im2col(x: Value, kernel: Pair, options: Omit<ConvOptions, 'groups'> = {}): Value {
+  const xs = shapeOfValue(x)
+  if (xs.length !== 3 && xs.length !== 4)
+    throw new ShapeError('im2col', `im2col: x needs shape [N, C, H, W] or [C, H, W], got [${xs.join(', ')}]`)
+  const C = xs[xs.length - 3]
+  const [kh, kw] = pair(kernel)
+  const taps = kh * kw
+  // Output channel c·taps + t copies tap t of input channel c: a one-hot kernel per (c, t), applied depthwise.
+  const data = new Float64Array(C * taps * taps)
+  for (let c = 0; c < C; c++) for (let t = 0; t < taps; t++) data[(c * taps + t) * taps + t] = 1
+  const y = conv2d(x, fromData(data, [C * taps, 1, kh, kw]), { ...options, groups: C })
+  const ys = shapeOfValue(y)
+  return xs.length === 4 ? reshape(y, [ys[0], ys[1], ys[2] * ys[3]]) : reshape(y, [ys[0], ys[1] * ys[2]])
 }
 
 // ── Pooling ──────────────────────────────────────────────────────────────────────────────────────────────────────────

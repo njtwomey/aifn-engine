@@ -22,6 +22,8 @@
  * - `weak-supervision`: learning without clean labels (label models, positive-unlabelled data, label proportions,
  *   multiple instances, confident learning).
  * - `transfer`: domain adaptation, label shift, continual learning and meta-learning on small problems.
+ * - `semi-supervised`: learning from a few labels and many unlabelled points (self-training, co-training, the
+ *   transductive SVM, entropy minimisation, manifold regularisation, thresholds on a line, novelty filtering).
  * - `explanation`: studies that compare data-attribution methods against planted label noise.
  *
  * The family itself re-exports the most used estimators of its modules, and `isotonicRegressor`, isotonic regression

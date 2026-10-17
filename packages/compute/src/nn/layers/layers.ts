@@ -6,7 +6,8 @@
  * Non-trainable state (batch norm's running statistics; torch's buffers, flax's `batch_stats` collection) is passed in
  * the same way, in `ctx.buffers`, and a layer in training mode writes its new entry to `ctx.bufferUpdates`.
  *
- * Functional forms (`linear`, `layerNorm`, `rmsNorm`, `batchNorm`, `dropout`) are exported beside the layers, which
+ * Functional forms (`linear`, `layerNorm`, `rmsNorm`, `batchNorm`, `groupNorm`, `instanceNorm`, `dropout`) are
+ * exported beside the layers, which
  * only add parameter shapes and initialisation. Every layer passes its output through `ctx.tap(path, value)` when the
  * context has one, which is how `inspect` records activations and their gradients.
  *
@@ -494,6 +495,69 @@ export function rmsNorm(x: Value, gamma?: Value, eps = 1e-6): Value {
   return gamma === undefined ? y : mul(y, gamma)
 }
 
+/**
+ * Group normalisation (Wu and He, 2018, "Group Normalization", §3, eqs. 1 to 3 with the set $\mathcal{S}_i$ of eq. 7)
+ * of $x$, shape `[N, C, ...spatial]`: the $C$ channels are split into $G$ groups of $C/G$ consecutive channels (channel
+ * $c$ in group $\lfloor cG/C \rfloor$), and each example's values in one group, over its channels and every spatial
+ * position, are standardised by their own mean and biased variance, $(x - \mu)/\sqrt{\sigma^2 + \varepsilon}$; then
+ * the per-channel $\gamma$ and $\beta$ (shape `[C]`) are applied. $G = 1$ is layer normalisation over $(C, H, W)$,
+ * which differs from `layerNorm` (last axis only); $G = C$ is `instanceNorm`. Matches
+ * `torch.nn.functional.group_norm`. Differentiable to any order and batched under `vmap`. Throws `ShapeError` for a
+ * rank below 3 or channels not divisible by `groups`.
+ *
+ * @param x The activations, `[N, C, ...spatial]` with at least one spatial axis.
+ * @param groups The number of groups $G$; $C$ must be divisible by it.
+ * @param gamma The per-channel scale $\gamma$, `[C]`; left out, no scale.
+ * @param beta The per-channel shift $\beta$, `[C]`; left out, no shift.
+ * @param eps The $\varepsilon$ added to the variance.
+ * @returns The normalised activations, with the shape of `x`.
+ *
+ * @example One example of four channels: instance, two groups, layer
+ * const x = tensor([[[[1, 3], [5, 7]], [[2, 2], [4, 4]], [[0, 4], [0, 4]], [[6, 6], [6, 10]]]])
+ * print('G = 4:', get(groupNorm(x, 4, undefined, undefined, 0), 0, 0, 0, 0), '=', -3 / Math.sqrt(5))
+ * print('G = 2:', get(groupNorm(x, 2, undefined, undefined, 0), 0, 0, 0, 0), '=', -2.5 / Math.sqrt(3.25))
+ * print('G = 1:', get(groupNorm(x, 1, undefined, undefined, 0), 0, 0, 0, 0), '=', -3 / Math.sqrt(6.75))
+ */
+export function groupNorm(x: Value, groups: number, gamma?: Value, beta?: Value, eps = 1e-5): Value {
+  const shape = shapeOfValue(x)
+  if (shape.length < 3) throw new ShapeError('groupNorm', 'groupNorm: x must be [N, C, ...spatial]', [shape])
+  const [N, C] = shape
+  if (!Number.isInteger(groups) || groups < 1 || C % groups !== 0)
+    throw new ShapeError('groupNorm', `groupNorm: ${C} channels are not divisible by ${groups} groups`, [shape])
+  // [N, G, (C/G) · spatial]: each row is one example's group, normalised over its last axis.
+  const rows = reshape(x, [N, groups, -1])
+  const centred = sub(rows, mean(rows, -1, true))
+  const variance = mean(square(centred), -1, true)
+  let y: Value = reshape(div(centred, sqrt(add(variance, eps))), shape)
+  // Per-channel affine: gamma and beta broadcast as [1, C, 1, ...].
+  const channel = [1, C, ...shape.slice(2).map(() => 1)]
+  if (gamma !== undefined) y = mul(y, reshape(gamma, channel))
+  if (beta !== undefined) y = add(y, reshape(beta, channel))
+  return y
+}
+
+/**
+ * Instance normalisation (Ulyanov, Vedaldi and Lempitsky, 2016, "Instance Normalization: The Missing Ingredient for
+ * Fast Stylization"): `groupNorm` with one group per channel, so one mean and variance per example and channel.
+ * Differentiable. Throws `ShapeError` for a rank below 3.
+ *
+ * @param x The activations, `[N, C, ...spatial]`.
+ * @param gamma The per-channel scale $\gamma$, `[C]`; left out, no scale.
+ * @param beta The per-channel shift $\beta$, `[C]`; left out, no shift.
+ * @param eps The $\varepsilon$ added to the variance.
+ * @returns The normalised activations, with the shape of `x`.
+ *
+ * @example Every channel of every example gets mean 0
+ * const y = instanceNorm(tensor([[[[1, 3], [5, 7]], [[2, 2], [4, 4]]]]))
+ * print('y =', y)
+ * print('channel means:', mean(y, [2, 3]))
+ */
+export function instanceNorm(x: Value, gamma?: Value, beta?: Value, eps = 1e-5): Value {
+  const shape = shapeOfValue(x)
+  if (shape.length < 3) throw new ShapeError('instanceNorm', 'instanceNorm: x must be [N, C, ...spatial]', [shape])
+  return groupNorm(x, shape[1], gamma, beta, eps)
+}
+
 /** Options of `batchNorm`. */
 export type BatchNormOptions = {
   /** The $\varepsilon$ added to the variance (default 1e-5). */
@@ -581,6 +645,55 @@ export function RmsNorm(features: number, { eps = 1e-6 }: { eps?: number } = {})
     label: `RmsNorm(${features})`,
     init: () => ({ gamma: ones([features]) }),
     apply: (p, x, ctx) => tap(ctx, rmsNorm(x, p.gamma, eps)),
+  }
+}
+
+/**
+ * Group normalisation of `channels` channels in `groups` groups, with learned per-channel $\gamma$ (initially ones)
+ * and $\beta$ (initially zeros), as `torch.nn.GroupNorm`; see `groupNorm`. No running statistics: training and
+ * evaluation normalise alike.
+ *
+ * @param groups The number of groups $G$; `channels` must be divisible by it.
+ * @param channels The number of channels $C$ (axis 1 of the input).
+ * @param options The normalisation's settings.
+ * @param options.eps The $\varepsilon$ added to the variance.
+ * @returns The layer, with parameters `NormParams`.
+ *
+ * @example Two groups of two channels
+ * const gn = GroupNorm(2, 4)
+ * const x = tensor([[[[1, 3], [5, 7]], [[2, 2], [4, 4]], [[0, 4], [0, 4]], [[6, 6], [6, 10]]]])
+ * print('apply:', gn.apply(gn.init(stream(0)), x))
+ */
+export function GroupNorm(groups: number, channels: number, { eps = 1e-5 }: { eps?: number } = {}): Layer<NormParams> {
+  if (!Number.isInteger(groups) || groups < 1 || channels % groups !== 0)
+    throw new ShapeError('GroupNorm', `GroupNorm: ${channels} channels are not divisible by ${groups} groups`)
+  return {
+    kind: 'GroupNorm',
+    label: `GroupNorm(${groups}, ${channels})`,
+    init: () => ({ gamma: ones([channels]), beta: zeros([channels]) }),
+    apply: (p, x, ctx) => tap(ctx, groupNorm(x, groups, p.gamma, p.beta, eps)),
+  }
+}
+
+/**
+ * Instance normalisation of `channels` channels with learned per-channel $\gamma$ (initially ones) and $\beta$
+ * (initially zeros), as `torch.nn.InstanceNorm2d` with `affine=True` and no running statistics; see `instanceNorm`.
+ *
+ * @param channels The number of channels $C$ (axis 1 of the input).
+ * @param options The normalisation's settings.
+ * @param options.eps The $\varepsilon$ added to the variance.
+ * @returns The layer, with parameters `NormParams`.
+ *
+ * @example Each channel normalised on its own
+ * const inorm = InstanceNorm(2)
+ * print('apply:', inorm.apply(inorm.init(stream(0)), tensor([[[[1, 3], [5, 7]], [[2, 2], [4, 4]]]])))
+ */
+export function InstanceNorm(channels: number, { eps = 1e-5 }: { eps?: number } = {}): Layer<NormParams> {
+  return {
+    kind: 'InstanceNorm',
+    label: `InstanceNorm(${channels})`,
+    init: () => ({ gamma: ones([channels]), beta: zeros([channels]) }),
+    apply: (p, x, ctx) => tap(ctx, instanceNorm(x, p.gamma, p.beta, eps)),
   }
 }
 

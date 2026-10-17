@@ -2,6 +2,7 @@
 
 import { normal, type Stream, child, uniform } from 'aifn-compute/foundation/random'
 import { regressionTruth } from '../truth'
+import type { LabelledDataset } from './points'
 import { checkCount, type Dataset, generatorRecipe, matrix, vector } from '../types'
 import type { DatasetInfo } from 'aifn-compute/foundation/contracts'
 import { definer } from 'aifn-compute/foundation/registry'
@@ -234,7 +235,7 @@ export function linearRegressionData(
  * print('formula:', 10 * Math.sin(Math.PI * a * b) + 20 * (c - 0.5) ** 2 + 10 * e + 5 * g, ' f:', f[0])
  * print('sd of y - f:', Math.sqrt(y.reduce((t, v, i) => t + (v - f[i]) ** 2, 0) / 1000))
  */
-export function friedman1(s: Stream, options: { n?: number; d?: number; noise?: number } = {}): Dataset {
+export function friedman1(s: Stream, options: { n?: number; d?: number; noise?: number } = {}): LabelledDataset {
   const { n = 200, d = 10, noise = 1 } = options
   checkCount(n, 'friedman1')
   if (d < 5) throw new DomainError('friedman1', 'friedman1: needs at least five features')

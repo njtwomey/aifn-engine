@@ -4,6 +4,7 @@
 
 import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as bspline from './bspline'
+import * as chebyshev from './chebyshev'
 import * as piecewise from './piecewise'
 import * as polynomial from './polynomial'
 import * as thinplate from './thinplate'
@@ -32,6 +33,30 @@ fn(
     cite: ['trefethen2019'],
   },
   polynomial.chebyshevNodes,
+)
+fn(
+  {
+    key: 'chebyshevInterpolation',
+    name: 'Chebyshev interpolation',
+    tex: 'c_k = \\frac{2 - [k = 0]}{K + 1} \\sum_j f(x_j) \\cos\\frac{\\pi k (j + 1/2)}{K + 1}',
+    summary: 'The Chebyshev series that interpolates a function at the Chebyshev nodes of an interval.',
+    role: 'fit',
+    notes: ['spectral-graph-convolution'],
+    cite: ['he2022chebnetii', 'hammond2011'],
+  },
+  chebyshev.chebyshevInterpolation,
+)
+fn(
+  {
+    key: 'chebyshevSeries',
+    name: 'Chebyshev series',
+    tex: 'p(x) = \\sum_k c_k T_k\\big(2(x - a)/(b - a) - 1\\big)',
+    summary: 'Evaluate a Chebyshev series on an interval by the three-term recurrence.',
+    role: 'transform',
+    notes: ['spectral-graph-convolution'],
+    cite: ['hammond2011'],
+  },
+  chebyshev.chebyshevSeries,
 )
 fn(
   {
@@ -265,6 +290,6 @@ fn(
 
 /** The functions of the module, keyed by name. */
 export const interpolateFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', polynomial, bspline, piecewise, thinplate) as Readonly<
+  entries<FunctionInfo>('function', polynomial, bspline, piecewise, thinplate, chebyshev) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

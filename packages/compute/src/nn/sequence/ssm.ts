@@ -42,6 +42,7 @@ import {
   type Value,
 } from 'aifn-compute/foundation/tensor'
 import type { DiscreteSsm, SsmDiscretisation } from 'aifn-compute/systems'
+import { fftConvolve } from 'aifn-compute/foundation/convolution'
 
 /**
  * Elementwise discretisation of a diagonal system (S4D, Mamba), with $a$, $b$ and $\Delta$ broadcasting together. With
@@ -148,11 +149,16 @@ export function ssmKernel(A: Value, B: Value, C: Value, length: Size): Value {
  * The causal convolution $y_t = \sum_{k \le t} K_k u_{t-k}$ of inputs $u$ with a kernel $K$: a lower-triangular
  * Toeplitz matrix gathered from $K$, times $u$. Differentiable in $K$ and $u$. This is the convolutional mode of a
  * state-space layer. The kernel may have any number of taps $n$: taps past $u$'s length $L$ are unused, and a shorter
- * kernel is read as zero past its last tap ($K_k = 0$ for $k \ge n$).
+ * kernel is read as zero past its last tap ($K_k = 0$ for $k \ge n$). With `method: 'fft'` the same sum is the first
+ * $L$ outputs of the full convolution by FFT (`fftConvolve`), $O(L \log L)$ per channel instead of $O(L^2)$, as
+ * long-convolution models (Hyena) compute it; the two agree to rounding.
  *
  * @param kernel The taps $K_0, \dots, K_{n-1}$: a vector of $n$, or $[n, \dots]$ with one kernel per channel.
  * @param u The input, time first: a vector of $L$ for a vector kernel, or $[L, \dots]$ with the kernel's trailing shape
  *   (each channel convolved with its own kernel).
+ * @param options How the sum is computed.
+ * @param options.method `direct` (default): a lower-triangular Toeplitz matrix times $u$. `fft`: by FFT, channel by
+ *   channel.
  * @returns The output $y$, with the shape of `u`.
  *
  * @example An impulse returns the kernel; a step returns its running sum
@@ -163,13 +169,32 @@ export function ssmKernel(A: Value, B: Value, C: Value, length: Size): Value {
  * @example Two channels, each with its own kernel
  * const K = tensor([[1, 2], [0.5, 1], [0.25, 0]])
  * print('y =', causalConvolution(K, tensor([[1, 1], [1, 0], [0, 0]])))
+ *
+ * @example By FFT, as a long convolution: the same numbers
+ * const K = tensor([1, 0.5, 0.25, 0])
+ * const u = tensor([1, 2, 0, -1])
+ * print('direct:', causalConvolution(K, u))
+ * print('fft:', causalConvolution(K, u, { method: 'fft' }))
  */
-export function causalConvolution(kernel: Value, u: Value): Value {
+export function causalConvolution(
+  kernel: Value,
+  u: Value,
+  { method = 'direct' }: { method?: 'direct' | 'fft' } = {},
+): Value {
   const L = shapeOfValue(u)[0]
   const ks = shapeOfValue(kernel)
   const n = ks[0]
   const rest = ks.slice(1)
   const w = rest.reduce((p, q) => p * q, 1)
+  if (method === 'fft') {
+    if (rest.length === 0) return slice(fftConvolve(u, kernel), [0, L])
+    const K = reshape(kernel, [n, w])
+    const U = reshape(u, [L, w])
+    const columns = Array.from({ length: w }, (_, j) =>
+      slice(fftConvolve(slice(U, [0, L], j), slice(K, [0, n], j)), [0, L]),
+    )
+    return reshape(stack(columns, 1), [L, ...rest])
+  }
   // T[t, s] = K[t − s] for 0 ≤ t − s < n, else the padded zero row (index n, after the kernel's own taps).
   const padded = concat([kernel, zeros([1, ...rest])], 0)
   const ids = new Int32Array(L * L * w)

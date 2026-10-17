@@ -266,6 +266,7 @@ describe('registry', () => {
       'leastAngleRegression',
       'ridgeHypergradient',
       'ridgePath',
+      'ruleFitPath',
       'stepwise',
     ])
   })

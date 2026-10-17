@@ -23,11 +23,11 @@ import {
   type Truth,
 } from '../truth'
 import { appendStep, labels, matrix, values, vector, type Dataset, type DatasetMeta } from '../types'
-import { fromData, type Tensor } from 'aifn-compute/foundation/tensor'
+import { fromData, isTensor, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { inverse, logDet } from 'aifn-compute/numerics/linalg'
 import { sigmoid } from 'aifn-compute/numerics/special'
 import { MultivariateNormal, Normal, Uniform } from 'aifn-compute/probability/distributions'
-import type { ModifierInfo } from 'aifn-compute/foundation/contracts'
+import type { FunctionInfo, ModifierInfo } from 'aifn-compute/foundation/contracts'
 import { definer } from 'aifn-compute/foundation/registry'
 import { int, oneOf, real, space, when } from 'aifn-compute/foundation/space'
 import { DomainError, ShapeError } from 'aifn-compute/foundation/errors'
@@ -1250,6 +1250,153 @@ export function split(s: Stream, d: Dataset, options: SplitOptions = {}): { trai
   return { train: part(trainRows, 'train'), test: testPart }
 }
 
+// ── Semi-supervised split ────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Options of `semiSupervisedSplit`. */
+export interface SemiSupervisedSplitOptions {
+  /** The inputs, $n \times d$: given, the labelled and unlabelled rows are returned as `labelledX` and `unlabelledX`. */
+  x?: Tensor
+  /**
+   * How the labelled points are drawn. `'per-class'` (default): class $k$ takes the first of a permutation of its own
+   * points from the child stream `'class', k`, as `split` stratifies. `'global'`: one permutation of all $n$ rows from
+   * the stream itself, each class taking its first points in that order.
+   */
+  draw?: 'per-class' | 'global'
+  /** Throw `DomainError` when a class has fewer points than asked for (default false: such a class keeps all). */
+  strict?: boolean
+}
+
+/** A few-label split: the labels with $-1$ for hidden ones, the two row lists and the classes of each part. */
+export interface SemiSupervisedSplit {
+  /** One entry per point: its class if labelled, $-1$ if not. */
+  labels: Int32Array
+  /** The labelled rows, in increasing order. */
+  labelled: number[]
+  /** The unlabelled rows, in increasing order. */
+  unlabelled: number[]
+  /** The classes of the labelled rows, in the order of `labelled`. */
+  labelledY: Int32Array
+  /** The true classes of the unlabelled rows, in the order of `unlabelled` (for diagnostics, never for fitting). */
+  unlabelledTruth: Int32Array
+}
+
+/** A few-label split of inputs: `SemiSupervisedSplit` with the rows of each part. */
+export interface SemiSupervisedSplitWithX extends SemiSupervisedSplit {
+  /** The labelled inputs, $n_L \times d$, in the order of `labelled`. */
+  labelledX: Tensor
+  /** The unlabelled inputs, $n_U \times d$, in the order of `unlabelled`. */
+  unlabelledX: Tensor
+}
+
+/**
+ * A seeded few-label split for semi-supervised experiments: `perClass` points of each class keep their labels and
+ * every other point becomes unlabelled (label $-1$). Stratifying by class is the protocol of the semi-supervised
+ * benchmarks ("4 labels per class" on CIFAR-10 in FixMatch; Sohn et al., 2020, §4.1). Rows keep their original order
+ * inside each part. Throws `DomainError` for a class that is not a non-negative integer, a negative or fractional
+ * count, or (with `strict`) a class with fewer points than asked for, and `ShapeError` when `x` and `y` differ in rows
+ * or a per-class list has the wrong length.
+ *
+ * @param s The random stream: class $k$ draws from its child `'class', k` (`draw: 'per-class'`), or all classes from
+ *   one permutation of the stream itself (`draw: 'global'`).
+ * @param y The classes $0, \dots, K - 1$ of the $n$ points, a tensor or an array.
+ * @param perClass How many points of each class keep their label: one count for every class, or $K$ counts.
+ * @param options The inputs to split along, the draw and whether a short class throws.
+ * @returns The labels with $-1$ for hidden ones, the labelled and unlabelled rows and their classes, and, with `x`,
+ *   their inputs.
+ *
+ * @example Four labels per class of two moons
+ * const d = moons(stream(1), { n: 100 })
+ * const split = semiSupervisedSplit(stream(2), d.y, 4)
+ * print('labelled rows:', split.labelled)
+ * print('their classes:', split.labelledY, ' unlabelled:', split.unlabelled.length)
+ *
+ * @example Splitting the inputs too, with one draw over all rows
+ * const d = moons(stream(1), { n: 20 })
+ * const split = semiSupervisedSplit(stream(2), d.y, [1, 2], { x: d.x, draw: 'global', strict: true })
+ * print('labelled inputs:', split.labelledX)
+ * print('their classes:', split.labelledY)
+ */
+export function semiSupervisedSplit(
+  s: Stream,
+  y: Tensor | ArrayLike<number>,
+  perClass: number | readonly number[],
+  options: SemiSupervisedSplitOptions & { x: Tensor },
+): SemiSupervisedSplitWithX
+export function semiSupervisedSplit(
+  s: Stream,
+  y: Tensor | ArrayLike<number>,
+  perClass: number | readonly number[],
+  options?: SemiSupervisedSplitOptions,
+): SemiSupervisedSplit
+export function semiSupervisedSplit(
+  s: Stream,
+  y: Tensor | ArrayLike<number>,
+  perClass: number | readonly number[],
+  options: SemiSupervisedSplitOptions = {},
+): SemiSupervisedSplit | SemiSupervisedSplitWithX {
+  const { x, draw = 'per-class', strict = false } = options
+  const where = 'semiSupervisedSplit'
+  const classes = isTensor(y) ? Array.from(toFlat(y)) : Array.from(y)
+  const n = classes.length
+  let K = 0
+  for (const k of classes) {
+    if (!(Number.isInteger(k) && k >= 0))
+      throw new DomainError(where, `${where}: classes must be non-negative integers`)
+    K = Math.max(K, k + 1)
+  }
+  if (typeof perClass !== 'number' && perClass.length !== K)
+    throw new ShapeError(where, `${where}: perClass has ${perClass.length} counts for ${K} classes`)
+  const want = typeof perClass === 'number' ? new Array<number>(K).fill(perClass) : Array.from(perClass)
+  for (const w of want)
+    if (!(Number.isInteger(w) && w >= 0))
+      throw new DomainError(where, `${where}: perClass must be non-negative integers`)
+  const labels = new Int32Array(n).fill(-1)
+  const taken = new Array<number>(K).fill(0)
+  if (draw === 'per-class') {
+    const byClass: number[][] = Array.from({ length: K }, () => [])
+    classes.forEach((k, i) => byClass[k].push(i))
+    byClass.forEach((rows, k) => {
+      if (rows.length === 0) return
+      const order = Array.from(toFlat(permutation(child(s, 'class', k), rows.length)))
+      for (const r of order.slice(0, want[k])) labels[rows[r]] = k
+      taken[k] = Math.min(want[k], rows.length)
+    })
+  } else {
+    for (const i of Array.from(toFlat(permutation(s, n)))) {
+      const k = classes[i]
+      if (taken[k] < want[k]) {
+        labels[i] = k
+        taken[k]++
+      }
+    }
+  }
+  if (strict)
+    taken.forEach((v, k) => {
+      if (v < want[k]) throw new DomainError(where, `${where}: class ${k} has only ${v} points`)
+    })
+  const labelled: number[] = []
+  const unlabelled: number[] = []
+  for (let i = 0; i < n; i++) (labels[i] >= 0 ? labelled : unlabelled).push(i)
+  const out: SemiSupervisedSplit = {
+    labels,
+    labelled,
+    unlabelled,
+    labelledY: Int32Array.from(labelled, (i) => classes[i]),
+    unlabelledTruth: Int32Array.from(unlabelled, (i) => classes[i]),
+  }
+  if (!x) return out
+  if (x.shape.length !== 2 || x.shape[0] !== n)
+    throw new ShapeError(where, `${where}: x must be a matrix with one row per label`, [x.shape])
+  const d = x.shape[1]
+  const data = values(x)
+  const pick = (rows: number[]) => {
+    const part = new Float64Array(rows.length * d)
+    rows.forEach((i, r) => part.set(data.subarray(i * d, (i + 1) * d), r * d))
+    return matrix(part, rows.length, d)
+  }
+  return { ...out, labelledX: pick(labelled), unlabelledX: pick(unlabelled) }
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 const modifier = definer<ModifierInfo>('modifier', 'data/synthetic')
@@ -1359,4 +1506,40 @@ modifier(
     random: false,
   },
   withTransform,
+)
+
+const fn = definer<FunctionInfo>('function', 'data/synthetic')
+
+fn(
+  {
+    key: 'semiSupervisedSplit',
+    name: 'Semi-supervised split',
+    summary: 'Keep a few labels per class, drawn at random within each class, and hide the rest.',
+    role: 'construction',
+    random: true,
+    notes: [
+      'pseudo-labelling',
+      'co-training',
+      'tri-training-and-disagreement-methods',
+      'noisy-student',
+      'label-spreading',
+      'graph-construction-for-semi-supervised-learning',
+      'manifold-regularisation',
+      'semi-supervised-node-classification',
+      'evaluating-semi-supervised-learning',
+      'self-supervised-pretraining-for-semi-supervised-learning',
+      'consistency-regularisation',
+      'fixmatch',
+      'mean-teacher',
+      'virtual-adversarial-training',
+      'unsupervised-data-augmentation',
+      'mixmatch',
+      'adaptive-confidence-thresholds',
+      'generative-semi-supervised-learning',
+      'semi-supervised-variational-autoencoders',
+      'semi-supervised-generative-adversarial-networks',
+    ],
+    cite: ['sohn2020'],
+  },
+  semiSupervisedSplit,
 )

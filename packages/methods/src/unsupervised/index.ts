@@ -3,10 +3,11 @@
  * low-dimensional embeddings and anomalies.
  *
  * - `clustering`: groups of rows, by centres (k-means family), mixtures fitted by EM, hierarchies, density (DBSCAN,
- *   OPTICS, mean shift) and spectral clustering; `kmeans`, `gaussianMixture` and `dbscan` are exported here.
+ *   OPTICS, mean shift), spectral clustering and clustering with must-link and cannot-link constraints; `kmeans`,
+ *   `gaussianMixture` and `dbscan` are exported here.
  * - `embedding`: maps to a few coordinates, linear (PCA, MDS, latent-variable models), manifold (Isomap, Laplacian
- *   eigenmaps, LLE, diffusion maps, self-organising maps) and neighbour embeddings (t-SNE, UMAP, PaCMAP); `pca`,
- *   `tsne` and `umap` are exported here.
+ *   eigenmaps, LLE, diffusion maps, self-organising maps), neighbour embeddings (t-SNE, UMAP, PaCMAP) and node
+ *   embeddings of graphs (NetMF, node2vec walks with skip-gram); `pca`, `tsne` and `umap` are exported here.
  * - `anomaly`: scores of how unusual each row is, by isolation, neighbour distances, kernel boundaries and models of
  *   the data, with thresholds and ensembles.
  *

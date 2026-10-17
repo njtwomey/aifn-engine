@@ -6,6 +6,9 @@
  * - Running a query: `sldSteps` is the step-through algorithm, each step one node of the SLD tree (the goal, clause
  *   and unifier; branches a cut removes reported as pruned); `solveQuery` runs it to the end with step and depth
  *   limits and says why it stopped; `formatSolution` prints a solution's bindings.
+ * - Bottom-up evaluation: `leastHerbrandModel` iterates the immediate-consequence operator $T_P$ of a function-free
+ *   definite program (Datalog) from the empty set to its least model, round by round, each fact with its derivation;
+ *   `herbrandBaseSize` counts the ground atoms the model is drawn from.
  * - Reading the search: `sldTree` builds the SLD tree from a trace's states, with when each node was created and
  *   closed.
  * - `resolutionAlgorithms` and `resolutionFunctions`: the module's registry entries.
@@ -31,5 +34,13 @@ export {
   type SolveResult,
 } from './sld'
 export { sldTree, type SldNode, type SldNodeStatus } from './tree'
+export {
+  herbrandBaseSize,
+  leastHerbrandModel,
+  type DerivedFact,
+  type HerbrandBase,
+  type LeastModelOptions,
+  type LeastModelResult,
+} from './forward'
 export { LIBRARY_SOURCE } from './library'
 export { resolutionAlgorithms, resolutionFunctions } from './registry'

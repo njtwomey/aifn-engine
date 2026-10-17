@@ -1,7 +1,8 @@
 /**
  * `aifn-compute/nn`: neural networks, after torch.nn, as parameter trees with pure forward functions.
  *
- * - `aifn-compute/nn/functional`: stateless operations: activations, 1-D and 2-D convolution and pooling.
+ * - `aifn-compute/nn/functional`: stateless operations: activations, 1-D and 2-D convolution and pooling, im2col and
+ *   deformable convolution, and the arithmetic of convolutional networks (costs, shapes and receptive fields).
  * - `aifn-compute/nn/init`: weight initialisers (Xavier, He, LeCun, normal, zeros) that draw from a stream.
  * - `aifn-compute/nn/layers`: layers (`Linear`, convolutions, normalisation, dropout, `Sequential`, `Mlp`), recurrent
  *   cells, multiple-instance pooling and the neural ODE block.
@@ -15,7 +16,11 @@
  *   adversarial, contrastive divergence and DP-SGD, and activation and gradient inspection.
  * - `aifn-compute/nn/experts`: mixtures of experts, with routing, capacity and the auxiliary balancing losses.
  * - `aifn-compute/nn/graph`: graph neural network layers (graph convolution, graph attention, GraphSAGE, message
- *   passing).
+ *   passing, GIN, PNA, ChebNet, R-GCN, hypergraph convolution), graph readout and pooling, oversmoothing and
+ *   oversquashing measures, Graphormer's spatial bias and minibatch computation graphs.
+ * - `aifn-compute/nn/sets`: permutation-invariant pooling over padded sets, for Deep Sets and PointNet.
+ * - `aifn-compute/nn/equivariant`: group-equivariant layers: convolution over translations and quarter-turn
+ *   rotations ($p4$).
  * - `aifn-compute/nn/quantise`: $b$-bit quantisation of tensors and weights, after torch.ao.quantization.
  *
  * Losses are `aifn-compute/learning/losses` (decision D6) and optimisers the pytree update rules of

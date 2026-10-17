@@ -2,10 +2,11 @@
  * Standard graphs as data graphs on the base `Graph`: chains, cycles, stars, complete and complete bipartite graphs,
  * balanced trees, lattices (4 or 8 neighbours, optionally periodic), random DAGs and random graphs (Erdős & Rényi
  * 1959, "On random graphs I"; Gilbert 1959; Watts & Strogatz 1998, "Collective dynamics of small-world networks",
- * Nature 393; Barabási & Albert 1999, "Emergence of scaling in random networks", Science 286), and graphs built from
- * points: $k$-nearest-neighbour and $\varepsilon$-ball graphs (von Luxburg 2007, "A tutorial on spectral clustering",
- * §2.2), on the distances of `aifn-compute/numerics/linalg`. Node and edge orders follow networkx where it defines
- * them.
+ * Nature 393; Barabási & Albert 1999, "Emergence of scaling in random networks", Science 286), stochastic block
+ * models, random recursive trees and the barbell, graphs built from points: $k$-nearest-neighbour and
+ * $\varepsilon$-ball graphs (von Luxburg 2007, "A tutorial on spectral clustering", §2.2) and greedy b-matchings
+ * (Jebara, Wang and Chang 2009), on the distances of `aifn-compute/numerics/linalg`, and the clique and star
+ * expansions of hypergraphs. Node and edge orders follow networkx where it defines them.
  *
  * Every generator returns a plain `Graph` on nodes $0, \dots, n - 1$, undirected unless asked otherwise, and throws
  * `AifnError` on a node count that is not a non-negative integer or a parameter out of range. The random ones take a
@@ -14,11 +15,11 @@
  */
 
 import type { Index, MatrixLike, Scalar, Size } from 'aifn-compute/foundation/contracts'
-import { AifnError } from 'aifn-compute/foundation/errors'
-import { child, integers, uniform, type Stream } from 'aifn-compute/foundation/random'
-import { toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
+import { AifnError, DomainError, ShapeError } from 'aifn-compute/foundation/errors'
+import { child, integers, uniform, units as draws, type Stream } from 'aifn-compute/foundation/random'
+import { dense, fromData, toFlat, type Tensor } from 'aifn-compute/foundation/tensor'
 import { pairwiseDistances, type PairwiseMetric } from 'aifn-compute/numerics/linalg'
-import { fromEdges, type Edge, type Graph } from '../graph'
+import { checkHyperedges, fromEdges, type Edge, type Graph, type Hyperedges } from '../graph'
 
 /** Options of the generated graphs: direction (default undirected) and display labels. */
 export interface StructureOptions {
@@ -481,4 +482,292 @@ export function epsilonBallGraph(x: MatrixLike, epsilon: Scalar, options: PointG
   for (let i = 0; i < n; i++)
     for (let j = i + 1; j < n; j++) if (at(i, j) <= epsilon) edges.push({ from: i, to: j, weight: at(i, j) })
   return fromEdges(n, edges, { directed: false })
+}
+
+/**
+ * The greedy b-matching graph of the rows of $\Xmat$: every pair $i < j$ is visited in order of increasing distance
+ * (ties to the smaller $i$, then the smaller $j$) and joined, weighted by its distance, when both ends still have
+ * fewer than $b$ edges. Every node ends with at most $b$ edges, so the graph is regular where the points allow,
+ * unlike the $k$-nearest-neighbour graph, whose hubs collect many edges. Jebara, Wang and Chang (2009), "Graph
+ * construction and b-matching for semi-supervised learning", ICML, §3, solve the minimum-distance b-matching exactly by
+ * belief propagation; this greedy pass keeps the degree bound but may leave some nodes with fewer than $b$ edges.
+ * Throws `DomainError` unless $b$ is a positive integer.
+ *
+ * @param x The points $\Xmat$, one per row: an $n \times d$ tensor or array of rows (a rank-1 input is $n$ points on
+ *   a line).
+ * @param b The largest number of edges $b$ at any node.
+ * @param options The distance: `metric` (default Euclidean) and `p` for Minkowski.
+ * @returns The undirected graph on $n$ nodes, edges $i < j$ in row-major order, weighted by distance.
+ *
+ * @example Points 0, 1 and 3 on a line: with $b = 1$ only the closest pair is joined
+ * const x = [[0], [1], [3]]
+ * print('b = 1:', bMatchingGraph(x, 1).edges.map((e) => [e.from, e.to, e.weight]))
+ * print('b = 2:', bMatchingGraph(x, 2).edges.map((e) => [e.from, e.to, e.weight]))
+ *
+ * @example The degree bound holds where a k-nearest-neighbour graph has a hub
+ * const x = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]
+ * const count = (g) => g.edges.reduce((d, e) => { d[e.from]++; d[e.to]++; return d }, [0, 0, 0, 0, 0])
+ * print('2-NN degrees:', count(kNearestNeighbourGraph(x, 2)))
+ * print('b = 2 degrees:', count(bMatchingGraph(x, 2)))
+ */
+export function bMatchingGraph(x: MatrixLike, b: Size, options: PointGraphOptions = {}): Graph {
+  if (!(Number.isInteger(b) && b >= 1))
+    throw new DomainError('bMatchingGraph', `bMatchingGraph: b = ${b} must be a positive integer`)
+  const { n, at } = distanceRows(x, options)
+  const pairs: [number, number][] = []
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) pairs.push([i, j])
+  pairs.sort((p, q) => at(p[0], p[1]) - at(q[0], q[1]) || p[0] - q[0] || p[1] - q[1])
+  const degree = new Int32Array(n)
+  const joined = new Uint8Array(n * n)
+  for (const [i, j] of pairs)
+    if (degree[i] < b && degree[j] < b) {
+      joined[i * n + j] = 1
+      degree[i]++
+      degree[j]++
+    }
+  const edges: Edge[] = []
+  for (let i = 0; i < n; i++)
+    for (let j = i + 1; j < n; j++) if (joined[i * n + j]) edges.push({ from: i, to: j, weight: at(i, j) })
+  return fromEdges(n, edges, { directed: false })
+}
+
+// ── Block models, trees and the barbell ─────────────────────────────────────────────────────────────────────────
+
+/** The two edge probabilities of a block model with one value within blocks and one between them. */
+export interface BlockProbabilities {
+  /** The probability $p_{\text{in}}$ of an edge between two nodes of the same block, in $[0, 1]$. */
+  pIn: Scalar
+  /** The probability $p_{\text{out}}$ of an edge between two nodes of different blocks, in $[0, 1]$. */
+  pOut: Scalar
+}
+
+/**
+ * The block of every node of a block model whose nodes are numbered block by block, as a working array.
+ *
+ * @param sizes The number of nodes in each block; throws `DomainError` unless each is a non-negative integer.
+ * @param where The caller's name, for error messages.
+ * @returns The block index of each node, in node order.
+ */
+function membership(sizes: readonly Size[], where: string): Int32Array {
+  if (sizes.some((m) => !(Number.isInteger(m) && m >= 0)))
+    throw new DomainError(where, `${where}: block sizes must be non-negative integers`)
+  const out = new Int32Array(sizes.reduce((a, m) => a + m, 0))
+  let at = 0
+  sizes.forEach((m, c) => {
+    out.fill(c, at, at + m)
+    at += m
+  })
+  return out
+}
+
+/**
+ * The block of every node of a block model (`stochasticBlockModel`), whose nodes are numbered block by block. Throws
+ * `DomainError` unless every size is a non-negative integer.
+ *
+ * @param sizes The number of nodes in each block.
+ * @returns An int32 vector: entry $i$ is the block of node $i$.
+ *
+ * @example Blocks of 2, 3 and 1 nodes
+ * print('blocks:', blockMembership([2, 3, 1]))
+ */
+export function blockMembership(sizes: readonly Size[]): Tensor {
+  return fromData(membership(sizes, 'blockMembership'))
+}
+
+/**
+ * The stochastic block model (Holland, Laskey and Leinhardt 1983, "Stochastic blockmodels: first steps", Social
+ * Networks 5(2)), as networkx's `stochastic_block_model`: nodes are numbered block by block, and each pair $i < j$
+ * (each ordered pair $i \ne j$ when directed) is an edge with probability $P_{c_i c_j}$, independently, $c_i$ the
+ * block of node $i$. With `{ pIn, pOut }`, $P$ is $p_{\text{in}}$ on its diagonal and $p_{\text{out}}$ off it: the
+ * planted-partition model, homophilous when $p_{\text{in}} > p_{\text{out}}$ and heterophilous when it is less.
+ * Throws `DomainError` for a block size that is not a non-negative integer or a probability outside $[0, 1]$, and
+ * `ShapeError` for a matrix that is not $C \times C$; an undirected model with an asymmetric matrix is a
+ * `DomainError`.
+ *
+ * @param s The random stream; the draws come from its child `'edges'`, one uniform per pair in row-major order (as
+ *   `erdosRenyiGraph` draws), so a model with equal probabilities gives the Erdős–Rényi graph of the same stream.
+ * @param sizes The number of nodes in each of the $C$ blocks.
+ * @param p The edge probabilities: a $C \times C$ matrix $P$, or `{ pIn, pOut }`.
+ * @param options Direction (default undirected) and labels.
+ * @returns The random graph on $\sum_c m_c$ nodes, edges in row-major order of their pairs. The block of each node is
+ *   `blockMembership(sizes)`.
+ *
+ * @example Two blocks of 20: most edges stay inside a block
+ * const sizes = [20, 20]
+ * const g = stochasticBlockModel(stream(0), sizes, { pIn: 0.3, pOut: 0.02 })
+ * const block = toFlat(blockMembership(sizes))
+ * print('edges:', g.edges.length)
+ * print('inside a block:', g.edges.filter((e) => block[e.from] === block[e.to]).length)
+ *
+ * @example A matrix of probabilities: a dense block, a sparse one and none between them
+ * const g = stochasticBlockModel(stream(1), [5, 5], [[0.9, 0], [0, 0.2]])
+ * print('edges:', g.edges.map((e) => [e.from, e.to]))
+ */
+export function stochasticBlockModel(
+  s: Stream,
+  sizes: readonly Size[],
+  p: MatrixLike | BlockProbabilities,
+  options: StructureOptions = {},
+): Graph {
+  const where = 'stochasticBlockModel'
+  const block = membership(sizes, where)
+  const C = sizes.length
+  let P: Float64Array
+  if ('pIn' in p && 'pOut' in p && typeof (p as BlockProbabilities).pIn === 'number') {
+    const { pIn, pOut } = p as BlockProbabilities
+    P = new Float64Array(C * C).fill(pOut)
+    for (let c = 0; c < C; c++) P[c * C + c] = pIn
+  } else {
+    const m = dense.toMatrixF64(p as MatrixLike, where)
+    if (m.m !== C || m.n !== C)
+      throw new ShapeError(where, `${where}: the probabilities must be ${C} × ${C}, got ${m.m} × ${m.n}`)
+    P = m.data
+    if (!options.directed)
+      for (let a = 0; a < C; a++)
+        for (let c = a + 1; c < C; c++)
+          if (P[a * C + c] !== P[c * C + a])
+            throw new DomainError(where, `${where}: an undirected model needs a symmetric probability matrix`)
+  }
+  if (P.some((q) => !(q >= 0 && q <= 1))) throw new DomainError(where, `${where}: probabilities must lie in [0, 1]`)
+  const n = block.length
+  const pairs: [number, number][] = []
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (i !== j && (options.directed || i < j)) pairs.push([i, j])
+  const u = units(s, 'edges', pairs.length)
+  return make(
+    n,
+    pairs.filter(([i, j], k) => u[k] < P[block[i] * C + block[j]]).map(([from, to]) => ({ from, to })),
+    options,
+    where,
+  )
+}
+
+/**
+ * A random recursive tree on $n$ nodes: node $v = 1, \dots, n - 1$ joins a parent drawn uniformly from
+ * $0, \dots, v - 1$ (Drmota 2009, "Random Trees", §1.3). Its law is not the uniform law on labelled trees (networkx's
+ * `random_labeled_tree`): early nodes collect more children, and the expected depth of node $v$ is the harmonic number
+ * $H_v$. Unlike the other random generators here, it draws from `s` itself, advancing it, so that successive calls on
+ * one stream give independent trees. Throws `DomainError` unless $n$ is a positive integer.
+ *
+ * @param s The random stream; $n - 1$ uniforms are drawn from it (advancing it), the parent of $v$ being
+ *   $\lfloor u_v v \rfloor$.
+ * @param n The number of nodes.
+ * @param options Direction (default undirected; directed edges run from parent to child) and labels.
+ * @returns The tree as a graph rooted at 0, edge $v - 1$ joining node $v$ to its parent.
+ *
+ * @example Two trees from one stream differ, and each has $n - 1$ edges
+ * const s = stream(0)
+ * print('first:', randomRecursiveTree(s, 6).edges.map((e) => [e.from, e.to]))
+ * print('second:', randomRecursiveTree(s, 6).edges.map((e) => [e.from, e.to]))
+ */
+export function randomRecursiveTree(s: Stream, n: Size, options: StructureOptions = {}): Graph {
+  if (!(Number.isInteger(n) && n >= 1))
+    throw new DomainError('randomRecursiveTree', `randomRecursiveTree: n = ${n} must be a positive integer`)
+  const u = n > 1 ? draws(s, n - 1) : new Float64Array(0)
+  return make(
+    n,
+    Array.from({ length: n - 1 }, (_, k) => ({ from: Math.floor(u[k] * (k + 1)), to: k + 1 })),
+    options,
+    'randomRecursiveTree',
+  )
+}
+
+/**
+ * The barbell graph, as networkx's `barbell_graph`: two complete graphs of $c$ nodes joined by a path through $p$ more
+ * nodes. Nodes $0, \dots, c - 1$ form the first clique, whose node $c - 1$ starts the path $c, \dots, c + p - 1$; the
+ * second clique is $c + p, \dots, 2c + p - 1$, whose node $c + p$ ends it. The path is the graph's bottleneck: the
+ * standard example of oversquashing (Topping et al. 2022). Throws `DomainError` unless $c \ge 2$ and $p \ge 0$ are
+ * integers.
+ *
+ * @param cliqueSize The number of nodes $c$ in each clique.
+ * @param pathLength The number of path nodes $p$ between the cliques (0 joins them by one edge).
+ * @param options Direction (default undirected) and labels.
+ * @returns The graph on $2c + p$ nodes with $c(c - 1) + p + 1$ edges: the first clique's, then the second's (each in
+ *   row-major order of its pairs), then the path's from the first clique to the second.
+ *
+ * @example Cliques of 3 joined through 2 path nodes
+ * const g = barbellGraph(3, 2)
+ * print('nodes:', g.nodes, ' edges:', g.edges.length)
+ * print('path edges:', g.edges.slice(6).map((e) => [e.from, e.to]))
+ */
+export function barbellGraph(cliqueSize: Size, pathLength: Size, options: StructureOptions = {}): Graph {
+  const [c, p] = [cliqueSize, pathLength]
+  if (!(Number.isInteger(c) && c >= 2 && Number.isInteger(p) && p >= 0))
+    throw new DomainError('barbellGraph', 'barbellGraph: need an integer clique size of at least 2 and path length ≥ 0')
+  const edges: Edge[] = []
+  for (const base of [0, c + p])
+    for (let i = 0; i < c; i++) for (let j = i + 1; j < c; j++) edges.push({ from: base + i, to: base + j })
+  let prev = c - 1
+  for (let k = 0; k < p; k++) {
+    edges.push({ from: prev, to: c + k })
+    prev = c + k
+  }
+  edges.push({ from: prev, to: c + p })
+  return make(2 * c + p, edges, options, 'barbellGraph')
+}
+
+// ── Hypergraph expansions ────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The clique expansion of a hypergraph (Zhou, Huang and Schölkopf 2006, "Learning with hypergraphs", NeurIPS): an
+ * undirected graph joining every two nodes that share a hyperedge, weighted by the number of hyperedges they share.
+ * Throws `DomainError` for a member outside $0, \dots, n - 1$, a repeated member or an empty hyperedge.
+ *
+ * @param nodes The number of nodes $n$.
+ * @param hyperedges The hyperedges, each a list of member nodes.
+ * @returns The weighted undirected graph on $n$ nodes, each pair once (smaller end first), in order of first
+ *   appearance.
+ *
+ * @example Two papers sharing author 2
+ * const g = cliqueExpansion(4, [[0, 1, 2], [2, 3], [1, 2]])
+ * print('edges:', g.edges.map((e) => [e.from, e.to, e.weight]))
+ */
+export function cliqueExpansion(nodes: Size, hyperedges: Hyperedges): Graph {
+  checkHyperedges(nodes, hyperedges, 'cliqueExpansion')
+  const byPair = new Map<number, Edge & { weight: number }>()
+  for (const e of hyperedges)
+    for (let a = 0; a < e.length; a++)
+      for (let b = a + 1; b < e.length; b++) {
+        const [from, to] = e[a] < e[b] ? [e[a], e[b]] : [e[b], e[a]]
+        const key = from * nodes + to
+        const edge = byPair.get(key)
+        if (edge) edge.weight += 1
+        else byPair.set(key, { from, to, weight: 1 })
+      }
+  return make(nodes, [...byPair.values()], {}, 'cliqueExpansion')
+}
+
+/**
+ * The star expansion of a hypergraph on $n + m$ nodes: hyperedge $e$ becomes node $n + e$, joined to each of its
+ * members. It is returned as two directed bipartite graphs, `toEdges` (member to hyperedge) and `toNodes` (hyperedge
+ * to member), so that a round of message passing on each gives the two stages of hypergraph message passing. Throws
+ * as `cliqueExpansion` does.
+ *
+ * @param nodes The number of nodes $n$.
+ * @param hyperedges The $m$ hyperedges, each a list of member nodes.
+ * @returns `toEdges` and `toNodes`, directed graphs on $n + m$ nodes with one edge per membership, hyperedge by
+ *   hyperedge in member order.
+ *
+ * @example Two hyperedges on three nodes
+ * const { toEdges, toNodes } = starExpansion(3, [[0, 1], [1, 2]])
+ * print('to edges:', toEdges.edges.map((e) => [e.from, e.to]))
+ * print('to nodes:', toNodes.edges.map((e) => [e.from, e.to]))
+ */
+export function starExpansion(nodes: Size, hyperedges: Hyperedges): { toEdges: Graph; toNodes: Graph } {
+  checkHyperedges(nodes, hyperedges, 'starExpansion')
+  const pairs = hyperedges.flatMap((e, k) => e.map((v) => [v, nodes + k] as const))
+  const total = nodes + hyperedges.length
+  return {
+    toEdges: make(
+      total,
+      pairs.map(([v, e]) => ({ from: v, to: e })),
+      { directed: true },
+      'starExpansion',
+    ),
+    toNodes: make(
+      total,
+      pairs.map(([v, e]) => ({ from: e, to: v })),
+      { directed: true },
+      'starExpansion',
+    ),
+  }
 }

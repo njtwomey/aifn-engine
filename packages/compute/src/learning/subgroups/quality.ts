@@ -209,6 +209,12 @@ export function binomialQuality(target: Target, options: { direction?: Direction
   )
 }
 
+/** A lift measure with its configured minimum support. */
+export interface LiftMeasure extends CountMeasure {
+  readonly minSupport: number
+  withMinSupport(minSupport: number): LiftMeasure
+}
+
 /**
  * Lift $p/p_0$; under a minimum support $m$ (default 1) its optimistic estimate is $\min(1, \mathit{tp}/m)/p_0$, the
  * best precision a subset of at least $m$ rows can reach. Every subgroup scores 0 when there are no positives.
@@ -224,12 +230,6 @@ export function binomialQuality(target: Target, options: { direction?: Direction
  * print('lift =', lift.quality(cover), ' (0.5 / 0.375)')
  * print('optimistic estimate =', lift.bound(cover))
  */
-/** A lift measure with its configured minimum support. */
-export interface LiftMeasure extends CountMeasure {
-  readonly minSupport: number
-  withMinSupport(minSupport: number): LiftMeasure
-}
-
 export function liftQuality(target: Target, options: { minSupport?: number } = {}): LiftMeasure {
   const m = Math.max(1, options.minSupport ?? 1)
   const base = countMeasure(

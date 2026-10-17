@@ -7,6 +7,7 @@
 
 import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as components from './components'
+import * as neighbourhoods from './neighbourhoods'
 import * as order from './order'
 import * as traversal from './traversal'
 
@@ -83,9 +84,29 @@ fn(
 )
 fn({ key: 'condensation', name: 'Condensation', role: 'transform' }, components.condensation)
 fn({ key: 'bipartite', name: 'Bipartition', role: 'property' }, components.bipartite)
+fn(
+  {
+    key: 'hopDistances',
+    name: 'Hop distances',
+    summary: 'The number of edges on a shortest path between every pair of nodes, by one breadth-first search each.',
+    role: 'solver',
+    notes: ['graph-transformer', 'molecular-property-prediction-with-graph-networks'],
+  },
+  neighbourhoods.hopDistances,
+)
+fn(
+  {
+    key: 'kHopNeighbourhood',
+    name: 'k-hop neighbourhood',
+    summary: 'The nodes within k hops of a set of sources: the computation graph of a k-layer message-passing network.',
+    role: 'solver',
+    notes: ['neighbour-sampling-and-scalable-graph-networks', 'higher-order-and-subgraph-graph-neural-networks'],
+  },
+  neighbourhoods.kHopNeighbourhood,
+)
 
 /** The functions of the module, keyed by name. */
 export const traversalFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', traversal, order, components) as Readonly<
+  entries<FunctionInfo>('function', traversal, order, components, neighbourhoods) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
   >

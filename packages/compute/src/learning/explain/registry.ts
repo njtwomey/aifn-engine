@@ -4,8 +4,9 @@
  * effects and the evaluation of explanations.
  */
 
-import { definer, entries, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
+import { definer, entries, type AlgorithmInfo, type Entry, type FunctionInfo } from 'aifn-compute/foundation/registry'
 import * as attribution from './attribution'
+import * as cam from './cam'
 import * as concepts from './concepts'
 import * as counterfactual from './counterfactual'
 import * as data from './data'
@@ -19,6 +20,7 @@ import * as lime from './lime'
 import * as perturbation from './perturbation'
 import * as shapley from './shapley'
 import * as tree from './tree'
+import * as visualise from './visualise'
 
 const fn = definer<FunctionInfo>('function', 'learning/explain')
 const ATTRIBUTION = ['feature-attribution-methods', 'interpretability']
@@ -30,6 +32,7 @@ const DATA = ['leverage-and-influence', 'detecting-and-cleaning-label-errors', '
 const GLOBAL = ['interpretability', 'interpreting-generalised-additive-models']
 const EVALUATION = ['evaluating-explanations', 'feature-attribution-methods']
 const NETWORK = ['feature-attribution-methods', 'concept-based-explanations']
+const CAM = ['class-activation-mapping']
 
 fn(
   {
@@ -760,8 +763,100 @@ fn(
   evaluation.attributionOrder,
 )
 
+fn(
+  {
+    key: 'featureMaps',
+    name: 'Feature maps of one example',
+    summary: 'A [1, K, h, w] or [K, h, w] activation tensor as a flat channel-major record of K maps.',
+    role: 'transform',
+    notes: CAM,
+  },
+  cam.featureMaps,
+)
+fn(
+  {
+    key: 'weightedMapSum',
+    name: 'Weighted sum of feature maps',
+    summary: 'Σ_k λ_k A_k over K feature maps, optionally through ReLU.',
+    tex: '\\sum_k \\lambda_k A_k',
+    role: 'transform',
+    notes: CAM,
+    cite: ['zhou2016', 'selvaraju2017'],
+  },
+  cam.weightedMapSum,
+)
+fn(
+  {
+    key: 'classActivationMap',
+    name: 'Class activation map',
+    summary:
+      'The classifier weights of one class applied to the last feature maps at every position; its mean is the score.',
+    tex: 'M_c = \\sum_k w_{kc} A_k',
+    role: 'transform',
+    notes: CAM,
+    cite: ['zhou2016'],
+  },
+  cam.classActivationMap,
+)
+fn(
+  {
+    key: 'gradCamWeights',
+    name: 'Grad-CAM channel weights',
+    summary: 'The spatial mean of the gradient of a class score with respect to each feature map.',
+    tex: '\\alpha_{kc} = \\frac{1}{hw} \\sum_{ij} \\partial y_c / \\partial A_{k,ij}',
+    role: 'transform',
+    notes: CAM,
+    cite: ['selvaraju2017'],
+  },
+  cam.gradCamWeights,
+)
+fn(
+  {
+    key: 'gradCamPlusPlusWeights',
+    name: 'Grad-CAM++ channel weights',
+    summary: 'Positive gradients weighted per position, under the exponential-score assumption of Grad-CAM++.',
+    role: 'transform',
+    notes: CAM,
+    cite: ['chattopadhyay2018'],
+  },
+  cam.gradCamPlusPlusWeights,
+)
+fn(
+  {
+    key: 'normaliseMap',
+    name: 'Map normalised by its largest magnitude',
+    summary: 'A map divided by its largest absolute value, so it spans at most [−1, 1].',
+    role: 'transform',
+    notes: CAM,
+  },
+  cam.normaliseMap,
+)
+
+const algorithm = definer<AlgorithmInfo>('algorithm', 'learning/explain')
+
+algorithm(
+  {
+    key: 'activationMaximisation',
+    name: 'Activation maximisation',
+    summary:
+      'Gradient ascent on a unit’s input with an L2 penalty, jitter, blur and clipping: an image that excites it.',
+    problem: 'objective',
+    state: { iterate: 'x', objective: 'objective', flags: ['diverged'] },
+    random: true,
+    notes: ['feature-visualisation'],
+    cite: ['erhan2009', 'simonyan2014', 'yosinski2015', 'olah2017'],
+  },
+  visualise.activationMaximisation,
+)
+
 /** The functions of the module, keyed by name. */
 export const explainFunctions: Readonly<Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>> =
-  entries<FunctionInfo>('function', shapley, tree, lime, gradients, importance, perturbation) as Readonly<
+  entries<FunctionInfo>('function', shapley, tree, lime, gradients, importance, perturbation, cam) as Readonly<
     Record<string, Entry<(...args: never[]) => unknown, FunctionInfo>>
+  >
+
+/** The step-through algorithms of the module, keyed by name. */
+export const explainAlgorithms: Readonly<Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>> =
+  entries<AlgorithmInfo>('algorithm', visualise) as Readonly<
+    Record<string, Entry<(...args: never[]) => unknown, AlgorithmInfo>>
   >

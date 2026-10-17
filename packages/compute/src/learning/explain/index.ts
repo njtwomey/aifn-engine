@@ -20,6 +20,10 @@
  *   `quantileEdges` and `binPredicates`.
  * - Concepts: `tcav` with its random-concept t-test, built from `linearProbe`, `conceptActivationVector`,
  *   `activationGradients`, `conceptSensitivity` and `tcavScore`.
+ * - Convolutional networks: class activation maps (`classActivationMap`, `weightedMapSum` of the `FeatureMaps` that
+ *   `featureMaps` reads from a tensor), the channel weights of Grad-CAM (`gradCamWeights`) and Grad-CAM++
+ *   (`gradCamPlusPlusWeights`), and `normaliseMap`; `gradCam` itself is in `aifn-compute/nn/training`. Feature
+ *   visualisation by `activationMaximisation`, an algorithm of regularised gradient ascent on the input.
  * - Data: `influenceFunctions` (exact or LiSSA) on `exampleGradients`, `tracIn`, `dataShapley` (truncated Monte Carlo)
  *   and `knnShapley` (exact).
  * - Global: `permutationImportance`, `partialDependence` with ICE on a `featureGrid`, `accumulatedLocalEffects`
@@ -31,7 +35,7 @@
  * Models are plain functions: a batch of rows ($m \times d$) to one output per row (`ScalarModel`), a differentiable
  * function of one input (`Differentiable`), or a classifier returning a label per row. Inputs are numbers, nested
  * arrays or tensors; results are plain arrays and records. Every random method takes a `Stream`, so a seed fixes its
- * result. `explainFunctions` is the module's registry.
+ * result. `explainFunctions` and `explainAlgorithms` are the module's registry.
  */
 
 export {
@@ -159,4 +163,18 @@ export {
   randomiseNetwork,
   relevanceMass,
 } from './evaluation'
-export { explainFunctions } from './registry'
+export {
+  classActivationMap,
+  featureMaps,
+  gradCamPlusPlusWeights,
+  gradCamWeights,
+  normaliseMap,
+  weightedMapSum,
+  type FeatureMaps,
+} from './cam'
+export {
+  activationMaximisation,
+  type ActivationMaximisationOptions,
+  type ActivationMaximisationState,
+} from './visualise'
+export { explainAlgorithms, explainFunctions } from './registry'

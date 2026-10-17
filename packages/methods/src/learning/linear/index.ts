@@ -20,6 +20,8 @@
  *   the implicit function theorem; `ridgeHyperDescentSteps`, gradient descent on $\ln\lambda$ with it.
  * - Stochastic gradient: `linearSgdSteps`, penalised least squares one shuffled epoch per step, with the truncated
  *   $\ell_1$ penalty of `SGDRegressor` or the plain subgradient.
+ * - Rule ensembles: `ruleFitPath`, RuleFit's lasso path over the rules of a tree ensemble and winsorised linear terms
+ *   (the terms from `aifn-compute/learning/rules`), with `ruleFitPredict` and `ruleImportances`.
  * - Classification: `perceptron`, Rosenblatt's mistake-driven classifier for labels 0 and 1, optionally averaged;
  *   `perceptronSteps` is the same run as a step-through algorithm on labels $\pm 1$, one example per step.
  *
@@ -93,4 +95,12 @@ export {
   type RidgeHyperDescentState,
   type RidgeHypergradient,
 } from './hypergradient'
+export {
+  ruleFitPath,
+  ruleFitPredict,
+  ruleImportances,
+  type RuleFitOptions,
+  type RuleFitPath,
+  type RuleFitTerm,
+} from './ruleFit'
 export { linearAlgorithms, linearFunctions } from './registry'

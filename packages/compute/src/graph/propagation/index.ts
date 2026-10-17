@@ -15,6 +15,11 @@
  *   $\alpha$); `labelMatrix` builds the one-hot $\Ymat$ and `normaliseScores` the final scores and classes.
  * - Labels as steps, for `run` and `trace`: `labelPropagationSteps` and `labelSpreadingSteps`, stopping when the change
  *   falls below a tolerance, as scikit-learn.
+ * - New points: `harmonicExtension` scores them as the kernel-weighted average of the node scores (Delalleau et al.
+ *   2005), the inductive half of `harmonicLabels` and `labelSpreading`.
+ * - Graphs of points for semi-supervised learning: `neighbourhoodGraph` joins them by a full, $k$-NN, mutual $k$-NN,
+ *   $\varepsilon$-ball or $b$-matching rule and weights the edges by 1 or a heat kernel, with the edge list for
+ *   drawing.
  *
  * Labels are integers $0, \dots, C - 1$, with $-1$ for an unlabelled node. Affinities are a graph or a non-negative
  * $n \times n$ matrix. The label functions are not differentiable: they return plain tensors.
@@ -50,4 +55,12 @@ export {
   type PointAffinityOptions,
   type SpreadingOptions,
 } from './labels'
+export { harmonicExtension, type HarmonicExtensionOptions } from './extension'
+export {
+  neighbourhoodGraph,
+  type EdgeWeighting,
+  type GraphEdge,
+  type NeighbourhoodGraph,
+  type NeighbourhoodRule,
+} from './neighbourhood'
 export { propagationAlgorithms, propagationFunctions } from './registry'

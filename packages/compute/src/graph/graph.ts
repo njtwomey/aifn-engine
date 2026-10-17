@@ -38,6 +38,34 @@ export interface GraphOptions {
 export type EdgeInput = Edge | readonly [number, number] | readonly [number, number, number]
 
 /**
+ * The hyperedges of a hypergraph on nodes $0, \dots, n - 1$: hyperedge $e$ is the list of its member nodes. Read by
+ * `cliqueExpansion` and `starExpansion` (`aifn-compute/graph/structures`), `hypergraphIncidence`
+ * (`aifn-compute/graph/matrices`) and the hypergraph layers of `aifn-compute/nn/graph`.
+ */
+export type Hyperedges = readonly (readonly number[])[]
+
+/**
+ * Validate hyperedges: throws `DomainError` when a member is not a node of $0, \dots, n - 1$, a hyperedge lists a node
+ * twice, or a hyperedge is empty.
+ *
+ * @param nodes The number of nodes $n$.
+ * @param hyperedges The hyperedges to check.
+ * @param where The caller's name, for error messages.
+ */
+export function checkHyperedges(nodes: number, hyperedges: Hyperedges, where: string): void {
+  hyperedges.forEach((e, k) => {
+    if (e.length === 0) throw new DomainError(where, `${where}: hyperedge ${k} is empty`)
+    const seen = new Set<number>()
+    for (const v of e) {
+      if (!(Number.isInteger(v) && v >= 0 && v < nodes))
+        throw new DomainError(where, `${where}: hyperedge ${k} has member ${v}, outside 0…${nodes - 1}`)
+      if (seen.has(v)) throw new DomainError(where, `${where}: hyperedge ${k} lists node ${v} twice`)
+      seen.add(v)
+    }
+  })
+}
+
+/**
  * The weight of an edge (1 when unset).
  *
  * @param e The edge.
